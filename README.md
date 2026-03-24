@@ -1,8 +1,8 @@
 Trading system development-Zhang Zhixuan
 
-Yuque address: https://www.yuque.com/bluememories/lanaff/eud01pmbglsxf6gu
-Blog garden address: https://www.cnblogs.com/zzxscodes/p/19695166/trading-system-notes
-Github address: https://github.com/zzxscodes/trading-system-notes
+Yuque address: [https://www.yuque.com/bluememories/lanaff/eud01pmbglsxf6gu](https://www.yuque.com/bluememories/lanaff/eud01pmbglsxf6gu)  
+Blog garden address: [https://www.cnblogs.com/zzxscodes/p/19695166/trading-system-notes](https://www.cnblogs.com/zzxscodes/p/19695166/trading-system-notes)  
+Github address: [https://github.com/zzxscodes/trading-system-notes](https://github.com/zzxscodes/trading-system-notes)
 
 ## Low latency system development basics
 ### 1. CPU affinity and NUMA architecture
@@ -25,7 +25,7 @@ Github address: https://github.com/zzxscodes/trading-system-notes
   Bind threads under the process: ps -T -p <PID> taskset -p -c <CPU list> <TID> 
 ```
 
-<font style="color:rgb(27, 28, 29);"></font>
+
 
 **<font style="color:rgb(27, 28, 29);">pthread_setaffinity_np (sched_setaffinity): Thread (process) CPU binding</font>**
 
@@ -85,7 +85,7 @@ namespace Common {
  */
 ```
 
-<font style="color:rgb(27, 28, 29);"></font>
+
 
 **cpusets: CPU resource pool isolation**
 
@@ -145,10 +145,6 @@ echo "To stop the task, run: kill ${TASK_PID}"
 | **Dynamic** | **Static (requires restart)** | **Dynamic** | Dynamic | Dynamic |
 
 
-
-
-
-
 <font style="color:rgb(25, 27, 31);">The CPU's Hyper-Threading Technology (HT) simulates the physical core into two logical cores, sharing the core's execution units (such as ALU, FPU) and L1/L2 cache.</font>
 
 <font style="color:rgb(25, 27, 31);">(1) If threads bound to the same physical core perform computationally intensive operations, especially AVX equal-width instruction sets, the shared floating point unit will be completely occupied, causing the transaction thread to be blocked;</font>
@@ -195,17 +191,15 @@ taskset -c 8-15 ./strategy_engine
 
 **BIOS/UEFI level**
 
-| BIOS settings | Recommended values ​​| Description |
+| BIOS settings | Recommended values  | Description |
 | --- | --- | --- |
 | **CPU C-States** / **Global C-State Control** | `Disabled` | Disable all C-States (C1~C10), the CPU will never go to sleep |
 | **C1E Support** | `Disabled` | Disable enhanced C1 states (C1E may still be enabled even if C-States are turned off) |
 | **Intel SpeedStep** (EIST) / **AMD Cool'n'Quiet** | `Disabled` | Disable P-State dynamic frequency modulation, lock frequency |
 | **Intel Turbo Boost** / **AMD Core Performance Boost** | `Disabled` | Disable automatic overclocking to avoid frequency fluctuations |
-| **CPU Ratio** / **Multiplier** | Fixed value (such as `45`<br/>) | Manually set the CPU multiplier to achieve frequency locking (SpeedStep needs to be disabled simultaneously) |
+| **CPU Ratio** / **Multiplier** | Fixed value (such as `45`   ) | Manually set the CPU multiplier to achieve frequency locking (SpeedStep needs to be disabled simultaneously) |
 | **Hyper-Threading** / **SMT Mode** | `Disabled` | Optional: Turn off hyper-threading to reduce scheduling interference and facilitate precise control. **Global switch will invalidate the precise control of hyper-threading core strategy** |
-| **Power Technology** (AMD) | `Custom`<br/> → Manually turn off various energy saving items | AMD platform precautions |
-
-
+| **Power Technology** (AMD) | `Custom`   → Manually turn off various energy saving items | AMD platform precautions |
 
 
 **Linux kernel parameters**
@@ -226,10 +220,10 @@ GRUB_CMDLINE_LINUX_DEFAULT="quiet splash \
 
 | Parameters | Function |
 | --- | --- |
-| `intel_idle.max_cstate=0` | Force Intel CPU's `intel_idle`<br/> Driver disables all C-States (C1 and above) |
+| `intel_idle.max_cstate=0` | Force Intel CPU's `intel_idle`   Driver disables all C-States (C1 and above) |
 | `processor.max_cstate=1` | Compatible with backup driver (acpi-cpufreq), limiting the maximum C-State to C1 |
 | `idle=poll` | **The most aggressive setting**: The CPU does not wait for interrupts when idle, but continuously polls the task queue to achieve the lowest latency (but extremely high power consumption) |
-| `intel_pstate=disable` | Disable modern Intel P-State driver and fall back to legacy `acpi-cpufreq`<br/>, convenient for manual frequency control |
+| `intel_pstate=disable` | Disable modern Intel P-State driver and fall back to legacy `acpi-cpufreq`   , convenient for manual frequency control |
 
 
 2. Update GRUB configuration
@@ -248,7 +242,7 @@ sudo grub2-mkconfig -o /boot/grub2/grub.cfg
 sudo reboot
 ```
 
-****
+---
 
 **Linux runtime control**
 
@@ -276,7 +270,6 @@ Output key information:
 + `driver`: The currently used driver (`intel_pstate`, `acpi-cpufreq`）
 + `governor`: Current frequency modulation strategy (`powersave`, `performance`, `userspace`）
 + `current policy`:Supported frequency range
-
 3. Set to performance mode (recommended)
 
 ```bash
@@ -284,7 +277,6 @@ sudo cpupower frequency-set -g performance
 ```
 
 + `performance` mode will maintain the highest frequency possible (P0 State)
-
 4. (Optional) Manually lock frequency
 
 ```bash
@@ -320,7 +312,7 @@ sudo systemctl enable cpu-performance.service
 sudo systemctl start cpu-performance.service
 ```
 
-****
+---
 
 **Verify that energy saving is turned off**
 
@@ -336,7 +328,6 @@ sudo turbostat --interval 5
 
 + observe `C0%` Is it close to 100%, other C-state (C1~C10) should be 0%
 + `Busy%` Should ≈ `C0%`
-
 2. Check whether the frequency is stable
 
 ```bash
@@ -344,7 +335,6 @@ watch -n 0.5 'cat /proc/cpuinfo | grep "cpu MHz"'
 ```
 
 + All core frequencies should be stable at the target value (such as 3500.000 MHz) without fluctuations
-
 3. Check FM drivers and strategies
 
 ```bash
@@ -362,10 +352,8 @@ cpupower frequency-info
 | --- | --- | --- |
 | `x86_energy_perf_policy` | `sudo x86_energy_perf_policy performance` | Force all CPU cores to run in the highest performance mode and disable dynamic frequency scaling to save energy |
 | `isolcpus + nohz_full + rcu_nocbs` | Kernel parameters:   `isolcpus=2-7 nohz_full=2-7 rcu_nocbs=2-7` | Completely isolate CPU 2-7, no scheduled interrupts, no kernel scheduling interference, dedicated to real-time tasks |
-| `tuned`<br/> Services | `sudo tuned-adm profile latency-performance` | Enable extreme low-latency configuration, turn off energy saving, optimize scheduling and interrupt handling |
+| `tuned`   Services | `sudo tuned-adm profile latency-performance` | Enable extreme low-latency configuration, turn off energy saving, optimize scheduling and interrupt handling |
 | `powertop --auto-tune` | `sudo powertop --auto-tune` | Automatically set all subsystems (CPU, disk, USB, etc.) to high-performance mode, suitable for performance stress testing |
-
-
 
 
 **NUMA topology of the system**
@@ -434,7 +422,7 @@ numactl --interleave=all test_program arguments
 numactl --preferred=1
 ```
 
-****
+---
 
 **1. Core Idea**
 
@@ -521,7 +509,7 @@ The following is libnuma's common interfaces and related system call tables:
 |  | `void *numa_alloc_local(size_t size);` | `void *` | Allocate memory on the local node and return on failure`NULL` |
 |  | `void *numa_alloc_interleaved(size_t size);` | `void *` | Cross-allocate memory to all nodes, return on failure`NULL` |
 |  | `void numa_free(void *ptr, size_t size);` | `void` | Release`numa_alloc_*`Allocated memory (size needs to be specified) |
-|  | `void *numa_realloc(void *oldptr, size_t oldsize, size_t newsize);` | `void *` |Reallocate memory and maintain node affinity, return on failure`NULL` |
+|  | `void *numa_realloc(void *oldptr, size_t oldsize, size_t newsize);` | `void *` | Reallocate memory and maintain node affinity, return on failure`NULL` |
 | **Memory Policy Settings** | `void numa_set_localalloc(void);` | `void` | Set the default policy to "Local node first" |
 |  | `void numa_set_interleave_mask(const struct bitmask *mask);` | `void` | Press`mask`Node set set cross assignment mode |
 |  | `void numa_set_bind_mask(const struct bitmask *mask);` | `void` | Limit memory allocation to`mask`Specify node |
@@ -624,7 +612,7 @@ int main() {
 
 **NUMA data sharding**
 
-**<font style="color:rgb(25, 27, 31);">The core idea of ​​data sharding is to allocate different types of data structures to the most appropriate physical memory area based on the access frequency, importance and policy logic of the data.</font>**
+**<font style="color:rgb(25, 27, 31);">The core idea of data sharding is to allocate different types of data structures to the most appropriate physical memory area based on the access frequency, importance and policy logic of the data.</font>**
 
 ```shell
 # View NUMA node distribution
@@ -771,10 +759,10 @@ Priority inheritance (PTHREAD_PRIO_INHERIT)
 2. The improved L can immediately seize the medium-priority thread M, quickly execute and release the lock.
 3. After L releases the lock, its priority automatically returns to its original value.
 4. If there are multiple levels of waiting (such as L waiting for another lock), the system will recursively increase the priorities of all related threads.
-
-2. Priority ceiling (PTHREAD_PRIO_PROTECT)
+5. Priority ceiling (PTHREAD_PRIO_PROTECT)
 
 The ceiling priority is preset when the lock is created, which is suitable for scenarios with known resource dependencies.  
+
 
 
 **Command**: Use `chrt` (change real-time attributes) command, adjusts priority only for processes
@@ -869,8 +857,7 @@ exist<font style="color:rgba(0, 0, 0, 0.85) !important;">After the CPU is bound,
 
 1. `<font style="color:rgb(0, 0, 0);">isolcpus</font>`<font style="color:rgba(0, 0, 0, 0.85) !important;">: Isolate the specified CPU from the kernel general scheduler, preventing most kernel threads and ordinary processes from running;</font>
 2. `<font style="color:rgb(0, 0, 0);">nohz_full</font>`<font style="color:rgba(0, 0, 0, 0.85) !important;">: Enable adaptive clockless mode on isolated cores to reduce/eliminate clock interruptions;</font>
-3. `<font style="color:rgb(0, 0, 0);">rcu_nocbs</font>`<font style="color:rgba(0, 0, 0, 0.85) !important;">: Offload RCU callbacks to non-isolated cores.  
-</font><font style="color:rgba(0, 0, 0, 0.85) !important;">The result is a near-exclusive, kernel-free “silent” operating environment for critical low-latency tasks.</font>
+3. `<font style="color:rgb(0, 0, 0);">rcu_nocbs</font>`<font style="color:rgba(0, 0, 0, 0.85) !important;">: Offload RCU callbacks to non-isolated cores. </font><font style="color:rgba(0, 0, 0, 0.85) !important;">The result is a near-exclusive, kernel-free “silent” operating environment for critical low-latency tasks.</font>
 
 ```shell
 # Modify GRUB configuration
@@ -882,13 +869,12 @@ grub2-mkconfig -o /boot/grub2/grub.cfg
 
 
 
-### 4. Summary of system silent configuration steps  
-
+### 4. Summary of system silent configuration steps
 | Configuration phase | Specific operations | Purpose | Precautions |
 | --- | --- | --- | --- |
 | **1. Startup parameter configuration** | 1. Add in the boot entry `isolcpus=managed_irq,7`   2. Add `nohz_full=7`   3. Add `rcu_nocbs=7`   4. Add `nowatchdog nmi_watchdog=0`   5. Add `hpet=disable`   6. Add `tsc=reliable`   7. Add `mce=off`   8. Add `ipv6.disable=1`   9. Add `audit=0`   10. Add `printk.devkmsg=off quiet loglevel=1`   11. Add`selinux=0` | 1. Isolate core 7 from the universal scheduler,`managed_irq`   Mode allows interrupts to run on this CPU but prevents user/kernel thread preemption 2. Enable adaptive tickless mode to stop periodic clock interrupts when idle, significantly reducing jitter 3. Offload RCU callbacks to non-isolated CPUs to avoid RCU softirq interference with critical threads 4. Disable NMI watchdog to prevent it from generating unnecessary timer interrupts 5. Disable HPET multicast interrupt sources to reduce global interrupt load 6. Declare TSC as a reliable time source to avoid jitter caused by frequent kernel calibration. 7. Turn off machine check exceptions (MCE) to avoid non-maskable interrupts (NMI) interrupting execution. 8. Reduce background tasks and interrupt processing related to the IPv6 protocol stack. 9. Disable the audit subsystem to eliminate the uncertainty overhead caused by auditd and audit backlog processing. 10. Suppress kernel log output and reduce interruptions and competition caused by console and syslog writing. 11. Disable SE Linux extension | 1. `isolcpus`   Must cooperate `nohz_full`   To achieve a true "silent" effect; it is recommended to use `isolcpus=managed_irq,<cpu_list>`rather than the old format 2. `nohz_full`   The target CPU is required not to run any tasks other than process 0, otherwise it will degrade back to the ticking mode. Make sure that the kernel is configured`CONFIG_NO_HZ_FULL=y`, can be passed `cat /boot/config-* |
 | **2. Interrupt and task isolation** | 1. Execute the command:`systemctl stop irqbalance && systemctl disable irqbalance`   2. Manually bind all non-critical device interrupts (such as network cards, disks) to non-target CPUs (such as CPU 0-6):   `echo <cpu_id> > /proc/irq/<irq_num>/smp_affinity_list`   3. Edit `/sys/devices/virtual/workqueue/cpumask`, set to `0x7F`(i.e. CPU 0-6) 4. (Optional) Change `ksoftirqd/7`   Process manual migration:   `taskset -pc 0 $(pgrep ksoftirqd/7)` | 1. Prevent `irqbalance`Automatically migrate interrupts to the isolated core 2. Actively control IRQ affinity to ensure that hardware interrupts do not fall into core 7 3. Restrict all general workqueues (workqueues) to run only on non-isolated CPUs to prevent kernel worker preemption 4. Force the softirq daemon to be moved out of core 7 to further reduce the risk of potential interference | 1. Disable `irqbalance` Must be inspected regularly after `/proc/interrupts`, to prevent new devices from being interrupted and mistakenly bound 2. Use `smp_affinity_list`The interface is more intuitive and less error-prone than bit masking 3. Modification `workqueue/cpumask` Root permissions are required, and please note that the system may be reset after updating 4. `ksoftirqd`Migration is a temporary means, if not combined `nohz_full`Limited effect |
-| **3. Power management optimization** | 1. Disable in BIOS: - Turbo Boost - C-States (C1E, C-State Control) - P-States / SpeedStep - SMT/Hyper-Threading (optional) **2. Add kernel startup parameters: **   `intel_pstate=disable`   `processor.max_cstate=1`   `intel_idle.max_cstate=1`   `idle=poll`   3. Set the frequency policy at runtime:   `sudo cpupower frequency-set -g performance`   4. Lock frequency (optional):   `sudo cpupower frequency-set -f <target_freq>MHz`   5. Load `msr`   module and use the WRMSR tool to fix the UNCORE frequency:   `modprobe msr`   `wrmsr -p7 0x620 <min_max_ratio>` | 1. Eliminate frequency fluctuations and wake-up delays caused by dynamic frequency modulation (P-State), automatic overclocking (Turbo) and deep sleep (C-State) 2. Keep the CPU in shallow C1 state or forced polling (idle=poll) to achieve the lowest latency response 3. Ensure that the CPU always runs at the highest stable frequency to avoid performance governor switching delays 4. Fixed frequency to avoid jitter introduced by dvfs transition state 5. Control Uncore (LLC, memory controller) frequency consistency to avoid cross-NUMA bandwidth fluctuations | 1. BIOS settings require physical access to the server or remote KVM operation 2. `idle=poll`Greatly increases power consumption and is only suitable for short-term stress testing or low-latency scenarios 3. `cpupower`The tool chain needs to be installed in advance (such as `linux-tools-common`) 4. MSR operation needs to be done with caution, wrong values ​​may lead to system instability or frequency reduction |
+| **3. Power management optimization** | 1. Disable in BIOS: - Turbo Boost - C-States (C1E, C-State Control) - P-States / SpeedStep - SMT/Hyper-Threading (optional) **2. Add kernel startup parameters: **   `intel_pstate=disable`   `processor.max_cstate=1`   `intel_idle.max_cstate=1`   `idle=poll`   3. Set the frequency policy at runtime:   `sudo cpupower frequency-set -g performance`   4. Lock frequency (optional):   `sudo cpupower frequency-set -f <target_freq>MHz`   5. Load `msr`   module and use the WRMSR tool to fix the UNCORE frequency:   `modprobe msr`   `wrmsr -p7 0x620 <min_max_ratio>` | 1. Eliminate frequency fluctuations and wake-up delays caused by dynamic frequency modulation (P-State), automatic overclocking (Turbo) and deep sleep (C-State) 2. Keep the CPU in shallow C1 state or forced polling (idle=poll) to achieve the lowest latency response 3. Ensure that the CPU always runs at the highest stable frequency to avoid performance governor switching delays 4. Fixed frequency to avoid jitter introduced by dvfs transition state 5. Control Uncore (LLC, memory controller) frequency consistency to avoid cross-NUMA bandwidth fluctuations | 1. BIOS settings require physical access to the server or remote KVM operation 2. `idle=poll`Greatly increases power consumption and is only suitable for short-term stress testing or low-latency scenarios 3. `cpupower`The tool chain needs to be installed in advance (such as `linux-tools-common`) 4. MSR operation needs to be done with caution, wrong values may lead to system instability or frequency reduction |
 | **IV. Other key optimizations** | 1. Disable VT-x virtualization support (BIOS); avoid cross-core reading and writing of MSR registers; reduce RDTSC sampling frequency 2. Use `chrt`   Set real-time priority:   `chrt -f 99 ./realtime_app`   3.`echo -1 > /proc/sys/kernel/sched_rt_runtime_us`Set the CPU usage time limit of real-time tasks to unlimited 4. NUMA binding: Use `numactl`Bind processes, memory, and I/O devices to the same node:   `numactl --cpunodebind=0 --membind=0 --physcpubind=7 ./app`   At the same time, set the I/O interrupt affinity to another NUMA node CPU 5. Detect SMI (System Management Interrupt) overhead: Intel: `perf stat --smi-cost sleep 10`   AMD: `perf stat -e ls_smi_rx -I 10000 sleep 1`   When high-frequency SMI exists, adjust the SMM-related options in the BIOS 6. Disable Transparent Huge Page THP: Method 1:`transparent_hugepage=never`(boot parameter) Method 2:`echo never > /sys/kernel/mm/transparent_hugepage/enabled`   7. Insert serialization instructions before and after the timing code:   `asm volatile("cpuid" ::: "eax", "ebx", "ecx", "edx");`   Execute again `rdtsc` or use`rdtscp` | 1. Reduce the minor delay jitter caused by IPI, VMX related traps and MSR access 2. Improve the process scheduling priority so that it can immediately preempt ordinary tasks 3. Allow real-time tasks (RT tasks) to use CPU resources without restrictions 4. Realize computing, memory, I/O locality to avoid cross-NUMA delays and bandwidth bottlenecks 5. SMI is the highest priority interrupt and cannot be blocked, and must be avoided through BIOS tuning 6. THP background merge thread (khugepaged) will produce unpredictable latency spikes 7. CPUID acts as a memory barrier to prevent RDTSC from being executed out of order and ensure timestamp accuracy. RDTSCP will ensure that the previous instructions will not be executed out of order to the rear of RDTSCP | 1. Disabling VT-x will affect virtualization functions such as containers and KVM 2. `chrt -f 99`If misuse will cause the system to become unresponsive, it should only be used for a single key process. 3. If an infinite loop occurs in the RT task, the system may become completely unresponsive. 4. NUMA binding needs to be combined. `numactl --show`Verify actual binding results 5. SMI tuning depends on the specific motherboard/BMC firmware. Common options include:`USB SMI`、`Legacy USB Support`、`PCI Lock`etc. 6. Disabling THP may affect the performance of database applications, and the scenarios need to be weighed. 7. CPUID brings about 50~100 cycle overhead, which is suitable for high-precision measurement rather than high-frequency sampling |
 
 
@@ -1191,7 +1177,7 @@ Different hardware memory models vary greatly. C11/C++11 provides a unified abst
 | `memory_order_seq_cst` | The strongest constraint: the memory access sequence seen by all threads is consistent (global total order), the default memory order | Scenarios that require global consistency (such as distributed lock status synchronization), the lowest performance but the easiest to ensure correctness |
 
 
-****
+---
 
 **3. Mapping relationship between memory order and hardware barriers**
 
@@ -1205,8 +1191,6 @@ The "memory order" specified by software needs to be implemented through "hardwa
 | `release` | No barrier (TSO prohibits writing → pre-order access out of order) | `dmb ish`(write barrier) | Constrains all access before writing, medium overhead |
 | `acq_rel` | `mfence`(full barrier) | `dmb ish`(Full barrier) | Constrains reading and writing at the same time, high overhead |
 | `seq_cst` | `mfence` + Atomic operation belt`lock`prefix | `dmb sy`(System-level full barrier) | The strongest constraint, the highest overhead, ensuring global total order |
-
-
 
 
 **4. Memory barrier and compiler barrier**
@@ -1280,7 +1264,7 @@ _ReadWriteBarrier(); // Compiler barrier
 
 **<font style="color:rgb(25, 27, 31);">memory barrier</font>**<font style="color:rgb(25, 27, 31);">: Memory barriers also prevent compiler reordering</font>
 
-****
+---
 
 **4. Select the “weakest enough” memory order**
 
@@ -2353,7 +2337,7 @@ auto some_func() {
 2. `std::pmr::vector`Through the memory resource pointer (`std::pmr::memory_resource*`) to manage memory
 3. all`std::pmr`Containers all use the same allocator type, so`std::pmr::vector<int>`and`std::pmr::vector<int>`is compatible
 
-****
+---
 
 **Common memory resources**
 
@@ -2794,7 +2778,6 @@ private:
 inline related content
 
 1. In C++ language,`inline` At its core is a **link period directive** that addresses the **One Definition Rule (ODR)**.
-
 + **Core**: allow the same`inline`function or variable in multiple compilation units (`.cpp`file) have exactly the same definition. The linker ensures that only one instance of the definition exists in the final program.
 + **Main uses**:
     - **Define function in header file**: This is`inline`The most fundamental purpose is to avoid "multiple definition" link errors caused by including header files in multiple places.
@@ -2802,16 +2785,13 @@ inline related content
 + **Implicit**`**inline**`** rule**:
     - exist `class`/`struct` Declare internally defined member functions.
     - All function templates and member functions of class templates.
-
 2. In the compiler,`inline` Considered a **Performance Optimization Suggestion**. The compiler decides whether to perform this optimization of function inlining.
-
 + **Core**: Replace function calls with the function body itself, eliminating the fixed overhead of function calls.
 + **Compiler decision-making authority**:
     - `inline` Just a suggestion, the compiler has the right to ignore it. Compilers usually refuse inlining if a function is too large, complex, or recursive.
     - The compiler will automatically inline any appropriate non-`**inline**`**Function**, at high optimization level (`-O2`, `-O3`) or via link-time optimization (LTO).
 + **Forced inlining**:
     - To override the compiler's judgment, use specific instructions`__attribute__((always_inline))`。
-
 3. Points to note:
 
 **<font style="color:rgb(25, 27, 31);">Lambdas are very easy to expand inline at compile time.</font>**
@@ -2841,2972 +2821,7 @@ Inline assembly is a technology that embeds assembly code directly into C++ file
 | 5. Supports function inlining and is portable to multiple x86 platforms (GNU/Clang/Intel) | 5. VEX and non-VEX instructions may be mistakenly mixed, resulting in Intel CPU performance penalty |
 
 
-****
-
-**MASM style inline assembly (Microsoft/Intel compilers)**
-
-**1. Applicable scenarios and compiler support**
-
-+ **Supported compilers**: 16-bit/32-bit Microsoft C++ compiler, 32-bit/64-bit Intel compiler (required for Windows/Linux`-use-msasm`options).
-+ **Limitations**: Not supported at all by the Microsoft 64-bit compiler; only supports a subset of MASM syntax and does not rely on external assemblers.
-
-**2. Basic Grammar**
-
-+ **code block tag**: use`__asm { ... }`Wrapping assembly instructions, line breaks or using`__asm`separated, supports C++ comments (`//`) or assembly comments (`;`）。
-+ **Variable access**: directly use C++ variable names (such as`x`、`n`), the compiler automatically replaces it with the memory address (such as`[esp+4]`), no need to manually handle stack offset.
-+ **Register usage**: The compiler automatically detects and saves modified registers (in compliance with ABI rules), but modification is prohibited`ebp`/`ebx`Wait for the compiler to reserve registers.
-
-**3. Example: Calculate the integer power of x (x87 floating point instructions) **
-
-```cpp
-// Function: double ipow(double x, int n), return x^n
-double ipow(double x, int n) {
-    __asm {
-        mov eax, n ; move n into eax
-        cdq ; extend sign bit to edx (compute abs(n))
-        xor eax, edx ; negate negative numbers
-        sub eax, edx ; Add 1 to a negative number, eax=abs(n)
-        fld1; st(0)=1.0 (initial result)
-        jz L9 ; If n=0, return 1.0 directly
-        fld qword ptr x  ; st(0)=x，st(1)=1.0
-        jmp L2 ; jump to loop entry
-
-    L1: // Loop body: x multiplies itself (x^2, x^4...)
-        fmul st(0), st(0)
-    L2: // Check the current bit, if it is 1, multiply the result
-        shr eax, 1 ; eax is shifted right by 1 bit, and the lowest bit enters the carry flag
-        jnc L1 ; skip multiplication if no carry
-        fmul st(1), st(0); result(st(1)) *= current power of x(st(0))
-        jnz L1 ; until eax=0
-
-        fstp st(0) ; discard st(0) (remaining st(0)=result)
-        test edx, edx ; Check if n is negative
-        jns L9; Non-negative numbers are returned directly
-        fld1; For negative numbers, take the reciprocal: st(0)=1.0, st(1)=result
-        fdivr ; st(0)=st(1)/st(0)(1/result)
-    L9: //The result is stored in st(0), conforming to the 32-bit calling convention
-        #pragma warning(disable:1011) // Disable "no return" warning
-    }
-}
-```
-
-+ Key logic: pass`cdq`/`xor`/`sub`calculate`abs(n)`, using x87 stack registers to implement power accumulation to avoid branch prediction overhead.
-
-**4. Key Notes**
-
-+ **Calling Convention Compatibility**: If cross-platform/digit number is required, the result needs to be stored in a temporary variable (such as`double result`) to avoid direct reliance on register returns (such as`fstp qword ptr result`）。
-+ **naked**: added`__declspec(naked)`You can cancel the prologue/epilogue automatically generated by the compiler, but you need to manually handle stack alignment and register saving (such as`push ebp`/`mov ebp, esp`）。
-+ **Class/Structure Member Access**: Pass`this`Pointer addressing, the format is`[ecx].成员名`(like`[ecx].length`), in 32-bit Windows`this`Default in`ecx`, 64-bit needs to be adjusted to`rcx`/`rdi`。
-
-
-
-**GNU style inline assembly (GNU/Clang/Intel Linux compiler)**
-
-**1. Applicable scenarios and compiler support**
-
-+ **Supported compilers**: GNU GCC, Clang, Intel compiler (Linux/Mac, 32-bit/64-bit supported).
-+ **Core Features**: The assembly code is passed in as a string, and the compiler passes it directly to the GAS assembler. It supports complete GAS instructions/pseudo operations, and requires explicit declaration of input/output/modified registers.
-
-**2. Basic grammar (extended grammar structure)**
-
-```cpp
-__asm__ (
-    "Assembly instruction string" // 1. Assembly code, instructions separated by \n
-    : "Output operand list" // 2. Output: The format is "constraint" (variable name), such as "=t"(y)
-    : "Input operand list" // 3. Input: The format is "constraint" (variable name), such as "m" (x), "a" (n)
-    : "Modified register list" // 4. Inform the compiler of the registers that need to be saved, such as "%edx"
-);
-```
-
-+ **Operand constraints**: Common constraints include`m`(Memory),`r`(any register),`a`（EAX/RAX）、`t`(st(0) on the top of the floating point stack).
-+ **Tag handling**: Use local tags (e.g.`1:`、`2:`), used to jump`1b`(skip forward)/`1f`(jump backward) to avoid label duplication during inlining.
-
-**3. Example: Calculate the integer power of x (Intel syntax)**
-
-```cpp
-double ipow(double x, int n) {
-    double y;
-    __asm__ (
-        ".intel_syntax noprefix\n" // Switch to Intel syntax (no register % prefix)
-        "cdq\n" // Extend n sign bits to edx
-        "xor eax, edx\n" // Calculate abs(n)
-        "sub eax, edx\n"
-        "fld1\n"
-        "jz 9f\n" // jump to 9 if n=0:
-        "fldl %[xx]\n" // Load x (%[xx] corresponds to input x)
-        "jmp 2f\n"
-
-    "1:\n" // Loop: x multiplies itself
-        "fmul %%st(0), %%st(0)\n"
-    "2:\n" // Check the current bit
-        "shr eax, 1\n"
-        "jnc 1b\n" // Jump back to 1 if there is no carry:
-        "fmul %%st(1), %%st(0)\n"
-        "jnz 1b\n"
-
-        "fstp %%st(0)\n"
-        "test edx, edx\n"
-        "jns 9f\n" // Jump to 9 for non-negative numbers:
-        "fld1\n"
-        "fdivp %%st(0), %%st(1)\n" // Take the reciprocal
-    "9:\n"
-        ".att_syntax prefix\n" //Revert to AT&T syntax (for subsequent use by the compiler)
-        : "=t"(y) // Output: y = top of stack st(0)
-        : [xx]"m"(x), "a"(n)        // 输入：%[xx] = x，eax = n
-        : "%edx", "%st(1)" // Modified register: edx, st(1)
-    );
-    return y;
-}
-```
-
-+ Key difference: input needs to be declared explicitly (`x`stored in memory,`n`Store in EAX), output (`y`from the top of the floating point stack), and the modified register (`edx`、`st(1)`）。
-
-**4. Switch between AT&T syntax and Intel syntax**
-
-+ **AT&T Syntax Features**: The order of operands is "source → target" (such as`addl %eax, %ebx`), register plus`%`prefix, constant plus`Trading system development-Zhang Zhixuan
-
-Yuque address: https://www.yuque.com/bluememories/lanaff/eud01pmbglsxf6gu
-Blog garden address: https://www.cnblogs.com/zzxscodes/p/19695166/trading-system-notes
-Github address: https://github.com/zzxscodes/trading-system-notes
-
-## Low latency system development basics
-### 1. CPU affinity and NUMA architecture
-**<font style="color:rgb(27, 28, 29);">isolcpus: Kernel startup parameter CPU isolation</font>**
-
-```shell
-  Edit /etc/default/grub .
-  Modify the GRUB_CMDLINE_LINUX_DEFAULT line and add isolcpus=cpu number list within quotation marks (for example: isolcpus=2,3 isolcpus=1,4-7).
-  执行 sudo update-grub (Debian/Ubuntu) ( sudo grub2-mkconfig -o /boot/grub2/grub.cfg (RHEL/CentOS/Fedora)) 并 sudo reboot.
-```
-
-
-
-**<font style="color:rgb(27, 28, 29);">taskset: command line tool CPU binding</font>**
-
-```shell
-  Start the process: taskset -c 1 ./my_app (running on CPU 1)
-  Modify a running process: taskset -pc 3 <PID>  (Move PID process to CPU 3)
-  Query process: tasksset -pc <PID> 
-  Bind threads under the process: ps -T -p <PID> taskset -p -c <CPU list> <TID> 
-```
-
-<font style="color:rgb(27, 28, 29);"></font>
-
-**<font style="color:rgb(27, 28, 29);">pthread_setaffinity_np (sched_setaffinity): Thread (process) CPU binding</font>**
-
-```cpp
-#pragma once
-
-#include <iostream>
-#include <atomic>
-#include <thread>
-#include <unistd.h>
-
-#include <sys/syscall.h>
-
-namespace Common {
-    /// Set affinity for current thread to be pinned to the provided core_id.
-    inline auto setThreadCore(int core_id) noexcept {
-        cpu_set_t cpuset;
-
-        CPU_ZERO(&cpuset);
-        CPU_SET(core_id, &cpuset);
-
-        return (pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset) == 0);
-    }
-
-    /// Creates a thread instance, sets affinity on it, assigns it a name and
-    /// passes the function to be run on that thread as well as the arguments to the function.
-    template<typename T, typename... A>
-    inline auto createAndStartThread(int core_id, const std::string &name, T &&func, A &&... args) noexcept {
-        auto t = new std::thread([&]() {
-            if (core_id >= 0 && !setThreadCore(core_id)) {
-                std::cerr << "Failed to set core affinity for " << name << " " << pthread_self() << " to " << core_id << std::endl;
-                exit(EXIT_FAILURE);
-            }
-            std::cerr << "Set core affinity for " << name << " " << pthread_self() << " to " << core_id << std::endl;
-
-            std::forward<T>(func)((std::forward<A>(args))...);
-        });
-
-        using namespace std::literals::chrono_literals;
-        std::this_thread::sleep_for(1s);
-
-        return t;
-    }
-}
-
-
-/*
- * The difference between sched_setaffinity and pthread_setaffinity_np:
- *
- * 1. Target objects:
- * - pthread_setaffinity_np: Action thread, specify the thread to be bound through the pthread_t handle.
- * - sched_setaffinity: affects the process. It specifies the process to bind to by its process ID (PID).
- * When a process is bound, all child threads will also be restricted to this CPU.
- * 2. Portability:
- * - pthread_setaffinity_np: GNU C library (glibc) extension.
- * - sched_setaffinity: standard Linux system call.
- */
-```
-
-<font style="color:rgb(27, 28, 29);"></font>
-
-**cpusets: CPU resource pool isolation**
-
-```bash
-#!/usr/bin/env bash
-#
-# simple_cpuset_example.sh
-# 
-# Demonstrates how to use cpuset to bind a task to a dedicated CPU core.
-
-# --- Configuration ---
-# Regular cores allocated for background tasks
-SYSTEM_CORE="0"
-# Cores reserved for exclusive tasks
-EXCLUSIVE_CORE="1"
-
-seven
-
-# Make sure the script is run with root privileges
-if [[ $(u -id) -ne 0 ]]; then
-    echo "This script must be run as root."
-    exit 1
-be
-
-# 1. Create cgroup directory
-echo "-->Creating cpuset core pool..."
-mkdir -p /sys/fs/cgroup/cpuset/exclusive_tasks
-
-# 2. Configure an exclusive core pool
-# Assign core 1 to this pool
-echo "${EXCLUSIVE_CORE}" > /sys/fs/cgroup/cpuset/exclusive_tasks/cpuset.cpus
-# Mark it as CPU exclusive
-echo "1" > /sys/fs/cgroup/cpuset/exclusive_tasks/cpuset.cpu_exclusive
-# Allocate memory node 0 to this pool (usually there is only one memory node per core)
-echo "0" > /sys/fs/cgroup/cpuset/exclusive_tasks/cpuset.mems
-
-# 3. Run a task and bind it to an exclusive core pool
-echo "--> Starting an infinite loop bound to core ${EXCLUSIVE_CORE}..."
-# Start a background task
-while true; do :; done &
-TASK_PID=$!
-echo "Task PID: ${TASK_PID}"
-
-# Write the PID of the task into the tasks file of the exclusive pool
-echo "${TASK_PID}" > /sys/fs/cgroup/cpuset/exclusive_tasks/tasks
-
-echo "Task bound successfully. You can use 'top' or 'htop' to check if PID ${TASK_PID} is running on core ${EXCLUSIVE_CORE}."
-echo "To stop the task, run: kill ${TASK_PID}"
-```
-
-| features | isolcpus | cpusets | taskset | pthread_setaffinity_np |
-| --- | --- | --- | --- | --- |
-| **Level** | Kernel level | Kernel level | Process level | Thread level |
-| **Method** | Startup parameters | Virtual file system interface | Command line | Library functions |
-| **Isolation Strength** | **Strong** | **Strong** | Weak | Weak |
-| **Granularity** | CPU | **CPU & Memory Node Pool** | Process | Thread |
-| **Dynamic** | **Static (requires restart)** | **Dynamic** | Dynamic | Dynamic |
-
-
-
-
-
-
-<font style="color:rgb(25, 27, 31);">The CPU's Hyper-Threading Technology (HT) simulates the physical core into two logical cores, sharing the core's execution units (such as ALU, FPU) and L1/L2 cache.</font>
-
-<font style="color:rgb(25, 27, 31);">(1) If threads bound to the same physical core perform computationally intensive operations, especially AVX equal-width instruction sets, the shared floating point unit will be completely occupied, causing the transaction thread to be blocked;</font>
-
-<font style="color:rgb(25, 27, 31);">(2) A thread's access to the L1/L2 cache will contaminate or expel the hot data of the transaction thread and increase cache misses.</font>
-
-<font style="color:rgb(25, 27, 31);">(3) Disabling hyper-threading can make the execution delay of key transaction threads lower and reduce delay fluctuations.</font>
-
-<font style="color:rgb(25, 27, 31);">(4) Disabling Hyper-Threading will reduce the overall throughput of the system. Therefore low-latency sensitive tasks are exclusively bound to physical cores (even or odd parts of the logical core ID), while non-real-time tasks are deployed on hyper-threading-enabled cores. (implemented at the Linux system level)</font>
-
-```shell
-lscpu -e # Assume the output shows that both CPU 0 and CPU 8 belong to CORE 0. This means they are two "sibling" logical cores on the same physical core.
-
-# View the online status of CPU 8 (1 means online)
-cat /sys/devices/system/cpu/cpu8/online
-
-# Set CPU 8 offline (disabled)
-echo 0 > /sys/devices/system/cpu/cpu8/online
-
-# Check the number of online CPUs. It will be 1 less than the original number.
-nproc
-
-# Or run lscpu again, you will see that CPU 8 is displayed as no (offline)
-lscpu -e | grep "cpu8"
-
-# At this point, the operating system scheduler will not assign any more tasks to CPU 8. CPU 0 can now use the full resources of physical core 0 without interruption.
-#Restart only
-echo 1 > /sys/devices/system/cpu/cpu8/online
-```
-
-```shell
-# Clearly list the corresponding relationships between CPU, core, and Socket
-lscpu -e=CPU,CORE,SOCKET
-
-# Bind the policy process to physical cores 8-15 (skipping hyper-threaded cores)
-taskset -c 8-15 ./strategy_engine
-```
-
-
-
-
-
-**Turn off CPU power saving (C-States & P-States)**
-
-**BIOS/UEFI level**
-
-| BIOS settings | Recommended values ​​| Description |
-| --- | --- | --- |
-| **CPU C-States** / **Global C-State Control** | `Disabled` | Disable all C-States (C1~C10), the CPU will never go to sleep |
-| **C1E Support** | `Disabled` | Disable enhanced C1 states (C1E may still be enabled even if C-States are turned off) |
-| **Intel SpeedStep** (EIST) / **AMD Cool'n'Quiet** | `Disabled` | Disable P-State dynamic frequency modulation, lock frequency |
-| **Intel Turbo Boost** / **AMD Core Performance Boost** | `Disabled` | Disable automatic overclocking to avoid frequency fluctuations |
-| **CPU Ratio** / **Multiplier** | Fixed value (such as `45`<br/>) | Manually set the CPU multiplier to achieve frequency locking (SpeedStep needs to be disabled simultaneously) |
-| **Hyper-Threading** / **SMT Mode** | `Disabled` | Optional: Turn off hyper-threading to reduce scheduling interference and facilitate precise control. **Global switch will invalidate the precise control of hyper-threading core strategy** |
-| **Power Technology** (AMD) | `Custom`<br/> → Manually turn off various energy saving items | AMD platform precautions |
-
-
-
-
-**Linux kernel parameters**
-
-1. Edit GRUB configuration
-
-```bash
-sudo vim /etc/default/grub
-```
-
-```bash
-GRUB_CMDLINE_LINUX_DEFAULT="quiet splash \
-    intel_idle.max_cstate=0 \
-    processor.max_cstate=1 \
-    idle=poll \
-    intel_pstate=disable"
-```
-
-| Parameters | Function |
-| --- | --- |
-| `intel_idle.max_cstate=0` | Force Intel CPU's `intel_idle`<br/> Driver disables all C-States (C1 and above) |
-| `processor.max_cstate=1` | Compatible with backup driver (acpi-cpufreq), limiting the maximum C-State to C1 |
-| `idle=poll` | **The most aggressive setting**: The CPU does not wait for interrupts when idle, but continuously polls the task queue to achieve the lowest latency (but extremely high power consumption) |
-| `intel_pstate=disable` | Disable modern Intel P-State driver and fall back to legacy `acpi-cpufreq`<br/>, convenient for manual frequency control |
-
-
-2. Update GRUB configuration
-
-```bash
-# Debian/Ubuntu
-sudo update-grub
-
-# CentOS/RHEL/Fedora
-sudo grub2-mkconfig -o /boot/grub2/grub.cfg
-```
-
-3. Restart takes effect
-
-```bash
-sudo reboot
-```
-
-****
-
-**Linux runtime control**
-
-1. Install frequency control tool
-
-```bash
-# Ubuntu/Debian
-sudo apt install cpufrequtils linux-tools-common
-
-# CentOS/RHEL
-sudo yum install cpufreq-utils kernel-tools
-
-# Fedora
-sudo dnf install kernel-tools
-```
-
-2. View current status
-
-```bash
-cpupower frequency-info
-```
-
-Output key information:
-
-+ `driver`: The currently used driver (`intel_pstate`, `acpi-cpufreq`）
-+ `governor`: Current frequency modulation strategy (`powersave`, `performance`, `userspace`）
-+ `current policy`:Supported frequency range
-
-3. Set to performance mode (recommended)
-
-```bash
-sudo cpupower frequency-set -g performance
-```
-
-+ `performance` mode will maintain the highest frequency possible (P0 State)
-
-4. (Optional) Manually lock frequency
-
-```bash
-# Lock all CPUs to 3.5GHz
-sudo cpupower frequency-set -f 3500MHz
-
-# or set min/max frequency range
-sudo cpupower frequency-set -d 3500MHz -u 3500MHz
-```
-
-5. Effective permanently (automatically set at startup)
-
-```bash
-sudo vim /etc/systemd/system/cpu-performance.service
-```
-
-```plain
-[Unit]
-Description=Set CPU to Performance Mode
-After=multi-user.target
-
-[Service]
-Type=oneshot
-ExecStart=/usr/bin/cpupower frequency-set -g performance
-RemainAfterExit=yes
-
-[Install]
-WantedBy=multi-user.target
-```
-
-```bash
-sudo systemctl enable cpu-performance.service
-sudo systemctl start cpu-performance.service
-```
-
-****
-
-**Verify that energy saving is turned off**
-
-1. Check C-State
-
-```bash
-# View current idle status
-cat /proc/cpuinfo | grep -i "idle"
-
-# Use turbostat (requires root)
-sudo turbostat --interval 5
-```
-
-+ observe `C0%` Is it close to 100%, other C-state (C1~C10) should be 0%
-+ `Busy%` Should ≈ `C0%`
-
-2. Check whether the frequency is stable
-
-```bash
-watch -n 0.5 'cat /proc/cpuinfo | grep "cpu MHz"'
-```
-
-+ All core frequencies should be stable at the target value (such as 3500.000 MHz) without fluctuations
-
-3. Check FM drivers and strategies
-
-```bash
-cpupower frequency-info
-```
-
-+ `governor` should be `performance`
-+ `current policy` Frequency range should be narrow or fixed
-
-
-
-**Alternatives**
-
-| Method | The most radical usage | Function description |
-| --- | --- | --- |
-| `x86_energy_perf_policy` | `sudo x86_energy_perf_policy performance` | Force all CPU cores to run in the highest performance mode and disable dynamic frequency scaling to save energy |
-| `isolcpus + nohz_full + rcu_nocbs` | Kernel parameters:   `isolcpus=2-7 nohz_full=2-7 rcu_nocbs=2-7` | Completely isolate CPU 2-7, no scheduled interrupts, no kernel scheduling interference, dedicated to real-time tasks |
-| `tuned`<br/> Services | `sudo tuned-adm profile latency-performance` | Enable extreme low-latency configuration, turn off energy saving, optimize scheduling and interrupt handling |
-| `powertop --auto-tune` | `sudo powertop --auto-tune` | Automatically set all subsystems (CPU, disk, USB, etc.) to high-performance mode, suitable for performance stress testing |
-
-
-
-
-**NUMA topology of the system**
-
-+ How many NUMA nodes are there?
-+ How many CPU cores are there per node?
-+ How much memory does each node have?
-+ What is the interconnect bandwidth and latency between nodes?
-
-**Commonly used tools to view NUMA topology:**
-
-+ `numactl --hardware`: Displays the hardware information of the NUMA node, including the number of CPUs and memory size.
-+ `lscpu`: Displays CPU architecture information, including NUMA node distribution.
-+ `hwloc`: A library and toolset that can generate detailed topology diagrams of the system, including NUMA nodes, CPUs, caches, PCI devices, etc.
-
-```shell
-# numactl --hardware
-available: 2 nodes (0-1)
-node 0 cpus: 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 48 49 50 51 52 53 54 55 56 57 58 59 60 61 62 63 64 65 66 67 68 69 70 71
-node 0 size: 96920 MB
-node 0 free: 2951 MB
-node 1 cpus: 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 44 45 46 47 72 73 74 75 76 77 78 79 80 81 82 83 84 85 86 87 88 89 90 91 92 93 94 95
-node 1 size: 98304 MB
-node 1 free: 33 MB
-node distances:
-node   0   1 
-  0:  10  21 
-  1:  21  10
-```
-
-1. <font style="color:rgb(25, 27, 31);">The CPU is divided into two groups, node 0 and node 1 (this machine has two CPU Sockets).</font>
-2. <font style="color:rgb(25, 27, 31);">One set of CPUs is allocated 96 GB of memory (the machine has a total of 192 GB of memory).</font>
-3. <font style="color:rgb(25, 27, 31);">node distances is a two-dimensional matrix, node[i][j] represents the relative distance of node i accessing the memory of node j. For example, the distance between node 0 and node 0's memory is 10, and the distance between node 0 and node 1's memory is 21.</font>
-
-```shell
-# numactl --show
-policy: default
-preferred node: current
-physcpubind: 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 44 45 46 47 48 49 50 51 52 53 54 55 56 57 58 59 60 61 62 63 64 65 66 67 68 69 70 71 72 73 74 75 76 77 78 79 80 81 82 83 84 85 86 87 88 89 90 91 92 93 94 95 
-cpubind: 0 1 
-nodebind: 0 1 
-binding: 0 1
-```
-
-<font style="color:rgb(25, 27, 31);">The numactl command also has several important options:</font>
-
-1. `<font style="color:rgb(25, 27, 31);background-color:rgb(248, 248, 250);">--cpubind=0</font>`<font style="color:rgb(25, 27, 31);">: Bound to execute on the CPU of node 0.</font>
-2. `<font style="color:rgb(25, 27, 31);background-color:rgb(248, 248, 250);">--membind=1</font>`<font style="color:rgb(25, 27, 31);">: Allocate memory on node 1 only.</font>
-3. `<font style="color:rgb(25, 27, 31);background-color:rgb(248, 248, 250);">--interleave=nodes</font>`<font style="color:rgb(25, 27, 31);">: nodes can be all, N, N, N or N-N, which means memory is allocated in round robin on nodes.</font>
-4. `<font style="color:rgb(25, 27, 31);background-color:rgb(248, 248, 250);">--physcpubind=cpus</font>`<font style="color:rgb(25, 27, 31);">: cpus is the processor (hyper-threading) field in /proc/cpuinfo. The format of cpus is the same as --interleave=nodes, which means it is bound to run on cpus.</font>
-5. `<font style="color:rgb(25, 27, 31);background-color:rgb(248, 248, 250);">--preferred=1</font>`<font style="color:rgb(25, 27, 31);">: Prioritize allocating memory from node 1.</font>
-
-<font style="color:rgb(25, 27, 31);">A few examples of numactl commands:</font>
-
-```shell
-# Run the test_program program, the parameter is argument, bound to the CPU of node 0 and the memory of node 1
-numactl --cpubind=0 --membind=1 test_program arguments
-
-# Run test_program on processors 0-4, 8-12
-numactl --physcpubind=0-4,8-12 test_program arguments
-
-# Round-robin allocation of memory staggers the program's memory pages across all NUMA nodes while allowing the program to run on all CPUs. Suitable for applications with high memory bandwidth requirements and random data access patterns.
-numactl --interleave=all test_program arguments
-
-# Prioritize allocating memory from node 1
-numactl --preferred=1
-```
-
-****
-
-**1. Core Idea**
-
-<!-- 这是一张图片，ocr 内容为： -->
-![](https://www.yuque.com/api/filetransfer/images?url=https%3A%2F%2Fimg-blog.csdn.net%2F20150512112954867%3Fwatermark%2F2%2Ftext%2FaHR0cDovL2Jsb2cuY3Nkbi5uZXQvdXN0Y19keWxhbg%3D%3D%2Ffont%2F5a6L5L2T%2Ffontsize%2F400%2Ffill%2FI0JBQkFCMA%3D%3D%2Fdissolve%2F70%2Fgravity%2FCenter&sign=cb8c2242e367c91e67d3e234b23aa2d2de4ad6b4a2e4c8b90887099e7f9a79a9)
-
-On a server with multiple CPU sockets, each CPU has its own local memory, and accessing local memory is much faster than accessing another CPU's memory (remote memory). Therefore, the key to optimization is to ensure that "whoever calculates has his data by his side".
-
-Advanced scenarios (high-performance networks) are CPU, memory,<font style="color:rgba(0, 0, 0, 0.85);">Consistent with PCIe devices (network cards).</font>
-
-**2. Linux memory allocation behavior**
-
-+ **Default policy**: Always allocate memory **first** on the **local NUMA node** where the current CPU core is located.
-+ **Exception**: When local memory is low, behavior is determined by kernel parameter `vm.zone_reclaim_mode` Decide.
-    - `vm.zone_reclaim_mode = 0` (Default value): When the local memory is insufficient, go to the remote node to find free memory. This is the recommended configuration in most scenarios.
-    - `vm.zone_reclaim_mode = 1`: When local memory is insufficient, priority is given to recycling local inactive memory pages (such as Cache) instead of accessing remote memory. This recycling process itself may introduce delays.
-
-**3. Management and optimization tools**
-
-1. `**numactl**`** (most commonly used)**: Command line tool to specify the NUMA policy of an application when starting it.
-    - **Force binding (**`**--membind**`**)**: `numactl --cpunodebind=0 --membind=0 my_app`
-        * **Effect**: Forced `my_app` Can only run on node 0's CPU and can only be allocated from node 0's memory. If node 0 runs out of memory, the allocation will fail. Provides the strongest performance certainty.
-    - **Priority Use (**`**--preferred**`**)**: `numactl --preferred=0 my_app`
-        * **Effect**: Prioritize allocation from node 0. If it fails, it will automatically fall back to other nodes. Optimize while ensuring program availability.
-2. `**sysctl**`** (System level adjustment)**:
-    - `sudo sysctl -w vm.zone_reclaim_mode=0`: Ensure that the system adopts the default NUMA allocation behavior to avoid unnecessary local memory reclamation delays.
-
-```shell
-# Permanent modification
-# Add a line to a new file under /etc/sysctl.conf or /etc/sysctl.d/:
-# vm.zone_reclaim_mode = 0
-# Then execute sudo sysctl -p to make it take effect
-```
-
-3. `**cpuset**`** (Bottom Hard Isolation)**:
-    - `cpuset` While allocating CPU cores, pass `cpuset.mems` The file is also forcibly bound to the memory node, which is better than `numactl` Lower-level kernel-level isolation has the same effect as `numactl --membind` Similar but more isolated.
-
-**4.Before NUMA**
-
-+ **The core is "share-nothing"**: Using the Share-Nothing architecture, the system is divided into independent computing units, each with its own data (data partition). Cross-NUMA node memory access is logically eradicated.
-+ **Replace "global shared" with "thread local"**: Use thread local storage (TLS) to eliminate data races and locks. Each thread only works on its own "territory" (i.e., local NUMA memory) to avoid cross-node cache synchronization due to data contention.
-+ **Replace "shared memory" with "message passing"**: Use Actor model, disruptor communication and other modes, that is, CSP concurrency philosophy.
-
-
-
-NUMA optimization is an iterative process that requires continuous performance analysis and monitoring to identify bottlenecks and verify optimization effects.
-
-+ `**numastat**`: View memory access statistics for each NUMA node in real time or historically, including local (`local_node`) and remote (`other_node`) memory access times. If the remote access ratio is high, it means there is still room for NUMA optimization.
-
-```shell
-$ numastat -m # View memory policy
-$ numastat -c # View the memory access statistics of each CPU
-$ numbered -p <pid> # View NUMA statistics for a specific process
-```
-
-+ `**perf**`: Performance analysis tool under Linux that can track various hardware events, such as cache misses (`cache-misses`), remote memory access (`mem_load_retired.l3_miss` wait). Discover potential NUMA bottlenecks by analyzing these events.
-
-```shell
-$ perf stat -e cache-misses,L1-dcache-loads,L1-dcache-misses ./your_program
-```
-
-+ **Intel VTune Amplifier**: A microarchitecture performance analysis tool for Intel CPUs that provides very detailed NUMA-related performance indicators and optimization suggestions.
-
-Factors to consider:
-
-+ **Over-optimization:** Not all programs require NUMA optimization. For programs that are CPU-intensive and have strong data locality, or programs with small amounts of data and random memory access patterns, NUMA optimization may have little benefit or even be counterproductive.
-+ **Dynamic environment:** If your program needs to run on systems with different NUMA topologies, you may need to dynamically detect NUMA nodes and adjust policies.
-
-
-
-**Explicit NUMA-aware memory allocation**
-
-The following is libnuma's common interfaces and related system call tables:
-
-| **Classification** | **Function signature** | **Return value type** | **Key description** |
-| :--- | :--- | :--- | :--- |
-| **Initialization and version** | `void numa_available(void);` | `void` | Check NUMA support, terminate the program if not supported |
-|  | `const char *numa_version(void);` | `const char *` | Returns the library version string (such as`libnuma 2.0.14`） |
-| **Node information query** | `int numa_max_node(void);` | `int` | Returns the maximum node number (starts from 0, returns - 1 if there are no nodes) |
-|  | `int numa_num_configured_nodes(void);` | `int` | Returns the total number of configured nodes |
-|  | `extern struct bitmask *numa_all_nodes_ptr;` | Global variable | Contains a predefined bitmask of all available nodes |
-|  | `extern struct bitmask *numa_nodes_ptr;` | Global variables | Bitmask of nodes accessible to the current process |
-| **Memory Allocation** | `void *numa_alloc_onnode(size_t size, int node);` | `void *` | Allocate memory on the specified node and return on failure`NULL` |
-|  | `void *numa_alloc_local(size_t size);` | `void *` | Allocate memory on the local node and return on failure`NULL` |
-|  | `void *numa_alloc_interleaved(size_t size);` | `void *` | Cross-allocate memory to all nodes, return on failure`NULL` |
-|  | `void numa_free(void *ptr, size_t size);` | `void` | Release`numa_alloc_*`Allocated memory (size needs to be specified) |
-|  | `void *numa_realloc(void *oldptr, size_t oldsize, size_t newsize);` | `void *` |Reallocate memory and maintain node affinity, return on failure`NULL` |
-| **Memory Policy Settings** | `void numa_set_localalloc(void);` | `void` | Set the default policy to "Local node first" |
-|  | `void numa_set_interleave_mask(const struct bitmask *mask);` | `void` | Press`mask`Node set set cross assignment mode |
-|  | `void numa_set_bind_mask(const struct bitmask *mask);` | `void` | Limit memory allocation to`mask`Specify node |
-|  | `void numa_set_preferred(int node);` | `void` | Set the preferred node for memory allocation |
-| **Process Affinity** | `int numa_run_on_node(int node);` | `int` | Bind the current process to the node`node`CPU, returns 0 on success, -1 on failure |
-|  | `int numa_run_on_node_mask(const struct bitmask *mask);` | `int` | Bind the current process to`mask`CPU of the node set, returns 0 on success, -1 on failure |
-|  | `int numa_sched_setaffinity(pid_t pid, const struct bitmask *mask);` | `int` | Setup process`pid`The CPU affinity of`mask`Node, returns 0 on success, -1 on failure |
-| **Node attribute query** | `long long numa_node_size64(int node, int *free);` | `long long` | Returns the total memory of the node (bytes),`free`Output free memory (KB), return - 1 on failure |
-|  | `int numa_node_of_cpu(int cpu);` | `int` | Return to CPU`cpu`The node it belongs to, returns - 1 on failure |
-| **Bit mask operation** | `struct bitmask *numa_bitmask_alloc(unsigned int nbits);` | `struct bitmask *` | Allocate accommodation`nbits`Bit mask of bits, returned on failure`NULL` |
-|  | `void numa_bitmask_free(struct bitmask *b);` | `void` | release bitmask`b`（`b`for`NULL`no operation) |
-|  | `void numa_bitmask_setall(struct bitmask *b);` | `void` | Settings`b`All bits of (including all nodes) |
-|  | `void numa_bitmask_clearall(struct bitmask *b);` | `void` | Clear`b`All bits of (excluding any nodes) |
-|  | `void numa_bitmask_setbit(struct bitmask *b, unsigned int i);` | `void` | Settings`b`of the`i`bit (contains node`i`） |
-|  | `void numa_bitmask_clearbit(struct bitmask *b, unsigned int i);` | `void` | Clear`b`of the`i`bits (excluding nodes`i`） |
-|  | `int numa_bitmask_is_set(const struct bitmask *b, unsigned int i);` | `int` | Check`b`of the`i`If the bit is set, 1 is returned, otherwise 0 is returned |
-|  | `struct bitmask *numa_allocate_nodemask(void);` | `struct bitmask *` | Allocates a node bitmask of default size (equivalent to`numa_bitmask_alloc(numa_max_node()+1)`） |
-|  | `void numa_free_nodemask(struct bitmask *b);` | `void` | Release`numa_allocate_nodemask`assigned bitmask |
-| **Large pages + NUMA related system calls** | `void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset);` | `void *` | allocate memory (`MAP_HUGETLB`flag for large pages), returns on failure`MAP_FAILED` |
-|  | `int mbind(void *start, size_t length, int policy, const unsigned long *nmask, unsigned int maxnode, unsigned int flags);` | `int` | Set the NUMA policy for the memory block (such as`MPOL_BIND`), returns 0 on success, -1 on failure |
-
-
-**Example: Allocate memory on a specific node**
-
-```cpp
-#define _GNU_SOURCE // Enable GNU extensions, including sched_setaffinity
-#include <pthread.h>
-#include <sched.h>
-#include <iostream>
-#include <thread>
-#include <vector>
-#include <numa.h> // Need to link libnuma
-
-void worker_function(int thread_id, int target_cpu) {
-    cpu_set_t cpuset;
-    CPU_ZERO(&cpuset);
-    CPU_SET(target_cpu, &cpuset);
-
-    if (pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset) != 0) {
-        std::cerr << "Error setting CPU affinity for thread " << thread_id << " to CPU " << target_cpu << std::endl;
-    } else {
-        std::cout << "Thread " << thread_id << " bound to CPU " << target_cpu << std::endl;
-    }
-
-    // Simulate some work, such as accessing data previously allocated on a specific NUMA node
-    long long sum = 0;
-    for (int i = 0; i < 100000000; ++i) {
-        sum += i;
-    }
-    std::cout << "Thread " << thread_id << " finished work, sum: " << sum << std::endl;
-}
-
-int main() {
-    if (numa_available() == -1) {
-        std::cerr << "NUMA support not available." << std::endl;
-        return 1;
-    }
-
-    int num_nodes = numa_num_configured_nodes();
-    if (num_nodes < 1) {
-        std::cerr << "No NUMA nodes detected." << std::endl;
-        return 1;
-    }
-
-    std::vector<std::thread> threads;
-    int current_cpu = 0;
-
-    for (int i = 0; i < num_nodes; ++i) {
-        // Get all CPUs on the current NUMA node
-        struct bitmask *cpus_on_node = numa_node_to_cpus(i);
-        if (cpus_on_node == nullptr) {
-            std::cerr << "Failed to get CPUs for node " << i << std::endl;
-            continue;
-        }
-
-        // Traverse all CPUs on the node and create a thread for each CPU
-        for (int cpu = 0; cpu <= cpus_on_node->size; ++cpu) {
-            if (numa_bitmask_isbitset(cpus_on_node, cpu)) {
-                threads.emplace_back(worker_function, current_cpu, cpu);
-                current_cpu++;
-            }
-        }
-        numa_free_cpumask(cpus_on_node);
-    }
-
-    for (auto& t : threads) {
-        t.join();
-    }
-
-    std::cout << "All threads finished." << std::endl;
-    return 0;
-}
-```
-
-**Compile:**`g++ -std=c++11 test.cpp -o test -lnuma -pthread`
-
-**run:**`./test`
-
-
-
-**NUMA data sharding**
-
-**<font style="color:rgb(25, 27, 31);">The core idea of ​​data sharding is to allocate different types of data structures to the most appropriate physical memory area based on the access frequency, importance and policy logic of the data.</font>**
-
-```shell
-# View NUMA node distribution
-numactl --hardware
-
-# Allocate 1024 2MB huge pages to Node0
-echo 1024 > /sys/devices/system/node/node0/hugepages/hugepages-2048kB/nr_hugepages
-
-# Allocate 512 1GB huge pages to Node1 (if supported)
-echo 512 > /sys/devices/system/node/node1/hugepages/hugepages-1048576kB/nr_hugepages
-```
-
-```cpp
-#include <numa.h>
-#include <numaif.h>
-#include <sys/mman.h>
-
-void* alloc_hugepage_on_node(int node, size_t size) {
-    struct bitmask *nm = numa_allocate_nodemask();
-    if (!nm) return NULL;
-    numa_bitmask_setbit(nm, node);
-
-    void* ptr = mmap(NULL, size, PROT_READ|PROT_WRITE,
-                    MAP_PRIVATE|MAP_ANONYMOUS|MAP_HUGETLB, -1, 0);
-    if (ptr == MAP_FAILED) {
-        perror("mmap hugepage failed");
-        numa_free_nodemask(nm);
-        return NULL;
-    }
-
-    if (mbind(ptr, size, MPOL_BIND, nm->maskp, nm->size + 1, 0) == -1) {
-        perror("mbind failed");
-        munmap(ptr, size); // If binding fails, the allocated large page needs to be released
-        numa_free_nodemask(nm);
-        return NULL;
-    }
-
-    numa_free_nodemask(nm);
-    return ptr;
-}
-
-int main() {
-    const size_t memSize = 2 * 1024 * 1024; // 2MB
-    void* lockMem = alloc_hugepage_on_node(0, memSize);
-
-    //Lock memory
-    if (-1 == mlock(lockMem, memSize)) {
-        munmap(lockMem, memSize);
-    }
-
-    // Manually trigger page fault interrupt
-    memset(lockMem, 0, memSize);
-
-    //Keep resident (memory will not be swapped out when the program is running)
-    while(true) {
-        //There should be exit logic in actual applications
-        sleep(1);
-    }
-
-    // Automatically unlock when the program exits
-    munlock(lockedMem, memSize);
-    munmap(lockedMem);
-    return 0;
-}
-```
-
-
-
-### 2. Real-time thread priority
-Real-time thread priority determines the execution order of threads in the system, ensuring that high-priority threads can immediately preempt the execution of low-priority threads when they are ready, thereby ensuring deterministic delay on the critical path.
-
-+ **Setting method**: In Linux systems, you can use the pthread_setschedparam function to set the thread's scheduling policy and priority.
-
-<font style="color:rgb(0, 0, 0);">Three scheduling strategies of the Linux kernel:</font>
-
-+ <font style="color:rgb(0, 0, 0);">SCHED_OTHER: time-sharing scheduling strategy, system default</font>
-+ <font style="color:rgb(0, 0, 0);">SCHED_FIFO: real-time scheduling strategy, first come first served</font>
-+ <font style="color:rgb(0, 0, 0);">SCHED_RR: real-time scheduling strategy, time slice rotation</font>
-
-```c
-#include <sched.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <pthread.h>
-
-void* thread_function(void* arg) {
-    //Code executed by thread
-    return NULL;
-}
-
-int main() {
-    pthread_t thread;
-    struct sched_param param;
-    int policy;
-
-    //Create thread
-    if (pthread_create(&thread, NULL, thread_function, NULL) != 0) {
-        perror("pthread_create");
-        return EXIT_FAILURE;
-    }
-
-    // Get the scheduling strategy and parameters of the current thread
-    if (pthread_getschedparam(pthread_self(), &policy, &param) != 0) {
-        perror("pthread_getschedparam");
-        return EXIT_FAILURE;
-    }
-
-    //Set the scheduling policy to SCHED_FIFO
-    policy = SCHED_FIFO;
-    //Set the thread priority, the value range is 0 to sched_get_priority_max(policy)
-    param.sched_priority = sched_get_priority_max(policy);
-
-    //Set the thread's scheduling policy and priority
-    if (pthread_setschedparam(thread, policy, &param) != 0) {
-        perror("pthread_setschedparam");
-        return EXIT_FAILURE;
-    }
-
-    // Wait for the thread to end
-    if (pthread_join(thread, NULL) != 0) {
-        perror("pthread_join");
-        return EXIT_FAILURE;
-    }
-
-    return EXIT_SUCCESS;
-}
-
-
-// sched_setscheduler(pid_t pid, int policy, const struct sched_param *param)
-// This is the function corresponding to adjusting the process priority
-```
-
-**Priority inversion and solutions**
-
-In a real-time system, when a **high-priority thread** is blocked waiting for a resource (such as a mutex) held by a **low-priority thread**, if a **medium-priority thread** seizes the CPU, it will result in:
-
-+ Low-priority threads cannot release resources in time
-+ High-priority threads are "indirectly" delayed (should be the highest priority but are executed last)  
-`L（持锁）→ H（等待锁）→ M（抢占L）→ H持续阻塞`
-
-Priority inheritance (PTHREAD_PRIO_INHERIT)
-
-1. When the high-priority thread H waits for the lock, the priority of the low-priority thread L holding the lock is temporarily raised to the priority of H**
-2. The improved L can immediately seize the medium-priority thread M, quickly execute and release the lock.
-3. After L releases the lock, its priority automatically returns to its original value.
-4. If there are multiple levels of waiting (such as L waiting for another lock), the system will recursively increase the priorities of all related threads.
-
-2. Priority ceiling (PTHREAD_PRIO_PROTECT)
-
-The ceiling priority is preset when the lock is created, which is suitable for scenarios with known resource dependencies.  
-
-
-**Command**: Use `chrt` (change real-time attributes) command, adjusts priority only for processes
-
-```shell
-# Change the PID to <pid> The process is set to SCHED_FIFO real-time scheduling policy, with the highest priority of 99
-sudo greyhound -f -p 99 <pid>
-
-The basic syntax of the chrt command is:
-chrt [options] <priority> <command> [command parameters...]
-chrt [options] -p <priority> <PID>
-<priority>: This is an integer indicating the scheduling priority. Its scope and meaning depend on the scheduling policy used.
-<command>: The command you want to run and set its scheduling policy and its parameters.
-<PID>: The process ID of the existing process for which you want to modify the scheduling policy.
-
-chrt supports a variety of real-time scheduling strategies, the most commonly used of which are:
-
---fifo (SCHED_FIFO): First-in, first-out. Processes with the same priority are executed in the order in which they are ready. Once a FIFO process starts running, it will continue to run until it actively relinquishes the CPU, is blocked (such as waiting for I/O), or is preempted by a process with a higher priority.
-
---rr (SCHED_RR): Round-Robin. Similar to SCHED_FIFO, but with a time slice. When an RR process's time slice runs out, it is moved to the end of the ready queue to give other processes of the same priority a chance to run.
-
---other (SCHED_OTHER): Ordinary scheduling strategy. This is the system's default scheduling policy, using CFS (Completely Fair Scheduler).
-
---batch (SCHED_BATCH): Batch scheduling strategy. Suitable for batch processing tasks that do not require interaction.
-
---idle (SCHED_IDLE): idle scheduling strategy. It only runs when the system is idle and has the lowest priority.
-
-Common options:
-
--p: Operate on the specified PID (process ID) instead of starting a new command.
-
--o: Set OTHER scheduling policy (SCHED_OTHER).
-
--f: Set FIFO scheduling policy (SCHED_FIFO).
-
--r: Set RR scheduling policy (SCHED_RR).
-
--b: Set BATCH scheduling policy (SCHED_BATCH).
-
--i: Set IDLE scheduling policy (SCHED_IDLE).
-
--g: Set GROUP scheduling policy (SCHED_GROUP, not commonly used).
-
--h: Set HIGH scheduling policy (SCHED_HIGH, not commonly used).
-
--a: Set AFR scheduling policy (SCHED_AFR, not commonly used).
-
--e: Set EDF scheduling policy (SCHED_EDF, not commonly used).
-
--d: Set DEADLINE scheduling policy (SCHED_DEADLINE, not commonly used).
-
--v: Display the scheduling policy and priority of the current process (or specified PID).
-
---help: Display help information.
-
---version: Display version information.
-```
-
-
-
-### 3. Interrupt binding and common interrupt core isolation
-**Interrupt binding** refers to allocating interrupt requests (IRQs) to specific CPU cores for processing to avoid interrupt processing from interfering with the critical path. By properly bundling interrupts, you can reduce the CPU load on the critical path and ensure deterministic latency.
-
-**Identify Bottlenecks**: Before tuning, use `top`, `htop`, `mpstat -P ALL 1` Wait for tools and observe `si` (softirq) or `%irq` Is it too high on a certain CPU core, confirm that interrupt handling is the bottleneck.  
-
-+ **Find the IRQ number of the device**`cat /proc/interrupts`
-+ Pass the device name in the last column (e.g. `eth0-rx-0`) to find the corresponding IRQ number.
-+ **Core file for executing binding**: `/proc/irq/<IRQ号>/smp_affinity_list` (recommended) or `smp_affinity` (bitmask).
-+ `**smp_affinity_list**`** (CPU list)**: Write the CPU core number directly.
-
-```shell
-# Example: Bind IRQ 128 to CPU Core 2
-sudo sh -c 'echo 2 > /proc/irq/128/smp_affinity_list'
-```
-
-**Verification effect**
-
-+ Repeatedly under load `cat /proc/interrupts`, and observe whether the interrupt count increases only on the bound CPU.
-+ use `mpstat -P ALL 1` Observe the performance of each CPU `%irq` Usage rate.
-
-**Follow NUMA principles**: Always bind device interrupts to the CPU on the same NUMA node as the physical location of the device (PCIe slot).
-
-**Distribute load**: For multi-queue devices (such as network cards), distribute the IRQ of each queue evenly to different CPU cores.
-
-**irqbalance**: Automatically manage interrupted load balancing, and adjust its behavior through the configuration file /etc/irqbalance.conf. This will override the fine manual control behavior above.
-
-**Usage scenario**: For the CPU core where the critical path is located, bind irrelevant interrupt requests to other cores to reduce the interrupt processing burden of the core.
-
-
-
-exist<font style="color:rgba(0, 0, 0, 0.85) !important;">After the CPU is bound, kernel threads (such as ksoftirqd, kworker) may still preempt the user-mode threads bound to the core, and clock interrupts and RCU callbacks will also cause overhead; and</font>`<font style="color:rgba(0, 0, 0, 0.85) !important;">isolcpus</font>`<font style="color:rgba(0, 0, 0, 0.85) !important;">、</font>`<font style="color:rgba(0, 0, 0, 0.85) !important;">nohz_full</font>`<font style="color:rgba(0, 0, 0, 0.85) !important;">、</font>`<font style="color:rgba(0, 0, 0, 0.85) !important;">rcu_nocbs</font>`<font style="color:rgba(0, 0, 0, 0.85) !important;">The combination of three parameters can solve this problem:</font>
-
-1. `<font style="color:rgb(0, 0, 0);">isolcpus</font>`<font style="color:rgba(0, 0, 0, 0.85) !important;">: Isolate the specified CPU from the kernel general scheduler, preventing most kernel threads and ordinary processes from running;</font>
-2. `<font style="color:rgb(0, 0, 0);">nohz_full</font>`<font style="color:rgba(0, 0, 0, 0.85) !important;">: Enable adaptive clockless mode on isolated cores to reduce/eliminate clock interruptions;</font>
-3. `<font style="color:rgb(0, 0, 0);">rcu_nocbs</font>`<font style="color:rgba(0, 0, 0, 0.85) !important;">: Offload RCU callbacks to non-isolated cores.  
-</font><font style="color:rgba(0, 0, 0, 0.85) !important;">The result is a near-exclusive, kernel-free “silent” operating environment for critical low-latency tasks.</font>
-
-```shell
-# Modify GRUB configuration
-grub_cmdline="isolcpus=8-15 nohz_full=8-15 rcu_nocbs=8-15"
-
-# Effective configuration
-grub2-mkconfig -o /boot/grub2/grub.cfg
-```
-
-
-
-### 4. Summary of system silent configuration steps  
-
-| Configuration phase | Specific operations | Purpose | Precautions |
-| --- | --- | --- | --- |
-| **1. Startup parameter configuration** | 1. Add in the boot entry `isolcpus=managed_irq,7`   2. Add `nohz_full=7`   3. Add `rcu_nocbs=7`   4. Add `nowatchdog nmi_watchdog=0`   5. Add `hpet=disable`   6. Add `tsc=reliable`   7. Add `mce=off`   8. Add `ipv6.disable=1`   9. Add `audit=0`   10. Add `printk.devkmsg=off quiet loglevel=1`   11. Add`selinux=0` | 1. Isolate core 7 from the universal scheduler,`managed_irq`   Mode allows interrupts to run on this CPU but prevents user/kernel thread preemption 2. Enable adaptive tickless mode to stop periodic clock interrupts when idle, significantly reducing jitter 3. Offload RCU callbacks to non-isolated CPUs to avoid RCU softirq interference with critical threads 4. Disable NMI watchdog to prevent it from generating unnecessary timer interrupts 5. Disable HPET multicast interrupt sources to reduce global interrupt load 6. Declare TSC as a reliable time source to avoid jitter caused by frequent kernel calibration. 7. Turn off machine check exceptions (MCE) to avoid non-maskable interrupts (NMI) interrupting execution. 8. Reduce background tasks and interrupt processing related to the IPv6 protocol stack. 9. Disable the audit subsystem to eliminate the uncertainty overhead caused by auditd and audit backlog processing. 10. Suppress kernel log output and reduce interruptions and competition caused by console and syslog writing. 11. Disable SE Linux extension | 1. `isolcpus`   Must cooperate `nohz_full`   To achieve a true "silent" effect; it is recommended to use `isolcpus=managed_irq,<cpu_list>`rather than the old format 2. `nohz_full`   The target CPU is required not to run any tasks other than process 0, otherwise it will degrade back to the ticking mode. Make sure that the kernel is configured`CONFIG_NO_HZ_FULL=y`, can be passed `cat /boot/config-* |
-| **2. Interrupt and task isolation** | 1. Execute the command:`systemctl stop irqbalance && systemctl disable irqbalance`   2. Manually bind all non-critical device interrupts (such as network cards, disks) to non-target CPUs (such as CPU 0-6):   `echo <cpu_id> > /proc/irq/<irq_num>/smp_affinity_list`   3. Edit `/sys/devices/virtual/workqueue/cpumask`, set to `0x7F`(i.e. CPU 0-6) 4. (Optional) Change `ksoftirqd/7`   Process manual migration:   `taskset -pc 0 $(pgrep ksoftirqd/7)` | 1. Prevent `irqbalance`Automatically migrate interrupts to the isolated core 2. Actively control IRQ affinity to ensure that hardware interrupts do not fall into core 7 3. Restrict all general workqueues (workqueues) to run only on non-isolated CPUs to prevent kernel worker preemption 4. Force the softirq daemon to be moved out of core 7 to further reduce the risk of potential interference | 1. Disable `irqbalance` Must be inspected regularly after `/proc/interrupts`, to prevent new devices from being interrupted and mistakenly bound 2. Use `smp_affinity_list`The interface is more intuitive and less error-prone than bit masking 3. Modification `workqueue/cpumask` Root permissions are required, and please note that the system may be reset after updating 4. `ksoftirqd`Migration is a temporary means, if not combined `nohz_full`Limited effect |
-| **3. Power management optimization** | 1. Disable in BIOS: - Turbo Boost - C-States (C1E, C-State Control) - P-States / SpeedStep - SMT/Hyper-Threading (optional) **2. Add kernel startup parameters: **   `intel_pstate=disable`   `processor.max_cstate=1`   `intel_idle.max_cstate=1`   `idle=poll`   3. Set the frequency policy at runtime:   `sudo cpupower frequency-set -g performance`   4. Lock frequency (optional):   `sudo cpupower frequency-set -f <target_freq>MHz`   5. Load `msr`   module and use the WRMSR tool to fix the UNCORE frequency:   `modprobe msr`   `wrmsr -p7 0x620 <min_max_ratio>` | 1. Eliminate frequency fluctuations and wake-up delays caused by dynamic frequency modulation (P-State), automatic overclocking (Turbo) and deep sleep (C-State) 2. Keep the CPU in shallow C1 state or forced polling (idle=poll) to achieve the lowest latency response 3. Ensure that the CPU always runs at the highest stable frequency to avoid performance governor switching delays 4. Fixed frequency to avoid jitter introduced by dvfs transition state 5. Control Uncore (LLC, memory controller) frequency consistency to avoid cross-NUMA bandwidth fluctuations | 1. BIOS settings require physical access to the server or remote KVM operation 2. `idle=poll`Greatly increases power consumption and is only suitable for short-term stress testing or low-latency scenarios 3. `cpupower`The tool chain needs to be installed in advance (such as `linux-tools-common`) 4. MSR operation needs to be done with caution, wrong values ​​may lead to system instability or frequency reduction |
-| **IV. Other key optimizations** | 1. Disable VT-x virtualization support (BIOS); avoid cross-core reading and writing of MSR registers; reduce RDTSC sampling frequency 2. Use `chrt`   Set real-time priority:   `chrt -f 99 ./realtime_app`   3.`echo -1 > /proc/sys/kernel/sched_rt_runtime_us`Set the CPU usage time limit of real-time tasks to unlimited 4. NUMA binding: Use `numactl`Bind processes, memory, and I/O devices to the same node:   `numactl --cpunodebind=0 --membind=0 --physcpubind=7 ./app`   At the same time, set the I/O interrupt affinity to another NUMA node CPU 5. Detect SMI (System Management Interrupt) overhead: Intel: `perf stat --smi-cost sleep 10`   AMD: `perf stat -e ls_smi_rx -I 10000 sleep 1`   When high-frequency SMI exists, adjust the SMM-related options in the BIOS 6. Disable Transparent Huge Page THP: Method 1:`transparent_hugepage=never`(boot parameter) Method 2:`echo never > /sys/kernel/mm/transparent_hugepage/enabled`   7. Insert serialization instructions before and after the timing code:   `asm volatile("cpuid" ::: "eax", "ebx", "ecx", "edx");`   Execute again `rdtsc` or use`rdtscp` | 1. Reduce the minor delay jitter caused by IPI, VMX related traps and MSR access 2. Improve the process scheduling priority so that it can immediately preempt ordinary tasks 3. Allow real-time tasks (RT tasks) to use CPU resources without restrictions 4. Realize computing, memory, I/O locality to avoid cross-NUMA delays and bandwidth bottlenecks 5. SMI is the highest priority interrupt and cannot be blocked, and must be avoided through BIOS tuning 6. THP background merge thread (khugepaged) will produce unpredictable latency spikes 7. CPUID acts as a memory barrier to prevent RDTSC from being executed out of order and ensure timestamp accuracy. RDTSCP will ensure that the previous instructions will not be executed out of order to the rear of RDTSCP | 1. Disabling VT-x will affect virtualization functions such as containers and KVM 2. `chrt -f 99`If misuse will cause the system to become unresponsive, it should only be used for a single key process. 3. If an infinite loop occurs in the RT task, the system may become completely unresponsive. 4. NUMA binding needs to be combined. `numactl --show`Verify actual binding results 5. SMI tuning depends on the specific motherboard/BMC firmware. Common options include:`USB SMI`、`Legacy USB Support`、`PCI Lock`etc. 6. Disabling THP may affect the performance of database applications, and the scenarios need to be weighed. 7. CPUID brings about 50~100 cycle overhead, which is suitable for high-precision measurement rather than high-frequency sampling |
-
-
-Linux platform silent tools
-
-```cpp
-#pragma once
-
-#include <sys/types.h>
-#include <unistd.h>
-#include <pthread.h>
-#include <sched.h>
-#include <thread>
-#include <fstream>
-#include <sstream>
-#include <string>
-#include <string_view>
-#include <vector>
-#include <cstdint>
-#include <cerrno>
-#include <cctype>
-#include <algorithm>
-#include <climits>
-
-/// Process priority level
-enum class PriorityLevel {
-    LowPriority = -1, ///< low priority
-    NormalPriority = 0, ///< Normal priority
-    HighPriority, ///< high priority
-    RealtimePriority ///< real-time priority
-};
-
-/**
- * @brief Linux platform process and thread helper classes
- */
-class process_helper {
-public:
-    static inline uint32_t get_pid() noexcept {
-        return static_cast<uint32_t>(::getpid());
-    }
-
-    static inline bool set_priority(PriorityLevel prio) noexcept {
-        const int max_prio = ::sched_get_priority_max(SCHED_FIFO);
-        if (max_prio == -1) return false;
-
-        int value;
-        switch (prio) {
-            case PriorityLevel::RealtimePriority: value = max_prio; break;
-            case PriorityLevel::HighPriority:     value = max_prio / 2; break;
-            case PriorityLevel::NormalPriority:   value = std::max(1, max_prio / 3); break;
-            case PriorityLevel::LowPriority:      value = 1; break;
-            default: return false;
-        }
-
-        ::sched_param param{value};
-        return ::sched_setscheduler(0, SCHED_FIFO, &param) == 0;
-    }
-
-    static inline bool thread_bind_core(uint32_t cpu) noexcept {
-        const auto hw_concur = std::thread::hardware_concurrency();
-        const uint32_t ncpus = hw_concur == 0 ? 1 : static_cast<uint32_t>(hw_concur);
-        if (cpu >= ncpus) return false;
-
-        cpu_set_t mask;
-        CPU_ZERO(&mask);
-        CPU_SET(cpu, &mask);
-        return ::pthread_setaffinity_np(::pthread_self(), sizeof(mask), &mask) == 0;
-    }
-
-    static inline bool set_thread_priority(PriorityLevel prio) noexcept {
-        const int max_prio = ::sched_get_priority_max(SCHED_FIFO);
-        if (max_prio == -1) return false;
-
-        int value;
-        switch (prio) {
-            case PriorityLevel::RealtimePriority: value = max_prio; break;
-            case PriorityLevel::HighPriority:     value = max_prio / 2; break;
-            case PriorityLevel::NormalPriority:   value = std::max(1, max_prio / 3); break;
-            case PriorityLevel::LowPriority:      value = 1; break;
-            default: return false;
-        }
-
-        ::sched_param param{value};
-        return ::pthread_setschedparam(::pthread_self(), SCHED_FIFO, &param) == 0;
-    }
-
-    /**
-     * @brief Get all IRQ numbers corresponding to the device (supports multi-queue network cards)
-     * @return vector<int>, may be empty
-     */
-    static std::vector<int> get_irqs_by_device(std::string_view device) {
-        std::vector<int> irqs;
-        std::ifstream file("/proc/interrupts");
-        if (!file) return irqs;
-
-        std::string line;
-        while (std::getline(file, line)) {
-            if (line.empty() || line[0] == ' ') continue; // Skip header or invalid line
-
-            // Find the IRQ number before the first colon
-            size_t colon = line.find(':');
-            if (colon == std::string::npos) continue;
-
-            std::string_view irq_part(line.data(), colon);
-            // Skip leading spaces
-            size_t start = 0;
-            while (start < irq_part.size() && std::isspace(irq_part[start])) ++start;
-            if (start >= irq_part.size()) continue;
-
-            char* end_ptr = nullptr;
-            errno = 0; 
-            long irq = std::strtol(std::string(irq_part.substr(start)).c_str(), &end_ptr, 10);
-            
-            if (errno != 0 || end_ptr == std::string(irq_part.substr(start)).c_str() || irq < INT_MIN || irq > INT_MAX) {
-                continue;
-            }
-
-            // Check if the end of the line contains a device name (exact match or [device] form)
-            std::string_view tail(line.data() + colon + 1, line.size() - colon - 1);
-            if (contains_device(tail, device)) {
-                irqs.push_back(static_cast<int>(irq));
-            }
-        }
-        return irqs;
-    }
-
-    /**
-     * @brief binds all IRQs of the device to the specified CPU (applicable to multi-queue devices)
-     */
-    static bool bind_device_irqs_to_cpu(std::string_view device, uint32_t cpu) {
-        auto irqs = get_irqs_by_device(device);
-        if (irqs.empty()) return false;
-
-        bool success = true;
-        for (int irq : irqs) {
-            if (!bind_irq_to_cpu(irq, cpu)) success = false;
-        }
-        return success;
-    }
-
-private:
-    static bool contains_device(std::string_view line, std::string_view target) {
-        // Remove leading spaces
-        size_t pos = 0;
-        while (pos < line.size() && std::isspace(line[pos])) ++pos;
-        if (pos >= line.size()) return false;
-
-        std::string_view tokens = line.substr(pos);
-        // Split by spaces (simple state machine, avoid constructing vector<string>）
-        size_t start = 0;
-        while (start < tokens.size()) {
-            // skip spaces
-            while (start < tokens.size() && std::isspace(tokens[start])) ++start;
-            if (start >= tokens.size()) break;
-
-            size_t end = start;
-            while (end < tokens.size() && !std::isspace(tokens[end])) ++end;
-            std::string_view token = tokens.substr(start, end - start);
-
-            // Remove trailing '+' (such as eth0+)
-            if (!token.empty() && token.back() == '+') {
-                token = token.substr(0, token.size() - 1);
-            }
-
-            // Check [target] form
-            if (token.size() >= target.size() + 2 &&
-                token[0] == '[' && token[token.size()-1] == ']') {
-                std::string_view inner = token.substr(1, token.size() - 2);
-                if (inner == target) return true;
-            } else if (token == target) {
-                return true;
-            }
-
-            start = end;
-        }
-        return false;
-    }
-
-    static bool bind_irq_to_cpu(int irq, uint32_t cpu) {
-        const auto hw_concur = std::thread::hardware_concurrency();
-        const uint32_t ncpus = hw_concur == 0 ? 1 : static_cast<uint32_t>(hw_concur);
-        if (cpu >= ncpus) return false;
-
-        // Construct hexadecimal mask (no prefix, lowercase)
-        char mask_str[18]; // 64-bit maximum 16 characters + '\0'
-        int len = snprintf(mask_str, sizeof(mask_str), "%llx", 1ULL << cpu);
-        if (len <= 0 || static_cast<size_t>(len) >= sizeof(mask_str)) return false;
-
-        std::string path = "/proc/irq/" + std::to_string(irq) + "/smp_affinity";
-        std::ofstream file(path, std::ios::out | std::ios::trunc);
-        if (!file) return false;
-
-        file.write(mask_str, len);
-        file.put('\n');
-        return file.good();
-    }
-};
-```
-
-
-
-### 5. Memory model, cache and pipeline
-Memory model reference:
-
-[https://research.swtch.com/hwmm](https://research.swtch.com/hwmm)
-
-[https://research.swtch.com/plmm](https://research.swtch.com/plmm)
-
-Advanced Parallel Programming Reference:
-
-[https://mirrors.edge.kernel.org/pub/linux/kernel/people/paulmck/perfbook/perfbook.html](https://mirrors.edge.kernel.org/pub/linux/kernel/people/paulmck/perfbook/perfbook.html)
-
-
-
-**Solution to memory disorder and memory model**
-
-**The root cause of memory disorder**
-
-**1. Store Buffer: Hide write latency**
-
-**Principle**: CPU execution`store`instruction, if the target cache line is not in the local cache, it needs to wait for the memory to be loaded; to avoid CPU stall, the CPU will`store`The data is first stored in the "store buffer" and then written asynchronously to the cache/memory——`store`Instructions can be completed quickly, but the order in which the data is written to memory may be later than in the code.`store`order".    
-
-```c
-// Thread A // Thread B
-a = 1;                 while (b == 0); 
-b = 1; assert(a == 1); // Possible failure?
-```
-
-**Conclusion**: The store buffer causes "the submission order of write operations ≠ the code order", that is, "write reordering (Store Reordering)".
-
-**2. Invalidate Queue: Hide cache consistency delay**
-
-**Principle**: When a CPU modifies a shared variable, it must first send an "Invalidate" request to other CPUs through the "cache consistency protocol (such as MESI)"; in order to avoid waiting for all CPUs to confirm the invalidity, the CPU stores the "invalid request" in the "invalidation queue" and processes it asynchronously - other CPUs may delay receiving the invalid request, causing "read operations to see outdated data."   
-
-```c
-// Thread A (CPU 0) // Thread B (CPU 1)
-a = 1;                 while (a == 0); 
-                       b = 1; 
-// Thread C (CPU 0)
-while (b == 0); 
-assert(a == 1); // Possible failure?
-```
-
-**Conclusion**: Invalid queue leads to "the order of invalid notifications seen by the read operation ≠ the order of request sending", that is, "Load Reordering".
-
-**3. Out-of-Order Execution: Maximize CPU resource utilization**
-
-**Principle**: In order to make full use of the pipeline and functional units (such as ALU, FPU), modern CPUs will disrupt the order of instruction execution - as long as the "logical dependencies are satisfied" (such as`c = a + b`Need to wait`a`and`b`calculation is completed), irrelevant instructions can be executed out of order.  
-
-**Impact on memory access**: Memory access instructions (`load`/`store`) may be executed out of order when they have no dependencies on calculation instructions - for example`a = 1; b = c + d;`middle,`b = c + d`may be executed first (if`c`and`d`already in the register), but`a=1`The store is still in the store buffer, causing other threads to see it first`b`the new value, see after`a`new value.
-
-**4. Speculative Execution: Execute uncertain branches in advance**
-
-**Principle**: The CPU encounters a branch (such as`if (x > 0)`), the branch direction will be speculated and subsequent instructions will be executed in advance; if the guess is wrong, the results of the speculative execution (including memory access) will be discarded.  
-
-**Implicit impact on memory ordering**: Speculatively executed memory accesses may "temporarily modify the cache state". Although they will eventually be rolled back, they may be sensed by other CPUs through "side channels" (such as the Specter vulnerability exploiting this feature); "memory order constraints" ensure that "speculatively executed memory accesses do not affect program correctness".
-
-
-
-**Memory Model**
-
-Define the memory model, clarify "which memory access sequences must be guaranteed by the hardware, and which ones the software can rely on", and solve "the problem of software correctness caused by hardware disorder".
-
-"Hardware memory model" and "language memory model" together form the basis of memory access rules for parallel programs.
-
-**1. Hardware memory model**
-
-**(1)x86/x86-64: Strong Memory Model (Total Store Order, TSO)**
-
-**rule**:  
-
-1. It is forbidden to "write → read" reordering (StoreLoad Reordering): that is, "the store executed first will not be overridden by the load executed later" - for example`a=1; b=load(c);`middle,`b=load(c)`not before`a=1`The store is submitted to memory;  
-2. It is forbidden to "write → write" reordering (StoreStore Reordering): that is, "the store that is executed first, other threads must see it first" - for example`a=1; b=1;`, other threads will not see it first`b=1`See you again`a=1`；  
-3. "Read → Write" reordering (LoadStore Reordering) is prohibited: that is, "the load executed first will not be overridden by the store executed later" - for example`a=load(c); b=1;`middle,`b=1`not before`a=load(c)`submit;  
-4. **Allow "Read→Read" reordering (LoadLoad Reordering)**: that is, "execute the load first, and see the results later" - for example`a=load(c); b=load(d);`medium, if`c`cache line miss while`d`cache line hit,`b`Maybe get the value first,`a`Then get the value.
-
-**Exception**: x86`non-temporal store`(like`_mm_stream_store_si128`) and "unaligned memory access" may break TSO rules and require additional memory barriers.  
-
-**Significance**: The strong memory model of x86 reduces software complexity. In most cases, there is no need to manually deal with the "write → read/write → write/read → write" out-of-order. However, attention should be paid to the exceptions of "read → read" out-of-order and special instructions.
-
-**(2) ARM/PowerPC: Weak memory model (Partial Store Order, PSO / Weak Order) **
-
-**Rules**: Four types of out-of-order "write → read", "write → write", "read → write" and "read → read" are allowed (only "out-of-order access to the same address" is prohibited);  
-
-**Significance**: The weak memory model has higher hardware performance (more freedom to optimize memory access), but the software needs to constrain out-of-order through "explicit memory barriers" or "atomic operations with memory order", otherwise correctness problems will easily occur.
-
-
-
-**2. Language memory model: unified abstraction for C11/C++11**
-
-Different hardware memory models vary greatly. C11/C++11 provides a unified abstraction through the "language memory model", shields the hardware details, and allows the software to select "memory order strength" as needed.
-
-| Memory order enumeration | Core constraints | Applicable scenarios |
-| --- | --- | --- |
-| `memory_order_relaxed` | Only guarantees "atomicity of access to the same atomic variable", without constraining any out-of-order (all four types of out-of-order are allowed) | Undependent statistical counting (such as network packet counting), only atomicity is required, no order guarantee is required |
-| `memory_order_consume` | Only constrains the order of "the current load operation and subsequent operations that depend on the load result" (data dependency) | Pointer loading (such as`p = atomic_load(&ptr, consume); *p = 1;`), only need to ensure that the pointer dereference is after loading |
-| `memory_order_acquire` | Constraint "all memory accesses after the current load operation" are not reordered before load (read barrier semantics) | Lock acquisition (such as`pthread_mutex_lock`), ensuring that the critical section code sees all write operations before load |
-| `memory_order_release` | Constraint "all memory accesses before the current store operation" are not reordered after the store (write barrier semantics) | Lock release (such as`pthread_mutex_unlock`), ensuring that all write operations before the store are seen by other threads |
-| `memory_order_acq_rel` | Possess both`acquire`(read barrier) with`release`(write barrier) semantics, applicable to RMW operations | atomic read and write modifications (such as`atomic_fetch_add`), it is necessary to ensure the order constraints of reading and writing at the same time |
-| `memory_order_seq_cst` | The strongest constraint: the memory access sequence seen by all threads is consistent (global total order), the default memory order | Scenarios that require global consistency (such as distributed lock status synchronization), the lowest performance but the easiest to ensure correctness |
-
-
-****
-
-**3. Mapping relationship between memory order and hardware barriers**
-
-The "memory order" specified by software needs to be implemented through "hardware memory barriers". The "barrier mapping" of software memory order on different hardware is the "underlying cost of memory order":
-
-| Memory ordering | x86/x86-64 (TSO) | ARM (weak memory model) | Core description |
-| --- | --- | --- | --- |
-| `relaxed` | Barrier-free | Barrier-free | Only relies on hardware atomicity, no additional overhead |
-| `consume` | No barriers (TSO prohibits key reordering) | `dmb ishld`(Data dependency barrier) | Only constrains data dependencies, the overhead is lower than`acquire` |
-| `acquire` | No barrier (TSO prohibits reading → subsequent access out of order) | `dmb ish`(read barrier) | Constrains all access after a read operation, medium overhead |
-| `release` | No barrier (TSO prohibits writing → pre-order access out of order) | `dmb ish`(write barrier) | Constrains all access before writing, medium overhead |
-| `acq_rel` | `mfence`(full barrier) | `dmb ish`(Full barrier) | Constrains reading and writing at the same time, high overhead |
-| `seq_cst` | `mfence` + Atomic operation belt`lock`prefix | `dmb sy`(System-level full barrier) | The strongest constraint, the highest overhead, ensuring global total order |
-
-
-
-
-**4. Memory barrier and compiler barrier**
-
-**(1)Memory Barrier**
-
-**MFENCE**
-
-Serialize all memory operations (read and write)
-
-Ensure that **all** memory operations (loads and stores) before MFENCE complete before **all** memory operations after MFENCE
-
-```plain
-mov [data], eax ; write operation
-mfence; memory barrier
-mov ebx, [flag] ; Read operation, ensure to be executed after data writing is completed
-```
-
-**SFENCE**
-
-Serialize write operations only (store)
-
-Ensure that writes before SFENCE complete before writes after SFENCE
-
-Handles weakly ordered memory types (such as WC memory), non-temporary store instructions (MOVNT), write combination buffers, etc.
-
-```plain
-movntps [buffer], xmm0 ; non-temporary storage
-sfence ; ensure writing is complete
-mov [flag], 1 ; set flag
-```
-
-**LFENCE**
-
-Serialize read operations only (load)
-
-Ensure that the read operation before LFENCE completes before the read operation after LFENCE
-
-Control the execution sequence that depends on the results of read operations to prevent information leakage caused by speculative execution (such as Specter vulnerability mitigation)
-
-```plain
-mov eax, [secret_data] ; Read sensitive data
-lfence ; prevents subsequent instructions from executing based on mispredictions
-mov [result], eax ; use the read result
-```
-
-**(2) Compiler Barrier**
-
-**C11/C++11 Standard**
-
-```c
-#include <stdatomic.h>
-atomic_signal_fence(memory_order_seq_cst); // Compiler barrier
-```
-
-**GCC/Clang**
-
-```c
-__asm__ __volatile__("" ::: "memory"); // Tell the compiler that the memory has been modified to prevent reordering
-```
-
-**MSVC**
-
-```c
-_ReadWriteBarrier(); // Compiler barrier
-```
-
-**<font style="color:rgb(25, 27, 31);">(3) Difference</font>**
-
-**<font style="color:rgb(25, 27, 31);">compiler barrier</font>**<font style="color:rgb(25, 27, 31);">: Compiler barriers do not force synchronization operations at the CPU level, they only prevent the compiler from rearranging code.</font>
-
-**<font style="color:rgb(25, 27, 31);">memory barrier</font>**<font style="color:rgb(25, 27, 31);">: Memory barriers also prevent compiler reordering</font>
-
-****
-
-**4. Select the “weakest enough” memory order**
-
-1. **Prioritize whether the variable is independent**: If the variable has no logical dependence (such as an independent counter), use it directly`relaxed`；  
-2. **Determine whether a "synchronization relationship" is required**: If you need "the write operation of thread A to be seen by thread B" (such as pointer release, lock), use`acquire/release`；  
-3. **Only use strong memory ordering when necessary**: Use it if you need "global consistency" (such as state synchronization of a distributed system)`seq_cst`, and the performance cost needs to be evaluated;  
-4. **Avoid "use seq_cst by default"**: C++ atomic operations default`seq_cst`, but 90% of scenarios do not require this strong constraint. Manually specifying weak memory order can greatly improve performance.
-
-
-
-Cache consistency protocol explanation reference:
-
-[https://weedge.github.io/perf-book-cn/zh/chapters/13-Optimizing-Multithreaded-Applications/13-7_Cache_Coherence_Issues_cn.html](https://weedge.github.io/perf-book-cn/zh/chapters/13-Optimizing-Multithreaded-Applications/13-7_Cache_Coherence_Issues_cn.html)
-
-[https://www.scss.tcd.ie/Jeremy.Jones/VivioJS/caches/MESIHelp.htm](https://www.scss.tcd.ie/Jeremy.Jones/VivioJS/caches/MESIHelp.htm)
-
-
-
-Problems and solutions caused by cache coherence protocols: pseudo sharing, true sharing
-
-In multi-threaded programming, False Sharing means that multiple threads simultaneously access different variables located in the same cache line (Cache Line) but actually have no data dependencies, resulting in frequent cache line invalidations and unnecessary memory synchronization overhead. False sharing problems can be effectively reduced through CPU cache line alignment (Cache Line Alignment). The following are specific methods:
-
-```cpp
-#include <iostream>
-#include <thread>
-#include <atomic>
-#include <array>
-
-// Define cache line size
-constexpr size_t CACHE_LINE_SIZE = 64;
-
-// Use structure padding to achieve cache line alignment
-struct AlignedData {
-    std::atomic<long long> value;
-    char padding[CACHE_LINE_SIZE - sizeof(std::atomic<long long>)];
-};
-
-// Shared data structure, each element is an aligned structure
-std::array<AlignedData, 2> shared_data;
-
-// Thread function, each thread modifies its own data
-void thread_function(int index) {
-    for (int i = 0; i < 10000000; ++i) {
-        shared_data[index].value++;
-    }
-}
-
-int main() {
-    //Create two threads
-    std::thread thread1(thread_function, 0);
-    std::thread thread2(thread_function, 1);
-
-    // Wait for the thread to end
-    thread1.join();
-    thread2.join();
-
-    //output result
-    std::cout << "Thread 0 value: " << shared_data[0].value << std::endl;
-    std::cout << "Thread 1 value: " << shared_data[1].value << std::endl;
-
-    return 0;
-}
-```
-
-1. **Use alignment attributes from compiler-specific and C++ language features**:  
-In addition to manual padding, some compilers also provide specific attributes to achieve cache line alignment. In GCC and Clang, you can use`__attribute__((aligned(CACHE_LINE_SIZE)))`To specify the alignment of the structure:
-
-```cpp
-struct __attribute__((aligned(CACHE_LINE_SIZE))) AlignedData {
-    std::atomic<long long> value;
-};
-
-//C++'s own way
-template <typename T>
-struct alignas(CACHE_LINE_SIZE) CacheLineAligned : public T {
-    using T::T;
-};
-
-// This method is more concise and ensures that the structure is aligned in memory to meet the cache line size requirements.
-```
-
-True sharing issues can be passed <font style="color:rgb(51, 51, 51);">std::atomic (not performance sensitive) and thread_local solve the problem.</font>
-
-
-
-**Cache Isolation**
-
-<font style="color:rgba(0, 0, 0, 0.85);">Intel Cache Allocation Technology (CAT) can divide the L3 cache into COS areas with configurable capacity, and can bind key low-latency transaction threads to dedicated COS areas to prevent their cache lines from being polluted by background tasks or other cores, thereby reducing latency jitter caused by cache contention.</font>
-
-```shell
-sudo apt update
-sudo apt install -y intel-cmt-cat
-
-# Check if the CPU supports CAT and MBA
-cat /proc/cpuinfo | grep -E 'cat_l3|mba'
-
-# Use the pqos tool to comprehensively detect system RDT functions
-pqos -d
-
-# View the current system default configuration
-pqos -s
-
-# Create COS definition
-# -e 'llc:COS_ID=BITMASK'  (L3 Cache Allocation)
-# -e 'mba:COS_ID=BANDWIDTH' (Memory Bandwidth Allocation)
-
-# COS1: Allocate the upper 8 bits of the L3 cache (for example, when the total mask is 12 bits, 0xff0 represents most of the cache)
-#       Allocate 80% of memory bandwidth simultaneously
-sudo pqos -e 'llc:1=0xff0;mba:1=80'
-
-# COS2: Allocate the lower 4 bits of the L3 cache (0x00f)
-#       Also allocate 50% of the memory bandwidth (if the bandwidth is insufficient, it will be limited)
-sudo pqos -e 'llc:2=0x0f;mba:2=50'
-
-# Verify whether the configuration is effective
-pqos -s
-
-# Bind cores 2 and 3 to COS1
-# 格式: pqos -a 'llc:COS_ID=core_list;mba:COS_ID=core_list'
-sudo pqos -a 'llc:1=2,3;mba:1=2,3'
-
-# (Optional) Additional cores can be bound to normal tasks COS2
-# sudo pqos -a 'llc:2=4-7;mba:2=4-7'
-
-sudo apt install -y stress
-
-# -c 1: Spawn 1 CPU-consuming process
-# -m 1: Spawn a process that takes up memory
-# --vm-bytes 512M: allocate 512MB memory
-# taskset -c 2: bind the process to core 2
-taskset -c 2 stress -c 1 -m 1 --vm-bytes 512M &
-STRESS_PID=$! # Get the PID of the background process to facilitate subsequent stopping
-echo "Stress test started with PID: $STRESS_PID"
-
-# Monitor cores 2 and 3 associated with COS1
-# -i 1: refresh every 1 second
-# -m llc,mbl,mbr: Monitoring indicators include LLC (cache occupancy), MBL (local memory bandwidth), MBR (remote memory bandwidth)
-sudo pqos -i 1 -m 'llc,mbl,mbr:2,3'
-
-# Stop the stress test process
-kill $STRESS_PID
-
-# Reset all RDT configurations to system default state
-south pqos -R
-```
-
-
-
-cpu pipeline reference:
-
-[https://weedge.github.io/perf-book-cn/zh/chapters/3-CPU-Microarchitecture/3-2_Pipelining_cn.html](https://weedge.github.io/perf-book-cn/zh/chapters/3-CPU-Microarchitecture/3-2_Pipelining_cn.html)
-
-**Pipeline stall avoidance and ILP utilization**
-
-Modern CPUs divide instruction execution into stages such as "fetch (IF), decoding (ID), execution (EX), memory access (MEM), and write back (WB)" through the pipeline. Ideally, one instruction can be completed per clock cycle. Actual **inter-instruction dependencies** cause the pipeline to stall (Stall), waiting for the results of the previous stage, and CPU cycles are wasted.
-
-Two types of inter-instruction dependencies in pipeline stalls:
-
-1. **Data dependent pause**: The latter instruction requires the execution result of the previous instruction (such as`a = b + c; d = a + e`middle,`d`rely`a`result), leading to`d`The "execution phase" needs to wait`a`"writeback phase".
-2. **Control Dependency Pause**: Branch instructions (e.g.`if-else`) needs to wait for the execution phase to be determined, resulting in subsequent instructions being unable to fetch instructions in advance, resulting in stalls, and longer stalls when branch prediction errors occur.
-
-The "three priorities" principle of CPU pipeline adaptation ensures no pauses in the pipeline and maximizes ILP:
-
-1. **Dependency chain splitting first**: Split long dependency chains into short chains (such as parallel calculation of "price × quantity" for multiple orders) to avoid serial pauses;
-2. **Data enters registers first**: Highly accessed core data (prices, trading volumes, rates) are preloaded into registers, eliminating dependence on memory access;
-3. **Instruction type priority balancing**: Intersperse integer, floating point, and logic instructions to allow multiple CPU execution units to work in parallel without wasting ILP potential.
-
-Optimize and split the dependency chain of complex structures and system globals using algorithms such as topological sorting to resolve dependencies.
-
-
-
-### 6. Memory pool
-**1. Non-thread-safe memory pool (object pool), the actual scenario is also thread-private**
-
-```cpp
-#pragma once
-
-#include <cstdint>
-#include <vector>
-#include <string>
-
-#include "macros.h"
-
-namespace Common {
-  template<typename T>
-  class MemPool final {
-  public:
-    explicit MemPool(std::size_t num_elems) :
-        store_(num_elems, {T(), true}) /* pre-allocation of vector storage. */ {
-      ASSERT(reinterpret_cast<const ObjectBlock *>(&(store_[0].object_)) == &(store_[0]), "T object should be first member of ObjectBlock.");
-    }
-
-    /// Allocate a new object of type T, use placement new to initialize the object, mark the block as in-use and return the object.
-    template<typename... Args>
-    T *allocate(Args... args) noexcept {
-      auto obj_block = &(store_[next_free_index_]);
-#if !defined(NDEBUG)
-      ASSERT(obj_block->is_free_, "Expected free ObjectBlock at index:" + std::to_string(next_free_index_));
-#endif
-      T *ret = &(obj_block->object_);
-      ret = new(ret) T(args...); // placement new.
-      obj_block->is_free_ = false;
-
-      updateNextFreeIndex();
-
-      return ret;
-    }
-
-    /// Return the object back to the pool by marking the block as free again.
-    /// Destructor is not called for the object.
-    auto deallocate(const T *elem) noexcept {
-      const auto elem_index = (reinterpret_cast<const ObjectBlock *>(elem) - &store_[0]);
-#if !defined(NDEBUG)
-      ASSERT(elem_index >= 0 && static_cast<size_t>(elem_index) < store_.size(), "Element being deallocated does not belong to this Memory pool.");
-      ASSERT(!store_[elem_index].is_free_, "Expected in-use ObjectBlock at index:" + std::to_string(elem_index));
-#endif
-      store_[elem_index].is_free_ = true;
-    }
-
-    // Deleted default, copy & move constructors and assignment-operators.
-    MemPool() = delete;
-    MemPool(const MemPool &) = delete;
-    MemPool(const MemPool &&) = delete;
-    MemPool &operator=(const MemPool &) = delete;
-    MemPool &operator=(const MemPool &&) = delete;
-
-  private:
-    /// Find the next available free block to be used for the next allocation.
-    auto updateNextFreeIndex() noexcept {
-      const auto initial_free_index = next_free_index_;
-      while (!store_[next_free_index_].is_free_) {
-        ++next_free_index_;
-        if (UNLIKELY(next_free_index_ == store_.size())) { // hardware branch predictor should almost always predict this to be false any ways.
-          next_free_index_ = 0;
-        }
-        if (UNLIKELY(initial_free_index == next_free_index_)) {
-#if !defined(NDEBUG)
-          ASSERT(initial_free_index != next_free_index_, "Memory Pool out of space.");
-#endif
-        }
-      }
-    }
-
-    /// It is better to have one vector of structs with two objects than two vectors of one object.
-    /// Consider how these are accessed and cache performance.
-    struct ObjectBlock {
-      T object_;
-      bool is_free_ = true;
-    };
-
-    /// We could've chosen to use a std::array that would allocate the memory on the stack instead of the heap.
-    /// We would have to measure to see which one yields better performance.
-    /// It is good to have objects on the stack but performance starts getting worse as the size of the pool increases.
-    std::vector<ObjectBlock> store_;
-
-    size_t next_free_index_ = 0;
-  };
-}
-
-```
-
-The optimized version is as follows
-
-```cpp
-#pragma once
-
-#include <cstdint>
-#include <vector>
-#include <string>
-
-#include "macros.h"
-
-namespace Common {
-  template<typename T>
-  class MemPool final {
-  public:
-    explicit MemPool(std::size_t num_elems) :
-        objects_(nullptr),
-        next_free_index_(0),
-        capacity_(num_elems) {
-      // Pre-allocate memory using standard allocation (avoiding new/delete)
-      objects_ = static_cast<T*>(std::aligned_alloc(alignof(T), sizeof(T) * capacity_));
-      free_list_ = static_cast<std::size_t*>(std::aligned_alloc(alignof(std::size_t), sizeof(std::size_t) * capacity_));
-      
-      // Initialize free list - each slot points to the next one
-      for (std::size_t i = 0; i < capacity_; ++i) {
-        free_list_[i] = i + 1;
-      }
-      free_list_[capacity_ - 1] = kInvalidIndex; // Last element points to invalid
-    }
-
-    ~MemPool() {
-      // Explicitly call destructors for any non-freed objects
-      for (std::size_t i = 0; i < capacity_; ++i) {
-        if (free_list_[i] == kInvalidIndex) { // Object is allocated
-          objects_[i].~T();
-        }
-      }
-      
-      // Free pre-allocated memory
-      std::free(objects_);
-      std::free(free_list_);
-    }
-
-    /// Allocate a new object of type T, use placement new to initialize the object, mark the block as in-use and return the object.
-    template<typename... Args>
-    T *allocate(Args... args) noexcept {
-      if (UNLIKELY(next_free_index_ == kInvalidIndex)) {
-        return nullptr; // Pool exhausted
-      }
-      
-      const auto index = next_free_index_;
-      next_free_index_ = free_list_[index]; // Move to next free slot
-      
-      T *ret = &(objects_[index]);
-      new (ret) T(std::forward<Args>(args)...); // placement new
-      free_list_[index] = kInvalidIndex; // Mark as allocated
-      
-      return ret;
-    }
-
-    /// Return the object back to the pool by marking the block as free again.
-    /// Destructor is not called for the object - lazy deallocation for performance.
-    auto deallocate(const T *elem) noexcept {
-      const auto elem_index = static_cast<std::size_t>(elem - objects_);
-      
-      if (LIKELY(elem_index < capacity_)) {
-        // Instead of calling destructor, just add back to free list
-        free_list_[elem_index] = next_free_index_;
-        next_free_index_ = elem_index;
-      }
-    }
-
-    // Deleted default, copy & move constructors and assignment-operators.
-    MemPool() = delete;
-    MemPool(const MemPool &) = delete;
-    MemPool(const MemPool &&) = delete;
-    MemPool &operator=(const MemPool &) = delete;
-    MemPool &operator=(const MemPool &&) = delete;
-
-  private:
-    static constexpr std::size_t kInvalidIndex = static_cast<std::size_t>(-1);
-    
-    T* objects_;              // Pre-allocated array of objects
-    std::size_t* free_list_;  // Free list - each slot points to the next free slot, or kInvalidIndex if allocated
-    std::size_t next_free_index_; // Head of free list
-    std::size_t capacity_;    // Total capacity of the pool
-  };
-}
-```
-
-**2. Memory tuning**
-
-```cpp
-#include <iostream>
-#include <unistd.h>
-#include <malloc.h>
-#include <sys/mman.h>
-
-void configure_memory_behavior() {
-    // Disable mmap allocation of large blocks of memory: all malloc requests are satisfied via the heap (sbrk)
-    if (mallopt(M_MMAP_MAX, 0) != 1) {
-        std::cerr << "Warning: Failed to set M_MMAP_MAX. Error: " << std::strerror(errno) << "\n";
-    }
-
-    // Disable automatic heap pruning: prevent calling sbrk after free to return memory and avoid system call overhead and delay fluctuations
-    if (mallopt(M_TRIM_THRESHOLD, -1) != 1) {
-        std::cerr << "Warning: Failed to set M_TRIM_THRESHOLD. Error: " << std::strerror(errno) << "\n";
-    }
-
-    // Force a single arena: all threads share the main heap to avoid the mmap expansion of thread arena and the uncertainty caused by it
-    if (mallopt(M_ARENA_MAX, 1) != 1) {
-        std::cerr << "Warning: Failed to set M_ARENA_MAX. Error: " << std::strerror(errno) << "\n";
-    }
-
-    // Fixed mmap threshold: ensures that the size block partitioning strategy is stable (even if mmap is disabled)
-    if (mallopt(M_MMAP_THRESHOLD, 131072) != 1) {
-        std::cerr << "Warning: Failed to set M_MMAP_THRESHOLD. Error: " << std::strerror(errno) << "\n";
-    }
-
-    // Lock all mapped pages in the current process and lock all pages that will be mapped in the future
-    if (mlockall(MCL_CURRENT | MCL_FUTURE) == -1) {
-        std::cerr << "Warning: mlockall failed. Check permissions (CAP_IPC_LOCK) and ulimit.\n";
-    }
-}
-```
-
-```shell
-# Temporarily disabled
-sudo swapoff -a
-
-#Permanently disabled, comment out all lines containing swap
-sudo vim /etc/fstab
-
-# Temporary settings
-sudo sysctl vm.swappiness=0
-
-# Permanent setting
-echo "vm.swappiness=0" | sudo tee /etc/sysctl.d/99-disable-swap.conf
-sudo sysctl -p
-
-# The use of mlockall() in the program is also forcibly disabled and is for the entire process.
-
-# To prevent the memlock limit of the system from being too low, check with the following command.
-ulimit -l
-
-# Temporarily increase limit (e.g. to 1GB)
-sudo ulimit -l 1048576 
-# Note: The ulimit raised by sudo only takes effect for the program within the sudo command and needs to be run in a way that can be passed to the child process.
-# A more reliable way is to modify the configuration file or run as root
-
-# Permanent modification
-Edit the /etc/security/limits.conf file, add unlimited permissions to memlock for the user, and then log in again.
-# Allow the 'trader' user to lock an unlimited amount of memory
-trader   soft   memlock   unlimited
-trader   hard   memlock   unlimited
-
-# Set vm.swappiness=0 and have the application call mlockall().  
-#	Temporary settings 
-sudo sysctl vm.swappiness=0
-
-#	For permanent settings, create a new configuration file in the /etc/sysctl.d/ directory.
-sudo vim /etc/sysctl.d/custom-latency.conf
-Add vm.swappiness=0
-sudo sysctl -p
-
-
-# Through the above settings, you can execute it without obtaining the permission below.
-
-# mlock and mlockall calls require sudo permissions
-# Grant programs only permission to lock memory
-sudo setcap cap_ipc_lock=+ep ./arena_test
-
-# full permissions
-sudo ./arena_test
-```
-
-```cpp
-// Tune the glibc allocator to lock pages in memory and prevent them from being released to the operating system. Some or all of these techniques may have been integrated into memory allocation libraries such as jemalloc, tcmalloc or mimalloc.
-
-// Setting M_MMAP_MAX to 0 disables the underlying mmap system call for large allocations - this is necessary because when the library attempts to free the mmaped segment back to the operating system, mlockall may be munmaped, thus defeating our efforts.
-// Setting M_TRIM_THRESHOLD to -1 prevents glibc from returning memory to the operating system after calling free. As mentioned before, this option has no effect on mmapped segments.
-// Finally, setting M_ARENA_MAX to 1 prevents glibc from allocating multiple arenas via mmap to accommodate multiple cores. Keep in mind that the latter hinders the multi-threaded scalability feature of the glibc allocator.
-// Combined, these settings force glibc to a heap allocation that does not release the memory back to the operating system until the application ends. The stacks of any threads spawned by this process will also be preprocessed and locked. The disadvantage of this technique is that it reduces the amount of memory available to other processes on the system.
-
-#include <malloc.h>
-#include <sys/mman.h>
-
-mallopt(M_MMAP_MAX, 0);
-mallopt(M_TRIM_THRESHOLD, -1);
-mallopt(M_ARENA_MAX, 1);
-
-mlockall(MCL_CURRENT | MCL_FUTURE);
-
-char *mem = malloc(size);
-for (int i = 0; i < size; i += sysconf(_SC_PAGESIZE))
-    mem[i] = 0;
-//...
-free(mem);
-```
-
-```shell
-// How to detect TLB evictions in multi-threaded applications? An easy way is to check the TLB line in /proc/interrupts.
-// A useful way to detect continuous TLB interruptions at runtime is to use the watch command while viewing this file
-// Run watch -n5 -d 'grep TLB /proc/interrupts', where the -n 5 option refreshes the view every 5 seconds, and -d highlights the differences between each refresh of the output.
-
-           CPU0 CPU1 CPU2 CPU3       
-...
-NMI:          0          0          0          0   Non-maskable interrupts
-LOC:     552219    1010298    2272333    3179890   Local timer interrupts
-SPU:          0          0          0          0   Spurious interrupts
-...
-IWI:          0          0          0          0   IRQ work interrupts
-RTR:          7          0          0          0   APIC ICR read retries
-RES:      18708       9550        771        528   Rescheduling interrupts
-CAL:        711        934       1312       1261   Function call interrupts
-TLB:       4493       6108      73789       5014   TLB shootdowns
-
-// Note the difference in other cores' orders of magnitude. In this case, the culprit of this behavior is a feature of the Linux kernel called automatic NUMA balancing, which can be easily disabled with sysctl -w numa_balancing=0.
-
-// Preventing TLB eviction requires limiting the number of updates made to the shared process address space.
-// At the source code level, runtime execution of these system calls, namely munmap, mprotect and madvise, should be avoided.
-// At the operating system level, disable kernel features that cause TLB evictions due to their functionality, such as transparent hugepages and automatic NUMA balancing.
-```
-
-**3. Reasonably choose data structure**
-
-Choose appropriate data structures based on actual needs and avoid using data structures that cause frequent memory allocation and release. For example, if you need to frequently insert and delete elements, consider using`std::list`instead of`std::vector`。
-
-**Stack allocation**: For data with fixed size and short life cycle, create it directly on the stack `std::array`. The size must be determined at compile time.  
-
-**4.pinned_arena+allocator (STL dynamic memory container memory allocator)**
-
-```cpp
-// pinned_arena.h
-#pragma once
-
-#include <cstddef>
-#include <cstdint>
-#include <memory>
-#include <stdexcept>
-#include <iostream>
-#include <vector>
-#include <string>
-#include <cstring>
-#include <unistd.h>
-#include <sys/mman.h>
-#include <malloc.h>
-
-// Branch prediction and optimization macros
-#if defined(__GNUC__) || defined(__clang__)
-    #define LIKELY(x)   __builtin_expect(!!(x), 1)
-    #define UNLIKELY(x) __builtin_expect(!!(x), 0)
-    #define ALWAYS_INLINE inline __attribute__((always_inline))
-    #define HOT_PATH [[gnu::hot]]
-    #define COLD_PATH [[gnu::cold]]
-#else
-    #define LIKELY(x)   (x)
-    #define UNLIKELY(x) (x)
-    #define ALWAYS_INLINE inline
-    #define HOT_PATH
-    #define COLD_PATH
-#endif
-
-#define CACHELINE_ALIGN alignas(64)
-#define CACHELINE_SIZE 64
-
-namespace Common {
-
-//Compile time memory alignment calculation
-template<size_t N>
-constexpr size_t next_power_of_two() {
-    static_assert(N > 0, "Size must be positive");
-    size_t value = 1;
-    while (value < N) value <<= 1;
-    return value;
-}
-
-// Fixed memory arena
-class PinnedArena {
-private:
-    //Memory block structure
-    struct CACHELINE_ALIGN MemoryBlock {
-        size_t used;
-        size_t capacity;
-        bool is_active;
-        uint32_t next_block; // Use indexes instead of pointers to improve cache locality
-        char padding[40]; //Padding to 64 bytes to avoid false sharing
-        
-        ALWAYS_INLINE char* data() { 
-            return reinterpret_cast<char*>(this + 1); 
-        }
-        
-        ALWAYS_INLINE const char* data() const { 
-            return reinterpret_cast<const char*>(this + 1); 
-        }
-        
-        static constexpr size_t header_size = sizeof(MemoryBlock);
-        static constexpr size_t min_capacity = 4096 - header_size;
-    };
-
-    // Pre-allocated contiguous memory area
-    struct CACHELINE_ALIGN ArenaMemory {
-        void* raw_memory;
-        size_t total_size;
-        size_t block_size;
-        uint32_t num_blocks;
-        bool is_locked;
-        
-        MemoryBlock* blocks; // Continuous array of memory blocks
-        char* data_start; // Continuous data area
-    };
-
-    ArenaMemory arena_mem_;
-    uint32_t current_block_idx_;
-    uint32_t active_blocks_;
-    const bool allow_fallback_;
-    const bool use_mlock_;
-    
-    // Disable copying
-    PinnedArena(const PinnedArena&) = delete;
-    PinnedArena& operator=(const PinnedArena&) = delete;
-
-public:
-    explicit PinnedArena(size_t block_size = 64 * 1024, 
-                        bool allow_fallback = false,
-                        bool use_mlock = true,
-                        uint32_t prealloc_blocks = 16) // Number of preallocated blocks
-        : allow_fallback_(allow_fallback)
-        , use_mlock_(use_mlock)
-        , current_block_idx_(0)
-        , active_blocks_(1) {
-        
-        //Initialize the continuous memory area
-        initialize_arena_memory(block_size, prealloc_blocks);
-        
-        // Prefetch the first memory block into the cache
-        if (LIKELY(arena_mem_.blocks != nullptr)) {
-            prefetch_memory(arena_mem_.blocks[0].data(), 
-                          std::min(block_size, size_t(4096)));
-        }
-    }
-    
-    ~PinnedArena() {
-        destroy_arena_memory();
-    }
-    
-    //Move semantic support
-    PinnedArena(PinnedArena&& other) noexcept
-        : arena_mem_(other.arena_mem_)
-        , current_block_idx_(other.current_block_idx_)
-        , active_blocks_(other.active_blocks_)
-        , allow_fallback_(other.allow_fallback_)
-        , use_mlock_(other.use_mlock_) {
-        
-        other.arena_mem_.raw_memory = nullptr;
-        other.arena_mem_.blocks = nullptr;
-        other.arena_mem_.data_start = nullptr;
-    }
-    
-    PinnedArena& operator=(PinnedArena&& other) noexcept {
-        if (LIKELY(this != &other)) {
-            destroy_arena_memory();
-            arena_mem_ = other.arena_mem_;
-            current_block_idx_ = other.current_block_idx_;
-            active_blocks_ = other.active_blocks_;
-            
-            other.arena_mem_.raw_memory = nullptr;
-            other.arena_mem_.blocks = nullptr;
-            other.arena_mem_.data_start = nullptr;
-        }
-        return *this;
-    }
-    
-    // Core allocation function - hot path optimization
-    HOT_PATH ALWAYS_INLINE
-    void* allocate(size_t size, size_t alignment = alignof(std::max_align_t)) {
-        // Fast path: allocated in the currently active block
-        MemoryBlock* current_block = &arena_mem_.blocks[current_block_idx_];
-        
-        if (LIKELY(current_block->is_active && size <= arena_mem_.block_size / 4)) {
-            char* ptr = current_block->data() + current_block->used;
-            uintptr_t aligned_ptr = (reinterpret_cast<uintptr_t>(ptr) + alignment - 1) & ~(alignment - 1);
-            size_t adjustment = aligned_ptr - reinterpret_cast<uintptr_t>(ptr);
-            size_t total_size = size + adjustment;
-            
-            if (LIKELY(current_block->used + total_size <= current_block->capacity)) {
-                current_block->used += total_size;
-                
-                // Prefetch the memory to be used
-                prefetch_memory(reinterpret_cast<void*>(aligned_ptr), size);
-                
-                return reinterpret_cast<void*>(aligned_ptr);
-            }
-        }
-        
-        // slow path
-        return allocate_slow_path(size, alignment);
-    }
-    
-    // Bulk array allocation - cache friendly
-    template<typename T>
-    HOT_PATH ALWAYS_INLINE
-    T* allocate_array(size_t count) {
-        static_assert(std::is_trivial_v<T>, "Only trivial types supported for array allocation");
-        constexpr size_t alignment = alignof(T);
-        const size_t total_size = count * sizeof(T);
-        
-        MemoryBlock* current_block = &arena_mem_.blocks[current_block_idx_];
-        
-        if (LIKELY(current_block->is_active)) {
-            char* ptr = current_block->data() + current_block->used;
-            uintptr_t aligned_ptr = (reinterpret_cast<uintptr_t>(ptr) + alignment - 1) & ~(alignment - 1);
-            size_t adjustment = aligned_ptr - reinterpret_cast<uintptr_t>(ptr);
-            size_t total_needed = total_size + adjustment;
-            
-            if (LIKELY(current_block->used + total_needed <= current_block->capacity)) {
-                current_block->used += total_needed;
-                T* result = reinterpret_cast<T*>(aligned_ptr);
-                
-                //Multi-level prefetch optimization
-                prefetch_array(result, count);
-                
-                return result;
-            }
-        }
-        
-        return reinterpret_cast<T*>(allocate_slow_path(total_size, alignment));
-    }
-    
-    //Reset the arena
-    HOT_PATH ALWAYS_INLINE
-    void reset() noexcept {
-        //Reset all active blocks - contiguous memory access, cache friendly
-        for (uint32_t i = 0; i < active_blocks_; ++i) {
-            arena_mem_.blocks[i].used = 0;
-            
-            // Prefetch the data area for each block
-            if (LIKELY(arena_mem_.blocks[i].is_active && arena_mem_.blocks[i].capacity > 0)) {
-                prefetch_memory(arena_mem_.blocks[i].data(), 
-                              std::min(arena_mem_.blocks[i].capacity, size_t(4096)));
-            }
-        }
-        current_block_idx_ = 0;
-    }
-    
-    //Clear all memory blocks
-    void clear() noexcept {
-        reset();
-        //Do not clear the pre-allocated memory area and maintain the mlock state
-    }
-    
-    // statistics
-    size_t memory_usage() const noexcept {
-        return arena_mem_.total_size;
-    }
-    
-    size_t block_count() const noexcept {
-        return active_blocks_;
-    }
-
-private:
-    //Initialize the continuous memory area
-    void initialize_arena_memory(size_t block_size, uint32_t num_blocks) {
-        if (UNLIKELY(num_blocks == 0)) {
-            return;
-        }
-        
-        // Calculate total memory size
-        size_t block_total_size = MemoryBlock::header_size + block_size;
-        size_t total_memory_size = block_total_size * num_blocks;
-        
-        // page alignment
-        long page_size = sysconf(_SC_PAGESIZE);
-        if (UNLIKELY(page_size == -1)) {
-            page_size = 4096;
-        }
-        
-        size_t aligned_total_size = ((total_memory_size + page_size - 1) / page_size) * page_size;
-        
-        //Allocate contiguous memory
-        void* raw_memory = nullptr;
-        if (UNLIKELY(posix_memalign(&raw_memory, page_size, aligned_total_size) != 0)) {
-            return;
-        }
-        
-        // memory lock
-        if (LIKELY(use_mlock_)) {
-            if (UNLIKELY(mlock(raw_memory, aligned_total_size) == -1)) {
-                // Simplify error handling to reduce system calls
-            }
-        }
-        
-        // Pre-faulting: trigger all page fault interrupts
-        memset(raw_memory, 0, aligned_total_size);
-        
-        //Set memory area information
-        arena_mem_.raw_memory = raw_memory;
-        arena_mem_.total_size = aligned_total_size;
-        arena_mem_.block_size = block_size;
-        arena_mem_.num_blocks = num_blocks;
-        arena_mem_.is_locked = use_mlock_;
-        
-        //Initialize the memory block array
-        arena_mem_.blocks = static_cast<MemoryBlock*>(raw_memory);
-        arena_mem_.data_start = reinterpret_cast<char*>(arena_mem_.blocks) + 
-                               (MemoryBlock::header_size * num_blocks);
-        
-        //Initialize each memory block
-        for (uint32_t i = 0; i < num_blocks; ++i) {
-            MemoryBlock* block = &arena_mem_.blocks[i];
-            block->used = 0;
-            block->capacity = block_size;
-            block->is_active = (i == 0); // Only the first block is initially activated
-            block->next_block = (i + 1 < num_blocks) ? (i + 1) : 0;
-        }
-        
-        active_blocks_ = 1;
-    }
-    
-    // Destroy memory area
-    void destroy_arena_memory() noexcept {
-        if (UNLIKELY(arena_mem_.raw_memory == nullptr)) return;
-        
-        if (arena_mem_.is_locked) {
-            munlock(arena_mem_.raw_memory, arena_mem_.total_size);
-        }
-        
-        free(arena_mem_.raw_memory);
-        arena_mem_.raw_memory = nullptr;
-        arena_mem_.blocks = nullptr;
-        arena_mem_.data_start = nullptr;
-    }
-    
-    // slow allocation path
-    COLD_PATH
-    void* allocate_slow_path(size_t size, size_t alignment) {
-        // Attempt to allocate in current block (may fail due to alignment requirements)
-        MemoryBlock* current_block = &arena_mem_.blocks[current_block_idx_];
-        if (LIKELY(current_block->is_active)) {
-            char* ptr = current_block->data() + current_block->used;
-            uintptr_t aligned_ptr = (reinterpret_cast<uintptr_t>(ptr) + alignment - 1) & ~(alignment - 1);
-            size_t adjustment = aligned_ptr - reinterpret_cast<uintptr_t>(ptr);
-            size_t total_size = size + adjustment;
-            
-            if (current_block->used + total_size <= current_block->capacity) {
-                current_block->used += total_size;
-                prefetch_memory(reinterpret_cast<void*>(aligned_ptr), size);
-                return reinterpret_cast<void*>(aligned_ptr);
-            }
-        }
-        
-        //Try to activate new block
-        if (LIKELY(size <= arena_mem_.block_size && active_blocks_ < arena_mem_.num_blocks)) {
-            // activate next block
-            uint32_t next_idx = current_block_idx_ + 1;
-            if (LIKELY(next_idx < arena_mem_.num_blocks)) {
-                MemoryBlock* next_block = &arena_mem_.blocks[next_idx];
-                next_block->is_active = true;
-                next_block->used = 0;
-                current_block_idx_ = next_idx;
-                active_blocks_++;
-                
-                char* ptr = next_block->data();
-                uintptr_t aligned_ptr = (reinterpret_cast<uintptr_t>(ptr) + alignment - 1) & ~(alignment - 1);
-                size_t adjustment = aligned_ptr - reinterpret_cast<uintptr_t>(ptr);
-                
-                if (LIKELY(size + adjustment <= next_block->capacity)) {
-                    next_block->used = size + adjustment;
-                    prefetch_memory(reinterpret_cast<void*>(aligned_ptr), size);
-                    return reinterpret_cast<void*>(aligned_ptr);
-                }
-            }
-        }
-        
-        // Large object or fallback allocation
-        if (UNLIKELY(allow_fallback_)) {
-            // Use a more lightweight allocation method
-            void* ptr = malloc(size);
-            if (UNLIKELY(ptr == nullptr)) {
-                return nullptr;
-            }
-            prefetch_memory(ptr, size);
-            return ptr;
-        }
-        
-        return nullptr;
-    }
-    
-    // Memory prefetch optimization
-    ALWAYS_INLINE void prefetch_memory(void* addr, size_t size) const {
-#if defined(__GNUC__) || defined(__clang__)
-        char* ptr = static_cast<char*>(addr);
-        
-        // Prefetch multiple cache lines, limiting the range to avoid excessive prefetching
-        for (size_t i = 0; i < size && i < 1024; i += CACHELINE_SIZE) {
-            __builtin_prefetch(ptr + i, 1, 3); // pre-written, high locality
-        }
-#endif
-    }
-    
-    // Array prefetch optimization
-    template<typename T>
-    ALWAYS_INLINE void prefetch_array(T* array, size_t count) const {
-        if (UNLIKELY(count == 0)) return;
-        
-#if defined(__GNUC__) || defined(__clang__)
-        // Prefetch the first few elements
-        __builtin_prefetch(array, 1, 3);
-        
-        // For large arrays, prefetch more elements
-        if (LIKELY(count > 8)) {
-            __builtin_prefetch(array + 8, 1, 2);
-            if (count > 16) {
-                __builtin_prefetch(array + 16, 1, 1);
-            }
-        }
-#endif
-    }
-};
-
-// STL compatible low latency allocator
-template<typename T>
-class LowLatencyAllocator {
-public:
-    using value_type = T;
-    using pointer = T*;
-    using const_pointer = const T*;
-    using reference = T&;
-    using const_reference = const T&;
-    using size_type = std::size_t;
-    using difference_type = std::ptrdiff_t;
-    using propagate_on_container_copy_assignment = std::false_type;
-    using propagate_on_container_move_assignment = std::true_type;
-    using propagate_on_container_swap = std::true_type;
-    using is_always_equal = std::false_type;
-    
-    template<typename U>
-    struct rebind {
-        using other = LowLatencyAllocator<U>;
-    };
-    
-    explicit LowLatencyAllocator(PinnedArena& arena) noexcept : arena_(&arena) {}
-    
-    LowLatencyAllocator(const LowLatencyAllocator& other) noexcept = default;
-    
-    template<typename U>
-    LowLatencyAllocator(const LowLatencyAllocator<U>& other) noexcept 
-        : arena_(other.arena_) {}
-    
-    // memory allocation
-    HOT_PATH ALWAYS_INLINE
-    pointer allocate(size_type n) {
-        
-        // Small array fast path
-        if (LIKELY(n <= 16)) {
-            return arena_->allocate_array<T>(n);
-        }
-        
-        //Large array path
-        void* ptr = arena_->allocate(n * sizeof(T), alignof(T));
-        return static_cast<pointer>(ptr);
-    }
-    
-    // Memory release - no operation (managed uniformly by arena)
-    void deallocate(pointer p, size_type n) noexcept {
-        (void)p;
-        (void)n;
-    }
-    
-    //Construct object
-    template<typename U, typename... Args>
-    void construct(U* p, Args&&... args) {
-        ::new (static_cast<void*>(p)) U(std::forward<Args>(args)...);
-    }
-    
-    // Destroy object
-    template<typename U>
-    void destroy(U* p) {
-        p->~U();
-    }
-    
-    PinnedArena* arena() const noexcept { return arena_; }
-    
-    template<typename U>
-    bool operator==(const LowLatencyAllocator<U>& other) const noexcept {
-        return arena_ == other.arena_;
-    }
-    
-    template<typename U>
-    bool operator!=(const LowLatencyAllocator<U>& other) const noexcept {
-        return arena_ != other.arena_;
-    }
-
-private:
-    PinnedArena* arena_;
-};
-
-// Convenient container creation function
-template<typename T, typename... Args>
-auto make_pinned_vector(PinnedArena& arena, Args&&... args) {
-    return std::vector<T, LowLatencyAllocator<T>>(
-        std::forward<Args>(args)..., 
-        LowLatencyAllocator<T>(arena)
-    );
-}
-
-} // namespace Common
-
-```
-
-```cpp
-#include "pinned_arena.h"
-#include <iostream>
-#include <vector>
-
-using namespace Common;
-
-int main()
-{
-
-    PinnedArena arena(64 * 1024, false, true, 4);
-
-    std::vector<int, LowLatencyAllocator<int>> int_vec(LowLatencyAllocator<int>(arena));
-
-    for (int i = 0; i < 5; ++i)
-    {
-        int_vec.push_back(i * 10); // 0, 10, 20, 30, 40
-    }
-
-    std::cout << "int_vec content: ";
-    for (const auto &val : int_vec)
-    {
-        std::cout << val << " ";
-    }
-    std::cout << "\nint_vec memory address: " << static_cast<void *>(int_vec.data()) << std::endl;
-
-    auto str_vec = make_pinned_vector<std::string>(arena);
-
-    str_vec.emplace_back("hello");
-    str_vec.emplace_back("pinned");
-    str_vec.emplace_back("arena");
-
-    std::cout << "str_vec content: ";
-    for (const auto &s : str_vec)
-    {
-        std::cout << s << " ";
-    }
-    std::cout << "\nstr_vec memory address: " << static_cast<void *>(str_vec.data()) << std::endl;
-
-    arena.reset();
-
-    std::vector<double, LowLatencyAllocator<double>> double_vec(LowLatencyAllocator<double>(arena));
-    double_vec.push_back(3.14);
-    double_vec.push_back(6.28);
-    std::cout << "New double_vec memory address: " << static_cast<void *>(double_vec.data()) << std::endl;
-    std::cout << "double_vec content: " << double_vec[0] << ", " << double_vec[1] << std::endl;
-
-    std::cout << "\n=== Final memory statistics ===" << std::endl;
-    std::cout << "Total Arena Memory: " << arena.memory_usage() << " Bytes" << std::endl;
-    std::cout << "Number of active memory blocks: " << arena.block_count() << std::endl;
-
-    return 0;
-}
-```
-
-
-
-**5. Use polymorphic memory allocator to solve std::vector type mismatch problem**
-
-`std::vector<int>`and`std::vector<int, MyAlloc>`is a completely different type because the allocator is part of the container type. Containers in the C++ standard library take allocators as template parameters, so different allocators result in different types.
-
-C++17 introduced`std::pmr`(polymorphic memory resource) namespace provides a polymorphic allocator mechanism to solve this problem.
-
-+ `std::pmr::polymorphic_allocator`: a generic allocator type that does not include the allocator as part of the type
-+ `std::pmr::memory_resource`: Base class for all memory resources
-+ all`std::pmr`Containers (such as`std::pmr::vector`) are used`polymorphic_allocator`, manage memory through memory resource pointers
-
-```cpp
-#include <vector>
-#include <memory_resource>
-#include <array>
-
-//Use std::pmr::vector and polymorphic allocator
-void process(std::pmr::vector<int>& buffer) {
-    //process buffer
-}
-
-auto some_func() {
-    //Create a buffer on the stack
-    auto buffer = std::array<std::byte, 512>{};
-    
-    //Create memory resources, use monotonic_buffer_resource (similar to your Arena)
-    auto resource = std::pmr::monotonic_buffer_resource{
-        buffer.data(), buffer.size(), std::pmr::new_delete_resource()};
-    
-    //Create a vector that uses this memory resource
-    auto vec = std::pmr::vector<int>{&resource};
-    
-    // add element
-    vec.push_back(42);
-    vec.push_back(7);
-    
-    // passed to process function (types match now)
-    process(vec);
-}
-```
-
-1. `std::pmr::vector<int>`use`std::pmr::polymorphic_allocator`, which does not include the allocator as part of the type
-2. `std::pmr::vector`Through the memory resource pointer (`std::pmr::memory_resource*`) to manage memory
-3. all`std::pmr`Containers all use the same allocator type, so`std::pmr::vector<int>`and`std::pmr::vector<int>`is compatible
-
-****
-
-**Common memory resources**
-
-The C++ standard library provides several built-in memory resources to meet the needs of different scenarios:
-
-1. `**std::pmr::monotonic_buffer_resource**`：
-    - Suitable for objects with short life cycle
-    - Memory is released only when the resource is destroyed
-    - Very fast allocation
-2. `**std::pmr::unsynchronized_pool_resource**`：
-    - Use memory pools (slabs) to manage memory
-    - Avoid memory fragmentation
-    - Works with objects of many sizes
-    - Not thread safe
-3. `**std::pmr::synchronized_pool_resource**`：
-    - `unsynchronized_pool_resource`Thread-safe version of
-
-
-
-**Implement custom memory resources**
-
-```cpp
-#include <memory_resource>
-
-class PrintingResource : public std::pmr::memory_resource {
-public:
-    PrintingResource() : res_{std::pmr::get_default_resource()} {}
-private:
-    void* do_allocate(std::size_t bytes, std::size_t alignment) override {
-        std::cout << "allocate: " << bytes << '\n';
-        return res_->allocate(bytes, alignment);
-    }
-    
-    void do_deallocate(void* p, std::size_t bytes,
-                       std::size_t alignment) override {
-        std::cout << "deallocate: " << bytes << '\n';
-        res_->deallocate(p, bytes, alignment);
-    }
-    
-    bool do_is_equal(const std::pmr::memory_resource& other) const noexcept override {
-        return this == &other;
-    }
-    
-    std::pmr::memory_resource* res_;
-};
-```
-
-```cpp
-auto res = PrintingResource{};
-auto vec = std::pmr::vector<int>{&res};
-vec.emplace_back(1);
-vec.emplace_back(2);
-```
-
-**Notes**
-
-1. **Memory resource lifetime**: Ensure that the lifetime of the memory resource is long enough to cover all containers that use it. The following code causes undefined behavior:
-
-```cpp
-auto create_vec() -> std::pmr::vector<int> {
-    auto resource = PrintingResource{};
-    auto vec = std::pmr::vector<int>{&resource}; // pass raw pointer
-    return vec; // The resource is destroyed at the end of the function and vec becomes invalid
-}
-
-auto vec = create_vec();
-vec.emplace_back(1); // Undefined behavior
-```
-
-2. **Default memory resource**: can be used`std::pmr::get_default_resource()`Get the default memory resource, or pass`std::pmr::set_default_resource()`set up.
-
-
-
-### 7. Large page memory
-1. <font style="color:rgba(0, 0, 0, 0.85) !important;">Large page memory simplifies the address translation process by increasing the granularity of a single page and reducing the page table traversal level (1GB large page level 4 becomes level 2).</font>
-2. <font style="color:rgba(0, 0, 0, 0.85) !important;">Because the memory page table is accessed less, the latency of a single address translation is reduced, avoiding performance losses caused by CPU waiting.</font>
-3. <font style="color:rgba(0, 0, 0, 0.85) !important;">Significantly improve the TLB hit rate, reduce the number of page table traversals triggered by TLB misses, and especially optimize the address translation efficiency in large memory scenarios.</font>
-
-```cpp
-#include <sys/mman.h>
-#include <sys/ipc.h>
-#include <sys/shm.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include <stdio.h>
-#include <stdlib.h>
-
-// --- Different implementations of large page memory ---
-
-// 1. Explicit huge page (EHP) + mmap (MAP_HUGETLB), this large page method is used in high-frequency trading
-// Principle: Reserve a specified number of huge pages through the kernel parameter (vm.nr_hugepages or hugepages=N) when the system starts.
-// The application requests the use of these reserved huge pages through mmap() with the MAP_HUGETLB flag.
-// The program uses huge page memory through mmap (the -lhugetlbfs library needs to be linked), which is essentially mmap() a file on hugetlbfs.
-// Method used in high-frequency trading, permanent configuration (to avoid restart failure):
-//Method 1: Edit /etc/sysctl.conf and add the configuration to take effect permanently
-// sudo vim /etc/sysctl.conf
-//Add new row: vm.nr_hugepages = 10 (reserve 10 large pages, the number needs to be adjusted according to the peak business)
-// Execute sudo sysctl -p to take effect immediately and load automatically after restarting
-// Method 2: If you need to manage the configuration independently, create /etc/sysctl.d/99-hugepages.conf
-// sudo vim /etc/sysctl.d/99-hugepages.conf
-//Add new line: vm.nr_hugepages = 10
-//Execute sudo sysctl --system to load all configurations, which will automatically take effect after restarting
-// Advantages: Most predictable performance, low overhead, memory pages are allocated at startup, avoiding runtime fragmentation.
-// Disadvantages: It requires root privileges to pre-configure, and the reserved memory will occupy physical memory even if it is not used.
-void demonstrate_static_huge_pages() {
-    printf("\n--- Demonstrating Static Huge Pages with mmap(MAP_HUGETLB) ---\n");
-
-    size_t size = 2 * 1024 * 1024; // 2MB, usually a multiple of the default hugepage size
-    void *huge_page_mem = mmap(NULL, size, PROT_READ | PROT_WRITE,
-                               MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB, -1, 0);
-
-    if (huge_page_mem == MAP_FAILED) {
-        perror("mmap with MAP_HUGETLB failed. Make sure huge pages are configured (e.g., add 'vm.nr_hugepages=1' to /etc/sysctl.conf and run 'sudo sysctl -p') and available.");
-        return;
-    }
-
-    printf("Successfully allocated static huge page memory at %p\n", huge_page_mem);
-    int *data = (int *)huge_page_mem;
-    data[0] = 123;
-    printf("Data at huge page: %d\n", data[0]);
-
-    if (munmap(huge_page_mem, size) == -1) {
-        perror("munmap failed");
-    }
-    printf("Successfully unmapped static huge page memory.\n");
-}
-
-// 2. Transparent Huge Page (THP) + madvise(MADV_HUGEPAGE) (optional)
-// Principle: Kernel feature, trying to automatically merge 4KB small pages into large pages (usually 2MB) in the background.
-// Applications do not need to explicitly request this, but can provide hints via madvise() to optimize the kernel's behavior.
-//Key configuration for high-frequency trading (THP must be disabled to eliminate uncertainty):
-// Permanently disable THP (to avoid automatic kernel enablement after reboot):
-//Method 1: Edit /etc/sysctl.conf and add disable configuration
-// sudo vim /etc/sysctl.conf
-//Add new line: vm.transparent_hugepage.enabled = never
-// vm.transparent_hugepage.defrag = never (also disables defragmentation)
-// Execute sudo sysctl -p to take effect immediately
-// Method 2: Permanently disable through grub kernel parameters (suitable for scenarios where THP needs to be completely shielded)
-//          sudo vim /etc/default/grub
-// Modify GRUB_CMDLINE_LINUX to: GRUB_CMDLINE_LINUX="transparent_hugepage=never"
-// Execute sudo update-grub to update the grub configuration, which will take effect after restarting the system.
-// Advantages: Transparent to applications, no code modifications are required to benefit.
-// Disadvantages: It may be difficult to allocate due to memory fragmentation, or lead to performance jitter and memory expansion.
-// In addition, system calls such as munmap and madvise can affect the types of address space changes that the kernel must communicate between the constituent threads of the process, causing TLB eviction.
-// Set transparent_hugepage=never in high-frequency trading to disable the kernel from automatically organizing memory in the background to eliminate unpredictable pauses.
-void demonstrate_transparent_huge_pages() {
-    printf("\n--- Demonstrating Transparent Huge Pages (THP) ---\n");
-
-    // Allocate normal memory, THP will try to convert it to huge pages
-    size_t size = 4 * 1024 * 1024; // 4MB
-    void *normal_mem = malloc(size);
-    if (!normal_mem) {
-        perror("malloc failed");
-        return;
-    }
-    printf("Successfully allocated normal memory at %p\n", normal_mem);
-
-    // Optional: use madvise to prompt the kernel to try using huge pages
-    // (Only valid when /sys/kernel/mm/transparent_hugepage/enabled is set to madvise or always, this configuration is disabled in high-frequency scenarios)
-    if (madvise(normal_mem, size, MADV_HUGEPAGE) == -1) {
-        perror("madvise(MADV_HUGEPAGE) failed (THP is disabled in HFT scenario, set 'vm.transparent_hugepage.enabled=never' in /etc/sysctl.conf)");
-        // The application can continue to use normal memory
-    } else {
-        printf("madvise(MADV_HUGEPAGE) successful, kernel may convert to huge pages (not recommended in HFT).\n");
-    }
-
-    //Use it like normal memory
-    char *data = (char *)normal_mem;
-    data[0] = 'A';
-    printf("Data in potentially THP-backed memory: %c\n", data[0]);
-
-    free(normal_mem);
-    printf("Successfully freed memory (potentially THP-backed).\n");
-}
-
-// 3. System V IPC shared memory + SHM_HUGETLB
-// Principle: Use the System V shared memory interface shmget() combined with the SHM_HUGETLB flag to create a large page shared memory segment.
-// Permanent configuration of dependent hugepages (consistent with explicit hugepages):
-// You need to first set vm.nr_hugepages=10 (example value) in /etc/sysctl.conf or /etc/sysctl.d/ according to the explicit huge page configuration method.
-// Ensure that enough large pages are reserved when the system starts to avoid allocation failure during runtime (high-frequency scenarios do not allow dynamic adjustment)
-// Advantages: It is directly anonymous memory that can be mounted by multiple processes and persists with the kernel.
-// Unless explicitly deleted (ipcrm or shmctl with IPC_RMID) or system restarted,
-// Otherwise the shared memory segment will always exist, even if the process that created it has exited.
-// Disadvantages: The interface is relatively complex and not as flexible as mmap().
-void demonstrate_systemv_huge_pages() {
-    printf("\n--- Demonstrating System V IPC Huge Pages ---\n");
-
-    size_t size = 2 * 1024 * 1024; // 2MB
-    int shm_id;
-    void *shm_addr;
-
-    //Create a shared memory segment and specify the SHM_HUGETLB flag
-    shm_id = shmget(IPC_PRIVATE, size, IPC_CREAT | SHM_R | SHM_W | SHM_HUGETLB);
-    if (shm_id == -1) {
-        perror("shmget with SHM_HUGETLB failed. Ensure huge pages are configured (add 'vm.nr_hugepages=10' to /etc/sysctl.conf and run 'sudo sysctl -p') and available.");
-        return;
-    }
-    printf("Successfully created huge page shared memory with ID: %d\n", shm_id);
-
-    // Attach shared memory to the process address space
-    shm_addr = shmat(shm_id, NULL, 0);
-    if (shm_addr == (void *)-1) {
-        perror("shmat failed");
-        shmctl(shm_id, IPC_RMID, NULL); // Clean up
-        return;
-    }
-    printf("Successfully attached huge page shared memory at %p\n", shm_addr);
-
-    int *data = (int *)shm_addr;
-    data[0] = 456;
-    printf("Data in huge page shared memory: %d\n", data[0]);
-
-    // Detach shared memory
-    if (shmdt(shm_addr) == -1) {
-        perror("shmdt failed");
-    }
-    // Mark the shared memory segment for deletion and will be deleted when all processes are separated.
-    if (shmctl(shm_id, IPC_RMID, NULL) == -1) {
-        perror("shmctl IPC_RMID failed");
-    }
-    printf("Successfully detached and marked shared memory for deletion.\n");
-}
-
-// 4. Hugepage file system (Hugetlbfs)
-// Principle: Specifically designed for file systems that support large pages (usually mounted on /mnt/huge).
-// High-frequency trading permanent configuration (mounting + large page reservation to ensure availability after restart):
-// Step 1: Reserve huge pages permanently (same as explicit huge page configuration)
-// sudo vim /etc/sysctl.conf
-// Newly added: vm.nr_hugepages = 10, execute sudo sysctl -p to take effect
-// Step 2: Permanently mount hugetlbfs to /mnt/huge (to avoid the need to remount after reboot)
-//          sudo vim /etc/fstab
-//          新增行：hugetlbfs  /mnt/huge  hugetlbfs  defaults  0  0
-//Execute sudo mkdir -p /mnt/huge to create the directory, and then execute sudo mount /mnt/huge to mount it immediately
-// After restarting, the system will automatically load the mount configuration from /etc/fstab
-// At this time, the files created in the /mnt/huge directory will be directly associated with the physical huge page memory, without the need for temporary mounting operations.
-// Advantages: Large pages can be identified and accessed through file paths, making them easy to manage and share.
-// Disadvantages: Root permission is required to mount hugetlbfs.
-void demonstrate_hugetlbfs() {
-    printf("\n--- Demonstrating Hugetlbfs ---\n");
-
-    const char *filepath = "/mnt/huge/my_huge_file"; // Depends on /mnt/huge permanent mounting (configured in /etc/fstab)
-    size_t size = 2 * 1024 * 1024; // 2MB
-
-    int fd = open(filepath, O_CREAT | O_RDWR, 0755);
-    if (fd == -1) {
-        perror("open hugetlbfs file failed. Make sure: 1. 'vm.nr_hugepages' is set in /etc/sysctl.conf; 2. hugetlbfs is mounted permanently via /etc/fstab (hugetlbfs /mnt/huge hugetlbfs defaults 0 0); 3. /mnt/huge is writable.");
-        return;
-    }
-
-    if (ftruncate(fd, size) == -1) {
-        perror("ftruncate failed");
-        close(fd);
-        return;
-    }
-
-    void *huge_mem = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-    if (huge_mem == MAP_FAILED) {
-        perror("mmap hugetlbfs file failed. Check if huge pages are reserved (via /etc/sysctl.conf) and hugetlbfs is mounted.");
-        close(fd);
-        return;
-    }
-    printf("Successfully mapped huge page memory from file at %p\n", huge_mem);
-
-    int *data = (int *)huge_mem;
-    data[0] = 789;
-    printf("Data in huge page file mapped memory: %d\n", data[0]);
-
-    if (munmap(huge_mem, size) == -1) {
-        perror("munmap failed");
-    }
-    close(fd);
-    unlink(filepath); // Clean the created files
-    printf("Successfully unmapped and deleted hugetlbfs file.\n");
-}
-
-int main() {
-    // Permanent configuration that must be completed before running:
-    // 1. Reserve explicit huge pages: set vm.nr_hugepages=10 in /etc/sysctl.conf or /etc/sysctl.d/, and execute sudo sysctl -p to take effect
-    // 2. Disable transparent huge pages: set vm.transparent_hugepage.enabled=never in /etc/sysctl.conf and execute sudo sysctl -p to take effect
-    // 3. Permanently mount hugetlbfs: add hugetlbfs /mnt/huge hugetlbfs defaults 0 0 in /etc/fstab, execute sudo mount /mnt/huge to take effect
-
-    demonstrate_static_huge_pages();
-    demonstrate_transparent_huge_pages();
-    demonstrate_systemv_huge_pages();
-    demonstrate_hugetlbfs();
-
-    printf("\n--- End of Huge Pages Demonstration ---\n");
-    return 0;
-}
-```
-
-hugePageAllocator (non-STL compatible), which can directly transform the implementation of object pools that rely on C-style arrays
-
-```cpp
-#pragma once
-
-#include <cstddef>
-#include <linux/mman.h>
-#include <sys/mman.h>
-#include <unistd.h>
-#include <cstdlib>
-#include <cstdio>
-#include <cstdint>
-
-#ifdef HUGE_PAGE_ALLOCATOR_DEBUG
-#define HPA_DEBUG_PRINT(fmt, ...) fprintf(stderr, "[HugePageAllocator] " fmt, ##__VA_ARGS__)
-#else
-#define HPA_DEBUG_PRINT(fmt, ...) do {} while(0)
-#endif
-
-/**
- * @brief A high-performance large page memory allocator
- * 
- * This allocator uses Linux's hugepages (mmap) to provide more efficient memory allocation
- */
-class HugePageAllocator
-{
-public:
-    // Large page type enumeration
-    enum class HugePageSize {
-        DEFAULT, // Let the system automatically select
-        HUGETLB_2MB, // 2MB huge page
-        HUGETLB_1GB // 1GB huge page
-    };
-
-    /**
-     * @brief allocates large page memory
-     * 
-     * @param size requested memory size (bytes)
-     * @param page_size specified large page size type
-     * @return pointer to allocated memory, or nullptr if allocation fails
-     */
-    static inline void* allocate(size_t size, HugePageSize page_size = HugePageSize::DEFAULT) noexcept
-    {
-        // Check if the requested size is valid
-        if (size == 0) [[unlikely]] {
-            HPA_DEBUG_PRINT("Invalid size: 0\n");
-            return nullptr;
-        }
-
-        void* ptr = MAP_FAILED;
-        
-        switch (page_size) {
-            case HugePageSize::HUGETLB_1GB: {
-                const size_t aligned_size = (size + HPA_PAGE_SIZE_1GB - 1) & ~(HPA_PAGE_SIZE_1GB - 1);
-                ptr = mmap(nullptr, aligned_size,
-                           PROT_READ | PROT_WRITE,
-                           MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB | MAP_HUGE_1GB,
-                           -1, 0);
-                
-                if (ptr == MAP_FAILED) [[unlikely]] {
-                    HPA_DEBUG_PRINT("1GB huge page allocation failed\n");
-                }
-                break;
-            }
-            
-            case HugePageSize::HUGETLB_2MB:
-            case HugePageSize::DEFAULT: // Use 2MB huge page by default
-            default: {
-                const size_t aligned_size = (size + HPA_PAGE_SIZE_2MB - 1) & ~(HPA_PAGE_SIZE_2MB - 1);
-                ptr = mmap(nullptr, aligned_size,
-                           PROT_READ | PROT_WRITE,
-                           MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB | MAP_HUGE_2MB,
-                           -1, 0);
-                
-                if (ptr == MAP_FAILED) [[unlikely]] {
-                    HPA_DEBUG_PRINT("2MB huge page allocation failed\n");
-                }
-                break;
-            }
-        }
-        
-        //If the specified large page allocation fails, fall back to the normal page
-        if (ptr == MAP_FAILED) [[unlikely]] {
-            const size_t page_size_bytes = (page_size == HugePageSize::HUGETLB_1GB) ? 
-                                           HPA_PAGE_SIZE_1GB : HPA_PAGE_SIZE_2MB;
-            const size_t aligned_size = (size + page_size_bytes - 1) & ~(page_size_bytes - 1);
-            
-            ptr = mmap(nullptr, aligned_size,
-                       PROT_READ | PROT_WRITE,
-                       MAP_PRIVATE | MAP_ANONYMOUS,
-                       -1, 0);
-            
-            if (ptr == MAP_FAILED) [[unlikely]] {
-                HPA_DEBUG_PRINT("Regular page allocation failed\n");
-                return nullptr;
-            }
-        }
-
-        return ptr;
-    }
-
-    /**
-     * @brief releases previously allocated huge page memory
-     * 
-     * @param ptr pointer to the memory to be released
-     * @param size The size of the memory to be released (bytes)
-     * @param page_size The large page size type used when allocating
-     */
-    static inline void deallocate(void* ptr, size_t size, HugePageSize page_size = HugePageSize::DEFAULT) noexcept
-    {
-        if (ptr == nullptr) [[unlikely]] {
-            return;
-        }
-        
-        const size_t page_size_bytes = (page_size == HugePageSize::HUGETLB_1GB) ? 
-                                       HPA_PAGE_SIZE_1GB : HPA_PAGE_SIZE_2MB;
-        const size_t aligned_size = (size + page_size_bytes - 1) & ~(page_size_bytes - 1);
-        
-        if (munmap(ptr, aligned_size) != 0) [[unlikely]] {
-            HPA_DEBUG_PRINT("munmap failed\n");
-        }
-    }
-
-    /**
-     * @brief Get the system page size
-     * 
-     * @return system page size (bytes)
-     */
-    static inline size_t get_page_size() noexcept
-    {
-        static const size_t page_size = []() noexcept -> size_t {
-            const long result = sysconf(_SC_PAGESIZE);
-            return (result != -1) ? static_cast<size_t>(result) : 4096UL;
-        }();
-        return page_size;
-    }
-
-private:
-    static constexpr size_t HPA_PAGE_SIZE_2MB = 2ULL * 1024ULL * 1024ULL;  // 2MB大页
-    static constexpr size_t HPA_PAGE_SIZE_1GB = 1ULL * 1024ULL * 1024ULL * 1024ULL;  // 1GB大页
-};
-```
-
-
-
-### 8. Inline and inline assembly
-inline related content
-
-1. In C++ language,`inline` At its core is a **link period directive** that addresses the **One Definition Rule (ODR)**.
-
-+ **Core**: allow the same`inline`function or variable in multiple compilation units (`.cpp`file) have exactly the same definition. The linker ensures that only one instance of the definition exists in the final program.
-+ **Main uses**:
-    - **Define function in header file**: This is`inline`The most fundamental purpose is to avoid "multiple definition" link errors caused by including header files in multiple places.
-    - **C++17 **`**inline**`**Variables**: Allows global variables to be defined in header files to ensure their uniqueness throughout the program (such as `inline AppConfig cfg;`）。
-+ **Implicit**`**inline**`** rule**:
-    - exist `class`/`struct` Declare internally defined member functions.
-    - All function templates and member functions of class templates.
-
-2. In the compiler,`inline` Considered a **Performance Optimization Suggestion**. The compiler decides whether to perform this optimization of function inlining.
-
-+ **Core**: Replace function calls with the function body itself, eliminating the fixed overhead of function calls.
-+ **Compiler decision-making authority**:
-    - `inline` Just a suggestion, the compiler has the right to ignore it. Compilers usually refuse inlining if a function is too large, complex, or recursive.
-    - The compiler will automatically inline any appropriate non-`**inline**`**Function**, at high optimization level (`-O2`, `-O3`) or via link-time optimization (LTO).
-+ **Forced inlining**:
-    - To override the compiler's judgment, use specific instructions`__attribute__((always_inline))`。
-
-3. Points to note:
-
-**<font style="color:rgb(25, 27, 31);">Lambdas are very easy to expand inline at compile time.</font>**
-
-**If the error handling function is inline, it will increase the instruction cache occupation of the fast path, resulting in an increased risk of instruction cache misses. **
-
-**Even if an error does not occur, inline error handling code will still occupy cache space and slow down the fast path. **
-
-**Pay more attention to the use of always_inline and noline**
-
-
-
-**Inline Assembly**
-
-**1. Definition and core role**
-
-Inline assembly is a technology that embeds assembly code directly into C++ files.`asm`、`_asm`、`__asm`or`__asm__`Keyword tags realize the hybrid programming mode of "using assembly optimization for part of the code and using C++ for the main body". Its core value is that it can directly access C++ variables/symbols without writing a separate assembly module, while retaining control over the underlying instructions.
-
-**2. Advantages and Disadvantages**
-
-| Advantages | Disadvantages |
-| --- | --- |
-| 1. Seamlessly integrate with C++ and directly access C++ variables, functions, and labels | 1. The syntax of different compilers is very different (MS/Intel vs GNU/Clang) |
-| 2. You only need to write assembly for the "parts that cannot be implemented in C++" | 2. You need to master the working principles of assembly language and compilers, which are prone to errors |
-| 3. The code is fully controllable and supports all x86 instructions | 3. It is difficult for the compiler to optimize across inline assembly (such as constant propagation, register allocation) |
-| 4. The compiler automatically handles calling conventions, register saving, and name modification | 4. Microsoft 64-bit compiler does not support inline assembly |
-| 5. Supports function inlining and is portable to multiple x86 platforms (GNU/Clang/Intel) | 5. VEX and non-VEX instructions may be mistakenly mixed, resulting in Intel CPU performance penalty |
-
-
-****
+---
 
 **MASM style inline assembly (Microsoft/Intel compilers)**
 
@@ -6314,7 +3329,7 @@ namespace Common {
 
 ```
 
-<font style="color:rgb(0, 0, 0);">The core idea of ​​Micro-Batching is to process multiple messages into one batch to reduce the fixed cost of single processing (message processing and calculation). However, batch processing that is too large will increase latency, and batch processing that is too small will not be able to take advantage of the batch size. Therefore, this processor passes</font>**<font style="color:rgb(0, 0, 0) !important;">Dynamically adjust batch size</font>**<font style="color:rgb(0, 0, 0);">, automatically select the optimal strategy based on the current message queue backlog:</font>
+<font style="color:rgb(0, 0, 0);">The core idea of Micro-Batching is to process multiple messages into one batch to reduce the fixed cost of single processing (message processing and calculation). However, batch processing that is too large will increase latency, and batch processing that is too small will not be able to take advantage of the batch size. Therefore, this processor passes</font>**<font style="color:rgb(0, 0, 0) !important;">Dynamically adjust batch size</font>**<font style="color:rgb(0, 0, 0);">, automatically select the optimal strategy based on the current message queue backlog:</font>
 
 + <font style="color:rgb(0, 0, 0);">When the queue backlog is small, use small batches to reduce delays;</font>
 + <font style="color:rgb(0, 0, 0);">When the queue is backlogged, use large batches to improve throughput.</font>
@@ -7057,7 +4072,7 @@ Try to place functions in sequence according to the call chain.
 + Key concept: critical stride = (total cache size) / (number of methods)
 + The critical step size means that if the distance of variables in memory is a multiple of the critical step size, they will compete for the same cache line, causing cache contention
 
-In matrix operations, severe cache contention can result if the row size of the matrix is ​​a multiple of the critical step size. For example:
+In matrix operations, severe cache contention can result if the row size of the matrix is a multiple of the critical step size. For example:
 
 + L1 cache critical step size is 4KB
 + If the matrix has 1024 ints per row (4 bytes per int), then each row size is 4096 bytes = 4KB
@@ -7078,8 +4093,6 @@ To avoid this problem,<font style="background-color:rgb(245, 247, 255);">Use til
 | Thread local storage | Because the underlying access design requires one more pointer dereference and is less efficient than stack storage, the thread stack is preferred for storage |
 | Heap storage (new/delete) | prone to memory fragmentation; high operating overhead; there is a risk of memory leaks and may suffer from poor cache performance |
 | Intra-class variables | Non-static members are stored continuously in the order of declaration; static members are stored in the static area |
-
-
 
 
 **8. Pay attention to the channel and rank parameters of the memory hardware to ensure memory load balancing**
@@ -7154,7 +4167,7 @@ static inline size_t calculate_padding(size_t obj_size, int channels) {
 + <font style="color:rgb(0, 0, 0);">virtual function call;</font>
 + <font style="color:rgb(0, 0, 0);">Function pointer (and function name).</font>
 
-<font style="color:rgb(27, 28, 29);"></font>
+
 
 **<font style="color:rgb(27, 28, 29);">1. </font>**`**<font style="color:rgb(87, 91, 95);">if-else</font>**`**<font style="color:rgb(27, 28, 29);"> statement</font>**
 
@@ -7180,7 +4193,7 @@ static inline size_t calculate_padding(size_t obj_size, int channels) {
 
 `<font style="color:rgb(87, 91, 95);">switch</font>`<font style="color:rgb(27, 28, 29);"> It is a multi-way jump. Its efficiency depends on </font>`<font style="color:rgb(87, 91, 95);">case</font>`<font style="color:rgb(27, 28, 29);"> Distribution of labels.</font>
 
-+ **<font style="color:rgb(27, 28, 29);">Inefficiency:</font>**<font style="color:rgb(27, 28, 29);"> if </font>`<font style="color:rgb(87, 91, 95);">case</font>`<font style="color:rgb(27, 28, 29);"> The distribution of values ​​is sparse (e.g. </font>`<font style="color:rgb(87, 91, 95);">1, 10, 1000</font>`<font style="color:rgb(27, 28, 29);">), the compiler usually implements it as a tree </font>`<font style="color:rgb(87, 91, 95);">if-else</font>`<font style="color:rgb(27, 28, 29);"> Tree.</font>
++ **<font style="color:rgb(27, 28, 29);">Inefficiency:</font>**<font style="color:rgb(27, 28, 29);"> if </font>`<font style="color:rgb(87, 91, 95);">case</font>`<font style="color:rgb(27, 28, 29);"> The distribution of values is sparse (e.g. </font>`<font style="color:rgb(87, 91, 95);">1, 10, 1000</font>`<font style="color:rgb(27, 28, 29);">), the compiler usually implements it as a tree </font>`<font style="color:rgb(87, 91, 95);">if-else</font>`<font style="color:rgb(27, 28, 29);"> Tree.</font>
 + **<font style="color:rgb(27, 28, 29);">Efficient situation (optimization skills):</font>**
     - <font style="color:rgb(27, 28, 29);">Will </font>`<font style="color:rgb(87, 91, 95);">case</font>`<font style="color:rgb(27, 28, 29);"> The value is set to </font>**<font style="color:rgb(27, 28, 29);">Continuous and increasing</font>**<font style="color:rgb(27, 28, 29);"> an integer (such as </font>`<font style="color:rgb(87, 91, 95);">0, 1, 2, 3, ...</font>`<font style="color:rgb(27, 28, 29);">）。</font>
     - <font style="color:rgb(27, 28, 29);">In this case, the compiler will optimize it to </font>**<font style="color:rgb(27, 28, 29);">Jump Table,</font>**<font style="color:rgba(0, 0, 0, 0.85);">Essentially, it is an array that stores code addresses.</font><font style="color:rgb(27, 28, 29);">, jump directly to the target code through one calculation and memory addressing,</font><font style="color:rgba(0, 0, 0, 0.85);">Implement branch-free multiplexing, and the efficiency has nothing to do with the number of cases.</font>
@@ -7223,7 +4236,7 @@ void process_order(const Order& order) {
 }
 ```
 
-<font style="color:rgb(27, 28, 29);"></font>
+
 
 **<font style="color:rgb(27, 28, 29);">6.</font>****branchless calculation**
 
@@ -7245,7 +4258,7 @@ int sign_branchless(int x) {
 }
 ```
 
-**<font style="color:rgb(27, 28, 29);"></font>**
+
 
 **<font style="color:rgb(27, 28, 29);">7. Loop Unrolling</font>**
 
@@ -7404,7 +4417,7 @@ int main() {
 }
 ```
 
-****
+---
 
 `std::conditional`It is used to select one of two types based on conditions at compile time. The decision-making process is completely completed at compile time, with no runtime overhead.  
 
@@ -7566,7 +4579,7 @@ if (ptr != nullptr) [[likely]] {
 
 In scenarios where more forced separation is required, extract the slow path code into a separate function.  
 
-+ **<font style="color:rgb(27, 28, 29);">principle:</font>**<font style="color:rgb(27, 28, 29);">  The machine code of the slow path function will be placed in the cold code area of ​​the binary file by the linker (</font>`<font style="color:rgb(27, 28, 29);">.text.cold</font>`<font style="color:rgb(27, 28, 29);">), physically separated from the hot path code to avoid I-Cache pollution.  </font>
++ **<font style="color:rgb(27, 28, 29);">principle:</font>**<font style="color:rgb(27, 28, 29);">  The machine code of the slow path function will be placed in the cold code area of the binary file by the linker (</font>`<font style="color:rgb(27, 28, 29);">.text.cold</font>`<font style="color:rgb(27, 28, 29);">), physically separated from the hot path code to avoid I-Cache pollution.  </font>
 
 ```cpp
 // Mark this function as not to be inlined and as a cold path
@@ -7586,15 +4599,15 @@ void process_packet_refactored(const Packet& pkt) {
 }
 ```
 
-Relatively speaking, there is <font style="color:rgba(0, 0, 0, 0.85);background-color:rgba(0, 0, 0, 0.06);">__attribute__((hot)) </font><font style="color:rgba(0, 0, 0, 0.85);">Used to mark functions as "hot functions", i.e. functions that execute more frequently or are on a performance-critical path.</font>
+Relatively speaking, there is **<font style="color:rgba(0, 0, 0, 0.85);">attribute</font>**<font style="color:rgba(0, 0, 0, 0.85);">((hot)) </font><font style="color:rgba(0, 0, 0, 0.85);">Used to mark functions as "hot functions", i.e. functions that execute more frequently or are on a performance-critical path.</font>
 
-<font style="color:rgba(0, 0, 0, 0.85);"></font>
 
-**<font style="color:rgba(0, 0, 0, 0.85);">11. Relying on cpu branch predictor</font>****<font style="color:rgb(0, 0, 0) !important;background-color:rgb(249, 250, 251);">Historical execution records</font>**
 
-<font style="background-color:rgba(255, 255, 255, 0);">Branch Predictor records branch instructions</font>**<font style="background-color:rgba(255, 255, 255, 0);">Historical execution records</font>**<font style="background-color:rgba(255, 255, 255, 0);">(As many times in the past</font>`<font style="background-color:rgba(255, 255, 255, 0);">if</font>`<font style="background-color:rgba(255, 255, 255, 0);">In the judgment, the frequency and regularity of "conditions are met" or "conditions are not met"), and based on these historical data, the direction of the current branch can be "predicted in advance" (for example, "This time</font>`<font style="background-color:rgba(255, 255, 255, 0);">if</font>`<font style="background-color:rgba(255, 255, 255, 0);">"High probability of meeting the conditions");</font>
+**<font style="color:rgba(0, 0, 0, 0.85);">11. Relying on cpu branch predictor</font>************<font style="color:rgb(0, 0, 0) !important;background-color:rgb(249, 250, 251);">Historical execution records</font>**
 
-<font style="background-color:rgba(255, 255, 255, 0);">The essence of case2 being faster is that "the sorted data regularizes branch judgments and greatly reduces the rate of branch misjudgments." By sorting,</font>`<font style="background-color:rgba(255, 255, 255, 0);">if</font>`<font style="background-color:rgba(255, 255, 255, 0);">The branches of judgment are presented</font>**<font style="background-color:rgba(255, 255, 255, 0);">stable law</font>**<font style="background-color:rgba(255, 255, 255, 0);">, let the branch predictor grasp the rules.</font>
+Branch Predictor records branch instructions**Historical execution records**(As many times in the past`<font style="background-color:rgba(255, 255, 255, 0);">if</font>`In the judgment, the frequency and regularity of "conditions are met" or "conditions are not met"), and based on these historical data, the direction of the current branch can be "predicted in advance" (for example, "This time`<font style="background-color:rgba(255, 255, 255, 0);">if</font>`"High probability of meeting the conditions");
+
+The essence of case2 being faster is that "the sorted data regularizes branch judgments and greatly reduces the rate of branch misjudgments." By sorting,`<font style="background-color:rgba(255, 255, 255, 0);">if</font>`The branches of judgment are presented**stable law**, let the branch predictor grasp the rules.
 
 ```cpp
 #include <iostream>
@@ -7903,7 +4916,7 @@ void print_vector(const std::vector<int>& thing) {
 }
 ```
 
-****
+---
 
 **2. const objects and const member functions: safe access to read-only objects**
 
@@ -7998,7 +5011,7 @@ const int s_myconst_const = somefunc();
 
 Templates are a "powerful tool" for compile-time optimization, and `const` Variables can be used as "non-type parameters" of templates to achieve "template instantiation parameters determined during compilation", further improving code pertinence and efficiency.
 
-For example, in the vector computing scenario of the AI ​​engine, you can use `const` Constants specify vector dimensions, and the template generates dedicated code for each dimension:
+For example, in the vector computing scenario of the AI engine, you can use `const` Constants specify vector dimensions, and the template generates dedicated code for each dimension:
 
 ```cpp
 // Template class: use const constants as non-type parameters to specify vector dimensions
@@ -8068,8 +5081,6 @@ Precalculation can be completed at four nodes: "before compilation, during compi
 | When used for the first time at runtime | Lazy Evaluation, filled when used for the first time | Avoid pre-calculation and memory usage of unused data | There is a calculation delay in the first call, and thread safety control needs to be added | Backup functions for low-frequency use, dynamic input range |
 
 
-
-
 **C++26 Expansion Statements: Compile-time loops (future support)**
 
  The core syntax form of Expansion Statements is`template for`, the compiler directly copies the loop body code N times without generating a jump instruction (jmp).
@@ -8082,7 +5093,7 @@ template for (constexpr auto i : 0..4) {
 }
 ```
 
-`0..4`Represents a compile-time generated integer sequence, loop variable`i`Take values ​​from 0 to 4 in each iteration.
+`0..4`Represents a compile-time generated integer sequence, loop variable`i`Take values from 0 to 4 in each iteration.
 
  Expansion Statements work based on the two-phase nature of C++ template metaprogramming. At compile time, the compiler instantiates the template and unrolls the loop body, converting the loop into a series of static codes. This unwinding process occurs inside the compiler without incurring any runtime overhead, while avoiding the instantiation bloat problem that can occur in traditional recursive templates.
 
@@ -9081,14 +6092,12 @@ double Func2(double x) {
 | C++20 | `[[nodiscard]]` | Although pure functions are not marked directly, they can be used together with |
 
 
- 
-
 ### 18.<font style="color:rgb(0, 0, 0) !important;">Strength weakening optimization and arithmetic optimization</font>
 **Integer variable and operator operation efficiency table**
 
 | Operation Type | Intensity Level | Typical CPU Cycles | Key Notes and Optimizations |
 | --- | --- | --- | --- |
-| Addition (+), subtraction (-), bit operations (&, |, ^, <<, >>, etc.) | 1 (weakest) | ~1 | Native hardware support, extremely fast; no additional optimization requirements, just use it directly. |
+| Addition (+), subtraction (-), bit operations (&, | , ^, <<, >>, etc.) | 1 (weakest) | ~1 |
 | Multiplication (*) | 2 (medium) | ~3 - 4 | The hardware is highly optimized and fast; the compiler will automatically optimize simple scenarios without excessive manual intervention. |
 | Division (/), modulo (%) (unsigned integer) | 3 (stronger) | ~40 - 80 | Division/modulo of unsigned integers is faster than signed integers; it should be avoided in high-frequency loops, and you can rely on the compiler to optimize "constant division" into a multiplication + shift operation. |
 | Division (/), modulo (%) (signed integer) | 3 (strongest) | ~40 - 80 (usually slightly slower than unsigned) | Signed integer needs to process the sign bit, which adds additional logic overhead, and is slightly slower than unsigned integer; like unsigned scenarios, high-frequency scenarios need to be avoided as much as possible or rely on compiler optimization. |
@@ -9099,9 +6108,9 @@ double Func2(double x) {
 
 | Operation Types | Register Type Reference | Typical CPU Cycles | Key Notes and Optimizations |
 | --- | --- | --- | --- |
-| Addition (+), subtraction (-) | |
-| Multiplication (*) |`float`and`double`Mixed), otherwise precision conversion overhead will be triggered. |
-| Division (/) |`-ffast-math`) to balance speed "when accuracy requirements are relaxed". |
+| Addition (+), subtraction (-) |  |  |  |
+| Multiplication (*) | `float`and`double`Mixed), otherwise precision conversion overhead will be triggered. |  |  |
+| Division (/) | `-ffast-math`) to balance speed "when accuracy requirements are relaxed". |  |  |
 | Accuracy selection (`float` vs `double`) | - | - | In non-vector scenarios,`double`(8 bytes) with`float`(4 bytes) Operation efficiency is **similar**; small array/large array is preferred`float`, which can save cache space and improve cache hit rate. |
 
 
@@ -9200,7 +6209,7 @@ void process_optimized(float* v, int n) {
 }
 ```
 
-****
+---
 
 **(4) Integer arithmetic replaces floating point arithmetic (limited precision scenario)**
 
@@ -9228,11 +6237,11 @@ int cents = total_cents % 100;
 
 **3. Avoidance of inefficient operations: for remainder (**`**%**`**) with type conversion**
 
-****
+---
 
 **1. Avoid remainder operation (**`**%**`**): Replace with branches or bit operations**
 
-****
+---
 
 **(1) Loop counting scenario: Use branch instead of remainder**
 
@@ -9255,7 +6264,7 @@ if (x == N - 1) {
 x = (x == N - 1) ? 0 : x + 1;
 ```
 
-****
+---
 
 **(2) The remainder of the power of 2: replaced by bit operations**
 
@@ -9285,7 +6294,7 @@ unsigned char rem = static_cast<unsigned char>(x); // result=255, equivalent to 
 
 | **Method** | **Instructions** |
 | --- | --- |
-| **Use**`**static_cast**`<br/>**Perform explicit conversion and avoid implicit conversion** | Explicit conversion avoids potential errors caused by C-style casts and the performance loss of implicit conversions |
+| **Use**`**static_cast**`   **Perform explicit conversion and avoid implicit conversion** | Explicit conversion avoids potential errors caused by C-style casts and the performance loss of implicit conversions |
 | **Keep data type precision consistent in critical calculations** | Mixed precision may cause additional conversion instructions and reduce performance. |
 | **Avoid mixing integer and floating-point operations** | Mixing integer and floating-point types requires additional conversion, which increases calculation overhead. Priority is given to unifying floating point or integer processing. |
 | **Create a type-safe API to avoid mixed type calls** | Use function overloading or templates to design APIs to force parameter types to be consistent and reduce the risk of implicit conversions. |
@@ -9356,7 +6365,7 @@ void compute_optimized(float* out, int* in, int n) {
 
 **4. Expression conversion: reducing redundant calculations and optimizing structures**
 
-****
+---
 
 **1. Common Subexpression Elimination (CSE)**
 
@@ -9377,12 +6386,12 @@ float x = temp + temp + sqrtf(temp); // Calculate i*i only once
 
 **2. Algebraic identity optimization: reducing the number of operations**
 
-| <font style="color:rgb(15, 17, 21);">Before optimization (redundant operations)</font> | <font style="color:rgb(15, 17, 21);">After optimization (reducing operations)</font> | <font style="color:rgb(15, 17, 21);">Changes in the number of operations</font> |
+| Before optimization (redundant operations) | After optimization (reducing operations) | Changes in the number of operations |
 | --- | --- | --- |
 | <font style="color:rgb(15, 17, 21);">a</font>_<font style="color:rgb(15, 17, 21);">x + a</font>_<font style="color:rgb(15, 17, 21);">and</font> | <font style="color:rgb(15, 17, 21);">a*(x + y)</font> | <font style="color:rgb(15, 17, 21);">2 multiplications + 1 addition → 1 multiplication + 1 addition</font> |
 | <font style="color:rgb(15, 17, 21);">-x + -y</font> | <font style="color:rgb(15, 17, 21);">-(x + y)</font> | <font style="color:rgb(15, 17, 21);">2 negatives + 1 addition → 1 addition + 1 negative</font> |
-| <font style="color:rgb(15, 17, 21);">(a && b) || (a && c)</font> | <font style="color:rgb(15, 17, 21);">a && (b || c)</font> | <font style="color:rgb(15, 17, 21);">2 times AND + 1 time OR → 1 time AND + 1 time OR (while reducing the number of evaluations of a)</font> |
-| <font style="color:rgb(15, 17, 21);">!a && !b</font> | <font style="color:rgb(15, 17, 21);">!(a || b)</font> | <font style="color:rgb(15, 17, 21);">2 times NOT + 1 time AND → 1 time OR + 1 time NOT</font> |
+| <font style="color:rgb(15, 17, 21);">(a && b)</font> |  | (a && c) |
+| <font style="color:rgb(15, 17, 21);">!a && !b</font> | <font style="color:rgb(15, 17, 21);">!(a</font> |  |
 
 
 **Example: Vector Operation Optimization in AI**  
@@ -9408,7 +6417,7 @@ float dot_product_optimized(const float* a, const float* w, const float* b, int 
 }
 ```
 
-****
+---
 
 **3. Compile-time constant folding (Constant Folding)**
 
@@ -9507,7 +6516,9 @@ void preorder_iterative(Node* root) {
 }
 ```
 
-    2. **Tail recursion elimination**: For tail recursion (recursive call is the last step of the function), rewrite it as a loop to avoid accumulation of stack overhead.
+```plain
+2. **Tail recursion elimination**: For tail recursion (recursive call is the last step of the function), rewrite it as a loop to avoid accumulation of stack overhead.
+```
 
 ```cpp
 void preorder_tail_rec(Node* root) {
@@ -9519,7 +6530,7 @@ void preorder_tail_rec(Node* root) {
 }
 ```
 
-****
+---
 
 **(2) Function parameter passing: value passing vs. reference passing**
 
@@ -9580,7 +6591,8 @@ Modern processors (SSE and subsequent instruction sets) provide specific instruc
 **<font style="color:rgb(27, 28, 29);">cache prefetch</font>**<font style="color:rgb(27, 28, 29);">Is a hardware or software technology that loads data from slower main memory into the faster CPU cache in advance before it is officially requested by the CPU. The core idea is to predict the data that the program may need in the future and move it closer to the computing core in advance, thereby hiding the latency of memory access and preventing the CPU from being idle waiting for data.</font>
 
 <!-- 这是一张图片，ocr 内容为： -->
-![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1754008438918-0e899738-57c1-460f-95cd-1b338f5e7c91.png)<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1754008438918-0e899738-57c1-460f-95cd-1b338f5e7c91.png)  
+<!-- 这是一张图片，ocr 内容为： -->
 ![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1754008467997-d4a71ab8-cc27-4a5f-8640-b6d7ffbdab21.png)
 
 <!-- 这是一张图片，ocr 内容为： -->
@@ -9596,15 +6608,25 @@ Modern processors (SSE and subsequent instruction sets) provide specific instruc
 void __builtin_prefetch(const void *addr, int rw, int locality);
 ```
 
-    - `<font style="color:rgb(87, 91, 95);">addr</font>`<font style="color:rgb(27, 28, 29);">: The memory address of the data to be prefetched.</font>
-    - `<font style="color:rgb(87, 91, 95);">rw</font>`<font style="color:rgb(27, 28, 29);"> (read and write):</font>
-        * `<font style="color:rgb(87, 91, 95);">0</font>`<font style="color:rgb(27, 28, 29);"> (Default): Prefetch for Read operations.</font>
-        * `<font style="color:rgb(87, 91, 95);">1</font>`<font style="color:rgb(27, 28, 29);">: Prefetch for write operations. This means that we are going to write data to this address soon, and the CPU needs to obtain exclusive ownership of the cache line in advance.</font>
-    - `<font style="color:rgb(87, 91, 95);">locality</font>`<font style="color:rgb(27, 28, 29);"> (temporal locality):</font>
-        * `<font style="color:rgb(87, 91, 95);">3</font>`<font style="color:rgb(27, 28, 29);"> (default): </font>**<font style="color:rgb(27, 28, 29);">High temporal locality</font>**<font style="color:rgb(27, 28, 29);">. Once the data is loaded, it is expected to be used multiple times in a short period of time. This loads the data into the cache closest to the CPU core (such as the L1 cache).</font>
-        * `<font style="color:rgb(87, 91, 95);">2</font>`<font style="color:rgb(27, 28, 29);">: </font>**<font style="color:rgb(27, 28, 29);">medium temporal locality</font>**<font style="color:rgb(27, 28, 29);">。</font>
-        * `<font style="color:rgb(87, 91, 95);">1</font>`<font style="color:rgb(27, 28, 29);">: </font>**<font style="color:rgb(27, 28, 29);">low temporal locality</font>**<font style="color:rgb(27, 28, 29);">. Once the data is loaded, it is expected to be used only once or a few times. This typically loads the data into a further cache (such as the L2 or L3 cache), avoiding polluting the L1 cache.</font>
-        * `<font style="color:rgb(87, 91, 95);">0</font>`<font style="color:rgb(27, 28, 29);">: </font>**<font style="color:rgb(27, 28, 29);">No temporal locality</font>**<font style="color:rgb(27, 28, 29);">. Once the data is loaded, it is not expected to be used in the near future. This uses a special "Non-Temporal" loading method, where the data is quickly removed from the cache after use to avoid polluting the entire cache hierarchy. This is very useful for streaming operations that require reading and writing large amounts of data at once (such as video encoding, memory copying).</font>
+```plain
+- `<font style="color:rgb(87, 91, 95);">addr</font>`<font style="color:rgb(27, 28, 29);">: The memory address of the data to be prefetched.</font>
+
+- `<font style="color:rgb(87, 91, 95);">rw</font>`<font style="color:rgb(27, 28, 29);"> (read and write):</font>
+
+    * `<font style="color:rgb(87, 91, 95);">0</font>`<font style="color:rgb(27, 28, 29);"> (Default): Prefetch for Read operations.</font>
+
+    * `<font style="color:rgb(87, 91, 95);">1</font>`<font style="color:rgb(27, 28, 29);">: Prefetch for write operations. This means that we are going to write data to this address soon, and the CPU needs to obtain exclusive ownership of the cache line in advance.</font>
+
+- `<font style="color:rgb(87, 91, 95);">locality</font>`<font style="color:rgb(27, 28, 29);"> (temporal locality):</font>
+
+    * `<font style="color:rgb(87, 91, 95);">3</font>`<font style="color:rgb(27, 28, 29);"> (default): </font>**<font style="color:rgb(27, 28, 29);">High temporal locality</font>**<font style="color:rgb(27, 28, 29);">. Once the data is loaded, it is expected to be used multiple times in a short period of time. This loads the data into the cache closest to the CPU core (such as the L1 cache).</font>
+
+    * `<font style="color:rgb(87, 91, 95);">2</font>`<font style="color:rgb(27, 28, 29);">: </font>**<font style="color:rgb(27, 28, 29);">medium temporal locality</font>**<font style="color:rgb(27, 28, 29);">。</font>
+
+    * `<font style="color:rgb(87, 91, 95);">1</font>`<font style="color:rgb(27, 28, 29);">: </font>**<font style="color:rgb(27, 28, 29);">low temporal locality</font>**<font style="color:rgb(27, 28, 29);">. Once the data is loaded, it is expected to be used only once or a few times. This typically loads the data into a further cache (such as the L2 or L3 cache), avoiding polluting the L1 cache.</font>
+
+    * `<font style="color:rgb(87, 91, 95);">0</font>`<font style="color:rgb(27, 28, 29);">: </font>**<font style="color:rgb(27, 28, 29);">No temporal locality</font>**<font style="color:rgb(27, 28, 29);">. Once the data is loaded, it is not expected to be used in the near future. This uses a special "Non-Temporal" loading method, where the data is quickly removed from the cache after use to avoid polluting the entire cache hierarchy. This is very useful for streaming operations that require reading and writing large amounts of data at once (such as video encoding, memory copying).</font>
+```
 
 ```cpp
 #define PREFETCH_DISTANCE 8 // Prefetch the next 8 elements
@@ -9624,7 +6646,7 @@ void process_array(int *data, int n) {
 
 <font style="color:rgb(27, 28, 29);">The key here is to choose the right </font>`<font style="color:rgb(87, 91, 95);">PREFETCH_DISTANCE</font>`<font style="color:rgb(27, 28, 29);">. This distance needs to be large enough to ensure that the CPU processes the current </font>`<font style="color:rgb(87, 91, 95);">i</font>`<font style="color:rgb(27, 28, 29);"> arrive </font>`<font style="color:rgb(87, 91, 95);">i+PREFETCH_DISTANCE</font>`<font style="color:rgb(27, 28, 29);"> between elements, the memory prefetch operation has enough time to complete.</font>
 
-**<font style="color:rgb(27, 28, 29);"></font>**
+
 
 **<font style="color:rgb(27, 28, 29);">Intel C++ Compiler (ICL/ICX)</font>**
 
@@ -9635,10 +6657,16 @@ void process_array(int *data, int n) {
 
 `<font style="color:rgb(87, 91, 95);">hint</font>`<font style="color:rgb(27, 28, 29);"> The parameters directly correspond to the processor's prefetch instructions:</font>
 
-    - `<font style="color:rgb(87, 91, 95);">_MM_HINT_T0</font>`<font style="color:rgb(27, 28, 29);">: Prefetch to all levels of cache (usually L1). correspond </font>`<font style="color:rgb(87, 91, 95);">PREFETCHT0</font>`<font style="color:rgb(27, 28, 29);"> instruction. Equivalent to </font>`<font style="color:rgb(87, 91, 95);">__builtin_prefetch</font>`<font style="color:rgb(27, 28, 29);"> the locality </font>`<font style="color:rgb(87, 91, 95);">3</font>`<font style="color:rgb(27, 28, 29);">。</font>
-    - `<font style="color:rgb(87, 91, 95);">_MM_HINT_T1</font>`<font style="color:rgb(27, 28, 29);">: Prefetch to L2 cache and above. correspond </font>`<font style="color:rgb(87, 91, 95);">PREFETCHT1</font>`<font style="color:rgb(27, 28, 29);"> instruction.</font>
-    - `<font style="color:rgb(87, 91, 95);">_MM_HINT_T2</font>`<font style="color:rgb(27, 28, 29);">: Prefetch to L3 cache and above (if present). correspond </font>`<font style="color:rgb(87, 91, 95);">PREFETCHT2</font>`<font style="color:rgb(27, 28, 29);"> instruction.</font>
-    - `<font style="color:rgb(87, 91, 95);">_MM_HINT_NTA</font>`<font style="color:rgb(27, 28, 29);">: </font>**<font style="color:rgb(27, 28, 29);">Non-Temporal Aligned</font>**<font style="color:rgb(27, 28, 29);">. Atemporal prefetching, loads into cache and minimizes cache pollution. correspond </font>`<font style="color:rgb(87, 91, 95);">PREFETCHNTA</font>`<font style="color:rgb(27, 28, 29);"> instruction. Equivalent to </font>`<font style="color:rgb(87, 91, 95);">__builtin_prefetch</font>`<font style="color:rgb(27, 28, 29);"> the locality </font>`<font style="color:rgb(87, 91, 95);">0</font>`<font style="color:rgb(27, 28, 29);">。</font>
+```plain
+- `<font style="color:rgb(87, 91, 95);">_MM_HINT_T0</font>`<font style="color:rgb(27, 28, 29);">: Prefetch to all levels of cache (usually L1). correspond </font>`<font style="color:rgb(87, 91, 95);">PREFETCHT0</font>`<font style="color:rgb(27, 28, 29);"> instruction. Equivalent to </font>`<font style="color:rgb(87, 91, 95);">__builtin_prefetch</font>`<font style="color:rgb(27, 28, 29);"> the locality </font>`<font style="color:rgb(87, 91, 95);">3</font>`<font style="color:rgb(27, 28, 29);">。</font>
+
+- `<font style="color:rgb(87, 91, 95);">_MM_HINT_T1</font>`<font style="color:rgb(27, 28, 29);">: Prefetch to L2 cache and above. correspond </font>`<font style="color:rgb(87, 91, 95);">PREFETCHT1</font>`<font style="color:rgb(27, 28, 29);"> instruction.</font>
+
+- `<font style="color:rgb(87, 91, 95);">_MM_HINT_T2</font>`<font style="color:rgb(27, 28, 29);">: Prefetch to L3 cache and above (if present). correspond </font>`<font style="color:rgb(87, 91, 95);">PREFETCHT2</font>`<font style="color:rgb(27, 28, 29);"> instruction.</font>
+
+- `<font style="color:rgb(87, 91, 95);">_MM_HINT_NTA</font>`<font style="color:rgb(27, 28, 29);">: </font>**<font style="color:rgb(27, 28, 29);">Non-Temporal Aligned</font>**<font style="color:rgb(27, 28, 29);">. Atemporal prefetching, loads into cache and minimizes cache pollution. correspond </font>`<font style="color:rgb(87, 91, 95);">PREFETCHNTA</font>`<font style="color:rgb(27, 28, 29);"> instruction. Equivalent to </font>`<font style="color:rgb(87, 91, 95);">__builtin_prefetch</font>`<font style="color:rgb(27, 28, 29);"> the locality </font>`<font style="color:rgb(87, 91, 95);">0</font>`<font style="color:rgb(27, 28, 29);">。</font>
+```
+
 + **<font style="color:rgb(27, 28, 29);">Compiler Directives (Pragma/Directive)</font>**<font style="color:rgb(27, 28, 29);">:</font>
 
 ```cpp
@@ -9647,9 +6675,13 @@ void process_array(int *data, int n) {
 
 <font style="color:rgb(27, 28, 29);">This directive tells the compiler to automatically generate prefetch instructions for the specified variables in the loop.</font>
 
-    - `<font style="color:rgb(87, 91, 95);">variable</font>`<font style="color:rgb(27, 28, 29);">: Array or pointer to be prefetched.</font>
-    - `<font style="color:rgb(87, 91, 95);">hint</font>`<font style="color:rgb(27, 28, 29);">: Optional, 0-3, corresponding to T0, T1, T2, NTA.</font>
-    - `<font style="color:rgb(87, 91, 95);">distance</font>`<font style="color:rgb(27, 28, 29);">: Optional, specifies how many iterations of data to prefetch.</font>
+```plain
+- `<font style="color:rgb(87, 91, 95);">variable</font>`<font style="color:rgb(27, 28, 29);">: Array or pointer to be prefetched.</font>
+
+- `<font style="color:rgb(87, 91, 95);">hint</font>`<font style="color:rgb(27, 28, 29);">: Optional, 0-3, corresponding to T0, T1, T2, NTA.</font>
+
+- `<font style="color:rgb(87, 91, 95);">distance</font>`<font style="color:rgb(27, 28, 29);">: Optional, specifies how many iterations of data to prefetch.</font>
+```
 
 ```cpp
 void process_array_pragma(int *data, int n) {
@@ -10291,11 +7323,11 @@ Make sure the critical code itself is in the CPU cache.
 
 <font style="color:rgb(25, 27, 31);">Frequently run a fake execution path to read out frequently used data and store it in the cache</font>
 
-<font style="color:rgb(25, 27, 31);"></font>
+
 
 <font style="color:rgb(25, 27, 31);">x86 CPU instructions related to cache</font>
 
-| <font style="color:rgb(25, 27, 31);">Instruction category</font> | <font style="color:rgb(25, 27, 31);">Command name</font> | <font style="color:rgb(25, 27, 31);">Function</font> | <font style="color:rgb(25, 27, 31);">Cache level impact</font> | <font style="color:rgb(25, 27, 31);">Persistent memory interaction</font> | <font style="color:rgb(25, 27, 31);">Applicable scenarios</font> | <font style="color:rgb(25, 27, 31);">Performance impact</font> |
+| Instruction category | Command name | Function | Cache level impact | Persistent memory interaction | Applicable scenarios | Performance impact |
 | --- | --- | --- | --- | --- | --- | --- |
 | <font style="color:rgb(25, 27, 31);">Cache refresh</font> | <font style="color:rgb(25, 27, 31);">CLFLUSH</font> | <font style="color:rgb(25, 27, 31);">Write back and invalidate cache line</font> | <font style="color:rgb(25, 27, 31);">L1/L2/L3</font> | <font style="color:rgb(25, 27, 31);">Need to cooperate with FENCE to ensure persistence</font> | <font style="color:rgb(25, 27, 31);">Scenarios where data persistence needs to be ensured</font> | <font style="color:rgb(25, 27, 31);">High latency, high overhead, affecting subsequent cache hits</font> |
 | <font style="color:rgb(25, 27, 31);">Cache refresh</font> | <font style="color:rgb(25, 27, 31);">CLFLUSHOPT</font> | <font style="color:rgb(25, 27, 31);">Write back and invalidate cache lines in parallel</font> | <font style="color:rgb(25, 27, 31);">L1/L2/L3</font> | <font style="color:rgb(25, 27, 31);">Need to cooperate with SFENCE to ensure order</font> | <font style="color:rgb(25, 27, 31);">Scenarios for batch refreshing cache lines</font> | <font style="color:rgb(25, 27, 31);">Medium latency, low overhead, concurrent execution</font> |
@@ -10315,9 +7347,6 @@ Make sure the critical code itself is in the CPU cache.
 | <font style="color:rgb(25, 27, 31);">system level control</font> | <font style="color:rgb(25, 27, 31);">WBINVD</font> | <font style="color:rgb(25, 27, 31);">Write back and invalidate all caches</font> | <font style="color:rgb(25, 27, 31);">L1/L2/L3</font> | <font style="color:rgb(25, 27, 31);">none</font> | <font style="color:rgb(25, 27, 31);">System-level cache management</font> | <font style="color:rgb(25, 27, 31);">Extremely high latency, only used by the operating system</font> |
 | <font style="color:rgb(25, 27, 31);">system level control</font> | <font style="color:rgb(25, 27, 31);">INVD</font> | <font style="color:rgb(25, 27, 31);">Invalidate all internal caches</font> | <font style="color:rgb(25, 27, 31);">L1/L2/L3</font> | <font style="color:rgb(25, 27, 31);">none</font> | <font style="color:rgb(25, 27, 31);">special testing environment</font> | <font style="color:rgb(25, 27, 31);">High latency, may result in data loss</font> |
 
-
-<font style="color:rgb(25, 27, 31);">   
-</font>
 
 <!-- 这是一张图片，ocr 内容为： -->
 ![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1753491708830-db9b5c2b-9a45-43a8-b14d-3baf38c25974.png)
@@ -10367,7 +7396,7 @@ Make sure the critical code itself is in the CPU cache.
 + For example: 128-bit XMM registers can be organized into 8 16-bit integers or 4 float vectors under the SSE2 instruction set
 + 64-bit MMX registers should be avoided as they cannot be mixed with x87 floating point code
 
- 
+
 
 **<font style="color:rgb(27, 28, 29);">Compiler automatic vectorization and directives</font>**
 
@@ -10445,7 +7474,7 @@ void add_arrays(float *a, float *b, float *c, int n) {
 
 <font style="color:rgb(27, 28, 29);">Asserting that the data in the loop is memory aligned helps the compiler generate more efficient aligned load/store instructions.</font>
 
-<font style="color:rgb(27, 28, 29);"></font>
+
 
 **AVX built-in functions**
 
@@ -10570,8 +7599,6 @@ float aussie_avx512_reduce_add(float v[16]) {
 | Horizontal minimum | `_mm256_hmin_ps` | `_mm512_reduce_min_ps` | Find the minimum value in a vector |
 
 
-
-
 **5. Memory alignment: improve loading/storage efficiency**
 
 AVX instructions have clear requirements for the "alignment width" of memory addresses (consistent with the register width). Non-aligned addresses will cause`_mm_load_ps`Wait for the command to report an error, or`_mm_loadu_ps`(Support non-aligned) instruction performance degradation:
@@ -10594,7 +7621,7 @@ AVX instructions have clear requirements for the "alignment width" of memory add
 #define IS_ALIGNED_32(ptr) (((unsigned long)(ptr) & 31UL) == 0)
 ```
 
-****
+---
 
 **6. CPU compatibility: dynamic detection and multi-version adaptation**
 
@@ -10907,16 +7934,16 @@ int main() {
 
 <font style="color:rgb(27, 28, 29);">This code loops through 8 floating point numbers at a time and performs far better than the scalar version. But the cost is that the code becomes complex and tied to the AVX instruction set.</font>
 
-| <font style="color:rgb(27, 28, 29);">technology</font> | <font style="color:rgb(27, 28, 29);">interface/command</font> | <font style="color:rgb(27, 28, 29);">compiler</font> | <font style="color:rgb(27, 28, 29);">advantage</font> | <font style="color:rgb(27, 28, 29);">shortcoming</font> |
+| technology | interface/command | compiler | advantage | shortcoming |
 | --- | --- | --- | --- | --- |
 | **<font style="color:rgb(27, 28, 29);">Hardware prefetching</font>** | <font style="color:rgb(27, 28, 29);">(none, automatic)</font> | <font style="color:rgb(27, 28, 29);">all</font> | <font style="color:rgb(27, 28, 29);">Transparent to programmers</font> | <font style="color:rgb(27, 28, 29);">Can only handle simple mode</font> |
 | **<font style="color:rgb(27, 28, 29);">Software prefetching</font>** | `<font style="color:rgb(87, 91, 95);">__builtin_prefetch</font>` | <font style="color:rgb(27, 28, 29);">GCC, Clang</font> | <font style="color:rgb(27, 28, 29);">Flexible to handle complex patterns</font> | <font style="color:rgb(27, 28, 29);">Increases programming complexity and may mislead the CPU</font> |
-| | `<font style="color:rgb(87, 91, 95);">_mm_prefetch</font>` | <font style="color:rgb(27, 28, 29);">Intel, GCC, Clang</font> | <font style="color:rgb(27, 28, 29);">Directly corresponds to x86 instructions</font> | <font style="color:rgb(27, 28, 29);">Same as above</font> |
-| | `<font style="color:rgb(87, 91, 95);">#pragma prefetch</font>` | <font style="color:rgb(27, 28, 29);">Intel</font> | <font style="color:rgb(27, 28, 29);">Simple, loop-level control</font> | <font style="color:rgb(27, 28, 29);">compiler specific</font> |
+|  | `<font style="color:rgb(87, 91, 95);">_mm_prefetch</font>` | <font style="color:rgb(27, 28, 29);">Intel, GCC, Clang</font> | <font style="color:rgb(27, 28, 29);">Directly corresponds to x86 instructions</font> | <font style="color:rgb(27, 28, 29);">Same as above</font> |
+|  | `<font style="color:rgb(87, 91, 95);">#pragma prefetch</font>` | <font style="color:rgb(27, 28, 29);">Intel</font> | <font style="color:rgb(27, 28, 29);">Simple, loop-level control</font> | <font style="color:rgb(27, 28, 29);">compiler specific</font> |
 | **<font style="color:rgb(27, 28, 29);">auto-vectorization</font>** | `<font style="color:rgb(87, 91, 95);">-O3 -march=native</font>` | <font style="color:rgb(27, 28, 29);">all</font> | <font style="color:rgb(27, 28, 29);">Transparent to programmers</font> | <font style="color:rgb(27, 28, 29);">Many restrictions, the compiler may be too conservative</font> |
 | **<font style="color:rgb(27, 28, 29);">explicit vectorization</font>** | `<font style="color:rgb(87, 91, 95);">#pragma omp simd</font>` | <font style="color:rgb(27, 28, 29);">GCC, Clang, Intel</font> | <font style="color:rgb(27, 28, 29);">Good portability, forced vectorization</font> | <font style="color:rgb(27, 28, 29);">Programmers are required to ensure security</font> |
-| | `<font style="color:rgb(87, 91, 95);">#pragma ivdep</font>` | <font style="color:rgb(27, 28, 29);">GCC, Clang, Intel</font> | <font style="color:rgb(27, 28, 29);">Ignore dependencies, more powerful</font> | <font style="color:rgb(27, 28, 29);">High risk, may lead to erroneous results</font> |
-| **<font style="color:rgb(27, 28, 29);">built-in functions</font>** | `<font style="color:rgb(87, 91, 95);">_mm256_...</font>`<br/><font style="color:rgb(27, 28, 29);">, </font>`<font style="color:rgb(87, 91, 95);">vaddq_f32</font>` | <font style="color:rgb(27, 28, 29);">all</font> | <font style="color:rgb(27, 28, 29);">Ultimate performance and control</font> | <font style="color:rgb(27, 28, 29);">Complex, non-portable, error-prone</font> |
+|  | `<font style="color:rgb(87, 91, 95);">#pragma ivdep</font>` | <font style="color:rgb(27, 28, 29);">GCC, Clang, Intel</font> | <font style="color:rgb(27, 28, 29);">Ignore dependencies, more powerful</font> | <font style="color:rgb(27, 28, 29);">High risk, may lead to erroneous results</font> |
+| **<font style="color:rgb(27, 28, 29);">built-in functions</font>** | `<font style="color:rgb(87, 91, 95);">_mm256_...</font>`   <font style="color:rgb(27, 28, 29);">, </font>`<font style="color:rgb(87, 91, 95);">vaddq_f32</font>` | <font style="color:rgb(27, 28, 29);">all</font> | <font style="color:rgb(27, 28, 29);">Ultimate performance and control</font> | <font style="color:rgb(27, 28, 29);">Complex, non-portable, error-prone</font> |
 
 
 <font style="color:rgb(27, 28, 29);">In practice the best strategy is usually:</font>
@@ -10926,7 +7953,7 @@ int main() {
 3. **<font style="color:rgb(27, 28, 29);">Auxiliary compiler</font>**<font style="color:rgb(27, 28, 29);">: When you find that a critical loop fails to vectorize or memory access becomes a bottleneck, try using </font>`<font style="color:rgb(87, 91, 95);">#pragma omp simd</font>`<font style="color:rgb(27, 28, 29);"> or </font>`<font style="color:rgb(87, 91, 95);">__builtin_prefetch</font>`<font style="color:rgb(27, 28, 29);"> to assist the compiler.</font>
 4. **<font style="color:rgb(27, 28, 29);">last resort</font>**<font style="color:rgb(27, 28, 29);">: Only consider using it for core code segments with extreme performance requirements.</font>**<font style="color:rgb(27, 28, 29);">built-in functions</font>**<font style="color:rgb(27, 28, 29);">Do a manual rewrite.</font>
 
-<font style="color:rgb(27, 28, 29);"></font>
+
 
 **SIMD vectorization error handling: NAN/INF propagation**
 
@@ -11336,12 +8363,12 @@ void unlock() {
 
 
 
-+ <font style="color:rgb(27, 28, 29);"></font>**<font style="color:rgb(27, 28, 29);">advantage</font>**<font style="color:rgb(27, 28, 29);">: The implementation is very simple.</font>
-+ <font style="color:rgb(27, 28, 29);"></font>**<font style="color:rgb(27, 28, 29);">shortcoming</font>**<font style="color:rgb(27, 28, 29);">:</font>
++ **<font style="color:rgb(27, 28, 29);">advantage</font>**<font style="color:rgb(27, 28, 29);">: The implementation is very simple.</font>
++ **<font style="color:rgb(27, 28, 29);">shortcoming</font>**<font style="color:rgb(27, 28, 29);">:</font>
     - **<font style="color:rgb(27, 28, 29);">unfair</font>**<font style="color:rgb(27, 28, 29);">: The order in which threads acquire locks is random, which may lead to "starvation" of some threads.</font>
     - **<font style="color:rgb(27, 28, 29);">High Cache Contention</font>**<font style="color:rgb(27, 28, 29);">: This is the biggest problem. All waiting threads are in the same atomic variable </font>`<font style="color:rgb(87, 91, 95);">locked</font>`<font style="color:rgb(27, 28, 29);"> Spin on. On a multi-core system, when a thread releases the lock (modify</font>`<font style="color:rgb(87, 91, 95);">locked</font>`<font style="color:rgb(27, 28, 29);">) will cause the cache lines of all other spinning cores to become invalid. This will cause a large amount of cache coherence traffic (Cache Coherence Traffic), occupy the memory bus, and seriously affect performance, especially when the number of cores is large.</font>
 
-**<font style="color:rgb(27, 28, 29);"></font>**
+
 
 **<font style="color:rgb(27, 28, 29);">2. Implementation 2: MCS lock (Mellor-Crummey and Scott Lock)</font>**
 
@@ -11481,10 +8508,10 @@ void unlock(lock_node* node) {
 
 
 
-+ <font style="color:rgb(27, 28, 29);"></font>**<font style="color:rgb(27, 28, 29);">advantage</font>**<font style="color:rgb(27, 28, 29);">:</font>
++ **<font style="color:rgb(27, 28, 29);">advantage</font>**<font style="color:rgb(27, 28, 29);">:</font>
     - **<font style="color:rgb(27, 28, 29);">fair</font>**<font style="color:rgb(27, 28, 29);">: Follow first-in-first-out (FIFO) order.</font>
     - **<font style="color:rgb(27, 28, 29);">High performance/high scalability</font>**<font style="color:rgb(27, 28, 29);">: Each thread spins on a different memory location, greatly reducing cache contention and thus performing very well in multi-core environments.</font>
-+ <font style="color:rgb(27, 28, 29);"></font>**<font style="color:rgb(27, 28, 29);">shortcoming</font>**<font style="color:rgb(27, 28, 29);">:</font>
++ **<font style="color:rgb(27, 28, 29);">shortcoming</font>**<font style="color:rgb(27, 28, 29);">:</font>
     - <font style="color:rgb(27, 28, 29);">Implementation is more complex than the other two.</font>
     - `<font style="color:rgb(87, 91, 95);">lock</font>`<font style="color:rgb(27, 28, 29);"> and </font>`<font style="color:rgb(87, 91, 95);">unlock</font>`<font style="color:rgb(27, 28, 29);"> The interface needs to pass a </font>`<font style="color:rgb(87, 91, 95);">lock_node</font>`<font style="color:rgb(27, 28, 29);"> Object is a little inconvenient to use.</font>
 
@@ -11570,24 +8597,22 @@ void unlock() {
 
 
 
-+ <font style="color:rgb(27, 28, 29);"></font>**<font style="color:rgb(27, 28, 29);">advantage</font>**<font style="color:rgb(27, 28, 29);">:</font>
++ **<font style="color:rgb(27, 28, 29);">advantage</font>**<font style="color:rgb(27, 28, 29);">:</font>
     - **<font style="color:rgb(27, 28, 29);">fair</font>**<font style="color:rgb(27, 28, 29);">: Strict first-in-first-out (FIFO) order.</font>
     - **<font style="color:rgb(27, 28, 29);">Simple to implement</font>**<font style="color:rgb(27, 28, 29);">: Much simpler than MCS lock.</font>
     - `<font style="color:rgb(87, 91, 95);">unlock</font>`<font style="color:rgb(27, 28, 29);"> Very fast operation, just one </font>`<font style="color:rgb(87, 91, 95);">fetch_add</font>`<font style="color:rgb(27, 28, 29);">。</font>
-+ <font style="color:rgb(27, 28, 29);"></font>**<font style="color:rgb(27, 28, 29);">shortcoming</font>**<font style="color:rgb(27, 28, 29);">:</font>
++ **<font style="color:rgb(27, 28, 29);">shortcoming</font>**<font style="color:rgb(27, 28, 29);">:</font>
     - **<font style="color:rgb(27, 28, 29);">Cache contention still exists</font>**<font style="color:rgb(27, 28, 29);">: Like the Test-and-Set lock, all waiting threads are</font>**<font style="color:rgb(27, 28, 29);">same one</font>**<font style="color:rgb(27, 28, 29);">Atomic variables </font>`<font style="color:rgb(87, 91, 95);">head</font>`<font style="color:rgb(27, 28, 29);"> Spin on. when </font>`<font style="color:rgb(87, 91, 95);">unlock</font>`<font style="color:rgb(27, 28, 29);"> Revise </font>`<font style="color:rgb(87, 91, 95);">head</font>`<font style="color:rgb(27, 28, 29);"> , it will also invalidate all cache lines waiting for the core, causing bus traffic. Although slightly better than implementation one (because </font>`<font style="color:rgb(87, 91, 95);">unlock</font>`<font style="color:rgb(27, 28, 29);"> The operation itself is fast), but does not scale well under high contention as an MCS lock.</font>
 
 
 
-| <font style="color:rgb(27, 28, 29);">characteristic</font> | <font style="color:rgb(27, 28, 29);">Implementation 1 (Test-and-Set)</font> | <font style="color:rgb(27, 28, 29);">Implementation 2 (MCS Lock)</font> | <font style="color:rgb(27, 28, 29);">Implementation 3 (Ticket Lock)</font> |
+| characteristic | Implementation 1 (Test-and-Set) | Implementation 2 (MCS Lock) | Implementation 3 (Ticket Lock) |
 | --- | --- | --- | --- |
 | **<font style="color:rgb(27, 28, 29);">fairness</font>** | <font style="color:rgb(27, 28, 29);">❌</font><font style="color:rgb(27, 28, 29);"> unfair</font> | <font style="color:rgb(27, 28, 29);">✅</font><font style="color:rgb(27, 28, 29);"> Fair (FIFO)</font> | <font style="color:rgb(27, 28, 29);">✅</font><font style="color:rgb(27, 28, 29);"> Fair (FIFO)</font> |
 | **<font style="color:rgb(27, 28, 29);">cache contention</font>** | <font style="color:rgb(27, 28, 29);">🔥</font><font style="color:rgb(27, 28, 29);"> </font>**<font style="color:rgb(27, 28, 29);">high</font>** | <font style="color:rgb(27, 28, 29);">✅</font><font style="color:rgb(27, 28, 29);"> </font>**<font style="color:rgb(27, 28, 29);">Low</font>**<font style="color:rgb(27, 28, 29);"> (optimal)</font> | <font style="color:rgb(27, 28, 29);">⚠️</font><font style="color:rgb(27, 28, 29);"> </font>**<font style="color:rgb(27, 28, 29);">medium</font>** |
 | **<font style="color:rgb(27, 28, 29);">Implementation complexity</font>** | <font style="color:rgb(27, 28, 29);">✅</font><font style="color:rgb(27, 28, 29);"> </font>**<font style="color:rgb(27, 28, 29);">Low</font>** | <font style="color:rgb(27, 28, 29);">❌</font><font style="color:rgb(27, 28, 29);"> </font>**<font style="color:rgb(27, 28, 29);">high</font>** | <font style="color:rgb(27, 28, 29);">✅</font><font style="color:rgb(27, 28, 29);"> </font>**<font style="color:rgb(27, 28, 29);">medium</font>** |
 | **<font style="color:rgb(27, 28, 29);">Ease of use</font>** | <font style="color:rgb(27, 28, 29);">✅</font><font style="color:rgb(27, 28, 29);"> </font>**<font style="color:rgb(27, 28, 29);">high</font>** | <font style="color:rgb(27, 28, 29);">❌</font><font style="color:rgb(27, 28, 29);"> </font>**<font style="color:rgb(27, 28, 29);">Low</font>**<font style="color:rgb(27, 28, 29);"> (need to pass node)</font> | <font style="color:rgb(27, 28, 29);">✅</font><font style="color:rgb(27, 28, 29);"> </font>**<font style="color:rgb(27, 28, 29);">high</font>** |
 | **<font style="color:rgb(27, 28, 29);">Applicable scenarios</font>** | <font style="color:rgb(27, 28, 29);">Low thread contention environment</font> | <font style="color:rgb(27, 28, 29);">Environments with high thread contention and pursuit of extreme performance and scalability</font> | <font style="color:rgb(27, 28, 29);">Common scenarios that require fairness and simple implementation</font> |
-
-
 
 
 **<font style="color:rgb(27, 28, 29);">Spin wait and PAUSE: optimization of spin (lock)</font>**
@@ -11856,9 +8881,9 @@ int aussie_popcount_msvs(unsigned int x) {
 }
 ```
 
-    - **Hardware support**: provided by x86 architecture`POPCNT`instruction, the built-in function directly maps the instruction, and completes 32-bit statistics in a single cycle.
-
-
+```plain
+- **Hardware support**: provided by x86 architecture`POPCNT`instruction, the built-in function directly maps the instruction, and completes 32-bit statistics in a single cycle.
+```
 
 ### 26.C++20 coroutine scheduling framework
 [https://zplutor.github.io/2022/03/25/cpp-coroutine-beginner/](https://zplutor.github.io/2022/03/25/cpp-coroutine-beginner/)
@@ -12578,7 +9603,7 @@ An unnamed object temporarily created during expression evaluation. The default 
 
 Safely "borrow" objects, avoiding copy overhead while ensuring read-only availability.
 
-+ can bind lvalues ​​and rvalues.
++ can bind lvalues and rvalues.
 + Extend the life cycle of the bound rvalue, allowing safe access but not modification.
 
 
@@ -12593,22 +9618,20 @@ Safely "borrow" objects, avoiding copy overhead while ensuring read-only availab
 
 **Perfect Forward**: Combine`std::forward`and reference folding, which preserves the lvalue/rvalue attributes of parameters in the template and ensures that overloaded functions with copy or move semantics are called correctly.
 
-**Explicit Semantics**: specifically bind rvalues ​​(or`std::move`Marked lvalue), clearly expressing the semantics of "resources can be safely transferred".
+**Explicit Semantics**: specifically bind rvalues (or`std::move`Marked lvalue), clearly expressing the semantics of "resources can be safely transferred".
 
 
 
 **4. Correlation and comparison**
 
-| Features | `const T&`<br/> (read-only borrower) | `T&&`<br/> (resource heir) |
+| Features | `const T&`   (read-only borrower) | `T&&`   (resource heir) |
 | --- | --- | --- |
 | **Permissions** | **Read-Only** (Read-Only) | **Modifiable** (Writable) |
 | **Core Purpose** | Avoid the overhead of copy-by-value | Completely eliminate deep copies through **move semantics** |
 | **Resource ownership** | Resource ownership** remains unchanged** | Resource ownership** is transferred** |
-| **Processing objects** | Can bind all objects (lvalues, rvalues) | **Only** can bind rvalues ​​(temporary objects or`std::move`object) |
+| **Processing objects** | Can bind all objects (lvalues, rvalues) | **Only** can bind rvalues (temporary objects or`std::move`object) |
 | **Typical scenario** | Function parameters, efficient access to objects in a read-only manner | Move construction/assignment, perfect forwarding (`std::forward`) |
 | **Problems solved** | How to efficiently transfer objects in C++98 | C++11 solves the problem of deep copying of temporary objects |
-
-
 
 
 **5. The impact of C++ copy constructor and other functions on parameter passing-non-zero cost abstraction**
@@ -12735,7 +9758,7 @@ else {
 }
 ```
 
-+ Requires two comparison operations (checking negative values ​​and upper limit)
++ Requires two comparison operations (checking negative values and upper limit)
 + Intuitive but less efficient
 
 
@@ -12786,7 +9809,7 @@ list[i & 15] += 1.0f; // Suitable for arrays of size 16
 + only works with array sizes that are powers of 2 (2, 4, 8, 16, 32...)
 + pass `i & (2^n - 1)` Ensures that the value is within the range [0, 2^n-1]
 
- 
+
 
 ### 30.wait-free programming
 + Definition: Each thread is completed in limited steps, and scheduling/suspension does not affect it; it is stronger than lock-free and eliminates starvation and unbounded spin.
@@ -12952,11 +9975,8 @@ Tip: Use high bit stealing to carry the state, and the read operation also parti
 | NUMA binding | Execute numactl --cpunodebind=0 --membind=0 ./app | No | Bind the application to a specific NUMA node to reduce cross-node delay | Use numactl --show to verify the actual binding result |
 
 
-
-
 ### 32. Latency measurement (clock cycles)
-
-#### 1. Important methods
+**1. Important methods**
 
 ```cpp
 // Read the value from the TSC (timestamp counter) register and return a uint64_t value representing the elapsed CPU clock cycle
@@ -12970,7 +9990,7 @@ inline auto Common::rdtsc() noexcept {
 }
 ```
 
-#### 2. Important macro definitions
+**2. Important macro definitions**
 
 ```cpp
 // Start latency measurement, use the rdtsc() function to get the current CPU clock cycle number, and create a variable named TAG to store the value
@@ -12995,15 +10015,16 @@ inline auto Common::rdtsc() noexcept {
       } while(false)
 ```
 
-#### 3. Working mechanism and implementation details of performance detection method
+**3. Working mechanism and implementation details of performance detection method**
 
 4. `rdtsc` Function: Use the assembly instruction rdtsc to read the value from the TSC register and combine the lower 32 bits and the upper 32 bits into a 64-bit uint64_t type value, representing the elapsed CPU clock cycle. This is the basis of the entire performance instrumentation and is used to obtain the precise number of CPU clock cycles.  
 5. `START_MEASURE` Macro: Use this macro where you need to start measuring latency. It will call the rdtsc function to get the current number of CPU clock cycles, and create a constant variable with a specified name (TAG) to store the value for subsequent calculation of latency.  
 6. `END_MEASURE` Macro: Use this macro where you need to end the measurement delay. It calls the rdtsc function again to get the current number of CPU clock cycles, calculates the difference from the value stored when starting the measurement, gets the number of delayed CPU clock cycles, and records the current time string and delay value through the logger (LOGGER).  
-7. `TTT_MEASURE` Macro: used to record the current timestamp (in nanoseconds), get the current time by calling the Common::getCurrentNanos() function, and then use the logger to record the current time string and the time value.  
+7. `TTT_MEASURE` Macro: used to record the current timestamp (in nanoseconds), get the current time by calling the Common::getCurrentNanos() function, and then use the logger to record the current time string and the time value.
 
-#### 4. An excellent Intel Linux Invariant TSC CPU high-precision timer implementation example  
-Source: https://github.com/a858438680/TSCTimer
+**4. An excellent Intel Linux Invariant TSC CPU high-precision timer implementation example**
+
+Source: [https://github.com/a858438680/TSCTimer](https://github.com/a858438680/TSCTimer)
 
 ```cpp
 #pragma once
@@ -13228,7 +10249,7 @@ int main() {
 }
 ```
 
-#### 5. rdtscp
+**5. rdtscp**
 
 The advantages of rdtscp compared to rdtsc: it comes with weak serialization (reducing its own previous instruction rearrangement), returns the current core APIC ID (can be verified across cores). rdtsc must depend on mfence.
 
@@ -13273,7 +10294,7 @@ Notice:
 ● If you need to strictly prevent subsequent command rearrangement, add lfence after rdtscp.  
 ● Use APIC ID to verify whether the timing process spans cores.  
 
-#### 6. Example of timer implemented using rdtscp feature
+**6. Example of timer implemented using rdtscp feature**
 
 ```cpp
 #ifndef HARDWARE_TIMER_H
@@ -13602,10 +10623,12 @@ private:
 ```
 
 
+
 ### 33. High-quality articles on system design
 [https://mp.weixin.qq.com/s/9OH1RA8POFidgQnvape6fQ](https://mp.weixin.qq.com/s/9OH1RA8POFidgQnvape6fQ)
 
 [https://mp.weixin.qq.com/s/PuG4ZFVZ-7hijS4Db8Z5jQ](https://mp.weixin.qq.com/s/PuG4ZFVZ-7hijS4Db8Z5jQ)  
+
 
 
 ## Common performance bottlenecks and optimization directions
@@ -13629,7 +10652,7 @@ private:
 
 <font style="color:rgb(25, 27, 31);">Roofline model talks about procedures</font>**<font style="color:rgb(25, 27, 31);">Under the constraints of the two indicators of computing power and bandwidth of the computing platform, the upper bound of the theoretical performance that can be achieved</font>**<font style="color:rgb(25, 27, 31);">, rather than the actual achieved performance, because during the actual calculation</font>**<font style="color:rgb(25, 27, 31);">There are other important factors besides computing power and bandwidth</font>**<font style="color:rgb(25, 27, 31);">, they will also affect the actual performance of the model, which is not taken into account by the Roofline Model.</font>
 
-<font style="color:rgb(25, 27, 31);"></font>
+
 
 <font style="color:rgb(51, 51, 51);">For the Intel Core i5-8259U processor, the maximum number of FLOPs (single precision floating point) using AVX2 and 2 Fused Multiply Add (FMA) units can be calculated as follows:</font>
 
@@ -13735,8 +10758,8 @@ gcc documentation:[https://gcc.gnu.org/onlinedocs/](https://gcc.gnu.org/onlinedo
 | Multiply by constant = shift and add | x | x | x | x | x |
 | Divide by constant = multiply and shift | x | x | x | x | x |
 | divided by a power of 2 = shift | x | x | x | x | x |
-| (-a==-b)=(a==b) | x | x | x | - | x |
-| (a+c==b+c)=(a==b) | x | x | x | x | x |
+| (-a<font style="background-color:#f3bb2f;">-b)=(a</font>b) | x | x | x | - | x |
+| (a+c<font style="background-color:#f3bb2f;">b+c)=(a</font>b) | x | x | x | x | x |
 | !(a<b)=(a>=b) | x | x | x | x | x |
 | (a<b && b<c && a<c)=(a<b && b<c) | x | - | - | - | x |
 
@@ -13763,7 +10786,7 @@ gcc documentation:[https://gcc.gnu.org/onlinedocs/](https://gcc.gnu.org/onlinedo
 | a/a=1 | x | x | - | - | x |
 | a/1=a | x | x | x | x | x |
 | 0/a=0 | x | x | x | - | x |
-| (-a==-b)=(a==b) | x | x | x | - | x |
+| (-a<font style="background-color:#f3bb2f;">-b)=(a</font>b) | x | x | x | - | x |
 | (-a>-b)=(a<b) | x | x | x | x | x |
 | Divide by constant = multiply by reciprocal | x | x | x | x | x |
 
@@ -13775,19 +10798,19 @@ gcc documentation:[https://gcc.gnu.org/onlinedocs/](https://gcc.gnu.org/onlinedo
 | Branchless Boolean operations | x | x | - | rarely | x |
 | Commutative law (a&&b=b&&a) | x | x | - | x | x |
 | Associative law (a&&b&&c=a&&(b&&c)) | - | - | - | x | - |
-| Distributive law ((a&&b)|(a&&c)=a&&(b|c)) | x | x | - | - | x |
-| Distributive law ((a|b)&&(a|c)=a|(b&&c)) | x | x | - | - | x |
-| DeMorgan's Law (!a&&!b=!(a|b)) | x | x | - | - | x |
+| Distributive law ((a&&b) | (a&&c)=a&&(b | c)) | x | x | - |
+| Distributive law ((a | b)&&(a | c)=a | (b&&c)) | x | x |
+| DeMorgan's Law (!a&&!b=!(a | b)) | x | x | - | - |
 | !(!a)=a | x | x | x | x | x |
-| a&&!a=false, a||!a=true | x | x | x | x | x |
-| a&&true=a, a||false=a | x | x | x | x | x |
-| a&&false=false, a||true=true | x | x | x | x | x |
+| a&&!a=false, a |  | !a=true | x | x | x |
+| a&&true=a, a |  | false=a | x | x | x |
+| a&&false=false, a |  | true=true | x | x | x |
 | a&&a=a | x | x | x | x | x |
-| (a&&b)|(a&&!b)=a | - | x | x | x | - |
-| (a&&b)|(!a&&c)=a?b:c | - | x | x | x | x |
-| (a&&b)|(!a&&c)|(b&&c)=a?b:c | - | - | x | x | - |
-| (a&&b)|(a&&b&&c)=a&&b | x | x | x | x | x |
-| (a&&!b)|(!a&&b)=a XOR b | x | x | - | - | x |
+| (a&&b) | (a&&!b)=a | - | x | x | x |
+| (a&&b) | (!a&&c)=a?b:c | - | x | x | x |
+| (a&&b) | (!a&&c) | (b&&c)=a?b:c | - | - | x |
+| (a&&b) | (a&&b&&c)=a&&b | x | x | x | x |
+| (a&&!b) | (!a&&b)=a XOR b | x | x | - | - |
 
 
 **Bitwise operation integer simplification**
@@ -13796,20 +10819,20 @@ gcc documentation:[https://gcc.gnu.org/onlinedocs/](https://gcc.gnu.org/onlinedo
 | --- | --- | --- | --- | --- | --- |
 | Commutative law (a&b=b&a) | x | x | x | x | x |
 | Associative law (a&b&c=a&(b&c)) | x | x | x | x | x |
-| Distributive law ((a&b)|(a&c)=a&(b|c)) | x | x | x | x | x |
-| Distributive law ((a|b)&(a|c)=a|(b&c)) | x | x | x | x | x |
-| DeMorgan's law~a&~b=(a|b) | x | x | x | x | x |
-| ~(~a)=a | x | x | x | x | x |
-| <font style="color:rgb(0,0,0);">a&~a=0, a|~a=-1</font> | x | x | x | x | x |
-| a&-1=a, a|0=a | x | x | x | x | x |
+| Distributive law ((a&b) | (a&c)=a&(b | c)) | x | x | x |
+| Distributive law ((a | b)&(a | c)=a | (b&c)) | x | x |
+| DeMorgan's law<sub>a&</sub>b=(a | b) | x | x | x | x |
+| <sub>(</sub>a)=a | x | x | x | x | x |
+| <font style="color:rgb(0,0,0);">a&~a=0, a</font> | ~a=-1 | x | x | x | x |
+| a&-1=a, a | 0=a | x | x | x | x |
 | a&0=0 | x | x | x | x | x |
-| a|-1=-1 | x | x | x | x | x |
-| a&a=a, a|a=a | x | x | x | x | x |
-| (a&b)|(a&~b)=a | x | x | x | x | x |
-| (a&b) | (~a&c) | (b&c) = (a&b) | (~a&c) = a ? b : c | - | - | - | - | - |
-| (a&b)|(a&b&c)=a&b | x | x | x | x | x |
-| (a&!b)|(~a&b)=a^b | x | x | x | x | x |
-| ~a^~b=a^b | x | x | x | x | x |
+| a | -1=-1 | x | x | x | x |
+| a&a=a, a | a=a | x | x | x | x |
+| (a&b) | (a&~b)=a | x | x | x | x |
+| (a&b) | (~a&c) | (b&c) = (a&b) | (~a&c) = a ? b : c | - | - |
+| (a&b) | (a&b&c)=a&b | x | x | x | x |
+| (a&!b) | (~a&b)=a^b | x | x | x | x |
+| <sub>a^</sub>b=a^b | x | x | x | x | x |
 | a&b&c&d=(a&b)&(c&d) | - | x | - | x | x |
 | a<<b<<c=a<<(b+c) | x | x | x | x | x |
 
@@ -13833,16 +10856,16 @@ gcc documentation:[https://gcc.gnu.org/onlinedocs/](https://gcc.gnu.org/onlinedo
 
 "x" indicates that the optimization is supported, "-" indicates that the optimization is not supported, and "excessive" indicates excessive optimization (such as excessive loop unrolling).
 
- 
+
 
 #### Adjust compiler options
 1. The most basic and important step is to enable the compiler's optimization flags. Usually, the following are necessary:
 + `**-O3**`**:** Enable machine-independent aggressive optimization. This is one of the highest levels of optimization provided by most compilers and does a lot of code transformations such as loop unrolling, function inlining, dead code elimination, etc.
-+ `**-march=native**`** or **`**-march=<CPU_ARCH>**`**:** Enables optimizations for specific CPU architectures. This instructs the compiler to generate files specific to the current machine or to a specific architecture such as `core-avx2`、`arm64`)'s instruction set optimizes code to take advantage of CPU-specific high-performance instructions (such as AVX, AVX2, AVX-512, NEON).
-+ `**-flto**`** (Link Time Optimization) / **`**-fipo**`** (Inter-Procedural Optimization): ** Enables link-time optimization (LTO), also known as inter-procedural optimization (IPO). Typically, compilers can only optimize one compilation unit (source file) at a time. LTO allows the compiler to globally analyze and optimize the entire program during the link phase, uncovering optimization opportunities across file boundaries such as more aggressive function inlining, dead code elimination, and data flow optimizations.
++ `**-march=native**`** or `**-march=<CPU_ARCH>**`:** Enables optimizations for specific CPU architectures. This instructs the compiler to generate files specific to the current machine or to a specific architecture such as `core-avx2`、`arm64`)'s instruction set optimizes code to take advantage of CPU-specific high-performance instructions (such as AVX, AVX2, AVX-512, NEON).
++ `**-flto**`** (Link Time Optimization) / `**-fipo**` (Inter-Procedural Optimization): ** Enables link-time optimization (LTO), also known as inter-procedural optimization (IPO). Typically, compilers can only optimize one compilation unit (source file) at a time. LTO allows the compiler to globally analyze and optimize the entire program during the link phase, uncovering optimization opportunities across file boundaries such as more aggressive function inlining, dead code elimination, and data flow optimizations.
 + `<font style="background-color:rgba(0, 0, 0, 0.04);">-fwhole-program</font>` The option Enable WPO enables inter-procedural optimization, treating the entire codebase as a monolithic program, similar to the LTO feature.
-+ `**-fprofile-generate**`**: **Insert performance probes during compilation to record the execution frequency of the program when it is running (such as the number of function calls, the number of branch jumps, etc.).`**-fprofile-use**`**:** The compiler uses the hotspot data collected by program execution with probes to perform more aggressive optimizations on frequently executed code paths, and may reduce optimization overhead on cold paths.
-        1.   **Other Important Options:** There are many other options that affect performance, such as:
++ `**-fprofile-generate**`**: ****Insert performance probes during compilation to record the execution frequency of the program when it is running (such as the number of function calls, the number of branch jumps, etc.).**`**-fprofile-use**`**:** The compiler uses the hotspot data collected by program execution with probes to perform more aggressive optimizations on frequently executed code paths, and may reduce optimization overhead on cold paths.  
+  1.   **Other Important Options:** There are many other options that affect performance, such as:
     - `**-ffast-math**`**:** Allows the compiler to rewire floating-point operations, possibly changing the order of operations, thereby enabling more optimizations (such as vectorization of floating-point operations). Use with caution, however, as it can lead to minor inaccuracies in the results and involves special behavior such as NaNs, infinities, etc. In databases, this is typically used only in analytical queries where numerical precision is less critical.
     - `**-mprefer-vector-width=###**`**:** If you don't want to use certain heavy AVX instructions (like AVX-512, which can cause throttling on some older CPUs), you can set this to 128 or 256 to fix the maximum vector width.
 
@@ -13871,7 +10894,7 @@ gcc documentation:[https://gcc.gnu.org/onlinedocs/](https://gcc.gnu.org/onlinedo
 | Instruction Scheduling (-fschedule-insns, -fschedule-insns2) | ❌ | ✅ | ✅ | ✅ |
 | Strength reduction (multiplication → shift, division → multiplication reciprocal) (-fstrength-reduce) | ❌ | ✅ | ✅ | ✅ |
 | Inline functions (-finline-functions-called-once, -finline-small-functions) | ❌ | Part | ✅ | ✅+More radical |
-| Loop optimization | | | | |
+| Loop optimization |  |  |  |  |
 | - Loop unrolling (-funroll-loops) | ❌ | ❌ | Part | ✅ |
 | - Loop vectorization (-ftree-vectorize) | ❌ | ❌ | ✅ | ✅ |
 | - loop exchange / block / strip (-floop-interchange, -floop-block) | ❌ | ❌ | ❌ | ✅ |
@@ -13896,9 +10919,9 @@ gcc documentation:[https://gcc.gnu.org/onlinedocs/](https://gcc.gnu.org/onlinedo
 | -fsplit-wide-types | Split wide type operations into smaller units of operations to improve register utilization |
 | -fcompare-elim | Eliminate redundant comparison operations, especially those whose results have been calculated |
 | -fssa-backprop | Perform backpropagation optimization in SSA form to improve constant propagation effect |
-| -fcprop-registers | Perform copy propagation, replacing the copy operation of registers with source values ​​|
+| -fcprop-registers | Perform copy propagation, replacing the copy operation of registers with source values  |
 | -fssa-phiopt | Optimize Phi nodes in SSA form to reduce unnecessary control flow merging |
-| -ftree-bit-ccp | Bit-level conditional constant propagation, optimizing constant values ​​at the tree level |
+| -ftree-bit-ccp | Bit-level conditional constant propagation, optimizing constant values at the tree level |
 | -fdefer-pop | Delay the stack pop operation and merge multiple pops into a single operation |
 | -ftree-ccp | Perform conditional constant propagation at the tree level to improve optimization accuracy |
 | -ftree-ch | Perform combined optimization of copy propagation and dead code elimination |
@@ -13911,7 +10934,7 @@ gcc documentation:[https://gcc.gnu.org/onlinedocs/](https://gcc.gnu.org/onlinedo
 | -fomit-frame-pointer | Omit the frame pointer when possible, freeing an additional general-purpose register |
 | -funit-at-a-time | Process the entire compilation unit at once, allowing cross-function optimization |
 | -freorder-blocks | Reorder basic blocks to improve instruction cache and branch prediction efficiency |
-| -fmerge-constants | Merge identical constant values ​​to reduce memory usage |
+| -fmerge-constants | Merge identical constant values to reduce memory usage |
 
 
 **Additional optimization flags enabled by GCC when -O2 is enabled**
@@ -13945,7 +10968,7 @@ gcc documentation:[https://gcc.gnu.org/onlinedocs/](https://gcc.gnu.org/onlinedo
 | -ftree-tail-merge | Merge paths with the same tail code to reduce duplicate code |
 | -ftree-vrp | Value range propagation, optimize the code by analyzing the possible value range of variables |
 | -fvect-cost-model=very-cheap | Apply a relaxed vectorization cost model and vectorize more aggressively |
-| -flra-remat | Rematerialization optimization, recalculate values ​​instead of loading from memory |
+| -flra-remat | Rematerialization optimization, recalculate values instead of loading from memory |
 | -fisolate-erroneous-paths-dereference | Isolate code paths that may cause erroneous dereferences to improve security |
 | -fhoist-adjacent-loads | Boost adjacent load operations and merge memory accesses |
 | -fthread-jumps | Thread jumps, optimize conditional jump chain |
@@ -13981,7 +11004,7 @@ gcc documentation:[https://gcc.gnu.org/onlinedocs/](https://gcc.gnu.org/onlinedo
 | --- | --- | --- |
 | -fno-math-errno | Disable math functions from setting errno, allowing the compiler to optimize out error checking code | Medium |
 | -funsafe-math-optimizations | Allow the compiler to perform floating point optimizations that do not strictly adhere to IEEE/ISO standards, such as reassociating expressions | High |
-| -ffinite-math-only | Assume all floating point calculations produce only finite values ​​(no NaN or infinities), remove related checks | high |
+| -ffinite-math-only | Assume all floating point calculations produce only finite values (no NaN or infinities), remove related checks | high |
 | -fno-rounding-math | Disable support for different rounding modes, assuming the program always uses the default rounding mode | Medium |
 | -fno-signaling-nans | Assume the program does not use signaling NaNs (signaling NaNs) and only handles silent NaNs | Low to medium |
 | -fcx-limited-range | Optimize complex multiplication and division assuming intermediate calculations do not overflow | Medium |
@@ -13995,7 +11018,7 @@ These optimization flags are not automatically enabled in any of the standard op
 1. Use only after thorough testing to confirm that the application is not sensitive to loss of accuracy
 2. It is recommended to enable it via a sub-flag instead of enabling it globally with -ffast-math
 
- 
+
 
 **Compilation options that are useful for low-latency optimization supported by newer versions of GCC**
 
@@ -14014,13 +11037,11 @@ These optimization flags are not automatically enabled in any of the standard op
 | `-fipa-cp-clone` | ✅ | ✅ | Belongs to IPA (Inter-Process Analysis) optimization, in `-O2` and `-O3`enabled, but `-O3` More radical. |
 
 
-
-
 #### Provide compiler hints
 1. In some cases, the compiler cannot prove on its own that an optimization is safe or beneficial. Provide additional information through **Compiler Hints** to assist the compiler in making decisions.
 + `**__restrict__**`** Keyword (C/C++): ** Used to tell the compiler that the memory regions pointed to by pointers do not overlap (aliasing problems), which allows the compiler to confidently perform optimizations such as loop vectorization and code movement without inserting expensive runtime alias checks.
-+ `**#pragma unroll(N)**`** / **`**#pragma clang loop vectorize(enable)**`**:** Forces the compiler to unroll or vectorize a loop even if its cost model deems it unhelpful. This is useful in certain scenarios where human judgment is more accurate than the compiler.
-+ `**[[likely]]**`** / **`**[[unlikely]]**`** Property (C++20): ** Used to prompt the compiler to predict conditional branches. The compiler optimizes the machine code layout based on these hints, placing the most frequently executed code paths together, thus reducing the penalty for branch mispredictions.
++ `**#pragma unroll(N)**`** / `**#pragma clang loop vectorize(enable)**`:** Forces the compiler to unroll or vectorize a loop even if its cost model deems it unhelpful. This is useful in certain scenarios where human judgment is more accurate than the compiler.
++ `**[[likely]]**`** / `**[[unlikely]]**` Property (C++20): ** Used to prompt the compiler to predict conditional branches. The compiler optimizes the machine code layout based on these hints, placing the most frequently executed code paths together, thus reducing the penalty for branch mispredictions.
 
 #### Use compiler built-in functions
 gcc (g++) provides many types of built-in functions, which are generally well-optimized implementations of corresponding functions. In some scenarios, you need to implement a better version yourself.
@@ -14082,41 +11103,41 @@ Disassembly analysis of target files
 
 | Optimization Types | MS Compilers (Windows) | Gnu and Clang Compilers | Intel Compilers (Windows) | Intel Compilers (Linux) |
 | --- | --- | --- | --- | --- |
-| Speed ​​optimization | /O2 or /Ox | -O3 or -Ofast | /O3 | -O3 |
-| Inter-process optimization | | | /Og | |
+| Speed optimization | /O2 or /Ox | -O3 or -Ofast | /O3 | -O3 |
+| Inter-process optimization |  |  | /Og |  |
 | Whole program optimization | /GL | --combine -fwhole-program | /Qipo | -ipo |
-| No exception handling | /EHs- | | | |
-| No F.P. Exception Trapping | /fp:except- | -fno-trapping-math -fno-math-errno | | |
-| 无栈帧 | /Oy | -fomit-framepointer -fomit-framepointer | | |
+| No exception handling | /EHs- |  |  |  |
+| No F.P. Exception Trapping | /fp:except- | -fno-trapping-math -fno-math-errno |  |  |
+| 无栈帧 | /Oy | -fomit-framepointer -fomit-framepointer |  |  |
 | 无RTTI | /GR- | -fno-rtti | /GR- | -fno-rtti |
-| Assume no pointer aliases | /Oa | -fno-alias | | |
+| Assume no pointer aliases | /Oa | -fno-alias |  |  |
 | Non-strict floating point | /fp:fast | -ffast-math | /fp:fast /fp:fast=2 | -fp-model fast, -fp-model fast=2 |
-| Fusion multiplication and addition | | -ffp-contract=fast | | |
-| Divide by constant = multiply by reciprocal | | -freciprocal-math | | |
-| Assume no overflow or NAN | | -ffinite-math-only | | |
-| Ignore sign of zeros | | -fno-signed-zeros | | |
-| Simple member pointers | /vms | -fno-complete-member-pointers | /vms | |
-| Quick function call | /Gr | | | |
-| Vector call function | /Gv | | | |
+| Fusion multiplication and addition |  | -ffp-contract=fast |  |  |
+| Divide by constant = multiply by reciprocal |  | -freciprocal-math |  |  |
+| Assume no overflow or NAN |  | -ffinite-math-only |  |  |
+| Ignore sign of zeros |  | -fno-signed-zeros |  |  |
+| Simple member pointers | /vms | -fno-complete-member-pointers | /vms |  |
+| Quick function call | /Gr |  |  |  |
+| Vector call function | /Gv |  |  |  |
 | Function-level linking | /Gy | -ffunction-sections | /Gy | -ffunction-sections |
 | SSE instruction set (128-bit floating point vector) | /arch:SSE | -msse | /arch:SSE | -msse |
 | SSE2 instruction set (128-bit integer or double) | /arch:SSE2 | -msse2 | /arch:SSE2 | -msse2 |
-| SSE3 instruction set | | -msse3 | /arch:SSE3 | -msse3 |
-| Supplementary SSE3 instruction set | | -mssse3 | /arch:SSSE3 | -mssse3 |
-| SSE4.1 instruction set | | -msse4.1 | /arch:SSE4.1 | -msse4.1 |
+| SSE3 instruction set |  | -msse3 | /arch:SSE3 | -msse3 |
+| Supplementary SSE3 instruction set |  | -mssse3 | /arch:SSSE3 | -mssse3 |
+| SSE4.1 instruction set |  | -msse4.1 | /arch:SSE4.1 | -msse4.1 |
 | AVX instruction set | /arch:AVX | -mAVX | /arch:AVX | -mAVX |
 | AVX2 instruction set | /arch:AVX2 | -mAVX2 | /arch:AVX | -mAVX2 |
-| AVX512F instruction set | | -mavx512f | | |
+| AVX512F instruction set |  | -mavx512f |  |  |
 | AVX512VL/BW/DQ instruction set | /arch:AVX512 | -mavx512vl -mavx512bw -mavx512dq | /arch:COREAVX512 | -mavx512vl -mavx512bw -mavx512dq |
-| Autovectorization | /fp:fast /fp:except- | -O2 -fno-trapping-math -fno-math-errno fveclib=libmvec | | |
-| Multi-thread automatic parallelization | | | /Qparallel | -parallel |
+| Autovectorization | /fp:fast /fp:except- | -O2 -fno-trapping-math -fno-math-errno fveclib=libmvec |  |  |
+| Multi-thread automatic parallelization |  |  | /Qparallel | -parallel |
 | OpenMP directive parallelization | /openmp | -fopenmp | /Qopenmp | -openmp |
-| 32-bit code | | -m32 | | |
-| 64-bit code | | -m64 | | |
+| 32-bit code |  | -m32 |  |  |
+| 64-bit code |  | -m64 |  |  |
 | Static linking (multi-threading) | /MT | -static | /MT | -static |
 | Generate assembly listing | /FA | -S -masm=intel | /FA | -S |
-| Generate mapping file | /Fm | | | |
-| Generate optimization report | | | /Qopt-report | -opt-report |
+| Generate mapping file | /Fm |  |  |  |
+| Generate optimization report |  |  | /Qopt-report | -opt-report |
 
 
 **Compiler directives and keywords related to optimization**
@@ -14125,17 +11146,17 @@ Disassembly analysis of target files
 | --- | --- | --- | --- | --- |
 | 16-byte alignment | __declspec(align(16)) | __attribute((aligned(16))) | __declspec(align(16)) | __attribute((aligned(16))) |
 | 16-byte alignment (C++11) | alignas(16) | alignas(16) | alignas(16) | alignas(16) |
-| Assume pointers are aligned | #pragma vector aligned | #pragma vector aligned | | |
+| Assume pointers are aligned | #pragma vector aligned | #pragma vector aligned |  |  |
 | Assume pointers are not aliased | #pragma optimize("a", on) __restrict | __restrict | __declspec(noalias) __restrict #pragma ivdep | __restrict #pragma ivdep |
-| Assume the function is pure | | __attribute((const)) | | __attribute((const)) |
+| Assume the function is pure |  | __attribute((const)) |  | __attribute((const)) |
 | Assume the function does not throw an exception | throw() | throw() | throw() | throw() |
 | Functions are assumed to be called only from the same module | static | static | static | static |
-| Assume that member functions are only called from the same module | | **attribute**((visibility("internal"))) | | **attribute**((visibility("internal"))) |
-| 向量化 | #pragma vector always | #pragma vector always | | |
-| Optimization function | #pragma optimize(...) | | | |
-| Fast call function | __fastcall | __attribute((fastcall)) | __fastcall | |
-| Vector call function | __vectorcall | __vectorcall (Clang only) | __vectorcall | |
-| Non-cached writes | #pragma vector nontemporal | #pragma vector nontemporal | | |
+| Assume that member functions are only called from the same module |  | **attribute**((visibility("internal"))) |  | **attribute**((visibility("internal"))) |
+| 向量化 | #pragma vector always | #pragma vector always |  |  |
+| Optimization function | #pragma optimize(...) |  |  |  |
+| Fast call function | __fastcall | __attribute((fastcall)) | __fastcall |  |
+| Vector call function | __vectorcall | __vectorcall (Clang only) | __vectorcall |  |
+| Non-cached writes | #pragma vector nontemporal | #pragma vector nontemporal |  |  |
 
 
 **Predefined Macros**
@@ -14144,14 +11165,12 @@ Disassembly analysis of target files
 | --- | --- | --- | --- | --- | --- |
 | 编译器标识 | _MSC_VER and not __INTEL_COMPILER | **GNUC** and not __INTEL_COMPILER and not **clang** | **clang** | __INTEL_COMPILER or __INTEL_LLVM_COMPILER | __INTEL_COMPILER or __INTEL_LLVM_COMPILER |
 | 16-bit platforms | not _WIN32 | n.a. | n.a. | n.a. | n.a. |
-| 32-bit platform | not _WIN64 | not _WIN64 | | | |
+| 32-bit platform | not _WIN64 | not _WIN64 |  |  |  |
 | 64-bit platforms | _WIN64 | _LP64 | _LP64 | _WIN64 | _LP64 |
-| Windows platform | _WIN32 | _WIN32 | | | |
+| Windows platform | _WIN32 | _WIN32 |  |  |  |
 | Linux平台 | n.a. | **unix****linux** | **unix****linux** | **unix****linux** | **unix****linux** |
-| x86 platform | _M_IX86 | _M_IX86 | | | |
-| x86-64 platform | _M_IX86 and _WIN64 | _M_X64 | _M_X64 | | |
-
-
+| x86 platform | _M_IX86 | _M_IX86 |  |  |  |
+| x86-64 platform | _M_IX86 and _WIN64 | _M_X64 | _M_X64 |  |  |
 
 
 #### Static linking and dynamic linking
@@ -14258,12 +11277,12 @@ Compiler dynamic link option optimization
     - **Solution**: Mark global variables and internal functions as`<font style="background-color:rgba(175, 184, 193, 0.2);">static</font>`or`<font style="background-color:rgba(175, 184, 193, 0.2);">__attribute__((visibility("hidden")))</font>`
 + **Avoid**:`<font style="background-color:rgba(175, 184, 193, 0.2);">-mcmodel=large</font>`(Using 64-bit address, low efficiency)
 
- 
+
 
 ### 4.Special hardware instructions
-**<font style="color:rgba(0, 0, 0, 0.85) !important;">1.</font>**`**<font style="color:rgba(0, 0, 0, 0.85) !important;">_mm_CRC32_uXX</font>**`**<font style="color:rgb(0, 0, 0);"> series function</font>****<font style="color:rgb(25, 27, 31);background-color:rgb(248, 248, 250);">Used as a high-performance hash function</font>**
+**<font style="color:rgba(0, 0, 0, 0.85) !important;">1.</font>**`**<font style="color:rgba(0, 0, 0, 0.85) !important;">_mm_CRC32_uXX</font>**`**<font style="color:rgb(0, 0, 0);"> series function</font>************<font style="color:rgb(25, 27, 31);background-color:rgb(248, 248, 250);">Used as a high-performance hash function</font>**
 
-| **<font style="color:rgb(0, 0, 0) !important;">function name</font>** | **<font style="color:rgb(0, 0, 0) !important;">input data type</font>** | **<font style="color:rgb(0, 0, 0) !important;">Corresponding hardware instructions</font>** | **<font style="color:rgb(0, 0, 0) !important;">illustrate</font>** |
+| **function name** | **input data type** | **Corresponding hardware instructions** | **illustrate** |
 | :--- | :--- | :--- | :--- |
 | `<font style="color:rgb(0, 0, 0);">_mm_CRC32_u8</font>` | `<font style="color:rgb(0, 0, 0);">unsigned char</font>` | `<font style="color:rgb(0, 0, 0);">crc32b</font>` | <font style="color:rgba(0, 0, 0, 0.85) !important;">Enter 8-bit data and update CRC32</font> |
 | `<font style="color:rgb(0, 0, 0);">_mm_CRC32_u16</font>` | `<font style="color:rgb(0, 0, 0);">unsigned short</font>` | `<font style="color:rgb(0, 0, 0);">crc32w</font>` | <font style="color:rgba(0, 0, 0, 0.85) !important;">Enter 16-bit data and update CRC32</font> |
@@ -14328,14 +11347,12 @@ unsigned int _mm_CRC32_u8(unsigned int crc, unsigned char data);
 | Disk read | 400K+ | Disk read |
 
 
-
-
 **Performance Measurement Tools and Methods**
 
 1. **High-precision time tracking**
 + use`rdtsc/rdtscp`Instructions (CPU cycle counters) measure nanosecond-level elapsed time and record the start and end timestamps of key links (such as order generation and matching engine processing).
 + combine`std::chrono::high_resolution_clock`and other tools to achieve cross-platform high-precision time measurement.
-+ PTP (Precision Time Protocol) is a financial industry standard that achieves microsecond to sub-microsecond high-precision clock synchronization within a local area network through hardware timestamps.  
++ PTP (Precision Time Protocol) is a financial industry standard that achieves microsecond to sub-microsecond high-precision clock synchronization within a local area network through hardware timestamps.
 2. **System Level Performance Analysis**
 
 Debugging and performance analysis tools:[https://www.yuque.com/bluememories/lanaff/sxleuxuom18gotls](https://www.yuque.com/bluememories/lanaff/sxleuxuom18gotls)
@@ -14396,7 +11413,7 @@ Perf in-depth analysis reference:[https://xie.infoq.cn/article/d86b3a3ca106449cb
 
 **<font style="color:rgb(0, 0, 0);">(1) Exchange-side timestamp event</font>**
 
-| **<font style="color:rgb(0, 0, 0) !important;">Timestamp identification</font>** | **<font style="color:rgb(0, 0, 0) !important;">event description</font>** |
+| **Timestamp identification** | **event description** |
 | :--- | :--- |
 | <font style="color:rgba(0, 0, 0, 0.85) !important;">T1_OrderServer_TCP_read</font> | <font style="color:rgba(0, 0, 0, 0.85) !important;">In the order server (OrderServer), the time when the customer request is first read through the TCP socket</font> |
 | <font style="color:rgba(0, 0, 0, 0.85) !important;">T2_OrderServer_LFQueue_write</font> | <font style="color:rgba(0, 0, 0, 0.85) !important;">The time when the order server writes the customer request to the "lock-free queue (LFQueue) of the connection matching engine (MatchingEngine)"</font> |
@@ -14411,7 +11428,7 @@ Perf in-depth analysis reference:[https://xie.infoq.cn/article/d86b3a3ca106449cb
 
 <font style="color:rgb(0, 0, 0);">(2) Market participant side timestamp events</font>
 
-| **<font style="color:rgb(0, 0, 0) !important;">Timestamp identification</font>** | **<font style="color:rgb(0, 0, 0) !important;">event description</font>** |
+| **Timestamp identification** | **event description** |
 | :--- | :--- |
 | <font style="color:rgba(0, 0, 0, 0.85) !important;">T7_MarketDataConsumer_UDP_read</font> | <font style="color:rgba(0, 0, 0, 0.85) !important;">The time the MarketDataConsumer reads market data updates from the UDP socket</font> |
 | <font style="color:rgba(0, 0, 0, 0.85) !important;">T7t_OrderGateway_TCP_read</font> | <font style="color:rgba(0, 0, 0, 0.85) !important;">Time for OrderGateway to read customer response from TCP socket</font> |
@@ -14435,8 +11452,6 @@ Perf in-depth analysis reference:[https://xie.infoq.cn/article/d86b3a3ca106449cb
 | Intermediate key processing function (decision link) | `Trading::OrderManager::newOrder()`(or `moveOrder()` / `cancelOrder()`, according to the decision type) | The order manager generates a specific order request (including price, quantity and other parameters) based on the decision of the trading engine |
 | Intermediate key processing function (decision link) | `Trading::RiskManager::checkPreTradeRisk()` | Conduct pre-trade risk checks (such as funds, position limits) on generated orders to ensure compliance |
 | End point: Send trading order (trade issuing system) | `Common::TCPSocket::send()`(TCP sending function of market participant client) | After risk check, the order gateway sends the order request to the exchange through the TCP socket to complete the issuance of "trade" |
-
-
 
 
 ## Simple practice
@@ -15602,7 +12617,7 @@ namespace lfc {
 
 <font style="color:rgb(0, 0, 0);background-color:rgb(249, 250, 251);">Disruptor achieves low-latency concurrent communication through modular component design. The functions and collaboration logic of each component are clear, as follows:</font>
 
-| **<font style="color:rgb(0, 0, 0) !important;background-color:rgb(249, 250, 251);">Component name</font>** | **<font style="color:rgb(0, 0, 0) !important;background-color:rgb(249, 250, 251);">Core functions</font>** | **<font style="color:rgb(0, 0, 0) !important;background-color:rgb(249, 250, 251);">Key Features</font>** |
+| **Component name** | **Core functions** | **Key Features** |
 | :--- | :--- | :--- |
 | <font style="color:rgba(0, 0, 0, 0.85) !important;background-color:rgb(249, 250, 251);">Producer</font> | <font style="color:rgba(0, 0, 0, 0.85) !important;background-color:rgb(249, 250, 251);">Generate and publish events to a ring buffer</font> | <font style="color:rgba(0, 0, 0, 0.85) !important;background-color:rgb(249, 250, 251);">There is no competition in the single-producer scenario. Multiple producers seize buffer slots through CAS operations to avoid lock overhead.</font> |
 | <font style="color:rgba(0, 0, 0, 0.85) !important;background-color:rgb(249, 250, 251);">Ring Buffer</font> | <font style="color:rgba(0, 0, 0, 0.85) !important;background-color:rgb(249, 250, 251);">Core data structure for storing events</font> | <font style="color:rgba(0, 0, 0, 0.85) !important;background-color:rgb(249, 250, 251);">Pre-allocated fixed size, no runtime memory allocation/recycling, supports pointer array or structure array to store event containers</font> |
@@ -16367,7 +13382,7 @@ SleepingWaitStrategy     : 29.27 ms
 BlockingWaitStrategy     : 29.47 ms
 ```
 
-****
+---
 
 **2. A lock-free queue with the same mechanism as rte_ring of dpdk**
 
@@ -16755,7 +13770,7 @@ Alternative implementation:[https://github.com/WG21-SG14/SG14/blob/master/SG14/i
 
 
 
-### 4. Avoid using Magic Static which has overhead  
+### 4. Avoid using Magic Static which has overhead
 **<font style="color:rgb(27, 28, 29);">Method 1: Explicit initialization, initialization when the main thread starts, priority used</font>**
 
 **<font style="color:rgb(27, 28, 29);">Usage scenarios:</font>**<font style="color:rgb(27, 28, 29);"> It is suitable for harsh scenarios that have strict requirements on the initialization sequence, require complete control of the life cycle, and pursue the ultimate access performance.</font>
@@ -17089,6 +14104,7 @@ namespace Common {
   }
 }
 ```
+
 
 
 ## Transaction data processing
@@ -17877,7 +14893,7 @@ install(TARGETS tdb DESTINATION bin)
 
 Incremental calculation means that only the changed parts of the data are processed instead of recalculating the entire data set.
 
-Ahead calculation (also known as precomputation) is to precompute and store the results before runtime requirements occur to avoid real-time calculations on the critical path. Precomputation in compiled languages ​​like C++ is also called compile-time calculation. It can be realized through the characteristics of the const faction and TMP technology. There are multiple methods mentioned in the basic part.
+Ahead calculation (also known as precomputation) is to precompute and store the results before runtime requirements occur to avoid real-time calculations on the critical path. Precomputation in compiled languages like C++ is also called compile-time calculation. It can be realized through the characteristics of the const faction and TMP technology. There are multiple methods mentioned in the basic part.
 
 These two computing modes are often used in combination: static or semi-static data are calculated in advance, and dynamically changing data is calculated incrementally.
 
@@ -18050,9 +15066,8 @@ Code formula: $ \hat{q}_{t_{m}}^{m}=\frac{1}{2}\left(q_{t_{a}}^{a}+q_{t_{b}}^{b}
 Advanced: If you need to consider the weight of order volume, the code implements size-weighted middle price $ \tilde{q}_{t}^{s}=\frac{q_{t_{b}}^{b} s_{t_{a}}^{a}+q_{t_{a}}^{a} s_{t_{b}}^{b}}{s_{t_{a}}^{a}+s_{t_{b}}^{b}} $ ($ s $ is the order volume corresponding to the buying/selling price).    
 
 
+
 ### Task Six (Order Timing Competition Analysis)
-  
-  
 In transactions, requests (orders) issued by programs on different servers arrive at the exchange in order, and high-frequency transactions
 
 Yi is very sensitive to this sequence. According to log files, statistics on different servers at the same time
@@ -18116,6 +15131,7 @@ Sample log file data entries
 [01/10 09:30:00.525277035] [  info  ] [  3394/3601  ] [notifyOrder]  InstrumentID:A  Direction:0 OffsetFlag:0 HedgeFlag:1 ConnectionSelectionType:1 OrderRef:2 OrderType:0 ConnectionID:1 RealConnectionID:1 ErrorNo:0 ExchangeRef:0 ExchangeTimestamp:22372 OrderStatus:1 OrderLocalID:5
 
 [01/10 09:30:00.525277421] [  info  ] [  3394/3601  ] [notifyOrder]  InstrumentID:A  Direction:0 OffsetFlag:0 HedgeFlag:1 ConnectionSelectionType:1 OrderRef:2 OrderType:0 ConnectionID:1 RealConnectionID:1 ErrorNo:0 ExchangeRef:0 ExchangeTimestamp:22372 OrderStatus:2 OrderLocalID:5  
+
 
 
 ```cpp
@@ -18575,13 +15591,15 @@ int main(int argc, char* argv[]) {
 
 ```
 
-  
+
+
 <!-- 这是一张图片，ocr 内容为： -->
 ![](https://cdn.nlark.com/yuque/0/2026/png/35485470/1767619685321-d70ca01e-e867-4a84-b4bb-0ee03a8ea80c.png)  
 
 
+
 ### Task Seven (Service Access Log Analysis)
-| <font style="color:#000000;">service_id</font> | <font style="color:#000000;">access_time</font> | <font style="color:#000000;">response_time</font> | <font style="color:#000000;">flow_bytes</font> | <font style="color:#000000;">status_code</font> |
+| service_id | access_time | response_time | flow_bytes | status_code |
 | --- | --- | --- | --- | --- |
 | <font style="color:#000000;">S001</font> | <font style="color:#000000;">2025/3/20 10:00</font> | <font style="color:#000000;">150</font> | <font style="color:#000000;">512</font> | <font style="color:#000000;">200</font> |
 | <font style="color:#000000;">S001</font> | <font style="color:#000000;">2025/3/20 10:01</font> | <font style="color:#000000;">80</font> | <font style="color:#000000;">2048</font> | <font style="color:#000000;">200</font> |
@@ -18664,23 +15682,18 @@ print(df_filtered)
 ### 1. Order management system
 1.1 Order management finite state machine
 
-<font style="color:rgba(0, 0, 0, 0.85);">Mealy state machine and Moore state machine are two classic finite state machine (FSM) models</font><font style="color:rgba(0, 0, 0, 0.85);background-color:rgba(0, 0, 0, 0.04);">. Trading systems are usually Mealy state machines. Compared to Moore, Mealy also includes input. </font>
+<font style="color:rgba(0, 0, 0, 0.85);">Mealy state machine and Moore state machine are two classic finite state machine (FSM) models</font><font style="color:rgba(0, 0, 0, 0.85);">. Trading systems are usually Mealy state machines. Compared to Moore, Mealy also includes input. </font>
 
 <font style="color:rgba(0, 0, 0, 0.85) !important;">The core elements of finite state machines:</font>
 
-1. **<font style="color:rgb(0, 0, 0) !important;">State</font>**<font style="color:rgba(0, 0, 0, 0.85) !important;">  
-</font><font style="color:rgba(0, 0, 0, 0.85) !important;">Represents the specific state of an object at a certain moment and is the basic unit of FSM. For example, the status of the order is "new order", "processing", "cancelled", etc.  
-</font><font style="color:rgba(0, 0, 0, 0.85) !important;">status has</font>**<font style="color:rgb(0, 0, 0) !important;">exclusivity</font>**<font style="color:rgba(0, 0, 0, 0.85) !important;">: The object can only be in one state at the same time.</font>
-2. **<font style="color:rgb(0, 0, 0) !important;">Event</font>**<font style="color:rgba(0, 0, 0, 0.85) !important;">  
-</font><font style="color:rgba(0, 0, 0, 0.85) !important;">An external or internal signal that triggers a state transition. Events such as "Order Success" and "Order Cancellation Instruction" will push the state machine to switch from the current state to the new state.</font>
-3. **<font style="color:rgb(0, 0, 0) !important;">Transition</font>**<font style="color:rgba(0, 0, 0, 0.85) !important;">  
-</font><font style="color:rgba(0, 0, 0, 0.85) !important;">Rules that define how "current state + event" maps to "next state". For example: after the "Processing" state receives the "Order Completed" event, it transitions to the "Successful" state.</font>
-4. **<font style="color:rgb(0, 0, 0) !important;">Action</font>**<font style="color:rgba(0, 0, 0, 0.85) !important;">  
-</font><font style="color:rgba(0, 0, 0, 0.85) !important;">Specific actions to perform during state transitions (optional). For example, recording logs when canceling orders, updating order status, etc.</font>
-5. **<font style="color:rgb(0, 0, 0) !important;">Guard</font>**<font style="color:rgba(0, 0, 0, 0.85) !important;">  
-</font><font style="color:rgba(0, 0, 0, 0.85) !important;">Conditions for state transition (optional). Events trigger state transitions only when conditions are met. For example, order cancellation is only allowed if the order cancellation interval exceeds 5 seconds.</font>
+1. **<font style="color:rgb(0, 0, 0) !important;">State</font>**<font style="color:rgba(0, 0, 0, 0.85) !important;">Represents the specific state of an object at a certain moment and is the basic unit of FSM. For example, the status of the order is "new order", "processing", "cancelled", etc. </font><font style="color:rgba(0, 0, 0, 0.85) !important;">status has</font>**<font style="color:rgb(0, 0, 0) !important;">exclusivity</font>**<font style="color:rgba(0, 0, 0, 0.85) !important;">: The object can only be in one state at the same time.</font>
+2. **<font style="color:rgb(0, 0, 0) !important;">Event</font>**<font style="color:rgba(0, 0, 0, 0.85) !important;">An external or internal signal that triggers a state transition. Events such as "Order Success" and "Order Cancellation Instruction" will push the state machine to switch from the current state to the new state.</font>
+3. **<font style="color:rgb(0, 0, 0) !important;">Transition</font>**<font style="color:rgba(0, 0, 0, 0.85) !important;">Rules that define how "current state + event" maps to "next state". For example: after the "Processing" state receives the "Order Completed" event, it transitions to the "Successful" state.</font>
+4. **<font style="color:rgb(0, 0, 0) !important;">Action</font>**<font style="color:rgba(0, 0, 0, 0.85) !important;">Specific actions to perform during state transitions (optional). For example, recording logs when canceling orders, updating order status, etc.</font>
+5. **<font style="color:rgb(0, 0, 0) !important;">Guard</font>**<font style="color:rgba(0, 0, 0, 0.85) !important;">Conditions for state transition (optional). Events trigger state transitions only when conditions are met. For example, order cancellation is only allowed if the order cancellation interval exceeds 5 seconds.</font>
 
-  
+
+
 1.2 Branchless state table  
 Branchless state table is a state machine design pattern that uses a table-driven approach to replace traditional conditional branch statements (if-else/switch-case) to implement state transitions.  
 In the Boost MSM (Meta State Machine) framework, the branchless state table is implemented through compile-time metaprogramming. The conversion logic is determined at compile time and no conditional judgment is required at runtime.
@@ -19380,7 +16393,8 @@ using OrderStateMachineGroup = std::deque<OrderStateMachineSPtr>;
 
 ```
 
-  
+
+
 1.3 Hierarchical state machine
 
 The hierarchical state machine effectively solves the maintenance problem of conversion relationships under complex state structures by introducing state nesting and inheritance mechanisms.
@@ -19442,29 +16456,22 @@ During maintenance, data or policies can be updated individually without disrupt
 
 1.4 Separation of session state machine and order state machine
 
-1. Separation model:
-
-    Session state machine: connection, login, heartbeat, disconnection and reconnection, sequence recovery.
-
-    Order status machine: order placement, confirmation, partial transaction, order cancellation, order rejection, and completion.
-
-2. Reconnection recovery strategy:
-
-    Restore the session and sequence first, then restore the in-transit order status.
-
-    Within the recovery window, the policy only allows downgrade actions (for example, only withdraw but not suspend).
+1. Separation model: Session state machine: connection, login, heartbeat, disconnection and reconnection, sequence recovery. Order status machine: order placement, confirmation, partial transaction, order cancellation, order rejection, and completion.
+2. Reconnection recovery strategy: Restore the session and sequence first, then restore the in-transit order status. Within the recovery window, the policy only allows downgrade actions (for example, only withdraw but not suspend).
 
 
 
 1.5 Idempotent and out-of-order return processing of order state machine  
-1. Idempotent processing principle  
-    The same execution return arrives repeatedly, and the final state cannot be advanced twice.  
-    Use stable primary keys (such as order key + exchange return serial number) to remove duplication.  
-2. Principle of out-of-order processing  
-    `ACK/TRADE/CANCEL/REJECT` Arrival order is not guaranteed and the state machine must allow "delayed completion".  
-    through intermediate states (e.g. `CANCEL_PENDING`) to express timing competition and avoid illegal transitions.
 
-  
+1. Idempotent processing principle  
+The same execution return arrives repeatedly, and the final state cannot be advanced twice.  
+Use stable primary keys (such as order key + exchange return serial number) to remove duplication.  
+2. Principle of out-of-order processing  
+`ACK/TRADE/CANCEL/REJECT` Arrival order is not guaranteed and the state machine must allow "delayed completion".  
+through intermediate states (e.g. `CANCEL_PENDING`) to express timing competition and avoid illegal transitions.
+
+
+
 1.6 Other order management system interface design
 
 ```cpp
@@ -19589,16 +16596,17 @@ int main(){
 }
 ```
 
-  
+
+
 1.5 Event Sourcing 和 CQRS
 
 Event Sourcing: The system does not directly store the current state, but persists all business events that cause state changes, and reconstructs the state at any point in time by replaying these immutable event streams.
 
-1. **<font style="color:rgb(0, 0, 0);background-color:rgba(0, 0, 0, 0);">State is driven by events</font>**<font style="color:rgb(0, 0, 0);background-color:rgba(0, 0, 0, 0);">: Do not directly save the current state of the system, but persist all state changes (such as order creation, matching, cancellation) in the form of "immutable events" in a complete and orderly manner.</font>
-2. **<font style="color:rgb(0, 0, 0);background-color:rgba(0, 0, 0, 0);">State can be reconstructed</font>**<font style="color:rgb(0, 0, 0);background-color:rgba(0, 0, 0, 0);">: By "replaying" the historical event sequence, the state of the system at any moment can be accurately restored.</font>
-3. **<font style="color:rgb(0, 0, 0);background-color:rgba(0, 0, 0, 0);">Naturally auditable</font>**<font style="color:rgb(0, 0, 0);background-color:rgba(0, 0, 0, 0);">: The event log completely records all operation history, which facilitates troubleshooting, compliance auditing and backtesting.</font>
+1. **<font style="color:rgb(0, 0, 0);">State is driven by events</font>**<font style="color:rgb(0, 0, 0);">: Do not directly save the current state of the system, but persist all state changes (such as order creation, matching, cancellation) in the form of "immutable events" in a complete and orderly manner.</font>
+2. **<font style="color:rgb(0, 0, 0);">State can be reconstructed</font>**<font style="color:rgb(0, 0, 0);">: By "replaying" the historical event sequence, the state of the system at any moment can be accurately restored.</font>
+3. **<font style="color:rgb(0, 0, 0);">Naturally auditable</font>**<font style="color:rgb(0, 0, 0);">: The event log completely records all operation history, which facilitates troubleshooting, compliance auditing and backtesting.</font>
 
-<font style="color:rgb(0, 0, 0);background-color:rgba(0, 0, 0, 0);">In the trading system, Event Sourcing is particularly suitable for processing core processes such as order life cycle, capital flow, and position changes, and can solve the historical tracing problems in the traditional "status coverage" model.</font>
+<font style="color:rgb(0, 0, 0);">In the trading system, Event Sourcing is particularly suitable for processing core processes such as order life cycle, capital flow, and position changes, and can solve the historical tracing problems in the traditional "status coverage" model.</font>
 
 ```cpp
 #include <iostream>
@@ -19729,11 +16737,11 @@ int main() {
 }
 ```
 
-| <font style="color:rgb(0, 0, 0);background-color:rgba(0, 0, 0, 0);">code module</font> | <font style="color:rgb(0, 0, 0);background-color:rgba(0, 0, 0, 0);">corresponding concept</font> | <font style="color:rgb(0, 0, 0);background-color:rgba(0, 0, 0, 0);">illustrate</font> |
+| code module | corresponding concept | illustrate |
 | --- | --- | --- |
-| `<font style="color:rgb(0, 0, 0);background-color:rgba(0, 0, 0, 0);">OrderCreated</font>`<font style="color:rgb(0, 0, 0);background-color:rgba(0, 0, 0, 0);"> / </font>`<font style="color:rgb(0, 0, 0);background-color:rgba(0, 0, 0, 0);">OrderCancelled</font>` | **Immutable Events** | <font style="color:rgb(0, 0, 0);background-color:rgba(0, 0, 0, 0);">The event object only contains "what happened" data, has no setter, and cannot be modified once created.</font> |
-| `<font style="color:rgb(0, 0, 0);background-color:rgba(0, 0, 0, 0);">EventStore::append()</font>` | **Append storage only** | <font style="color:rgb(0, 0, 0);background-color:rgba(0, 0, 0, 0);">Events can only be appended to the log in order, and existing events will never be modified or deleted to ensure complete traceability of history.</font> |
-| `<font style="color:rgb(0, 0, 0);background-color:rgba(0, 0, 0, 0);">OrderState::apply()</font>`<font style="color:rgb(0, 0, 0);background-color:rgba(0, 0, 0, 0);"> + event replay</font> | **STATE REBUILD** | <font style="color:rgb(0, 0, 0);background-color:rgba(0, 0, 0, 0);">The current state is not stored directly, but dynamically calculated by "replaying" the historical event sequence.</font> |
+| `<font style="color:rgb(0, 0, 0);background-color:rgba(0, 0, 0, 0);">OrderCreated</font>`<font style="color:rgb(0, 0, 0);"> / </font>`<font style="color:rgb(0, 0, 0);background-color:rgba(0, 0, 0, 0);">OrderCancelled</font>` | **Immutable Events** | <font style="color:rgb(0, 0, 0);">The event object only contains "what happened" data, has no setter, and cannot be modified once created.</font> |
+| `<font style="color:rgb(0, 0, 0);background-color:rgba(0, 0, 0, 0);">EventStore::append()</font>` | **Append storage only** | <font style="color:rgb(0, 0, 0);">Events can only be appended to the log in order, and existing events will never be modified or deleted to ensure complete traceability of history.</font> |
+| `<font style="color:rgb(0, 0, 0);background-color:rgba(0, 0, 0, 0);">OrderState::apply()</font>`<font style="color:rgb(0, 0, 0);"> + event replay</font> | **STATE REBUILD** | <font style="color:rgb(0, 0, 0);">The current state is not stored directly, but dynamically calculated by "replaying" the historical event sequence.</font> |
 
 
 ```plain
@@ -19748,8 +16756,8 @@ int main() {
 ID: 1002 | GOOGL @ 140.2 x 150
 ```
 
-+ <font style="color:rgb(0, 0, 0);background-color:rgba(0, 0, 0, 0);">On the left is</font>**Full Event Log**<font style="color:rgb(0, 0, 0);background-color:rgba(0, 0, 0, 0);">(Record "what happened");</font>
-+ <font style="color:rgb(0, 0, 0);background-color:rgba(0, 0, 0, 0);">On the right is</font>**Current status reconstructed from logs**<font style="color:rgb(0, 0, 0);background-color:rgba(0, 0, 0, 0);">(Documenting “what it’s like now”).</font>
++ <font style="color:rgb(0, 0, 0);">On the left is</font>**Full Event Log**<font style="color:rgb(0, 0, 0);">(Record "what happened");</font>
++ <font style="color:rgb(0, 0, 0);">On the right is</font>**Current status reconstructed from logs**<font style="color:rgb(0, 0, 0);">(Documenting “what it’s like now”).</font>
 
 
 
@@ -20055,7 +17063,8 @@ int main() {
 
 + Pre-allocate large memory - 30 million elements need to be allocated by default
 + Memory waste - Sparse order books waste a lot of space
-+ Limited price range  
++ Limited price range
+
 
 
 ```cpp
@@ -21035,7 +18044,8 @@ public:
 } // namespace lob
 ```
 
-  
+
+
 **Option 3: Tree-based LOB - Recommended Solution**
 
 **core**:
@@ -21471,24 +18481,20 @@ public:
 } // namespace lob
 ```
 
-  
+
+
 **Option 4: Circular array order book (Circular array)**
 
 **Data Structure**
 
 1. PriceLevel: Manage orders under the order price
-
 + storage: loop array (size `2^15 = 32768`),live `[订单ID, 未结数量]`, invalid orders are marked as `(-1, -1)`。
 + pointer:`start`/`end` Define the valid order range, and automatically skip invalid items during traversal.
 + Optimization: Bit operations replace modular operations (`v & (size-1)`）。
-
 2. Order Book: Manage all price levels in one direction (buy/sell)
-
 + storage: loop array (size `2^8 = 256`)live `PriceLevel`，`absl::flat_hash_map` mapping `价格→数组索引`。
 + pointer:`start`/`end` Define the effective price range, and the buy order book will be matched first `start` The highest price pointed to.
-
 3. Order Index (OrderIndex): O(1) positioning order
-
 + Storage: Open address hash table (`absl::flat_hash_map`），`Key=订单ID`。
 + Merge index:`Value` is the displacement combined value (`高8位=价格层级索引 | 低15位=订单索引`), reverse bit operation during parsing.
 
@@ -22107,9 +19113,8 @@ public:
 } // namespace lob
 ```
 
-###   
-  
-3.<font style="color:rgb(0, 0, 0) !important;">message transmission</font>Protocol Engine (FIX)
+### 
+3.<font style="color:rgb(0, 0, 0) !important;">message transmission</font>Protocol Engine (FIX)  
 The basic building blocks of the FIX protocol are tag-value pairs. Each data field consists of three parts:
 
 1. **Tag**: A unique integer that represents the meaning of the field (for example,`35` represent `MsgType`，`44` represent `Price`）。
@@ -22118,7 +19123,7 @@ The basic building blocks of the FIX protocol are tag-value pairs. Each data fie
 
 **Format:** `Tag=Value<SOH>`
 
-****
+---
 
 **Structure of FIX message**
 
@@ -22163,7 +19168,7 @@ The message tail is mainly used for message integrity verification.
 
 + **Required fields:**
     - `10=CHECKSUM`: **Checksum**. This is the last field in the message and is the sum of all bytes modulo 256 (including the SOH delimiter between fields).
-    - **Calculation method**: Put the message into `8=` start to arrive `SOH` The ASCII values ​​of all previous characters are added, then modulo 256.
+    - **Calculation method**: Put the message into `8=` start to arrive `SOH` The ASCII values of all previous characters are added, then modulo 256.
     - **Format**: The checksum must be three digits, for example `052`，`123`。
 
 | Section | Label-value pairs | Explanation |
@@ -22173,7 +19178,7 @@ The message tail is mainly used for message integrity verification.
 |  | `35=D` | This is a `NewOrderSingle` News |
 |  | `34=2` | The message sequence number is 2 |
 |  | `49=BUYSIDE` | The sender is "BUYSIDE" |
-|  | `52=20231027-10:30:00.000` |Sending time|
+|  | `52=20231027-10:30:00.000` | Sending time |
 |  | `56=SELLSIDE` | The recipient is "SELLSIDE" |
 | **Message body** | `11=ORD10001` | Unique client order ID |
 |  | `55=AAPL` | Trading Apple Stock |
@@ -22184,7 +19189,7 @@ The message tail is mainly used for message integrity verification.
 | **End of message** | `10=052` | Checksum (used to verify that the message was not corrupted during transmission) |
 
 
-****
+---
 
 **Repeat Group**
 
@@ -22199,15 +19204,15 @@ The important concept in the FIX protocol is **repeating groups**. It is used to
 ...|386=2|...|54=1|37=ORDER001|...|54=1|37=ORDER002|...
 ```
 
-    - `386=2` Indicates that there are 2 repeating groups of transaction records later.
-    - First group:`54=1|37=ORDER001|...`
-    - Second group:`54=1|37=ORDER002|...`
-
-
+```plain
+- `386=2` Indicates that there are 2 repeating groups of transaction records later.
+- First group:`54=1|37=ORDER001|...`
+- Second group:`54=1|37=ORDER002|...`
+```
 
 **Data type encoding**
 
-Values ​​in the FIX protocol follow specific encoding rules:
+Values in the FIX protocol follow specific encoding rules:
 
 + **String**: `55=AAPL`
 + **integer**: `38=100`
@@ -22394,7 +19399,8 @@ int main(int argc, char** argv) {
 }
 ```
 
-  
+
+
 CTP learning:[https://github.com/zzxscodes/ctp-learning/blob/main/README.md](https://github.com/zzxscodes/ctp-learning/blob/main/README.md)
 
 If you are using python to connect to CTP, a good framework is openctp-python. openctp uses swig technology to expose the C interface of ctp to python. You can write a ctp gateway on top of the generated python code of ctpapi. The following version is different from the official import. Here, a layer of ctpapi is added as the entrance.
@@ -23877,7 +20883,8 @@ class CtpTdApi(tdapi.CThostFtdcTraderSpi):
             self.connect_status = False
 ```
 
-  
+
+
 **ctp multi-account manual trading terminal tool  
 **[**https://github.com/zzxscodes/ctp-multi-account**](https://github.com/zzxscodes/ctp-multi-account)
 
@@ -23932,15 +20939,15 @@ class CtpTdApi(tdapi.CThostFtdcTraderSpi):
         * maintain `md_subscribers_by_instrument_`, records the subscription session for each contract.
         * During the market correction, CTP `DepthMarketData` Convert to `MarketDataBody`, serialized to `MsgType::MarketData`, distributed to subscribed sessions by contract number.
 + **Session/Connection Management**
+
+
+
     - `TcpServer` Responsible for listening on the port, accessing new connections, and creating them using factory mode `Session`。
     - `Session` Responsible:
         * Send and receive binary protocol packets.
         * Maintain a reverse pointer to the server for calling `ServerApp::on_*_req()`。
         * Save currently logged in `user_id` and corresponding `CtpTraderAdapter*`。
     - `ServerApp::unregister_session` On disconnection, from `sessions_by_user_` remove the `Session`, if the account has no session, clear the mapping.
-
-
-
 + **CTP multi-account management**: Multiple accounts share the server, and multiple terminals share a CTP channel.
 + **Network architecture**: Customized TCP protocol + server/client mode + Session management.
 + **Protocol Design**:`MsgType` Enumeration, structure message body, binary serialization/deserialization, 1MB body limit.
@@ -23979,16 +20986,16 @@ class CtpTdApi(tdapi.CThostFtdcTraderSpi):
     - pass `SHOW VARIABLES LIKE 'character_set_client'` Verify whether the character set setting takes effect.
 + **Table creation statements for four core tables (**`mysql_utils.hpp`**）**  
 `markdown/api_struct.md` Field descriptions in:
-    - `ctp_account`** ****↔**** **`CThostFtdcTradingAccountField`
+    - `ctp_account`** **↔** **`CThostFtdcTradingAccountField`
         * 50 fields, completely mapping capital account information (last settlement reserve, currently available funds, margin, deposits and withdrawals, interest, special product fields, etc.).
         * Key points: use `UNIQUE KEY (BrokerID, AccountID, TradingDay)` Make the idempotent constraint of "same brokerage company + account number + unique trading day".
-    - `ctp_commission`** ****↔**** **`CThostFtdcInstrumentCommissionRateField`
+    - `ctp_commission`** **↔** **`CThostFtdcInstrumentCommissionRateField`
         * Handling fee table: opening, closing, closing handling fees (based on amount/number of lots), exchange, business type, investment unit, etc.
         * `UNIQUE KEY (InstrumentID, TradingDay)` It is guaranteed that there is only one fee record for the same contract on the same day.
-    - `ctp_margin`** ****↔**** **`CThostFtdcInstrumentMarginRateField`
+    - `ctp_margin`** **↔** **`CThostFtdcInstrumentMarginRateField`
         * Margin rate table: long/short margin rate and amount, speculative hedging flag, whether it is charged by the exchange `IsRelative` wait.
         * same `UNIQUE KEY (InstrumentID, TradingDay)` Control uniqueness.
-    - `ctp_instrument`** ****↔**** **`CThostFtdcInstrumentField`
+    - `ctp_instrument`** **↔** **`CThostFtdcInstrumentField`
         * Basic information of the contract: contract code, exchange, product code/type, delivery year and month, minimum price change, maximum and minimum order volume, life cycle status, whether it is tradable, etc.
         * Contains options related fields:`UnderlyingInstrID`、`StrikePrice`、`OptionsType`、`UnderlyingMultiple`、`CombinationType`。
         * `UNIQUE KEY (InstrumentID, TradingDay)`, and to `EndDelivDate` Provide clarification when something is missing (fill in `29990101`）。
@@ -23998,8 +21005,8 @@ class CtpTdApi(tdapi.CThostFtdcTraderSpi):
     - use `mysql_errno == 1062` Determine the primary key/unique key conflict and treat it as idempotent: duplicate data is ignored directly and is not regarded as an error.
     - pass `output_sql` Synchronously output the generated SQL to the project path `markdown/*.sql` File for easy auditing/backup.
 
-  
-  
+
+
 Nasdaq ITCH/OUCH protocol (binary): The code needs to be parsed according to a fixed byte length (such as ITCH message fixed length, no text escaping required), ITCH is used to receive quotation/transaction data (needs to parse the "order new-transaction-cancellation" identification), OUCH is used to send orders (needs to encapsulate the "order type-quantity-price" binary package);  
 
 
@@ -24267,6 +21274,7 @@ Message middleware is responsible for system decoupling and interaction of large
 ![](https://cdn.nlark.com/yuque/0/2026/png/35485470/1768269462634-a35a10f7-8d7d-449e-91fa-8dc264f152eb.png)  
 
 
+
 ### 5. OMS, EMS, PMS, and RMS of trading systems
 **OMS - Order Management System**
 
@@ -24319,7 +21327,7 @@ struct Order {
 };
 ```
 
-****
+---
 
 **Core code**
 
@@ -24462,7 +21470,7 @@ private:
 };
 ```
 
-****
+---
 
 **OMS business process**
 
@@ -24484,7 +21492,7 @@ EMS is responsible for actually submitting orders to the exchange for trading.
 4. **Execution status feedback**: Feed back order execution results (transaction, rejection, etc.) to OMS
 5. **Asynchronous processing**: Use asynchronous queues to process order execution and improve system throughput
 
-****
+---
 
 **Core code**
 
@@ -24629,7 +21637,7 @@ private:
 };
 ```
 
-****
+---
 
 **EMS business process**
 
@@ -24657,7 +21665,7 @@ The PMS is responsible for managing the status and risk of the investment portfo
 4. **Risk Control**: Check whether the order is executable (whether the funds are sufficient and whether the position is sufficient)
 5. **Performance Analysis**: Calculate performance indicators such as return rate, total profit and loss, etc.
 
-****
+---
 
 **Core Data Structure**
 
@@ -24686,7 +21694,7 @@ struct Position {
 };
 ```
 
-****
+---
 
 **Core code**
 
@@ -24875,7 +21883,7 @@ private:
 };
 ```
 
-****
+---
 
 **PMS business process**
 
@@ -25235,7 +22243,7 @@ private:
 };
 ```
 
-****
+---
 
 **RMS Business Process**
 
@@ -27293,7 +24301,7 @@ public:
 };
 ```
 
-****
+---
 
 **2. Optimal Execution Solver**
 
@@ -27309,6 +24317,7 @@ This solver focuses on the time dimension allocation strategy of orders and dete
 **Main algorithm:**
 
 +Almgren-Chriss model
+
 + Dynamic programming methods
 + Reinforcement Learning Executor (few teams)
 
@@ -27413,7 +24422,7 @@ public:
 };
 ```
 
-****
+---
 
 **3. Risk Constraint Solver**
 
@@ -27558,7 +24567,7 @@ private:
 };
 ```
 
-****
+---
 
 **4. Market-Making Quote Solver**
 
@@ -27911,7 +24920,7 @@ $ \text{VWAP slippage (bps)} = \frac{P_{\text{your avg}} - P_{\text{mkt VWAP}}}{
 
 Arrival price $ m $ is the mid (or first touch) when the commonly used mother order arrives.
 
-$ \mathrm{IS\,(bps)} = s \cdot \frac{P_{\mathrm{fill\,avg}} - m}{m} \times 10000, \qquad s = \begin{cases} +1 & \text{Buy} \\ -1 & \text{Sell} \end{cases} $
+$ \mathrm{IS\,(bps)} = s \cdot \frac{P_{\mathrm{fill\,avg}} - m}{m} \times 10000, \qquad s = \begin{cases} +1 &amp; \text{Buy} \\ -1 &amp; \text{Sell} \end{cases} $
 
 + Buyer: Transaction price is below mid → IS is negative → better.
 
@@ -27932,7 +24941,7 @@ $ \mathrm{fill\,rate} = \frac{Q_{\mathrm{filled}}}{Q_{\mathrm{requested}}} $
 
 `requested == 0` When defined as 0 or N/A, division by zero is avoided. Conditional writing:
 
-$ \mathrm{fill\,rate} = \begin{cases} Q_{\mathrm{filled}} / Q_{\mathrm{requested}} & Q_{\mathrm{requested}} > 0 \\ 0 \;\text{或 N/A} & Q_{\mathrm{requested}} = 0 \end{cases} $
+$ \mathrm{fill\,rate} = \begin{cases} Q_{\mathrm{filled}} / Q_{\mathrm{requested}} &amp; Q_{\mathrm{requested}} &gt; 0 \\ 0 \;\text{或 N/A} &amp; Q_{\mathrm{requested}} = 0 \end{cases} $
 
 
 
@@ -28122,6 +25131,7 @@ In high-concurrency links such as trading systems/risk control/matching/gateways
 Current limiting is done to maintain stability and recoverability as the system approaches saturation.  
 
 
+
 **Common usage scenarios (trading system caliber)**
 
 + By account/user:`accountId` Dimension limits the frequency of placing/cancelling orders to prevent a single account from maxing out the system.
@@ -28148,10 +25158,11 @@ Current limiting is done to maintain stability and recoverability as the system 
 + For high concurrency, use shards (sharding) to `unordered_map` Disassembled to reduce lock contention
 + `unordered_map` support `string_view` Heterogeneous lookup: hit path no longer allocates string
 + `TokenBucket` Use integer fixed point (token * 1e9 units) to avoid the uncertainty and extra overhead caused by floating point
-+ `idle_timeout/prune_interval/max_entries` Control key life cycle and memory limit  
++ `idle_timeout/prune_interval/max_entries` Control key life cycle and memory limit
 
 
-**B) **`**LockFreeApiRateLimiter**`**(No lock + GCRA + fixed capacity table) **
+
+**B) `**LockFreeApiRateLimiter**`(No lock + GCRA + fixed capacity table) **
 
 **Applicable**: Extreme throughput/low tail latency, controllable and predictable key space, willingness to trade fixed capacity for performance.
 
@@ -29106,14 +26117,14 @@ void applyStateUpdate(const StateUpdate& update) {
 
 **Architecture Collaboration**:  
 `Client -> [撮合 (命令共识)] -> TradeEvent -> [柜台 (结果共识)] -> AccountState`  
-  
+
 
 
 ### 15. Exchange protocol layering and sequence consistency
 1.**Protocol layering**  
-    Session layer: login, heartbeat, reconnection, sequence number maintenance, retransmission negotiation.  
-    Business layer: order book increments, transactions, status events, snapshot events.  
-    Encoding and decoding layer: byte order conversion, field verification, structure mapping.
+Session layer: login, heartbeat, reconnection, sequence number maintenance, retransmission negotiation.  
+Business layer: order book increments, transactions, status events, snapshot events.  
+Encoding and decoding layer: byte order conversion, field verification, structure mapping.
 
 ```cpp
 #include <cstdint>
@@ -29157,9 +26168,9 @@ public:
 ```
 
 **2. Sequence consistency processing**  
-    Market flow maintenance for each channel `last_seq`, strictly check continuity.  
-    After detecting the gap, it enters the recovery state: request retransmission, merge playback, and then switch back to the real-time stream.  
-    The strategy is prohibited from continuing to consume the real-time increment of the target before the recovery is completed.
+Market flow maintenance for each channel `last_seq`, strictly check continuity.  
+After detecting the gap, it enters the recovery state: request retransmission, merge playback, and then switch back to the real-time stream.  
+The strategy is prohibited from continuing to consume the real-time increment of the target before the recovery is completed.
 
 ```cpp
 #include <cstdint>
@@ -29214,9 +26225,9 @@ private:
 ```
 
 **3.Time stamp layering**  
-    `exchange_ts`:Exchange time.  
-    `nic_rx_ts`: The network card receives the hardware time.  
-    `app_ts`: Application layer processing time.
+`exchange_ts`:Exchange time.  
+`nic_rx_ts`: The network card receives the hardware time.  
+`app_ts`: Application layer processing time.
 
 ```cpp
 #include <chrono>
@@ -29311,7 +26322,7 @@ int main() {
 
 
 ### 2.<font style="color:rgba(0, 0, 0, 0.85);">Changes in state of market trends and volatility</font>
-1. <font style="background-color:rgba(255, 255, 255, 0);">By analyzing market trends and state changes in volatility, we can determine whether the market is stable. If the state change interval presents a random distribution, it means the market is relatively stable; if it stays in a certain state for a long time (such as long-term high volatility), there may be non-stationarity, which will affect the robustness of the trading system. By analyzing the state changes of market indicators, we can test the stability of the market and provide a basis for the development of trading systems (to avoid failure in non-stationary markets).</font>
+1. By analyzing market trends and state changes in volatility, we can determine whether the market is stable. If the state change interval presents a random distribution, it means the market is relatively stable; if it stays in a certain state for a long time (such as long-term high volatility), there may be non-stationarity, which will affect the robustness of the trading system. By analyzing the state changes of market indicators, we can test the stability of the market and provide a basis for the development of trading systems (to avoid failure in non-stationary markets).
 2. **Calculation of key indicators**:
     - **Trend Indicator**: Fit the slope using least squares (`find_slope`) to measure price trends
     - **Volatility Indicator**: uses average true range (ATR,`find_volatility`) to measure market volatility
@@ -29551,15 +26562,9 @@ int main(int argc, char* argv[]) {
 
 <font style="color:rgba(0, 0, 0, 0.85);">There are two main ways to improve the stability of market indicators through the "indicator difference method": one is to subtract lagging indicators from current indicators, and the other is to subtract long-term indicators from short-term indicators.</font>
 
-1. <font style="color:rgba(0, 0, 0, 0.85);">Implementation of two index modification methods  
-</font><font style="color:rgba(0, 0, 0, 0.85);">Method 1 (Version=1): Current indicator - lagging indicator corresponds to "Calculate the indicator value and subtract the lag value, the lag length is usually equal to the indicator lookback window" in the text. The code is implemented using calc_trend(close, i, LOOKBACK) - calc_trend(close, i - LOOKBACK, LOOKBACK) to directly eliminate the long-term trend deviation of the indicator.  
-</font><font style="color:rgba(0, 0, 0, 0.85);">Method 2 (Version=3): Short-term indicators - long-term indicators correspond to the article "Use different lookback windows to calculate indicators, short-term and long-term to obtain more stable modified indicators." The code is implemented using calc_trend(close, i, LOOKBACK) - calc_trend(close, i, 3*LOOKBACK) to smooth extreme fluctuations through long-term windows while retaining short-term change information.</font>
-2. <font style="color:rgba(0, 0, 0, 0.85);">Quantitative verification of stationarity  
-</font><font style="color:rgba(0, 0, 0, 0.85);">State change analysis: Use the analyze_state_gaps function to count the switching intervals between the two states of "above the median" and "below the median". The more random the interval (the intervals are evenly distributed), the better the stability.  
-</font><font style="color:rgba(0, 0, 0, 0.85);">Comparison of results: The original indicator (Version=0) has a large number of long-term states (such as the >512 interval times of volatility), while the modified indicator (Version=1/3) has a significantly reduced number of long-term states, and its stability is significantly improved.</font>
-3. <font style="color:rgba(0, 0, 0, 0.85);">Trade-offs between methods  
-</font><font style="color:rgba(0, 0, 0, 0.85);">Version=1: The stability is optimal, but the absolute value information of the original indicator is lost (such as the specific size of the current trend), which corresponds to the "most powerful but discards the most information" in the article.  
-</font><font style="color:rgba(0, 0, 0, 0.85);">Version=3: By adjusting the long-term window (such as 3*LOOKBACK), a balance is achieved between stability and information retention. Corresponding to the "compromise solution" in the article, the trade-off relationship can be controlled by adjusting the long-term lookback window.</font>
+1. <font style="color:rgba(0, 0, 0, 0.85);">Implementation of two index modification methods </font><font style="color:rgba(0, 0, 0, 0.85);">Method 1 (Version=1): Current indicator - lagging indicator corresponds to "Calculate the indicator value and subtract the lag value, the lag length is usually equal to the indicator lookback window" in the text. The code is implemented using calc_trend(close, i, LOOKBACK) - calc_trend(close, i - LOOKBACK, LOOKBACK) to directly eliminate the long-term trend deviation of the indicator. </font><font style="color:rgba(0, 0, 0, 0.85);">Method 2 (Version=3): Short-term indicators - long-term indicators correspond to the article "Use different lookback windows to calculate indicators, short-term and long-term to obtain more stable modified indicators." The code is implemented using calc_trend(close, i, LOOKBACK) - calc_trend(close, i, 3*LOOKBACK) to smooth extreme fluctuations through long-term windows while retaining short-term change information.</font>
+2. <font style="color:rgba(0, 0, 0, 0.85);">Quantitative verification of stationarity </font><font style="color:rgba(0, 0, 0, 0.85);">State change analysis: Use the analyze_state_gaps function to count the switching intervals between the two states of "above the median" and "below the median". The more random the interval (the intervals are evenly distributed), the better the stability. </font><font style="color:rgba(0, 0, 0, 0.85);">Comparison of results: The original indicator (Version=0) has a large number of long-term states (such as the >512 interval times of volatility), while the modified indicator (Version=1/3) has a significantly reduced number of long-term states, and its stability is significantly improved.</font>
+3. <font style="color:rgba(0, 0, 0, 0.85);">Trade-offs between methods </font><font style="color:rgba(0, 0, 0, 0.85);">Version=1: The stability is optimal, but the absolute value information of the original indicator is lost (such as the specific size of the current trend), which corresponds to the "most powerful but discards the most information" in the article. </font><font style="color:rgba(0, 0, 0, 0.85);">Version=3: By adjusting the long-term window (such as 3*LOOKBACK), a balance is achieved between stability and information retention. Corresponding to the "compromise solution" in the article, the trade-off relationship can be controlled by adjusting the long-term lookback window.</font>
 
 ```cpp
 #include <iostream>
@@ -30079,12 +27084,12 @@ int main() {
 
 + **Hazards of low entropy**: Low entropy indicators (such as extreme outliers and excessive numerical clustering) will interfere with model training. For example, outliers will cause the model to focus too much on a small number of data and ignore most normal samples; numerical clustering will cause the model to mistakenly regard irrelevant clustering differences as core rules, reducing prediction accuracy.
 + **Optimization means**:
-    - Tail cleaning: Find the core data interval of the indicator (covering most normal data) through sorting, and perform monotonic compression (such as exponential function compression) on extreme values ​​outside the interval, which not only preserves the order of the data, but also prevents outliers from destroying the distribution and improves the entropy value.
+    - Tail cleaning: Find the core data interval of the indicator (covering most normal data) through sorting, and perform monotonic compression (such as exponential function compression) on extreme values outside the interval, which not only preserves the order of the data, but also prevents outliers from destroying the distribution and improves the entropy value.
     - Nonlinear transformation: Select corresponding transformations for different distribution defects, such as square root/cube root to deal with skewed distribution, hyperbolic tangent/logistic function to compress extreme values, cumulative distribution function to match standard distribution, and optimize indicator numerical distribution to improve information content.
 
 **3. The relationship between entropy and trading model**
 
-+ High entropy indicators usually correspond to values ​​evenly distributed within a range. This distribution allows the prediction model to learn data patterns more efficiently and reduce interference caused by outliers or clustering. Therefore, the level of entropy value is highly related to the model training effect.
++ High entropy indicators usually correspond to values evenly distributed within a range. This distribution allows the prediction model to learn data patterns more efficiently and reduce interference caused by outliers or clustering. Therefore, the level of entropy value is highly related to the model training effect.
 + It is necessary to pay attention to the limitations of entropy: high entropy only means that the indicator information content is high, and it is necessary to further verify whether the information is related to the trading target (such as judging long and short, predicting volatility); in a few cases, optimizing entropy may reduce the practicality of the indicator, but this is an exception. Most of the time, increasing entropy will improve model performance.
 
 ```cpp
@@ -30311,8 +27316,8 @@ cleanup:
 **(1) Regularization type: Ridge regression + Lasso + elastic net (regularization idea) **
 
 + via parameters`alpha`Control regularization type:
-    - `alpha=0`: Ridge regression (L2 regularization), penalizing the sum of squares of coefficients ($\lambda\sum\beta_j^2$), making the coefficients of highly correlated indicators tend to average, avoiding extreme values ​​of coefficients, and is suitable for scenarios where there is correlation between indicators (such as multiple trend indicators);
-    - `alpha=1`: Lasso (L1 regularization), the absolute value sum of penalty coefficients ($\lambda\sum|\beta_j| $) will return some irrelevant index coefficients to zero (variable selection), which is suitable for screening core indicators;
+    - `alpha=0`: Ridge regression (L2 regularization), penalizing the sum of squares of coefficients ($ \lambda\sum\beta_j^2 $), making the coefficients of highly correlated indicators tend to average, avoiding extreme values of coefficients, and is suitable for scenarios where there is correlation between indicators (such as multiple trend indicators);
+    - `alpha=1`: Lasso (L1 regularization), the absolute value sum of penalty coefficients ($ \lambda\sum|\beta_j|  $) will return some irrelevant index coefficients to zero (variable selection), which is suitable for screening core indicators;
     - `0<alpha<1`: Elastic net (recommended), combines L1 and L2 penalties at the same time, takes into account "variable selection" and "suppression coefficient extreme values", and is suitable for most trading scenarios.
 + `lambda`Control the strength of regularization: the larger the value, the stronger the constraints on the coefficients and the simpler the model (the stronger the generalization ability, but the fitting ability may decrease).
 
@@ -30321,9 +27326,9 @@ cleanup:
 + Core logic: Update coefficients variable by variable, fix other variables each time, only optimize the current variable, improve efficiency through "active set iteration" (only process non-zero coefficients), symbolizing the need for "fast training of linear models";
 + Key steps:
     1. **Data Standardization**: Perform "mean reduction and standard deviation" processing on input indicators (such as trends, volatility) and target variables (such as returns) (required in the book to reduce numerical errors and improve convergence speed);
-    2. **Fast update of covariance**: When the number of samples (number of historical bars in the market) is much larger than the number of indicators, the covariance matrix between indicators and the cross-covariance between indicators and targets are pre-calculated, reducing the time complexity of each iteration from $O(N*K)$ (N is the number of samples, K is the number of indicators) to $O(K^2)$, adapting to the efficient computing requirements of "large samples, multiple indicators" of the trading system;
+    2. **Fast update of covariance**: When the number of samples (number of historical bars in the market) is much larger than the number of indicators, the covariance matrix between indicators and the cross-covariance between indicators and targets are pre-calculated, reducing the time complexity of each iteration from $ O(N*K) $ (N is the number of samples, K is the number of indicators) to $ O(K^2) $, adapting to the efficient computing requirements of "large samples, multiple indicators" of the trading system;
     3. **Soft threshold update**: The core operation of Lasso/L1 regularization, applying "threshold clipping" to the optimized coefficients to return small coefficients to zero (implementing variable selection), the formula is:  
-$ S(z,\gamma)=\begin{cases}z-\gamma & z>\gamma \\ z+\gamma & z<-\gamma \\ 0 & \text{otherwise}\end{cases} $  
+$ S(z,\gamma)=\begin{cases}z-\gamma &amp; z&gt;\gamma \\ z+\gamma &amp; z&lt;-\gamma \\ 0 &amp; \text{otherwise}\end{cases} $  
 Among them $ \gamma=\alpha*\lambda $ (the combination of regularization strength and type).
 
 **(3) Lambda Optimization: Path Descent + Cross Validation ("Optimal Regularization Strength Selection") **
@@ -30946,7 +27951,7 @@ For the "regularized strategy parameter optimization" scenario in the trading sy
 + After each iteration, press`climb_prob`Probabilistically perform "single-parameter hill-climbing optimization" on individuals (prioritizing the current optimal individual):
     - Integer parameters (such as moving average lookback period): search the upper and lower boundaries value by value to find the optimal performance value;
     - Real parameters (such as position opening threshold): use the simplified Brent algorithm (rule of thirds) to quickly locate the local optimum;
-+ This step combines "global population evolution" and "local fine search" to avoid falling into local optima and improve the accuracy of optimal parameters (the idea of ​​"hybrid optimization to improve efficiency").
++ This step combines "global population evolution" and "local fine search" to avoid falling into local optima and improve the accuracy of optimal parameters (the idea of "hybrid optimization to improve efficiency").
 
 **(4) Termination conditions and result output**
 
@@ -30955,7 +27960,7 @@ For the "regularized strategy parameter optimization" scenario in the trading sy
 **(5)Performance evaluation interface:**`**trade_system_criter**`
 
 + Input: parameter combination to be evaluated (such as moving average lookback period, threshold) + minimum number of transactions constraints;
-+ Internal logic: reproduce the trading strategy according to parameters (such as moving average cross opening/closing), calculate the performance during the backtest period (total return, Sharpe ratio, profit factor, etc. supported in the book), and return invalid values ​​if the number of transactions is insufficient;
++ Internal logic: reproduce the trading strategy according to parameters (such as moving average cross opening/closing), calculate the performance during the backtest period (total return, Sharpe ratio, profit factor, etc. supported in the book), and return invalid values if the number of transactions is insufficient;
 + Output: Quantitative performance scores for the optimization algorithm to compare the pros and cons of different parameter combinations.
 
 ```cpp
@@ -31776,7 +28781,7 @@ Hessian matrix: The Hessian matrix (matrix of second derivatives of the performa
 
 **Analysis results:**
 
-Relative variation: The square root of the diagonal elements of the Hessian matrix, reflecting the robustness of a single parameter (larger values ​​are more robust).
+Relative variation: The square root of the diagonal elements of the Hessian matrix, reflecting the robustness of a single parameter (larger values are more robust).
 
 Correlation matrix: obtained by normalizing the Hessian matrix, revealing whether there is coupling between parameters.
 
@@ -34178,7 +31183,7 @@ int main() {
 
 
 
-### 13.<font style="background-color:rgba(255, 255, 255, 0.04);">Asset Cost Base (ACB) Calculation</font>
+### 13.Asset Cost Base (ACB) Calculation
 **FIFO PnL calculator**
 
 Calculating profit and loss (PnL) is an important part of post-trade analysis.
@@ -34456,7 +31461,7 @@ private:
 
 
 
-### 14.<font style="background-color:rgba(255, 255, 255, 0.04);">Numerical calculation tools</font>
+### 14.Numerical calculation tools
 ```cpp
 #ifndef _NUMERICAL_H_
 #define _NUMERICAL_H_
@@ -35497,7 +32502,7 @@ size_adjustment = 1.0 - min(|q| / max_inventory, 1.0)
 order_size = base_size * size_adjustment
 ```
 
-****
+---
 
 **Core Data Structure**
 
@@ -35556,7 +32561,7 @@ struct alignas(64) QuoteUpdate {
 };
 ```
 
-****
+---
 
 **Key code analysis**
 
@@ -35731,7 +32736,7 @@ inline void AvellanedaStoikov::on_fill(bool is_buy, double quantity) noexcept {
 
 **Core Parameters**
 
-| Parameters | Symbols | Typical values ​​| Effects |
+| Parameters | Symbols | Typical values  | Effects |
 | --- | --- | --- | --- |
 | Risk aversion coefficient | γ | 0.05-0.2 | The larger the value, the larger the spread and the lower the risk |
 | Price sensitivity | κ | 1.0-2.0 | The larger the value, the greater the price difference and the lower the probability of transaction |
@@ -36165,7 +33170,7 @@ int64_t align_price_to_tick(price, tick) {
 ```
 
 + **Zero floating point mixed use**: market decoding → calculation → whole order integer 
-+ **Explicit transfer of Scale**: Hard coding is prohibited, and the source/target Scale is clearly specified during operation. 
++ **Explicit transfer of Scale**: Hard coding is prohibited, and the source/target Scale is clearly specified during operation.
 
 **4. Scene quick check**
 
@@ -36173,7 +33178,7 @@ int64_t align_price_to_tick(price, tick) {
 | --- | --- | --- |
 | Order Book Position | `(price - min_price) / tick` | O(1) integer indexing, zero error |
 | Position Profit and Loss | `(最新价-开仓价)*数量*乘数` | Multiply first and then divide, Scale=100 rounding |
-| Margin | `合约价值 * 保证金比例` |Full link Scale=100, aligned with liquidation rules |
+| Margin | `合约价值 * 保证金比例` | Full link Scale=100, aligned with liquidation rules |
 | Order Verification | `is_price_valid(price, tick)` | Non-tick multiple → Automatic alignment → Interception of abandoned orders |
 
 
@@ -36201,7 +33206,7 @@ x∗y=k
 
 in `x` and `y` is the reserve amount of the two tokens in the pool,`k` is a constant product. This formula ensures that any transaction must maintain this invariant. The curve created by this formula penalizes larger trades with worse exchange rates, thus maintaining balance within the pool.
 
-Uniswap charges a fee of **0.30%** per transaction, which is added back to the reserve, making `k` Values ​​increase slightly over time. Since the price of tokens within a pool can only be changed through transactions, any difference between the price in the pool and the external market creates an arbitrage opportunity. Arbitrage ensures that Uniswap prices closely track global market prices.
+Uniswap charges a fee of **0.30%** per transaction, which is added back to the reserve, making `k` Values increase slightly over time. Since the price of tokens within a pool can only be changed through transactions, any difference between the price in the pool and the external market creates an arbitrage opportunity. Arbitrage ensures that Uniswap prices closely track global market prices.
 
 
 
@@ -36670,17 +33675,17 @@ if(UNIX)
 endif()
 ```
 
-###   
-2.uniswap-v3
+### 
+2.uniswap-v3  
 The main feature of Uniswap-v2 is **"uniform distribution of liquidity"**. As a liquidity provider (LP), the funds provided will be evenly distributed across all possible price ranges from 0 to infinity.
 
-One trading pool contains DAI and USDC, two stablecoins worth approximately $1. In v2, the liquidity provided is not only distributed between the most commonly traded price range of $0.99 to $1.01, but also to the almost impossible prices of $0.1 and $10,000. This leads to huge **capital inefficiency** because most of the money will never be used.
+One trading pool contains DAI and USDC, two stablecoins worth approximately $ 1. In v2, the liquidity provided is not only distributed between the most commonly traded price range of  $0.99 to $ 1.01, but also to the almost impossible prices of  $0.1 and $10,000. This leads to huge **capital inefficiency** because most of the money will never be used.
 
 The most revolutionary change of Uniswap-v3 is the introduction of **centralized liquidity**.
 
 This new mechanism allows liquidity providers (LPs) to pool their funds within a limited price range of their own choosing.
 
-Using the DAI/USDC example again, in v3, you can choose to only invest funds in the $0.99 to $1.01 price range.
+Using the DAI/USDC example again, in v3, you can choose to only invest funds in the $ 0.99 to  $1.01 price range.
 
 | Features | Uniswap-v2 | Uniswap-v3 |
 | --- | --- | --- |
@@ -37166,8 +34171,8 @@ int main() {
 }
 ```
 
-###   
-3.CEX order book solution
+### 
+3.CEX order book solution  
 **VectorOrderBook：**
 
 1. **Extreme performance requirements** - High-frequency trading systems require nanosecond latency
@@ -37189,18 +34194,18 @@ int main() {
 4. **Deterministic performance requirements** - More predictable than HashMap
 5. **Universal Scenario** - Suitable for most trading pairs
 
-**<font style="color:rgb(0, 0, 0);background-color:rgba(0, 0, 0, 0);">CircularArrayOrderBook</font>**<font style="color:rgb(0, 0, 0);background-color:rgba(0, 0, 0, 0);">：</font>
+**<font style="color:rgb(0, 0, 0);">CircularArrayOrderBook</font>**<font style="color:rgb(0, 0, 0);">：</font>
 
-1. **<font style="color:rgb(0, 0, 0);background-color:rgba(0, 0, 0, 0);">Ultra High Frequency Market Maker System</font>**<font style="color:rgb(0, 0, 0);background-color:rgba(0, 0, 0, 0);"> - Order cancellation/insertion frequency is extremely high, relying on O (1) stable latency</font>
-2. **<font style="color:rgb(0, 0, 0);background-color:rgba(0, 0, 0, 0);">Short life cycle order scenario</font>**<font style="color:rgb(0, 0, 0);background-color:rgba(0, 0, 0, 0);"> - A large number of IOC (immediate execution or cancellation) and FOK orders need to be quickly marked invalid and space recovered through compression</font>
-3. **<font style="color:rgb(0, 0, 0);background-color:rgba(0, 0, 0, 0);">Memory Sensitive High Frequency Trading</font>**<font style="color:rgb(0, 0, 0);background-color:rgba(0, 0, 0, 0);"> - Save 90%+ memory compared to VectorOrderBook (no need to pre-allocate 30M price point) while maintaining high-frequency operation performance</font>
-4. **<font style="color:rgb(0, 0, 0);background-color:rgba(0, 0, 0, 0);">Active price levels are concentrated</font>**<font style="color:rgb(0, 0, 0);background-color:rgba(0, 0, 0, 0);"> - 2^8=256 price levels are enough to cover the short-term fluctuation range of mainstream currencies</font>
+1. **<font style="color:rgb(0, 0, 0);">Ultra High Frequency Market Maker System</font>**<font style="color:rgb(0, 0, 0);"> - Order cancellation/insertion frequency is extremely high, relying on O (1) stable latency</font>
+2. **<font style="color:rgb(0, 0, 0);">Short life cycle order scenario</font>**<font style="color:rgb(0, 0, 0);"> - A large number of IOC (immediate execution or cancellation) and FOK orders need to be quickly marked invalid and space recovered through compression</font>
+3. **<font style="color:rgb(0, 0, 0);">Memory Sensitive High Frequency Trading</font>**<font style="color:rgb(0, 0, 0);"> - Save 90%+ memory compared to VectorOrderBook (no need to pre-allocate 30M price point) while maintaining high-frequency operation performance</font>
+4. **<font style="color:rgb(0, 0, 0);">Active price levels are concentrated</font>**<font style="color:rgb(0, 0, 0);"> - 2^8=256 price levels are enough to cover the short-term fluctuation range of mainstream currencies</font>
 
 **Multi-Currency Exchange:**
 
 1. **Mainstream coins (BTC/ETH/BNB)** → TreeOrderBook (balanced performance and functionality) or CircularArrayOrderBook (high-frequency market making area)  
 2. **Extremely low price coins (SHIB/PEPE)** → TreeOrderBook or HashOrderBook
-3. **Exclusive for High Frequency Trading** → VectorOrderBook or CircularArrayOrderBook (Memory + Latency Balanced)  
+3. **Exclusive for High Frequency Trading** → VectorOrderBook or CircularArrayOrderBook (Memory + Latency Balanced)
 
 **Single scene recommendation:**
 
@@ -37209,8 +34214,8 @@ int main() {
 + **Pursue high frequency performance but limited memory** → CircularArrayOrderBook  
 + **Resource Constrained Environment** → HashOrderBook
 
-###   
-4. Triangular arbitrage
+### 
+4. Triangular arbitrage  
 <font style="color:rgb(0,0,0);">Suppose there are three trading pairs (a trading pair refers to a market where two assets trade with each other at a certain ratio).</font>
 
 <font style="color:rgb(0,0,0);">The first one is</font><font style="color:rgb(0,0,0);">A-B</font><font style="color:rgb(0,0,0);">, the exchange ratio is</font><font style="color:rgb(0,0,0);">1:10</font><font style="color:rgb(0,0,0);">(Right now</font><font style="color:rgb(0,0,0);">1</font><font style="color:rgb(0,0,0);">indivual</font><font style="color:rgb(0,0,0);">A</font><font style="color:rgb(0,0,0);">Can be exchanged for</font><font style="color:rgb(0,0,0);">10</font><font style="color:rgb(0,0,0);">indivual</font><font style="color:rgb(0,0,0);">B</font><font style="color:rgb(0,0,0);">，</font><font style="color:rgb(0,0,0);">10</font><font style="color:rgb(0,0,0);">indivual</font><font style="color:rgb(0,0,0);">B</font><font style="color:rgb(0,0,0);">Can be exchanged for</font><font style="color:rgb(0,0,0);">1</font><font style="color:rgb(0,0,0);">indivual</font><font style="color:rgb(0,0,0);">A</font><font style="color:rgb(0,0,0);">, the same below);</font>
@@ -37219,11 +34224,11 @@ int main() {
 
 <font style="color:rgb(0,0,0);">The third one is</font><font style="color:rgb(0,0,0);">A-C</font><font style="color:rgb(0,0,0);">, the exchange ratio is</font><font style="color:rgb(0,0,0);">1:10</font><font style="color:rgb(0,0,0);">00</font><font style="color:rgb(0,0,0);">。</font>
 
-<font style="color:rgb(0,0,0);"></font>
+
 
 <font style="color:rgb(0,0,0);">Suppose we have in hand</font><font style="color:rgb(0,0,0);">1</font><font style="color:rgb(0,0,0);">indivual</font><font style="color:rgb(0,0,0);">A</font><font style="color:rgb(0,0,0);">assets, when</font><font style="color:rgb(0,0,0);">Price</font><font style="color:rgb(0,0,0);">(</font><font style="color:rgb(0,0,0);">A</font><font style="color:rgb(0,0,0);">,</font><font style="color:rgb(0,0,0);">C</font><font style="color:rgb(0,0,0);">)</font><font style="color:rgb(0,0,0);">become</font><font style="color:rgb(0,0,0);">1</font><font style="color:rgb(0,0,0);">:1100</font><font style="color:rgb(0,0,0);">, we can take</font><font style="color:rgb(0,0,0);">1</font><font style="color:rgb(0,0,0);">indivual</font><font style="color:rgb(0,0,0);">A</font><font style="color:rgb(0,0,0);">With the third trading pair, the exchange is</font><font style="color:rgb(0,0,0);">1100</font><font style="color:rgb(0,0,0);">indivual</font><font style="color:rgb(0,0,0);">C</font><font style="color:rgb(0,0,0);">, and then use the second trading pair to</font><font style="color:rgb(0,0,0);">1100</font><font style="color:rgb(0,0,0);">indivual</font><font style="color:rgb(0,0,0);">C</font><font style="color:rgb(0,0,0);">exchanged for</font><font style="color:rgb(0,0,0);">11</font><font style="color:rgb(0,0,0);">indivual</font><font style="color:rgb(0,0,0);">B</font><font style="color:rgb(0,0,0);">, and then use the first trading pair to</font><font style="color:rgb(0,0,0);">11</font><font style="color:rgb(0,0,0);">indivual</font><font style="color:rgb(0,0,0);">B</font><font style="color:rgb(0,0,0);">exchanged for</font><font style="color:rgb(0,0,0);">1.1</font><font style="color:rgb(0,0,0);">indivual</font><font style="color:rgb(0,0,0);">A</font><font style="color:rgb(0,0,0);">, thereby achieving</font><font style="color:rgb(0,0,0);">0.1</font><font style="color:rgb(0,0,0);">indivual</font><font style="color:rgb(0,0,0);">A</font><font style="color:rgb(0,0,0);">profit.</font>
 
-<font style="color:rgb(0,0,0);"></font>
+
 
 <font style="color:rgb(0,0,0);">Question 1: Can you make a profit when the Price(A,C) you receive becomes 1:900? How to do it?</font>
 
@@ -37235,18 +34240,15 @@ int main() {
 
 <font style="color:rgb(0,0,0);">Question 5: If what we exchange is not a fixed 1 A, but 0-1000 A, but due to the existence of impact cost, the greater the input of A, the lower the return rate, but the absolute return may keep rising within a certain range, how to design an algorithm to find the maximum profit of each loop or even all loops.</font>
 
-<font style="color:rgb(0,0,0);"></font>
+
 
 **Statistical Arbitrage Strategy (Pairs Trading)**
 
-1. <font style="color:rgb(0,0,0);">Asset pair filtering (code logic):  
-</font><font style="color:rgb(0,0,0);">Calculate the sum of squared price differences of candidate asset pairs</font>$ \sum_{t=1}^{T}\left(S_{i,t}-S_{j,t}\right)^{2} $<font style="color:rgb(0,0,0);">, select the asset pair corresponding to the minimum value (such as stocks in the same industry);  </font>
-2. <font style="color:rgb(0,0,0);">Deviation judgment (code formula):  
-</font><font style="color:rgb(0,0,0);">Calculate the mean of price differences</font>$ E[\Delta S_t]=\frac{1}{T}\sum_{t=1}^T \Delta S_t $<font style="color:rgb(0,0,0);">, standard deviation</font>$ \sigma[\Delta S_t]=\sqrt{\frac{1}{T-1}\sum_{t=1}^T (\Delta S_t-E[\Delta S_t])^2} $<font style="color:rgb(0,0,0);">；  </font>
-3. <font style="color:rgb(0,0,0);">Transaction trigger:  
-</font><font style="color:rgb(0,0,0);">like</font>$ \Delta S_\tau > E[\Delta S_\tau]+2\sigma[\Delta S_\tau] $<font style="color:rgb(0,0,0);">, the code executes "sell i and buy j"; if</font>$ \Delta S_\tau < E[\Delta S_\tau]-2\sigma[\Delta S_\tau] $<font style="color:rgb(0,0,0);">, execute "buy i, sell j".</font>
+1. <font style="color:rgb(0,0,0);">Asset pair filtering (code logic): </font><font style="color:rgb(0,0,0);">Calculate the sum of squared price differences of candidate asset pairs</font>$ \sum_{t=1}^{T}\left(S_{i,t}-S_{j,t}\right)^{2} $<font style="color:rgb(0,0,0);">, select the asset pair corresponding to the minimum value (such as stocks in the same industry);  </font>
+2. <font style="color:rgb(0,0,0);">Deviation judgment (code formula): </font><font style="color:rgb(0,0,0);">Calculate the mean of price differences</font>$ E[\Delta S_t]=\frac{1}{T}\sum_{t=1}^T \Delta S_t $<font style="color:rgb(0,0,0);">, standard deviation</font>$ \sigma[\Delta S_t]=\sqrt{\frac{1}{T-1}\sum_{t=1}^T (\Delta S_t-E[\Delta S_t])^2} $<font style="color:rgb(0,0,0);">；  </font>
+3. <font style="color:rgb(0,0,0);">Transaction trigger: </font><font style="color:rgb(0,0,0);">like</font>$ \Delta S_\tau &gt; E[\Delta S_\tau]+2\sigma[\Delta S_\tau] $<font style="color:rgb(0,0,0);">, the code executes "sell i and buy j"; if</font>$ \Delta S_\tau &lt; E[\Delta S_\tau]-2\sigma[\Delta S_\tau] $<font style="color:rgb(0,0,0);">, execute "buy i, sell j".</font>
 
-<font style="color:rgb(0,0,0);"></font>
+
 
 **<font style="color:rgb(0,0,0);">Answer to question 1</font>**
 
@@ -37848,11 +34850,12 @@ double findMaxProfit(const Loop& loop, const std::vector<double>& base_rates) {
 
 ### 5.quant trading workflow
 quant trading workflow in crypto  
+
 1. data process  
 2. statical analysis of trade data and orderbook data, to check anormal data and bad trade execution  
 3. research market event  
-4. imporve strategy model and its parameter  
-  
+4. imporve strategy model and its parameter
+
 example 1: In multi-cryptocurrency trading scenarios, when calculating profit and loss (PnL), it's necessary to convert profits and losses from different coins into a unified pricing unit (typically a stablecoin like USDT). If this standardization conversion is not performed, the avg Pnl significantly greater than mean value, maybe the problem come from the null value in datasets.
 
 
@@ -37865,30 +34868,40 @@ method to analysize, we should use the previous and next BBO data to calculate t
 
 ### 6.Binance U-based contract multi-factor
 Project address:[https://github.com/zzxscodes/long-short-infra](https://github.com/zzxscodes/long-short-infra)(Python implementation)  
-  
+
 Project structure:  
 Event-Driven Coordination Process (Process 1) - IPC Server
 
-           ↕ IPC Communication
+```plain
+       ↕ IPC Communication
+```
 
 Data Layer Process (Process 2) - Trade Collector + Kline Aggregator
 
-           ↕ File Signal
+```plain
+       ↕ File Signal
+```
 
 Strategy Process (Process 3) - Position Calculator
 
-           ↕ File Signal
+```plain
+       ↕ File Signal
+```
 
 Order Execution Process (Process 4) - Order Manager (Multiple instances, one per account)
 
-           ↕ IPC Communication
+```plain
+       ↕ IPC Communication
+```
 
 Monitoring Process (Process 5) - Metrics & Alerts + Web API
 
-           ↕ HTTP API
+```plain
+       ↕ HTTP API
+```
 
-Web monitoring interface (http://localhost:8080)  
-  
+Web monitoring interface ([http://localhost:8080](http://localhost:8080))  
+
 Data storage architecture:  
 data/  
 ├── universe/ #Universe file (supported version)  
@@ -37913,8 +34926,8 @@ data/
 ├── position_history/ # Position history data (JSON format, single file overlay mode)  
 │   └── {account_id}_position_history.json  
 └── strategy_reports/ # Strategy report data (JSON format, single file coverage mode)  
-    └── {account_id}_strategy_report_latest.json  
-  
+└── {account_id}_strategy_report_latest.json  
+
 Project structure  
 long-short-infra/  
 ├── src/  
@@ -38227,7 +35240,8 @@ async def run(self):
 1. Create GeminiClient instance
 2. Register callback function
 3. Establish a connection and start processing messages
-4. Exception handling and resource cleanup  
+4. Exception handling and resource cleanup
+
 
 
 ### 8.polymarket market robot
@@ -38239,9 +35253,9 @@ async def run(self):
 + In the last N minutes before the end of the contract, automatically buy YES/NO based on the market price
 + `py-clob-client`：Polymarket official CLOB trading client to place orders, check balances, and check order books
 + `requests`:access `gamma-api.polymarket.com` HTTP interface to obtain market data
-+ **The transaction logic (order placement) on the chain is unified **`py-clob-client`**, off-chain market information **`gamma-api`** + **`requests`** Separation. **
++ **The transaction logic (order placement) on the chain is unified `py-clob-client`, off-chain market information `gamma-api` + `requests` Separation. **
 
-****
+---
 
 `**slug_get.py**`** **
 
@@ -38260,11 +35274,14 @@ PREFIX_MAP = {
 }
 ```
 
-    - pass:
-        * Current ET time → month in English lowercase + date + 12-hour clock + am/pm
-        * spell:`{prefix}-{month}-{day}-{hour}{ampm}-et`
-    - example:`bitcoin-up-or-down-february-2-3am-et`
-        * **Structured naming rules for Polymarket slug**: currency prefix + natural language time period + time zone mark.
+```plain
+- pass:
+    * Current ET time → month in English lowercase + date + 12-hour clock + am/pm
+    * spell:`{prefix}-{month}-{day}-{hour}{ampm}-et`
+- example:`bitcoin-up-or-down-february-2-3am-et`
+    * **Structured naming rules for Polymarket slug**: currency prefix + natural language time period + time zone mark.
+```
+
 3. **15 minute contract slug generation**
     - logic:
         * The current time is rounded down to the nearest 15 minutes (0, 15, 30, 45)
@@ -38314,8 +35331,11 @@ params.asset_type = clob_types.AssetType.COLLATERAL
 resp = self.client.get_balance_allowance(params)
 ```
 
-    - use `AssetType.COLLATERAL` Get the collateral asset balance (usually USDC).
-    - The API return structure may be different, and multiple keys need to be compatible (`collateral`, `balance`, `availableCollateral` wait).
+```plain
+- use `AssetType.COLLATERAL` Get the collateral asset balance (usually USDC).
+- The API return structure may be different, and multiple keys need to be compatible (`collateral`, `balance`, `availableCollateral` wait).
+```
+
 + **Get order book**
 
 ```python
@@ -38324,8 +35344,11 @@ if ob.asks: yes_price = ob.asks[0].price
 if ob.bids: no_price  = ob.bids[0].price
 ```
 
-    - **YES price uses the lowest selling price (best ask)**, NO price uses the highest buying price (best bid).
-    - Falling back to 0.5 when there is no data is a safe bottom line (neutral odds).
+```plain
+- **YES price uses the lowest selling price (best ask)**, NO price uses the highest buying price (best bid).
+- Falling back to 0.5 when there is no data is a safe bottom line (neutral odds).
+```
+
 + **Market order implementation**
 
 ```python
@@ -38335,9 +35358,11 @@ order = OrderArgs(token_id=token_id, price=price, size=size, side=side.upper())
 self.client.create_and_post_order(order)
 ```
 
-    - pass `amount_usd / price` Reverse the size, which is essentially "buy according to the market price of the capital amount".
-    - Use rounding down to 4 decimal places to prevent rejection of orders due to accuracy issues.
-    - `DRY_RUN` The switch is used to run **Full Process Simulation** first, which is ideal for the development and backtesting phases.
+```plain
+- pass `amount_usd / price` Reverse the size, which is essentially "buy according to the market price of the capital amount".
+- Use rounding down to 4 decimal places to prevent rejection of orders due to accuracy issues.
+- `DRY_RUN` The switch is used to run **Full Process Simulation** first, which is ideal for the development and backtesting phases.
+```
 
 **3. Market information acquisition (gamma-api.polymarket.com)**
 
@@ -38422,18 +35447,14 @@ Example:[https://github.com/zzxscodes/feishu-monitor](https://github.com/zzxscod
     - Use the "last sent record id" (e.g. `last_error_id`、`last_asset_id`) to determine whether it is a new event and avoid refreshing the screen.
     - Similar alarms can be merged, for example, only one alarm with the same error will be sent within 5 minutes.
 + **Format content**
+
+
+
     - Convert database rows to readable text using line breaks or simple key=value lists.
     - Key fields (symbol, balance, error_message, timestamp, etc.) should be placed as early as possible to facilitate human eyes to judge the severity at a glance.
-
-
-
 + **Upstream**: trading system/strategy program, database (write `errors`, `account_balances`, `orders` wait).
 + **Middle layer**: monitoring script (`feishu_monitor`）：
     - Scheduled query → Determine whether there are new records/whether rules are triggered → Construct text.
 + **Downstream**: Feishu Webhook robot:
     - Receive JSON → Push alert messages within the group.
-
-
-
-
 
