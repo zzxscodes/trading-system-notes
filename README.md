@@ -11,7 +11,8 @@ Github address: [https://github.com/zzxscodes/trading-system-notes](https://gith
 ```shell
   Edit /etc/default/grub .
   Modify the GRUB_CMDLINE_LINUX_DEFAULT line and add isolcpus=cpu number list within quotation marks (for example: isolcpus=2,3 isolcpus=1,4-7).
-  执行 sudo update-grub (Debian/Ubuntu) ( sudo grub2-mkconfig -o /boot/grub2/grub.cfg (RHEL/CentOS/Fedora)) 并 sudo reboot.
+  sudo update-grub (Debian/Ubuntu) ( sudo grub2-mkconfig -o /boot/grub2/grub.cfg (RHEL/CentOS/Fedora))  
+  sudo reboot
 ```
 
 
@@ -400,11 +401,11 @@ binding: 0 1
 
 <font style="color:rgb(25, 27, 31);">The numactl command also has several important options:</font>
 
-1. `<font style="color:rgb(25, 27, 31);background-color:rgb(248, 248, 250);">--cpubind=0</font>`<font style="color:rgb(25, 27, 31);">: Bound to execute on the CPU of node 0.</font>
-2. `<font style="color:rgb(25, 27, 31);background-color:rgb(248, 248, 250);">--membind=1</font>`<font style="color:rgb(25, 27, 31);">: Allocate memory on node 1 only.</font>
-3. `<font style="color:rgb(25, 27, 31);background-color:rgb(248, 248, 250);">--interleave=nodes</font>`<font style="color:rgb(25, 27, 31);">: nodes can be all, N, N, N or N-N, which means memory is allocated in round robin on nodes.</font>
-4. `<font style="color:rgb(25, 27, 31);background-color:rgb(248, 248, 250);">--physcpubind=cpus</font>`<font style="color:rgb(25, 27, 31);">: cpus is the processor (hyper-threading) field in /proc/cpuinfo. The format of cpus is the same as --interleave=nodes, which means it is bound to run on cpus.</font>
-5. `<font style="color:rgb(25, 27, 31);background-color:rgb(248, 248, 250);">--preferred=1</font>`<font style="color:rgb(25, 27, 31);">: Prioritize allocating memory from node 1.</font>
+1. `--cpubind=0`: Bound to execute on the CPU of node 0.
+2. `--membind=1`: Allocate memory on node 1 only.
+3. `--interleave=nodes`: nodes can be `all`, `N,N,N` or `N-N`, which means memory is allocated in round robin on nodes.
+4. `--physcpubind=cpus`: cpus is the processor (hyper-threading) field in `/proc/cpuinfo`. The format of cpus is the same as `--interleave=nodes`, which means it is bound to run on the specified cpus.
+5. `--preferred=1`: Prioritize allocating memory from node 1.
 
 <font style="color:rgb(25, 27, 31);">A few examples of numactl commands:</font>
 
