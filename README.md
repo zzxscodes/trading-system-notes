@@ -191,7 +191,7 @@ taskset -c 8-15 ./strategy_engine
 
 **BIOS/UEFI level**
 
-| BIOS settings | Recommended values  | Description |
+| BIOS settings | Recommended values | Description |
 | --- | --- | --- |
 | **CPU C-States** / **Global C-State Control** | `Disabled` | Disable all C-States (C1~C10), the CPU will never go to sleep |
 | **C1E Support** | `Disabled` | Disable enhanced C1 states (C1E may still be enabled even if C-States are turned off) |
@@ -6592,6 +6592,7 @@ Modern processors (SSE and subsequent instruction sets) provide specific instruc
 
 <!-- 这是一张图片，ocr 内容为： -->
 ![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1754008438918-0e899738-57c1-460f-95cd-1b338f5e7c91.png)  
+
 <!-- 这是一张图片，ocr 内容为： -->
 ![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1754008467997-d4a71ab8-cc27-4a5f-8640-b6d7ffbdab21.png)
 
@@ -6626,6 +6627,7 @@ void __builtin_prefetch(const void *addr, int rw, int locality);
     * `<font style="color:rgb(87, 91, 95);">1</font>`<font style="color:rgb(27, 28, 29);">: </font>**<font style="color:rgb(27, 28, 29);">low temporal locality</font>**<font style="color:rgb(27, 28, 29);">. Once the data is loaded, it is expected to be used only once or a few times. This typically loads the data into a further cache (such as the L2 or L3 cache), avoiding polluting the L1 cache.</font>
 
     * `<font style="color:rgb(87, 91, 95);">0</font>`<font style="color:rgb(27, 28, 29);">: </font>**<font style="color:rgb(27, 28, 29);">No temporal locality</font>**<font style="color:rgb(27, 28, 29);">. Once the data is loaded, it is not expected to be used in the near future. This uses a special "Non-Temporal" loading method, where the data is quickly removed from the cache after use to avoid polluting the entire cache hierarchy. This is very useful for streaming operations that require reading and writing large amounts of data at once (such as video encoding, memory copying).</font>
+
 ```
 
 ```cpp
@@ -6665,6 +6667,7 @@ void process_array(int *data, int n) {
 - `<font style="color:rgb(87, 91, 95);">_MM_HINT_T2</font>`<font style="color:rgb(27, 28, 29);">: Prefetch to L3 cache and above (if present). correspond </font>`<font style="color:rgb(87, 91, 95);">PREFETCHT2</font>`<font style="color:rgb(27, 28, 29);"> instruction.</font>
 
 - `<font style="color:rgb(87, 91, 95);">_MM_HINT_NTA</font>`<font style="color:rgb(27, 28, 29);">: </font>**<font style="color:rgb(27, 28, 29);">Non-Temporal Aligned</font>**<font style="color:rgb(27, 28, 29);">. Atemporal prefetching, loads into cache and minimizes cache pollution. correspond </font>`<font style="color:rgb(87, 91, 95);">PREFETCHNTA</font>`<font style="color:rgb(27, 28, 29);"> instruction. Equivalent to </font>`<font style="color:rgb(87, 91, 95);">__builtin_prefetch</font>`<font style="color:rgb(27, 28, 29);"> the locality </font>`<font style="color:rgb(87, 91, 95);">0</font>`<font style="color:rgb(27, 28, 29);">。</font>
+
 ```
 
 + **<font style="color:rgb(27, 28, 29);">Compiler Directives (Pragma/Directive)</font>**<font style="color:rgb(27, 28, 29);">:</font>
@@ -6681,6 +6684,7 @@ void process_array(int *data, int n) {
 - `<font style="color:rgb(87, 91, 95);">hint</font>`<font style="color:rgb(27, 28, 29);">: Optional, 0-3, corresponding to T0, T1, T2, NTA.</font>
 
 - `<font style="color:rgb(87, 91, 95);">distance</font>`<font style="color:rgb(27, 28, 29);">: Optional, specifies how many iterations of data to prefetch.</font>
+
 ```
 
 ```cpp
@@ -10832,7 +10836,7 @@ gcc documentation:[https://gcc.gnu.org/onlinedocs/](https://gcc.gnu.org/onlinedo
 | (a&b) | (~a&c) | (b&c) = (a&b) | (~a&c) = a ? b : c | - | - |
 | (a&b) | (a&b&c)=a&b | x | x | x | x |
 | (a&!b) | (~a&b)=a^b | x | x | x | x |
-| <sub>a^</sub>b=a^b | x | x | x | x | x |
+| <sub>a</sub>b=ab | x | x | x | x | x |
 | a&b&c&d=(a&b)&(c&d) | - | x | - | x | x |
 | a<<b<<c=a<<(b+c) | x | x | x | x | x |
 
@@ -10864,8 +10868,8 @@ gcc documentation:[https://gcc.gnu.org/onlinedocs/](https://gcc.gnu.org/onlinedo
 + `**-march=native**`** or `**-march=<CPU_ARCH>**`:** Enables optimizations for specific CPU architectures. This instructs the compiler to generate files specific to the current machine or to a specific architecture such as `core-avx2`、`arm64`)'s instruction set optimizes code to take advantage of CPU-specific high-performance instructions (such as AVX, AVX2, AVX-512, NEON).
 + `**-flto**`** (Link Time Optimization) / `**-fipo**` (Inter-Procedural Optimization): ** Enables link-time optimization (LTO), also known as inter-procedural optimization (IPO). Typically, compilers can only optimize one compilation unit (source file) at a time. LTO allows the compiler to globally analyze and optimize the entire program during the link phase, uncovering optimization opportunities across file boundaries such as more aggressive function inlining, dead code elimination, and data flow optimizations.
 + `<font style="background-color:rgba(0, 0, 0, 0.04);">-fwhole-program</font>` The option Enable WPO enables inter-procedural optimization, treating the entire codebase as a monolithic program, similar to the LTO feature.
-+ `**-fprofile-generate**`**: ****Insert performance probes during compilation to record the execution frequency of the program when it is running (such as the number of function calls, the number of branch jumps, etc.).**`**-fprofile-use**`**:** The compiler uses the hotspot data collected by program execution with probes to perform more aggressive optimizations on frequently executed code paths, and may reduce optimization overhead on cold paths.  
-  1.   **Other Important Options:** There are many other options that affect performance, such as:
++ `**-fprofile-generate**`**: ***_**Insert performance probes during compilation to record the execution frequency of the program when it is running (such as the number of function calls, the number of branch jumps, etc.).**_`**-fprofile-use**`***:** The compiler uses the hotspot data collected by program execution with probes to perform more aggressive optimizations on frequently executed code paths, and may reduce optimization overhead on cold paths.  
+    1. **Other Important Options:** There are many other options that affect performance, such as:
     - `**-ffast-math**`**:** Allows the compiler to rewire floating-point operations, possibly changing the order of operations, thereby enabling more optimizations (such as vectorization of floating-point operations). Use with caution, however, as it can lead to minor inaccuracies in the results and involves special behavior such as NaNs, infinities, etc. In databases, this is typically used only in analytical queries where numerical precision is less critical.
     - `**-mprefer-vector-width=###**`**:** If you don't want to use certain heavy AVX instructions (like AVX-512, which can cause throttling on some older CPUs), you can set this to 128 or 256 to fix the maximum vector width.
 
@@ -10919,7 +10923,7 @@ gcc documentation:[https://gcc.gnu.org/onlinedocs/](https://gcc.gnu.org/onlinedo
 | -fsplit-wide-types | Split wide type operations into smaller units of operations to improve register utilization |
 | -fcompare-elim | Eliminate redundant comparison operations, especially those whose results have been calculated |
 | -fssa-backprop | Perform backpropagation optimization in SSA form to improve constant propagation effect |
-| -fcprop-registers | Perform copy propagation, replacing the copy operation of registers with source values  |
+| -fcprop-registers | Perform copy propagation, replacing the copy operation of registers with source values |
 | -fssa-phiopt | Optimize Phi nodes in SSA form to reduce unnecessary control flow merging |
 | -ftree-bit-ccp | Bit-level conditional constant propagation, optimizing constant values at the tree level |
 | -fdefer-pop | Delay the stack pop operation and merge multiple pops into a single operation |
@@ -24920,7 +24924,7 @@ $ \text{VWAP slippage (bps)} = \frac{P_{\text{your avg}} - P_{\text{mkt VWAP}}}{
 
 Arrival price $ m $ is the mid (or first touch) when the commonly used mother order arrives.
 
-$ \mathrm{IS\,(bps)} = s \cdot \frac{P_{\mathrm{fill\,avg}} - m}{m} \times 10000, \qquad s = \begin{cases} +1 &amp; \text{Buy} \\ -1 &amp; \text{Sell} \end{cases} $
+$ \mathrm{IS\,(bps)} = s \cdot \frac{P_{\mathrm{fill\,avg}} - m}{m} \times 10000, \qquad s = \begin{cases} +1 &amp;amp; \text{Buy} \\ -1 &amp;amp; \text{Sell} \end{cases} $
 
 + Buyer: Transaction price is below mid → IS is negative → better.
 
@@ -24941,7 +24945,7 @@ $ \mathrm{fill\,rate} = \frac{Q_{\mathrm{filled}}}{Q_{\mathrm{requested}}} $
 
 `requested == 0` When defined as 0 or N/A, division by zero is avoided. Conditional writing:
 
-$ \mathrm{fill\,rate} = \begin{cases} Q_{\mathrm{filled}} / Q_{\mathrm{requested}} &amp; Q_{\mathrm{requested}} &gt; 0 \\ 0 \;\text{或 N/A} &amp; Q_{\mathrm{requested}} = 0 \end{cases} $
+$ \mathrm{fill\,rate} = \begin{cases} Q_{\mathrm{filled}} / Q_{\mathrm{requested}} &amp;amp; Q_{\mathrm{requested}} &amp;gt; 0 \\ 0 \;\text{或 N/A} &amp;amp; Q_{\mathrm{requested}} = 0 \end{cases} $
 
 
 
@@ -27328,7 +27332,7 @@ cleanup:
     1. **Data Standardization**: Perform "mean reduction and standard deviation" processing on input indicators (such as trends, volatility) and target variables (such as returns) (required in the book to reduce numerical errors and improve convergence speed);
     2. **Fast update of covariance**: When the number of samples (number of historical bars in the market) is much larger than the number of indicators, the covariance matrix between indicators and the cross-covariance between indicators and targets are pre-calculated, reducing the time complexity of each iteration from $ O(N*K) $ (N is the number of samples, K is the number of indicators) to $ O(K^2) $, adapting to the efficient computing requirements of "large samples, multiple indicators" of the trading system;
     3. **Soft threshold update**: The core operation of Lasso/L1 regularization, applying "threshold clipping" to the optimized coefficients to return small coefficients to zero (implementing variable selection), the formula is:  
-$ S(z,\gamma)=\begin{cases}z-\gamma &amp; z&gt;\gamma \\ z+\gamma &amp; z&lt;-\gamma \\ 0 &amp; \text{otherwise}\end{cases} $  
+$ S(z,\gamma)=\begin{cases}z-\gamma &amp;amp; z&amp;gt;\gamma \\ z+\gamma &amp;amp; z&amp;lt;-\gamma \\ 0 &amp;amp; \text{otherwise}\end{cases} $  
 Among them $ \gamma=\alpha*\lambda $ (the combination of regularization strength and type).
 
 **(3) Lambda Optimization: Path Descent + Cross Validation ("Optimal Regularization Strength Selection") **
@@ -32736,7 +32740,7 @@ inline void AvellanedaStoikov::on_fill(bool is_buy, double quantity) noexcept {
 
 **Core Parameters**
 
-| Parameters | Symbols | Typical values  | Effects |
+| Parameters | Symbols | Typical values | Effects |
 | --- | --- | --- | --- |
 | Risk aversion coefficient | γ | 0.05-0.2 | The larger the value, the larger the spread and the lower the risk |
 | Price sensitivity | κ | 1.0-2.0 | The larger the value, the greater the price difference and the lower the probability of transaction |
@@ -33676,7 +33680,8 @@ endif()
 ```
 
 ### 
-2.uniswap-v3  
+### 2.uniswap-v3
+  
 The main feature of Uniswap-v2 is **"uniform distribution of liquidity"**. As a liquidity provider (LP), the funds provided will be evenly distributed across all possible price ranges from 0 to infinity.
 
 One trading pool contains DAI and USDC, two stablecoins worth approximately $ 1. In v2, the liquidity provided is not only distributed between the most commonly traded price range of  $0.99 to $ 1.01, but also to the almost impossible prices of  $0.1 and $10,000. This leads to huge **capital inefficiency** because most of the money will never be used.
@@ -34172,7 +34177,8 @@ int main() {
 ```
 
 ### 
-3.CEX order book solution  
+### 3.CEX order book solution
+  
 **VectorOrderBook：**
 
 1. **Extreme performance requirements** - High-frequency trading systems require nanosecond latency
@@ -34214,57 +34220,35 @@ int main() {
 + **Pursue high frequency performance but limited memory** → CircularArrayOrderBook  
 + **Resource Constrained Environment** → HashOrderBook
 
-### 
-4. Triangular arbitrage  
-<font style="color:rgb(0,0,0);">Suppose there are three trading pairs (a trading pair refers to a market where two assets trade with each other at a certain ratio).</font>
-
-<font style="color:rgb(0,0,0);">The first one is</font><font style="color:rgb(0,0,0);">A-B</font><font style="color:rgb(0,0,0);">, the exchange ratio is</font><font style="color:rgb(0,0,0);">1:10</font><font style="color:rgb(0,0,0);">(Right now</font><font style="color:rgb(0,0,0);">1</font><font style="color:rgb(0,0,0);">indivual</font><font style="color:rgb(0,0,0);">A</font><font style="color:rgb(0,0,0);">Can be exchanged for</font><font style="color:rgb(0,0,0);">10</font><font style="color:rgb(0,0,0);">indivual</font><font style="color:rgb(0,0,0);">B</font><font style="color:rgb(0,0,0);">，</font><font style="color:rgb(0,0,0);">10</font><font style="color:rgb(0,0,0);">indivual</font><font style="color:rgb(0,0,0);">B</font><font style="color:rgb(0,0,0);">Can be exchanged for</font><font style="color:rgb(0,0,0);">1</font><font style="color:rgb(0,0,0);">indivual</font><font style="color:rgb(0,0,0);">A</font><font style="color:rgb(0,0,0);">, the same below);</font>
-
-<font style="color:rgb(0,0,0);">The second one is</font><font style="color:rgb(0,0,0);">B-C</font><font style="color:rgb(0,0,0);">, the exchange ratio is</font><font style="color:rgb(0,0,0);">1:10</font><font style="color:rgb(0,0,0);">0</font><font style="color:rgb(0,0,0);">；</font>
-
-<font style="color:rgb(0,0,0);">The third one is</font><font style="color:rgb(0,0,0);">A-C</font><font style="color:rgb(0,0,0);">, the exchange ratio is</font><font style="color:rgb(0,0,0);">1:10</font><font style="color:rgb(0,0,0);">00</font><font style="color:rgb(0,0,0);">。</font>
 
 
+### 4. Triangular Arbitrage
+Suppose there are three trading pairs (a trading pair refers to a market where two assets are exchanged at a certain ratio).  
+The first pair is A-B with an exchange ratio of 1:10 (i.e., 1 A can be exchanged for 10 B, and 10 B can be exchanged for 1 A, the same below);  
+The second pair is B-C with an exchange ratio of 1:100;  
+The third pair is A-C with an exchange ratio of 1:1000.  
 
-<font style="color:rgb(0,0,0);">Suppose we have in hand</font><font style="color:rgb(0,0,0);">1</font><font style="color:rgb(0,0,0);">indivual</font><font style="color:rgb(0,0,0);">A</font><font style="color:rgb(0,0,0);">assets, when</font><font style="color:rgb(0,0,0);">Price</font><font style="color:rgb(0,0,0);">(</font><font style="color:rgb(0,0,0);">A</font><font style="color:rgb(0,0,0);">,</font><font style="color:rgb(0,0,0);">C</font><font style="color:rgb(0,0,0);">)</font><font style="color:rgb(0,0,0);">become</font><font style="color:rgb(0,0,0);">1</font><font style="color:rgb(0,0,0);">:1100</font><font style="color:rgb(0,0,0);">, we can take</font><font style="color:rgb(0,0,0);">1</font><font style="color:rgb(0,0,0);">indivual</font><font style="color:rgb(0,0,0);">A</font><font style="color:rgb(0,0,0);">With the third trading pair, the exchange is</font><font style="color:rgb(0,0,0);">1100</font><font style="color:rgb(0,0,0);">indivual</font><font style="color:rgb(0,0,0);">C</font><font style="color:rgb(0,0,0);">, and then use the second trading pair to</font><font style="color:rgb(0,0,0);">1100</font><font style="color:rgb(0,0,0);">indivual</font><font style="color:rgb(0,0,0);">C</font><font style="color:rgb(0,0,0);">exchanged for</font><font style="color:rgb(0,0,0);">11</font><font style="color:rgb(0,0,0);">indivual</font><font style="color:rgb(0,0,0);">B</font><font style="color:rgb(0,0,0);">, and then use the first trading pair to</font><font style="color:rgb(0,0,0);">11</font><font style="color:rgb(0,0,0);">indivual</font><font style="color:rgb(0,0,0);">B</font><font style="color:rgb(0,0,0);">exchanged for</font><font style="color:rgb(0,0,0);">1.1</font><font style="color:rgb(0,0,0);">indivual</font><font style="color:rgb(0,0,0);">A</font><font style="color:rgb(0,0,0);">, thereby achieving</font><font style="color:rgb(0,0,0);">0.1</font><font style="color:rgb(0,0,0);">indivual</font><font style="color:rgb(0,0,0);">A</font><font style="color:rgb(0,0,0);">profit.</font>
+Assume we hold 1 unit of asset A. When Price(A,C) changes to 1:1100, we can exchange 1 A for 1100 C via the third pair, then exchange 1100 C for 11 B via the second pair, and finally exchange 11 B for 1.1 A via the first pair, achieving a profit of 0.1 A.
 
 
 
-<font style="color:rgb(0,0,0);">Question 1: Can you make a profit when the Price(A,C) you receive becomes 1:900? How to do it?</font>
+**Question 1: When Price(A,C) changes to 1:900, is there an arbitrage opportunity? How to operate?**
 
-<font style="color:rgb(0,0,0);">Question 2: Write a function to determine whether there is a profit opportunity when the exchange ratio of any one of the three trading pairs changes. How to operate.</font>
+**Answer to Question 1**  
+When Price(A,C) changes to 1:900, arbitrage is possible. The operation path is A→B→C→A, with the following steps:  
 
-<font style="color:rgb(0,0,0);">Question 3: Assuming there are 50,000 similar trading pairs in the market, how to find all loopbacks that can perform the above transactions?</font>
+1. Exchange 1 A for 10 B (using the A-B ratio of 1:10);  
+2. Exchange 10 B for 1000 C (using the B-C ratio of 1:100, 10×100=1000);  
+3. Exchange 1000 C for approximately 1.111 A (using the A-C ratio of 1:900, 1000/900≈1.111).
 
-<font style="color:rgb(0,0,0);">Question 4: Design a data structure to store all found loops, and write a function to quickly find the most profitable loop when the exchange ratio of any one of the 50,000 trading pairs changes.</font>
-
-<font style="color:rgb(0,0,0);">Question 5: If what we exchange is not a fixed 1 A, but 0-1000 A, but due to the existence of impact cost, the greater the input of A, the lower the return rate, but the absolute return may keep rising within a certain range, how to design an algorithm to find the maximum profit of each loop or even all loops.</font>
-
-
-
-**Statistical Arbitrage Strategy (Pairs Trading)**
-
-1. <font style="color:rgb(0,0,0);">Asset pair filtering (code logic): </font><font style="color:rgb(0,0,0);">Calculate the sum of squared price differences of candidate asset pairs</font>$ \sum_{t=1}^{T}\left(S_{i,t}-S_{j,t}\right)^{2} $<font style="color:rgb(0,0,0);">, select the asset pair corresponding to the minimum value (such as stocks in the same industry);  </font>
-2. <font style="color:rgb(0,0,0);">Deviation judgment (code formula): </font><font style="color:rgb(0,0,0);">Calculate the mean of price differences</font>$ E[\Delta S_t]=\frac{1}{T}\sum_{t=1}^T \Delta S_t $<font style="color:rgb(0,0,0);">, standard deviation</font>$ \sigma[\Delta S_t]=\sqrt{\frac{1}{T-1}\sum_{t=1}^T (\Delta S_t-E[\Delta S_t])^2} $<font style="color:rgb(0,0,0);">；  </font>
-3. <font style="color:rgb(0,0,0);">Transaction trigger: </font><font style="color:rgb(0,0,0);">like</font>$ \Delta S_\tau &gt; E[\Delta S_\tau]+2\sigma[\Delta S_\tau] $<font style="color:rgb(0,0,0);">, the code executes "sell i and buy j"; if</font>$ \Delta S_\tau &lt; E[\Delta S_\tau]-2\sigma[\Delta S_\tau] $<font style="color:rgb(0,0,0);">, execute "buy i, sell j".</font>
+The final profit is approximately 0.111 A, indicating an arbitrage opportunity.
 
 
 
-**<font style="color:rgb(0,0,0);">Answer to question 1</font>**
+**Question 2: Write a function to detect arbitrage opportunities and determine the operation when any of the three trading pairs’ exchange ratios change.**
 
-<font style="color:rgb(0,0,0);">When Price(A,C) becomes 1:900, profit can be made, and the operation path is</font>**A→B→C→A**<font style="color:rgb(0,0,0);">, the specific steps are as follows:</font>
-
-1. **1 A exchanges for 10 B**<font style="color:rgb(0,0,0);">(Utilizing the 1:10 ratio of A-B);</font>
-2. **10 B exchange for 1000 C**<font style="color:rgb(0,0,0);">(Using the 1:100 ratio of B-C, 10×100=1000);</font>
-3. **1000 C is exchanged for about 1.111 A**<font style="color:rgb(0,0,0);">(Using the 1:900 ratio of A-C, 1000/900≈1.111).</font>
-
-<font style="color:rgb(0,0,0);">The final profit is about 0.111 A, and there is an arbitrage opportunity.</font>
-
-
-
-**<font style="color:rgb(0,0,0);">Question 2: Arbitrage detection function implementation</font>**
-
-<font style="color:rgb(0,0,0);">Model the exchange ratio between assets as an exchange rate matrix of a directed graph, and determine arbitrage opportunities by detecting "whether the exchange rate product of the circular path is greater than 1". For 3 assets, two core loop paths need to be detected:</font>`<font style="color:rgb(0,0,0);">A→B→C→A</font>`<font style="color:rgb(0,0,0);">and</font>`<font style="color:rgb(0,0,0);">A→C→B→A</font>`<font style="color:rgb(0,0,0);">。</font>
+**Arbitrage Detection Function Implementation**  
+Model the exchange ratios between assets as a rate matrix of a directed graph, and judge arbitrage opportunities by detecting "whether the product of exchange rates along a cyclic path is greater than 1". For 3 assets, two core cyclic paths need to be detected: <font style="color:rgb(0,0,0);">A→B→C→A</font> and <font style="color:rgb(0,0,0);">A→C→B→A</font>.
 
 ```cpp
 #include <iostream>
@@ -34274,7 +34258,7 @@ int main() {
 
 enum class Asset { A, B, C };
 
-//Asset to string auxiliary function
+// Helper function to convert asset to string
 std::string assetStr(Asset a) {
     switch (a) {
         case Asset::A: return "A";
@@ -34286,60 +34270,60 @@ std::string assetStr(Asset a) {
 
 class ArbitrageChecker {
 private:
-    // Exchange rate matrix: rate[i][j] represents the amount of asset j that can be exchanged for 1 unit of asset i
+    // Exchange rate matrix: rate[i][j] is the amount of asset j obtainable from 1 unit of asset i
     double rate[3][3] = {1,0,0, 0,1,0, 0,0,1}; // Initialized to identity matrix
 
 public:
-    //Initialize the default exchange rate
+    // Initialize default exchange rates
     ArbitrageChecker() {
-        setRate(Asset::A, Asset::B, 1, 10);   // A-B:1:10
-        setRate(Asset::B, Asset::C, 1, 100);  // B-C:1:100
-        setRate(Asset::A, Asset::C, 1, 1000); // A-C:1:1000
+        setRate(Asset::A, Asset::B, 1, 10);   // A-B: 1:10
+        setRate(Asset::B, Asset::C, 1, 100);  // B-C: 1:100
+        setRate(Asset::A, Asset::C, 1, 1000); // A-C: 1:1000
     }
 
-    //Update the trading pair exchange rate (a unit x to b unit y)
+    // Update trading pair exchange rate (a units of x exchange for b units of y)
     void setRate(Asset x, Asset y, int a, int b) {
         int xi = static_cast<int>(x);
-        int yi = static_cast<int>(and);
-        rate[xi][yi] = static_cast<double>(b)/a;  // 1x换b/a y
-        rate[yi][xi] = static_cast<double>(a) / b;  // 1y换a/b x
+        int yi = static_cast<int>(y);
+        rate[xi][yi] = static_cast<double>(b) / a;  // 1 x exchanges for b/a y
+        rate[yi][xi] = static_cast<double>(a) / b;  // 1 y exchanges for a/b x
     }
 
-    // Detect arbitrage opportunities and return to the operation steps
+    // Detect arbitrage opportunities and return operation steps
     std::vector<std::string> check() {
         const double EPS = 1e-9;
         std::vector<std::string> steps;
 
-        // Detection path 1: A→B→C→A
+        // Detect path 1: A→B→C→A
         double prod1 = rate[0][1] * rate[1][2] * rate[2][0];
         if (prod1 > 1.0 + EPS) {
-            steps.emplace_back("Arbitrage path: A→B→C→A");
-            steps.emplace_back("Profit multiple: " + std::to_string(prod1 - 1.0));
-            steps.emplace_back("Operation:");
+            steps.emplace_back("Arbitrage Path: A→B→C→A");
+            steps.emplace_back("Profit Multiplier: " + std::to_string(prod1 - 1.0));
+            steps.emplace_back("Operations:");
             steps.emplace_back("1. 1A → " + std::to_string(rate[0][1]) + "B");
             steps.emplace_back("2. " + std::to_string(rate[0][1]) + "B → " + std::to_string(rate[0][1]*rate[1][2]) + "C");
             steps.emplace_back("3. " + std::to_string(rate[0][1]*rate[1][2]) + "C → " + std::to_string(prod1) + "A");
             return steps;
         }
 
-        //Detection path 2: A→C→B→A
+        // Detect path 2: A→C→B→A
         double prod2 = rate[0][2] * rate[2][1] * rate[1][0];
         if (prod2 > 1.0 + EPS) {
-            steps.emplace_back("Arbitrage path: A→C→B→A");
-            steps.emplace_back("Profit multiple: " + std::to_string(prod2 - 1.0));
-            steps.emplace_back("Operation:");
+            steps.emplace_back("Arbitrage Path: A→C→B→A");
+            steps.emplace_back("Profit Multiplier: " + std::to_string(prod2 - 1.0));
+            steps.emplace_back("Operations:");
             steps.emplace_back("1. 1A → " + std::to_string(rate[0][2]) + "C");
             steps.emplace_back("2. " + std::to_string(rate[0][2]) + "C → " + std::to_string(rate[0][2]*rate[2][1]) + "B");
             steps.emplace_back("3. " + std::to_string(rate[0][2]*rate[2][1]) + "B → " + std::to_string(prod2) + "A");
             return steps;
         }
 
-        steps.emplace_back("No arbitrage opportunity");
+        steps.emplace_back("No Arbitrage Opportunity");
         return steps;
     }
 };
 
-//Test question 1 scenario
+// Test the scenario in Question 1
 int main() {
     ArbitrageChecker checker;
     checker.setRate(Asset::A, Asset::C, 1, 900); // Update A-C to 1:900
@@ -34351,13 +34335,14 @@ int main() {
 
 
 
-**<font style="color:rgb(0,0,0);">Question 3: Loopback detection for massive trading pairs</font>**
+**Question 3: With 50,000 similar trading pairs in the market, how to find all possible arbitrage loops?**
 
-<font style="color:rgb(0,0,0);">Model the trading pair as a directed graph (the nodes are assets and the edge weights are the logarithm of the exchange rate), and transform the "arbitrage loop" into a "positive weight loop" detection problem (product > 1 is equivalent to the sum of logarithms > 0). Since the actual arbitrage possibility of long loops is low, limit the loop length (such as ≤5 steps), use</font>**Improved Bellman-Ford algorithm**<font style="color:rgb(0,0,0);">Efficient detection:</font>
+**Loop Detection for Massive Trading Pairs**  
+Model trading pairs as a directed graph (nodes are assets, edge weights are the logarithms of exchange rates), and convert the "arbitrage loop" problem into a "positive-weight cycle" detection problem (product > 1 is equivalent to log sum > 0). Since long loops have low practical arbitrage value, limit the loop length (e.g., ≤ 5 steps) and use a modified Bellman-Ford algorithm for efficient detection:  
 
-1. **Graph Modeling**<font style="color:rgb(0,0,0);">:Assets are nodes and edges</font>`<font style="color:rgb(0,0,0);">X→Y</font>`<font style="color:rgb(0,0,0);">The weight is</font>`<font style="color:rgb(0,0,0);">ln(rate[X][Y])</font>`<font style="color:rgb(0,0,0);">；</font>
-2. **Short loop detection**<font style="color:rgb(0,0,0);">: For each node, run the Bellman-Ford algorithm to detect a positive-weighted cycle with ≤5 steps (the number of relaxation operations is limited to 5);</font>
-3. **Loop collection**<font style="color:rgb(0,0,0);">: Record all detected positive-weighted loops. After deduplication, they are effective loop closures.</font>
+1. **Graph Modeling**: Assets are nodes, and the weight of edge <font style="color:rgb(0,0,0);">X→Y</font> is <font style="color:rgb(0,0,0);">ln(rate[X][Y])</font>;  
+2. **Short Cycle Detection**: For each node, run the Bellman-Ford algorithm to detect positive-weight cycles with ≤ 5 steps (limit the number of relaxation operations to 5);  
+3. **Loop Collection**: Record all detected positive-weight cycles, remove duplicates, and obtain valid loops.
 
 ```cpp
 #include <iostream>
@@ -34371,26 +34356,26 @@ int main() {
 
 using namespace std;
 
-// Assets are represented by integer IDs
+// Represent assets with integer IDs
 using AssetId = int;
 
-// Directed edge: from -> to, weight is ln (exchange rate) (convenient to convert the product into a sum)
+// Directed edge: from -> to, weight is ln(exchange rate) (for converting product to sum)
 struct Edge {
     AssetId from;
     AssetId to;
-    double weight; // ln(rate), that is, 1 unit from can be exchanged for rate unit to, weight=ln(rate)
+    double weight; // ln(rate), i.e., 1 unit of from exchanges for rate units of to, weight=ln(rate)
 };
 
-// Loop structure: storage path and profit multiple (exchange rate product)
+// Loop structure: stores path and profit multiplier (product of exchange rates)
 struct Loop {
     vector<AssetId> path; 
-    double profit_multiplier; // Path exchange rate product (>1 indicates profit)
+    double profit_multiplier; // Product of exchange rates along the path (>1 indicates profit)
 
     // Hash function for deduplication
     size_t hash() const {
         size_t h = 0;
-        // Standardized path: starting from the smallest asset ID, arranged clockwise
-        auto min_it = min_element(path.begin(), path.end() - 1); // exclude the last one (same as the first one)
+        // Normalize path: start with the smallest asset ID, arrange clockwise
+        auto min_it = min_element(path.begin(), path.end() - 1); // Exclude the last element (same as the first)
         int shift = min_it - path.begin();
         for (int i = 0; i < path.size() - 1; ++i) {
             AssetId id = path[(shift + i) % (path.size() - 1)];
@@ -34399,10 +34384,10 @@ struct Loop {
         return h;
     }
 
-    //Equality judgment for deduplication
+    // Equality check for deduplication
     bool operator==(const Loop& other) const {
         if (path.size() != other.path.size()) return false;
-        // Check if they are different starting points of the same ring
+        // Check if it is the same cycle with a different starting point
         auto find_pos = [&](AssetId id) {
             for (int i = 0; i < other.path.size() - 1; ++i) {
                 if (other.path[i] == id) return i;
@@ -34433,47 +34418,47 @@ class ArbitrageLoopDetector {
 private:
     vector<Edge> edges; 
     unordered_set<AssetId> all_assets;
-    const int MAX_LOOP_LENGTH = 5; // Maximum loop length (long loops are meaningless in actual arbitrage)
-    const double EPS = 1e-8; // Floating point precision
+    const int MAX_LOOP_LENGTH = 5; // Maximum loop length (long loops are meaningless in practice)
+    const double EPS = 1e-8; // Floating-point precision
 
 public:
-    // Add a trading pair: unit a from can be exchanged for unit b to (i.e. 1 unit from can be exchanged for unit b/a unit to)
+    // Add a trading pair: a units of from exchange for b units of to (i.e., 1 unit of from exchanges for b/a units of to)
     void addTradingPair(AssetId from, AssetId to, int a, int b) {
         double rate = static_cast<double>(b) / a;
         edges.push_back({from, to, log(rate)}); // Forward edge weight
-        edges.push_back({to, from, log(static_cast<double>(a)/b)}); // reverse edge weight
+        edges.push_back({to, from, log(static_cast<double>(a)/b)}); // Reverse edge weight
         all_assets.insert(from);
         all_assets.insert(to);
     }
 
-    // Detect all profit loops
+    // Detect all profitable loops
     unordered_set<Loop> findAllLoops() {
         unordered_set<Loop> loops;
 
-        // Use each asset as a starting point to detect loopbacks
+        // Detect loops starting from each asset
         for (AssetId start : all_assets) {
-            // Distance array: dist[k][v] represents the maximum weight sum starting from start and reaching v after k steps
+            // Distance array: dist[k][v] is the maximum weight sum to reach v from start in k steps
             vector<unordered_map<AssetId, double>> dist(MAX_LOOP_LENGTH + 1);
-            // Precursor array: prev[k][v] = reaches the previous node of v (used for backtracking path)
+            // Predecessor array: prev[k][v] = previous node to reach v (for path backtracking)
             vector<unordered_map<AssetId, AssetId>> prev(MAX_LOOP_LENGTH + 1);
 
-            //Initialization: 0 steps to reach start, the weight sum is 0
+            // Initialization: reach start in 0 steps with weight sum 0
             dist[0][start] = 0.0;
 
-            // Relaxation operation: at most MAX_LOOP_LENGTH steps
+            // Relaxation: at most MAX_LOOP_LENGTH steps
             for (int k = 1; k <= MAX_LOOP_LENGTH; ++k) {
-                //Copy the distance of the previous step (without operation)
+                // Copy distances from the previous step (no operation)
                 dist[k] = dist[k-1];
                 prev[k] = prev[k-1];
 
-                // Traverse all edges and try to relax
+                // Traverse all edges and try relaxation
                 for (const Edge& e : edges) {
                     AssetId u = e.from;
                     AssetId v = e.to;
-                    // If u can be reached in the previous step, try to update v
+                    // If u is reachable in the previous step, try updating v
                     if (dist[k-1].count(u)) {
                         double new_weight = dist[k-1][u] + e.weight;
-                        // Find a better path (the weight sum is larger)
+                        // Find a better path (larger weight sum)
                         if (!dist[k].count(v) || new_weight > dist[k][v] + EPS) {
                             dist[k][v] = new_weight;
                             prev[k][v] = u;
@@ -34481,9 +34466,9 @@ public:
                     }
                 }
 
-                // Check whether a loop is formed (start from start, return to start in k steps, and the weight sum > 0)
+                // Check if a loop is formed (start → ... → start in k steps, weight sum > 0)
                 if (dist[k].count(start) && dist[k][start] > EPS) {
-                    // backtrace path
+                    // Backtrack the path
                     vector<AssetId> path;
                     AssetId current = start;
                     int steps = k;
@@ -34493,9 +34478,9 @@ public:
                         steps--;
                     }
                     path.push_back(start); // Close the loop
-                    reverse(path.begin(), path.end()); // restore the correct order
+                    reverse(path.begin(), path.end()); // Restore correct order
 
-                    // Calculate the profit multiple (exchange rate product = exp(weighted sum))
+                    // Calculate profit multiplier (product of exchange rates = exp(weight sum))
                     double profit = exp(dist[k][start]);
                     loops.insert({path, profit});
                 }
@@ -34506,27 +34491,27 @@ public:
     }
 };
 
-//Test example
+// Test example
 int main() {
     ArbitrageLoopDetector detector;
 
-    //Add the 3 trading pairs from question 1
-    detector.addTradingPair(0, 1, 1, 10);   // A(0)-B(1):1:10
-    detector.addTradingPair(1, 2, 1, 100);  // B(1)-C(2):1:100
-    detector.addTradingPair(0, 2, 1, 900); // A(0)-C(2):1:900 (question 1 scenario)
+    // Add the 3 trading pairs from Question 1
+    detector.addTradingPair(0, 1, 1, 10);   // A(0)-B(1): 1:10
+    detector.addTradingPair(1, 2, 1, 100);  // B(1)-C(2): 1:100
+    detector.addTradingPair(0, 2, 1, 900);  // A(0)-C(2): 1:900 (scenario in Question 1)
 
-    // Detect loopback
+    // Detect loops
     auto loops = detector.findAllLoops();
 
-    //output result
-    cout << "Found" << loops.size() << "Profitable loops:" << endl;
+    // Output results
+    cout << "Found " << loops.size() << " profitable loops:" << endl;
     for (const Loop& loop : loops) {
-        cout << "Path:";
+        cout << "Path: ";
         for (AssetId id : loop.path) {
             cout << (char)('A' + id) << " → ";
         }
-        cout << "\b\b\b " << endl; // Remove the last " → "
-        cout << "Profit multiple:" << loop.profit_multiplier << "(Profit: " << (loop.profit_multiplier - 1) << ")" << endl;
+        cout << "\b\b\b   " << endl; // Remove the last " → "
+        cout << "Profit Multiplier: " << loop.profit_multiplier << " (Profit: " << (loop.profit_multiplier - 1) << ")" << endl;
         cout << "------------------------" << endl;
     }
 
@@ -34536,30 +34521,30 @@ int main() {
 
 
 
-**<font style="color:rgb(0,0,0);">Question 4: Efficient loopback storage and maximum profit query</font>**
+**Question 4: Design a data structure to store all found loops, and write a function to quickly find the most profitable loop when any of the 50,000 trading pairs’ exchange ratios change.**
 
-**<font style="color:rgb(0,0,0);">data structure</font>**
+**Data Structure**  
 
-1. **Loop structure (Loop)**<font style="color:rgb(0,0,0);">：</font>
+1. **Loop Struct (Loop)**:
 
 ```cpp
 struct Loop {
-    std::vector<Asset> path; // Loop path (such as [A,B,C,A])
-    double profit; // current profit multiple
+    std::vector<Asset> path;          // Loop path (e.g., [A,B,C,A])
+    double profit;                    // Current profit multiplier
     std::vector<std::pair<Asset, Asset>> edges; // Dependent trading pairs
 };
 ```
 
-2. **Index structure**<font style="color:rgb(0,0,0);">：</font>
-    - `<font style="color:rgb(0,0,0);">edge_to_loops</font>`<font style="color:rgb(0,0,0);">: Hash table (the key is the trading pair</font>`<font style="color:rgb(0,0,0);">(X,Y)</font>`<font style="color:rgb(0,0,0);">, the value is the loopback list that depends on the trading pair);</font>
-    - `<font style="color:rgb(0,0,0);">profit_set</font>`<font style="color:rgb(0,0,0);">: ordered collection (by</font>`<font style="color:rgb(0,0,0);">profit</font>`<font style="color:rgb(0,0,0);">descending order, store</font>`<font style="color:rgb(0,0,0);">(profit, Loop*)</font>`<font style="color:rgb(0,0,0);">, supports quick query of the maximum value).</font>
+2. **Index Structures**:
++ <font style="color:rgb(0,0,0);">edge_to_loops</font>: Hash table (key is trading pair <font style="color:rgb(0,0,0);">(X,Y)</font>, value is the list of loops dependent on this pair);  
++ <font style="color:rgb(0,0,0);">profit_set</font>: Ordered set (sorted by <font style="color:rgb(0,0,0);">profit</font> in descending order, storing <font style="color:rgb(0,0,0);">(profit, Loop*)</font> to support fast maximum query).
 
-**<font style="color:rgb(0,0,0);">Update and query process</font>**
+**Update and Query Process**  
 
-1. **When the trading pair is updated**<font style="color:rgb(0,0,0);">：</font>
-    - <font style="color:rgb(0,0,0);">Traverse</font>`<font style="color:rgb(0,0,0);">edge_to_loops</font>`<font style="color:rgb(0,0,0);">All loopbacks corresponding to this trading pair;</font>
-    - <font style="color:rgb(0,0,0);">Recalculate the loopback</font>`<font style="color:rgb(0,0,0);">profit</font>`<font style="color:rgb(0,0,0);">, and in</font>`<font style="color:rgb(0,0,0);">profit_set</font>`<font style="color:rgb(0,0,0);">Medium update (delete old value, insert new value).</font>
-2. **Query maximum profit**<font style="color:rgb(0,0,0);">:Return directly</font>`<font style="color:rgb(0,0,0);">profit_set</font>`<font style="color:rgb(0,0,0);">The first element of (O(1) complexity).</font>
+1. When a trading pair is updated:
++ Traverse all loops dependent on this pair in <font style="color:rgb(0,0,0);">edge_to_loops</font>;  
++ Recalculate the <font style="color:rgb(0,0,0);">profit</font> of the loop and update it in <font style="color:rgb(0,0,0);">profit_set</font> (delete the old value, insert the new value).
+2. Query the maximum profit: Directly return the first element of <font style="color:rgb(0,0,0);">profit_set</font> (O(1) complexity).
 
 ```cpp
 #include <iostream>
@@ -34573,80 +34558,80 @@ struct Loop {
 #include <limits>
 #include <utility>
 
-//Basic type definition
-using AssetId = int; // Asset ID (integer representation, supports expansion)
-using TradingPair = std::pair<AssetId, AssetId>; // Directed trading pair (X→Y, distinguish direction)
+// Basic type definitions
+using AssetId = int;                          // Asset ID (integer, extensible)
+using TradingPair = std::pair<AssetId, AssetId>; // Directed trading pair (X→Y, direction matters)
 
 // Convert asset ID to string
 std::string assetToStr(AssetId id) {
     return std::string(1, 'A' + id);
 }
 
-// Transaction swap string
+// Convert trading pair to string
 std::string pairToStr(const TradingPair& pair) {
     return assetToStr(pair.first) + "→" + assetToStr(pair.second);
 }
 
-// Loopback structure: stores complete loopback information and dependencies
+// Loop struct: stores complete loop information and dependencies
 struct Loop {
-    std::vector<AssetId> path; // Loop path (such as [A,B,C,A], the beginning and end must be the same)
-    double profit_multiplier; // Profit multiple (exchange rate product, >1 indicates profit)
-    std::vector<TradingPair> edges; // Dependent directed trading pairs (one-to-one correspondence with path)
+    std::vector<AssetId> path;          // Loop path (e.g., [A,B,C,A], first and last must be the same)
+    double profit_multiplier;           // Profit multiplier (product of exchange rates, >1 indicates profit)
+    std::vector<TradingPair> edges;     // Dependent directed trading pairs (corresponds to path)
 
-    // Constructor: Pass in the path and automatically generate dependent trading pairs
+    // Constructor: takes path, automatically generates dependent trading pairs
     Loop(std::vector<AssetId> p) : path(std::move(p)) {
-        // Generate trading pairs (such as path [0,1,2,0]→[(0,1),(1,2),(2,0)])
+        // Generate trading pairs (e.g., path [0,1,2,0] → [(0,1),(1,2),(2,0)])
         for (size_t i = 0; i < path.size() - 1; ++i) {
             edges.emplace_back(path[i], path[i + 1]);
         }
-        profit_multiplier = 0.0; // Initial value, subsequent calculation through exchange rate
+        profit_multiplier = 0.0; // Initial value, calculated later via exchange rates
     }
 
-    //Print loopback information (auxiliary debugging and result display)
+    // Print loop information (for debugging and result display)
     void print() const {
-        std::cout << "Loop path:";
+        std::cout << "Loop Path: ";
         for (size_t i = 0; i < path.size(); ++i) {
             if (i > 0) std::cout << "→";
             std::cout << assetToStr(path[i]);
         }
-        std::cout << "\nDepends on trading pair:";
+        std::cout << "\nDependent Trading Pairs: ";
         for (size_t i = 0; i < edges.size(); ++i) {
             if (i > 0) std::cout << ", ";
             std::cout << pairToStr(edges[i]);
         }
-        std::cout << "\nCurrent profit multiple:" << profit_multiplier 
-                  << "(profit:" << (profit_multiplier - 1) * 100 << "%)\n";
+        std::cout << "\nCurrent Profit Multiplier: " << profit_multiplier 
+                  << " (Profit: " << (profit_multiplier - 1) * 100 << "%)\n";
     }
 };
 
-//Core index class: maintain loopback dual index, support transaction pair update and maximum profit query
+// Core index class: maintains dual indices for loops, supports trading pair updates and max profit queries
 class ArbitrageIndex {
 private:
-    // 1. Trading pair → current exchange rate (key: directed trading pair, value: the amount of 1 unit from to exchanged for to)
+    // 1. Trading pair → current exchange rate (key: directed pair, value: amount of to obtainable from 1 unit of from)
     std::unordered_map<TradingPair, double> rate_map;
-    // 2. All loopback objects (manage memory, avoid wild pointers)
+    // 2. All loop objects (manages memory, avoids dangling pointers)
     std::vector<Loop> all_loops;
-    // 3. Trading pair → relies on the loopback pointer of the trading pair (quickly locate the loopback when updating the trading pair)
+    // 3. Trading pair → pointers to loops dependent on this pair (quickly locate loops when updating a pair)
     std::unordered_map<TradingPair, std::vector<Loop*>> edge_to_loops;
-    // 4. Profit ordered collection (descending order by profit multiple, supports O(1) maximum search, O(logn) addition and deletion)
+    // 4. Ordered profit set (sorted by profit multiplier in descending order, supports O(1) max query, O(logn) insert/delete)
     using ProfitEntry = std::pair<double, Loop*>;
     std::multiset<ProfitEntry, std::greater<ProfitEntry>> profit_set;
 
     const double EPS = 1e-8;
 
-    // Calculate the current profit multiple of a single loop (based on the latest exchange rate)
+    // Calculate the current profit multiplier of a single loop (based on latest exchange rates)
     double calculateLoopProfit(const Loop& loop) const {
         double product = 1.0;
         for (const auto& pair : loop.edges) {
-            // If the trading pair is not defined, return 0 (marked as invalid loopback)
+            // If the trading pair is undefined, return 0 (mark as invalid loop)
             auto it = rate_map.find(pair);
             if (it == rate_map.end()) return 0.0;
-            product *= it->second; // Exchange rate product (such as A→B→C→A: rate1*rate2*rate3)
+            product *= it->second; // Product of exchange rates (e.g., A→B→C→A: rate1*rate2*rate3)
         }
         return product;
     }
 
-    // Delete the old profit record of loopback from profit_set (matching profit multiple + loopback pointer)
+    // Remove the old profit record of a loop from profit_set (match profit multiplier + loop pointer)
     void removeFromProfitSet(Loop* loop) {
         auto it = profit_set.begin();
         while (it != profit_set.end()) {
@@ -34661,90 +34646,90 @@ private:
 public:
     ~ArbitrageIndex() = default;
 
-    // Add/update directed trading pair: a unit from exchanges b unit to → 1 unit from exchanges b/a unit to
+    // Add/update a directed trading pair: a units of from exchange for b units of to → 1 unit of from exchanges for b/a units of to
     void updateTradingPair(AssetId from, AssetId to, int a, int b) {
         TradingPair pair = {from, to};
         double new_rate = static_cast<double>(b) / a;
 
-        // Case 1: Adding a trading pair for the first time (only updating the exchange rate table, no loopback dependencies)
+        // Case 1: First time adding the pair (only update rate table, no loop dependencies)
         if (rate_map.find(pair) == rate_map.end()) {
             rate_map[pair] = new_rate;
-            std::cout << "[Update trading pair] " << pairToStr(pair) << ":1→" << new_rate << "\n";
+            std::cout << "[Update Trading Pair] " << pairToStr(pair) << ": 1→" << new_rate << "\n";
             return;
         }
 
-        // Case 2: The trading pair already exists (update exchange rate + linked update dependency loop)
+        // Case 2: Pair already exists (update rate +联动 update dependent loops)
         rate_map[pair] = new_rate;
-        std::cout << "[update trading pair] " << pairToStr(pair) << ":1→" << new_rate << "(trigger loopback profit update)\n";
+        std::cout << "[Update Trading Pair] " << pairToStr(pair) << ": 1→" << new_rate << " (trigger loop profit updates)\n";
 
-        // Find all loops that depend on this trading pair and recalculate profits
+        // Find all loops dependent on this pair, recalculate profits
         auto loop_it = edge_to_loops.find(pair);
-        if (loop_it == edge_to_loops.end()) return; // No dependency loop, return directly
+        if (loop_it == edge_to_loops.end()) return; // No dependent loops, return directly
 
         for (Loop* loop : loop_it->second) {
-            removeFromProfitSet(loop); // Delete old profit records
+            removeFromProfitSet(loop);          // Remove old profit record
             double new_profit = calculateLoopProfit(*loop); // Calculate new profit
             loop->profit_multiplier = new_profit; // Update loop profit
             profit_set.emplace(new_profit, loop); // Insert new profit record
-            std::cout << " - loopback update: ";
+            std::cout << "  - Loop Update: ";
             loop->print();
         }
     }
 
-    // Add a new loop: a legal path must be passed in (the beginning and the end are the same, length ≥ 3)
+    // Add a new loop: requires a valid path (first and last same, length ≥3)
     void addLoop(const std::vector<AssetId>& path) {
-        // Verify the legality of the path (exclude invalid paths such as [A, B, A])
+        // Validate path legality (exclude invalid paths like [A,B,A])
         if (path.size() < 3 || path.front() != path.back()) {
-            std::cerr << "[Error] Invalid loop path (the beginning and end must be the same and length ≥ 3)\n";
+            std::cerr << "[Error] Invalid loop path (must have same first/last and length ≥3)\n";
             return;
         }
 
-        // 1. Store the loopback object and get the pointer
+        // 1. Store loop object and get pointer
         all_loops.emplace_back(path);
         Loop* new_loop = &all_loops.back();
 
-        // 2. Calculate initial profit and maintain double index
+        // 2. Calculate initial profit and maintain dual indices
         double init_profit = calculateLoopProfit(*new_loop);
         new_loop->profit_multiplier = init_profit;
 
-        // 3. Related trading pairs and loops (update edge_to_loops)
+        // 3. Associate trading pairs with loop (update edge_to_loops)
         for (const auto& pair : new_loop->edges) {
             edge_to_loops[pair].push_back(new_loop);
         }
 
-        // 4. Join the profitable ordered collection
+        // 4. Add to ordered profit set
         profit_set.emplace(init_profit, new_loop);
 
-        std::cout << "[Add loopback successfully]:\n";
+        std::cout << "[Add Loop Successful]:\n";
         new_loop->print();
     }
 
-    // Query the current maximum profit loop (returning nullptr means there is no valid profit loop)
+    // Query the current most profitable loop (return nullptr if no valid profitable loop)
     const Loop* getMaxProfitLoop() const {
         if (profit_set.empty()) {
-            std::cout << "[Query result] No valid loopback\n";
+            std::cout << "[Query Result] No valid loops\n";
             return nullptr;
         }
 
-        // Get the record with the largest profit (profit_set is arranged in descending order, the first element is the largest)
+        // Get the most profitable record (profit_set is sorted descending, first element is max)
         const auto& max_entry = *profit_set.begin();
         if (max_entry.first <= 1.0 + EPS) {
-            std::cout << "[query result] No profit loop (maximum profit multiple: " << max_entry.first << " ≤ 1)\n";
+            std::cout << "[Query Result] No profitable loops (max profit multiplier: " << max_entry.first << " ≤ 1)\n";
             return nullptr;
         }
 
-        std::cout << "[query result] Maximum profit loop:\n";
+        std::cout << "[Query Result] Most Profitable Loop:\n";
         max_entry.second->print();
         return max_entry.second;
     }
 
-    //Print the current status of all loopbacks (auxiliary debugging)
+    // Print current status of all loops (for debugging)
     void printAllLoops() const {
         if (all_loops.empty()) {
-            std::cout << "[Print all loopbacks] No loopbacks\n";
+            std::cout << "[Print All Loops] No loops\n";
             return;
         }
-        std::cout << "[Print all loops] Total" << all_loops.size() << "Loops:\n";
+        std::cout << "[Print All Loops] Total " << all_loops.size() << " loops:\n";
         for (const auto& loop : all_loops) {
             loop.print();
             std::cout << "------------------------\n";
@@ -34752,85 +34737,84 @@ public:
     }
 };
 
-// Simulated trading pair update, loopback addition and maximum profit query
+// Simulate trading pair updates, loop additions, and max profit queries
 int main() {
-    // 1. Initialize the index object
+    // 1. Initialize index object
     ArbitrageIndex arbitrage_index;
-    std::cout << "=== Initialization completed ===" << "\n\n";
+    std::cout << "=== Initialization Complete ===" << "\n\n";
 
-    // 2. Add basic trading pairs of 3 assets (A=0, B=1, C=2)
-    std::cout << "=== Step 1: Add basic trading pair ===" << "\n";
-    arbitrage_index.updateTradingPair(0, 1, 1, 10);  // A→B：1A换10B
-    arbitrage_index.updateTradingPair(1, 2, 1, 100); // B→C：1B换100C
-    arbitrage_index.updateTradingPair(2, 0, 1, 0.0012); // C→A：1C换0.0012A
+    // 2. Add basic trading pairs for 3 assets (A=0, B=1, C=2)
+    std::cout << "=== Step 1: Add Basic Trading Pairs ===" << "\n";
+    arbitrage_index.updateTradingPair(0, 1, 1, 10);  // A→B: 1A exchanges for 10B
+    arbitrage_index.updateTradingPair(1, 2, 1, 100); // B→C: 1B exchanges for 100C
+    arbitrage_index.updateTradingPair(2, 0, 1, 0.0012); // C→A: 1C exchanges for 0.0012A
     std::cout << "\n";
 
-    // 3. Add 2 core loopbacks (A→B→C→A and A→C→B→A)
-    std::cout << "=== Step 2: Add loopback ===" << "\n";
-    arbitrage_index.addLoop({0, 1, 2, 0}); // Loopback 1: A→B→C→A
-    arbitrage_index.addLoop({0, 2, 1, 0}); // Loopback 2: A→C→B→A
+    // 3. Add 2 core loops (A→B→C→A and A→C→B→A)
+    std::cout << "=== Step 2: Add Loops ===" << "\n";
+    arbitrage_index.addLoop({0, 1, 2, 0}); // Loop 1: A→B→C→A
+    arbitrage_index.addLoop({0, 2, 1, 0}); // Loop 2: A→C→B→A
     std::cout << "\n";
 
-    // 4. Query the initial maximum profit loop
-    std::cout << "=== Step 3: Query the initial maximum profit loop ===" << "\n";
+    // 4. Query initial most profitable loop
+    std::cout << "=== Step 3: Query Initial Most Profitable Loop ===" << "\n";
     arbitrage_index.getMaxProfitLoop();
     std::cout << "\n";
 
-    // 5. Update the trading pair exchange rate (simulate market fluctuations and create arbitrage)
-    std::cout << "=== Step 4: Update C→A exchange rate (1C for 0.0013A) ===" << "\n";
+    // 5. Update trading pair exchange rate (simulate market fluctuation, create arbitrage)
+    std::cout << "=== Step 4: Update C→A Exchange Rate (1C exchanges for 0.0013A) ===" << "\n";
     arbitrage_index.updateTradingPair(2, 0, 1, 0.0013);
     std::cout << "\n";
 
-    // 6. Query the maximum profit loop again (loop 1 should be profitable at this time)
-    std::cout << "=== Step 5: Query the maximum profit loop after fluctuation ===" << "\n";
+    // 6. Query most profitable loop again (Loop 1 should be profitable now)
+    std::cout << "=== Step 5: Query Most Profitable Loop After Fluctuation ===" << "\n";
     arbitrage_index.getMaxProfitLoop();
     std::cout << "\n";
 
-    // 7. Print all loopback status
-    std::cout << "=== Step 6: Print the current status of all loopbacks ===" << "\n";
+    // 7. Print status of all loops
+    std::cout << "=== Step 6: Print Current Status of All Loops ===" << "\n";
     arbitrage_index.printAllLoops();
 
     return 0;
 }
 
-// Support more assets: Just extend AssetId (such as 3=D, 4=E) without modifying the core logic.
-// Support longer loopbacks: When adding loopbacks, you only need to pass in a longer legal path (such as [A,B,C,D,A]), and the index will automatically adapt.
-//Performance optimization: If the number of assets and loopbacks is extremely large, profit_set uses boost::container::flat_set to improve cache efficiency.
-// Or use hash table segmented storage for edge_to_loops.
+// Support for more assets: simply extend AssetId (e.g., 3=D, 4=E), no need to modify core logic.
+// Support for longer loops: when adding a loop, simply pass a longer valid path (e.g., [A,B,C,D,A]), the index will adapt automatically.
+// Performance optimization: if the number of assets and loops is extremely large, use boost::container::flat_set for profit_set to improve cache efficiency,
+// or use segmented hash tables for edge_to_loops.
 ```
 
 
 
-**<font style="color:rgb(0,0,0);">Question 5: Maximum profit algorithm under impact costs</font>**
+**Question 5: If the amount exchanged is not fixed at 1 A but ranges from 0 to 1000 A, and due to slippage costs, the larger the input of A, the lower the return rate, but the absolute return may rise in a certain range. How to design an algorithm to find the maximum profit for each loop and all loops?**
 
-<font style="color:rgb(0,0,0);">Impact costs cause the return rate to decrease with increasing input, but the absolute return may show a unimodal distribution (increase first and then decrease). pass</font>**Rule of Thirds**<font style="color:rgb(0,0,0);">In the investment range</font>`<font style="color:rgb(0,0,0);">[0,1000]</font>`<font style="color:rgb(0,0,0);">Find the optimal input amount within:</font>
+**Maximum Profit Algorithm Under Slippage Costs**  
+Slippage costs cause the return rate to decrease as the input amount increases, but the absolute return may follow a unimodal distribution (first increases, then decreases). Use the ternary search method to find the optimal input amount in the interval <font style="color:rgb(0,0,0);">[0,1000]</font>:  
 
-1. **Impact Cost Modeling**<font style="color:rgb(0,0,0);">:Define function</font>`<font style="color:rgb(0,0,0);">f(X→Y, x)</font>`<font style="color:rgb(0,0,0);">Express investment</font>`<font style="color:rgb(0,0,0);">x</font>`<font style="color:rgb(0,0,0);">unit</font>`<font style="color:rgb(0,0,0);">X</font>`<font style="color:rgb(0,0,0);">available</font>`<font style="color:rgb(0,0,0);">Y</font>`<font style="color:rgb(0,0,0);">Quantity (diminishing marginal);</font>
-2. **Absolute return function**<font style="color:rgb(0,0,0);">: pair loop</font>`<font style="color:rgb(0,0,0);">X1→X2→...→Xk→X1</font>`<font style="color:rgb(0,0,0);">, invest</font>`<font style="color:rgb(0,0,0);">a</font>`<font style="color:rgb(0,0,0);">unit</font>`<font style="color:rgb(0,0,0);">X1</font>`<font style="color:rgb(0,0,0);">The absolute return is:</font>
+1. **Slippage Cost Modeling**: Define function <font style="color:rgb(0,0,0);">f(X→Y, x)</font> as the amount of Y obtainable by investing <font style="color:rgb(0,0,0);">x</font> units of X (marginal decreasing);  
+2. **Absolute Return Function**: For loop <font style="color:rgb(0,0,0);">X1→X2→...→Xk→X1</font>, the absolute return of investing <font style="color:rgb(0,0,0);">a</font> units of X1 is:  
 
-```plain
-R(a) = f(Xk→X1, f(Xk-1→Xk, ...f(X1→X2, a)...)) - a
-```
+$ R(a) = f(X_k→X1, f(X_{k-1}→X_k, ...f(X1→X2, a)...)) - a $
 
-3. **Rule of Thirds Optimization**<font style="color:rgb(0,0,0);">:because</font>`<font style="color:rgb(0,0,0);">R(a)</font>`<font style="color:rgb(0,0,0);">For a unimodal function, the maximum value point is found by iteratively narrowing the interval.</font>
+3. **Ternary Search Optimization**: Since <font style="color:rgb(0,0,0);">R(a)</font> is a unimodal function, iteratively narrow the interval to find the maximum point.
 
 ```cpp
-// Impact cost function (basic exchange rate * input amount / (1 + impact coefficient * input amount))
-double impact cost(Asset from, Asset to, double x, double base_rate) {
-    const double k = 0.001; // Impact coefficient
+// Slippage cost function (base rate * input amount / (1 + slippage coefficient * input amount))
+double slippageCost(Asset from, Asset to, double x, double base_rate) {
+    const double k = 0.001; // Slippage coefficient
     return base_rate * x / (1 + k * x);
 }
 
-// Calculate the absolute return of loopback
+// Calculate absolute return of a loop
 double calcProfit(const Loop& loop, double a, const std::vector<double>& base_rates) {
     double current = a;
     for (size_t i = 0; i < loop.path.size() - 1; ++i) {
-        current = 冲击成本(loop.path[i], loop.path[i+1], current, base_rates[i]);
+        current = slippageCost(loop.path[i], loop.path[i+1], current, base_rates[i]);
     }
     return current - a;
 }
 
-// Rule of thirds to find maximum profit
+// Ternary search to find maximum profit
 double findMaxProfit(const Loop& loop, const std::vector<double>& base_rates) {
     double left = 0.0, right = 1000.0;
     for (int i = 0; i < 100; ++i) { // Iteration precision control
@@ -34845,6 +34829,16 @@ double findMaxProfit(const Loop& loop, const std::vector<double>& base_rates) {
     return calcProfit(loop, (left + right)/2, base_rates);
 }
 ```
+
+
+
+**Statistical Arbitrage Strategy (Pairs Trading)**
+
+1. **Asset Pair Screening (Code Logic)**: Calculate the sum of squared price differences of candidate asset pairs $ \sum_{t=1}^{T}\left(S_{i,t}-S_{j,t}\right)^{2} $, and select the pair with the minimum value (e.g., stocks in the same industry);  
+2. **Deviation Judgment (Code Formula)**: Calculate the mean of price differences $ E[\Delta S_t]=\frac{1}{T}\sum_{t=1}^T \Delta S_t $ and standard deviation $ \sigma[\Delta S_t]=\sqrt{\frac{1}{T-1}\sum_{t=1}^T (\Delta S_t-E[\Delta S_t])^2} $;  
+3. **Trade Trigger**:  
+If $ \Delta S_\tau > E[\Delta S_\tau] + 2\sigma[\Delta S_\tau] $, execute "sell i, buy j";  
+If $ \Delta S_\tau < E[\Delta S_\tau] - 2\sigma[\Delta S_\tau] $, execute "buy i, sell j".
 
 
 
@@ -34902,68 +34896,77 @@ Monitoring Process (Process 5) - Metrics & Alerts + Web API
 
 Web monitoring interface ([http://localhost:8080](http://localhost:8080))  
 
-Data storage architecture:  
-data/  
-├── universe/ #Universe file (supported version)  
-│   └── YYYY-MM-DD/  
-│       ├── v1/universe.csv  
-│       └── v2/universe.csv  
-├── klines/ # K-line data (Parquet format)  
-│   └── {SYMBOL}/YYYY-MM-DD.parquet  
-├── trades/ # Collect transaction data one by one  
-│   └── {SYMBOL}/YYYY-MM-DD-HHh.parquet  
-├── funding_rates/ # Funding rate data (Parquet format)  
-│   └── {SYMBOL}/YYYY-MM-DD.parquet  
-├── premium_index/ # Premium index K-line data (Parquet format)  
-│   └── {SYMBOL}/YYYY-MM-DD.parquet  
-├── positions/ # Target position file  
-│   └── {account_id}_target_positions_{timestamp}.json  
-├── signals/ # Inter-process signal file  
-│   ├── strategy_trigger.json  
-│   └── execution_trigger_{account_id}.json  
-├── equity_curve/ # Equity curve data (JSON format, single file coverage mode)  
-│   └── {account_id}_equity_curve.json  
-├── position_history/ # Position history data (JSON format, single file overlay mode)  
-│   └── {account_id}_position_history.json  
-└── strategy_reports/ # Strategy report data (JSON format, single file coverage mode)  
-└── {account_id}_strategy_report_latest.json  
+```plain
+data/
+├── universe/                    # Universe Files (Version Control Supported)
+│   └── YYYY-MM-DD/
+│       ├── v1/universe.csv
+│       └── v2/universe.csv
+├── klines/                      # K-line Data (Parquet Format)
+│   └── {SYMBOL}/YYYY-MM-DD.parquet
+├── trades/                      # Aggregated Tick-by-Tick Trade Data
+│   └── {SYMBOL}/YYYY-MM-DD-HHh.parquet
+├── funding_rates/              # Funding Rate Data (Parquet Format)
+│   └── {SYMBOL}/YYYY-MM-DD.parquet
+├── premium_index/              # Premium Index K-line Data (Parquet Format)
+│   └── {SYMBOL}/YYYY-MM-DD.parquet
+├── positions/                   # Target Position Files
+│   └── {account_id}_target_positions_{timestamp}.json
+├── signals/                     # Inter-process Signal Files
+│   ├── strategy_trigger.json
+│   └── execution_trigger_{account_id}.json
+├── equity_curve/                # Equity Curve Data (JSON Format, Single File Overwrite Mode)
+│   └── {account_id}_equity_curve.json
+├── position_history/            # Position History Data (JSON Format, Single File Overwrite Mode)
+│   └── {account_id}_position_history.json
+└── strategy_reports/            # Strategy Report Data (JSON Format, Single File Overwrite Mode)
+    └── {account_id}_strategy_report_latest.json
+```
 
-Project structure  
-long-short-infra/  
-├── src/  
-│ ├── api/ # Strategy API: unified encapsulation of data layer, system layer and execution layer  
-│ │ └── strategy_api.py # StrategyAPI (recommended for strategy development)  
-│ ├── data/ # Data layer: collection, aggregation, storage  
-│ │ ├── collector.py # Collection of transaction-by-trade collector (@aggTrade)  
-│ │ ├── kline_aggregator.py # K-line aggregator (multi-cycle support)  
-│ │ ├── premium_index_collector.py # Premium index K-line collector  
-│ │ ├── universe_manager.py # Universe manager (supported version)  
-│ │ ├── storage.py # Data storage management  
-│ │ └── api.py # Data query API  
-│ ├── strategy/ # Strategy layer: calculation, position generation  
-│ │ ├── alpha.py # Alpha engine: concurrent execution of calculators  
-│ │ ├── calculator.py # Calculator base class and AlphaDataView (providing data access interface)  
-│ │ ├── calculators/ # Calculators (factor) directory  
-│ │ │ ├── **init**.py # Automatic loading mechanism  
-│ │ │ ├── template.py # Development template  
-│ │ │ └── *.py # Factor files for each researcher  
-│ │ └── position_generator.py # Position generator  
-│ ├── execution/ # Execution layer: order management, position management  
-│ │ ├── order_manager.py # Order manager (Market/TWAP/VWAP)  
-│ │ ├── position_manager.py # Position manager  
-│ │ └── binance_client.py # Binance API client  
-│ ├── monitoring/ # Monitoring layer: indicators, alarms  
-│ ├── common/ # Common module: configuration, log, IPC, network tools  
-│ ├── processes/ # Process entry  
-│ └── system_api.py # System API  
-├── web/ # Web monitoring interface  
-│ └── monitor.html # Monitoring panel front end  
-├── config/  
-│ └── default.yaml # Main configuration file  
-├── data/ # Data storage  
-├── logs/ # Log directory  
-├── start_all.py # Start script  
-└── stop_all.py # Stop script
+```plain
+long-short-infra/
+├── src/
+│   ├── api/                  # Strategy API: Unified encapsulation of data layer, system layer, and execution layer
+│   │   └── strategy_api.py
+│   ├── data/                 # Data Layer: Collection, aggregation, storage
+│   │   ├── collector.py      # Aggregated tick trade collector (@aggTrade)
+│   │   ├── kline_aggregator.py
+│   │   ├── multi_interval_aggregator.py
+│   │   ├── funding_rate_collector.py
+│   │   ├── funding_market_collector.py  # WebSocket funding rate/mark price
+│   │   ├── premium_index_collector.py
+│   │   ├── daily_official_compare.py   # Official 5m comparison and backtest data synchronization
+│   │   ├── universe_manager.py
+│   │   ├── storage.py
+│   │   └── api.py
+│   ├── strategy/             # Strategy Layer: Alpha engine, calculators, position generation
+│   ├── execution/            # Execution Layer: Order management, Binance client
+│   ├── monitoring/           # Monitoring Layer: Metrics, alerts, strategy reports, Web API
+│   ├── common/               # Common Modules: Config, logging, IPC, network tools
+│   ├── processes/            # Process Entry Points
+│   └── backtest/             # Backtest Module (Independent from live trading process)
+├── scripts/
+│   ├── daily_official_5m_compare.py    # Live machine: Daily official K-line comparison and backtest data synchronization
+│   ├── setup_daily_compare_scheduler.py # Live machine: Scheduled task setup (cron/schtasks)
+│   ├── setup_daily_compare_cron.sh
+│   ├── setup_daily_compare.bat
+│   ├── daily_compare_launcher.bat
+│   ├── backtest_pull_compare.py        # Backtest machine: Actively pull data and compare/fix
+│   ├── setup_backtest_compare_scheduler.py # Backtest machine: Scheduled task setup (cron/schtasks)
+│   ├── setup_backtest_compare.bat
+│   ├── backtest_pull_launcher.sh
+│   ├── backtest_pull_launcher.bat
+│   ├── temp_validate_data_layer_vs_binance.py  # Aggregation accuracy validation
+│   └── data_layer_memory_stress.py     # Data layer memory stress test
+├── web/
+│   └── monitor.html          # Monitor dashboard frontend
+├── config/
+│   └── default.yaml
+├── data/                     # Data storage
+├── logs/
+├── start_all.py
+└── stop_all.py
+```
 
 
 
