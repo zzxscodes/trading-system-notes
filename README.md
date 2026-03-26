@@ -1,7 +1,7 @@
 Trading system development-Zhang Zhixuan
 
-Yuque address: [https://www.yuque.com/bluememories/lanaff/nt8zeoa7rxcl185o](https://www.yuque.com/bluememories/lanaff/nt8zeoa7rxcl185o)
-Blog garden address: [https://www.cnblogs.com/zzxscodes/p/19695166/trading-system-notes](https://www.cnblogs.com/zzxscodes/p/19695166/trading-system-notes)
+Yuque address: [https://www.yuque.com/bluememories/lanaff/nt8zeoa7rxcl185o](https://www.yuque.com/bluememories/lanaff/nt8zeoa7rxcl185o)  
+Blog garden address: [https://www.cnblogs.com/zzxscodes/p/19695166/trading-system-notes](https://www.cnblogs.com/zzxscodes/p/19695166/trading-system-notes)  
 Github address: [https://github.com/zzxscodes/trading-system-notes](https://github.com/zzxscodes/trading-system-notes)
 
 ## Low latency system development basics
@@ -438,18 +438,18 @@ Advanced scenarios (high-performance networks) are CPU, memory,Consistent with P
 
 + **Default policy**: Always allocate memory **first** on the **local NUMA node** where the current CPU core is located.
 + **Exception**: When local memory is low, behavior is determined by kernel parameter `vm.zone_reclaim_mode` Decide.
- - `vm.zone_reclaim_mode = 0` (Default value): When the local memory is insufficient, go to the remote node to find free memory. This is the recommended configuration in most scenarios.
- - `vm.zone_reclaim_mode = 1`: When local memory is insufficient, priority is given to recycling local inactive memory pages (such as Cache) instead of accessing remote memory. This recycling process itself may introduce delays.
++ `vm.zone_reclaim_mode = 0` (Default value): When the local memory is insufficient, go to the remote node to find free memory. This is the recommended configuration in most scenarios.
++ `vm.zone_reclaim_mode = 1`: When local memory is insufficient, priority is given to recycling local inactive memory pages (such as Cache) instead of accessing remote memory. This recycling process itself may introduce delays.
 
 **3. Management and optimization tools**
 
 1. `**numactl**`** (most commonly used)**: Command line tool to specify the NUMA policy of an application when starting it.
- - **Force binding (**`**--membind**`**)**: `numactl --cpunodebind=0 --membind=0 my_app`
- * **Effect**: Forced `my_app` Can only run on node 0's CPU and can only be allocated from node 0's memory. If node 0 runs out of memory, the allocation will fail. Provides the strongest performance certainty.
- - **Priority Use (**`**--preferred**`**)**: `numactl --preferred=0 my_app`
- * **Effect**: Prioritize allocation from node 0. If it fails, it will automatically fall back to other nodes. Optimize while ensuring program availability.
++ **Force binding (**`**--membind**`**)**: `numactl --cpunodebind=0 --membind=0 my_app`
++ **Effect**: Forced `my_app` Can only run on node 0's CPU and can only be allocated from node 0's memory. If node 0 runs out of memory, the allocation will fail. Provides the strongest performance certainty.
++ **Priority Use (**`**--preferred**`**)**: `numactl --preferred=0 my_app`
++ **Effect**: Prioritize allocation from node 0. If it fails, it will automatically fall back to other nodes. Optimize while ensuring program availability.
 2. `**sysctl**`** (System level adjustment)**:
- - `sudo sysctl -w vm.zone_reclaim_mode=0`: Ensure that the system adopts the default NUMA allocation behavior to avoid unnecessary local memory reclamation delays.
++ `sudo sysctl -w vm.zone_reclaim_mode=0`: Ensure that the system adopts the default NUMA allocation behavior to avoid unnecessary local memory reclamation delays.
 
 ```shell
 # Permanent modification
@@ -459,7 +459,7 @@ Advanced scenarios (high-performance networks) are CPU, memory,Consistent with P
 ```
 
 3. `**cpuset**`** (Bottom Hard Isolation)**:
- - `cpuset` While allocating CPU cores, pass `cpuset.mems` The file is also forcibly bound to the memory node, which is better than `numactl` Lower-level kernel-level isolation has the same effect as `numactl --membind` Similar but more isolated.
++ `cpuset` While allocating CPU cores, pass `cpuset.mems` The file is also forcibly bound to the memory node, which is better than `numactl` Lower-level kernel-level isolation has the same effect as `numactl --membind` Similar but more isolated.
 
 **4.Before NUMA**
 
@@ -501,36 +501,36 @@ The following is libnuma's common interfaces and related system call tables:
 | **Classification** | **Function signature** | **Return value type** | **Key description** |
 | :--- | :--- | :--- | :--- |
 | **Initialization and version** | `void numa_available(void);` | `void` | Check NUMA support, terminate the program if not supported |
-| | `const char *numa_version(void);` | `const char *` | Returns the library version string (such as`libnuma 2.0.14`） |
+|  | `const char *numa_version(void);` | `const char *` | Returns the library version string (such as`libnuma 2.0.14`） |
 | **Node information query** | `int numa_max_node(void);` | `int` | Returns the maximum node number (starts from 0, returns - 1 if there are no nodes) |
-| | `int numa_num_configured_nodes(void);` | `int` | Returns the total number of configured nodes |
-| | `extern struct bitmask *numa_all_nodes_ptr;` | Global variable | Contains a predefined bitmask of all available nodes |
-| | `extern struct bitmask *numa_nodes_ptr;` | Global variables | Bitmask of nodes accessible to the current process |
+|  | `int numa_num_configured_nodes(void);` | `int` | Returns the total number of configured nodes |
+|  | `extern struct bitmask *numa_all_nodes_ptr;` | Global variable | Contains a predefined bitmask of all available nodes |
+|  | `extern struct bitmask *numa_nodes_ptr;` | Global variables | Bitmask of nodes accessible to the current process |
 | **Memory Allocation** | `void *numa_alloc_onnode(size_t size, int node);` | `void *` | Allocate memory on the specified node and return on failure`NULL` |
-| | `void *numa_alloc_local(size_t size);` | `void *` | Allocate memory on the local node and return on failure`NULL` |
-| | `void *numa_alloc_interleaved(size_t size);` | `void *` | Cross-allocate memory to all nodes, return on failure`NULL` |
-| | `void numa_free(void *ptr, size_t size);` | `void` | Release`numa_alloc_*`Allocated memory (size needs to be specified) |
-| | `void *numa_realloc(void *oldptr, size_t oldsize, size_t newsize);` | `void *` | Reallocate memory and maintain node affinity, return on failure`NULL` |
+|  | `void *numa_alloc_local(size_t size);` | `void *` | Allocate memory on the local node and return on failure`NULL` |
+|  | `void *numa_alloc_interleaved(size_t size);` | `void *` | Cross-allocate memory to all nodes, return on failure`NULL` |
+|  | `void numa_free(void *ptr, size_t size);` | `void` | Release`numa_alloc_*`Allocated memory (size needs to be specified) |
+|  | `void *numa_realloc(void *oldptr, size_t oldsize, size_t newsize);` | `void *` | Reallocate memory and maintain node affinity, return on failure`NULL` |
 | **Memory Policy Settings** | `void numa_set_localalloc(void);` | `void` | Set the default policy to "Local node first" |
-| | `void numa_set_interleave_mask(const struct bitmask *mask);` | `void` | Press`mask`Node set set cross assignment mode |
-| | `void numa_set_bind_mask(const struct bitmask *mask);` | `void` | Limit memory allocation to`mask`Specify node |
-| | `void numa_set_preferred(int node);` | `void` | Set the preferred node for memory allocation |
+|  | `void numa_set_interleave_mask(const struct bitmask *mask);` | `void` | Press`mask`Node set set cross assignment mode |
+|  | `void numa_set_bind_mask(const struct bitmask *mask);` | `void` | Limit memory allocation to`mask`Specify node |
+|  | `void numa_set_preferred(int node);` | `void` | Set the preferred node for memory allocation |
 | **Process Affinity** | `int numa_run_on_node(int node);` | `int` | Bind the current process to the node`node`CPU, returns 0 on success, -1 on failure |
-| | `int numa_run_on_node_mask(const struct bitmask *mask);` | `int` | Bind the current process to`mask`CPU of the node set, returns 0 on success, -1 on failure |
-| | `int numa_sched_setaffinity(pid_t pid, const struct bitmask *mask);` | `int` | Setup process`pid`The CPU affinity of`mask`Node, returns 0 on success, -1 on failure |
+|  | `int numa_run_on_node_mask(const struct bitmask *mask);` | `int` | Bind the current process to`mask`CPU of the node set, returns 0 on success, -1 on failure |
+|  | `int numa_sched_setaffinity(pid_t pid, const struct bitmask *mask);` | `int` | Setup process`pid`The CPU affinity of`mask`Node, returns 0 on success, -1 on failure |
 | **Node attribute query** | `long long numa_node_size64(int node, int *free);` | `long long` | Returns the total memory of the node (bytes),`free`Output free memory (KB), return - 1 on failure |
-| | `int numa_node_of_cpu(int cpu);` | `int` | Return to CPU`cpu`The node it belongs to, returns - 1 on failure |
+|  | `int numa_node_of_cpu(int cpu);` | `int` | Return to CPU`cpu`The node it belongs to, returns - 1 on failure |
 | **Bit mask operation** | `struct bitmask *numa_bitmask_alloc(unsigned int nbits);` | `struct bitmask *` | Allocate accommodation`nbits`Bit mask of bits, returned on failure`NULL` |
-| | `void numa_bitmask_free(struct bitmask *b);` | `void` | release bitmask`b`（`b`for`NULL`no operation) |
-| | `void numa_bitmask_setall(struct bitmask *b);` | `void` | Settings`b`All bits of (including all nodes) |
-| | `void numa_bitmask_clearall(struct bitmask *b);` | `void` | Clear`b`All bits of (excluding any nodes) |
-| | `void numa_bitmask_setbit(struct bitmask *b, unsigned int i);` | `void` | Settings`b`of the`i`bit (contains node`i`） |
-| | `void numa_bitmask_clearbit(struct bitmask *b, unsigned int i);` | `void` | Clear`b`of the`i`bits (excluding nodes`i`） |
-| | `int numa_bitmask_is_set(const struct bitmask *b, unsigned int i);` | `int` | Check`b`of the`i`If the bit is set, 1 is returned, otherwise 0 is returned |
-| | `struct bitmask *numa_allocate_nodemask(void);` | `struct bitmask *` | Allocates a node bitmask of default size (equivalent to`numa_bitmask_alloc(numa_max_node()+1)`） |
-| | `void numa_free_nodemask(struct bitmask *b);` | `void` | Release`numa_allocate_nodemask`assigned bitmask |
+|  | `void numa_bitmask_free(struct bitmask *b);` | `void` | release bitmask`b`（`b`for`NULL`no operation) |
+|  | `void numa_bitmask_setall(struct bitmask *b);` | `void` | Settings`b`All bits of (including all nodes) |
+|  | `void numa_bitmask_clearall(struct bitmask *b);` | `void` | Clear`b`All bits of (excluding any nodes) |
+|  | `void numa_bitmask_setbit(struct bitmask *b, unsigned int i);` | `void` | Settings`b`of the`i`bit (contains node`i`） |
+|  | `void numa_bitmask_clearbit(struct bitmask *b, unsigned int i);` | `void` | Clear`b`of the`i`bits (excluding nodes`i`） |
+|  | `int numa_bitmask_is_set(const struct bitmask *b, unsigned int i);` | `int` | Check`b`of the`i`If the bit is set, 1 is returned, otherwise 0 is returned |
+|  | `struct bitmask *numa_allocate_nodemask(void);` | `struct bitmask *` | Allocates a node bitmask of default size (equivalent to`numa_bitmask_alloc(numa_max_node()+1)`） |
+|  | `void numa_free_nodemask(struct bitmask *b);` | `void` | Release`numa_allocate_nodemask`assigned bitmask |
 | **Large pages + NUMA related system calls** | `void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset);` | `void *` | allocate memory (`MAP_HUGETLB`flag for large pages), returns on failure`MAP_FAILED` |
-| | `int mbind(void *start, size_t length, int policy, const unsigned long *nmask, unsigned int maxnode, unsigned int flags);` | `int` | Set the NUMA policy for the memory block (such as`MPOL_BIND`), returns 0 on success, -1 on failure |
+|  | `int mbind(void *start, size_t length, int policy, const unsigned long *nmask, unsigned int maxnode, unsigned int flags);` | `int` | Set the NUMA policy for the memory block (such as`MPOL_BIND`), returns 0 on success, -1 on failure |
 
 
 **Example: Allocate memory on a specific node**
@@ -751,7 +751,7 @@ int main() {
 In a real-time system, when a **high-priority thread** is blocked waiting for a resource (such as a mutex) held by a **low-priority thread**, if a **medium-priority thread** seizes the CPU, it will result in:
 
 + Low-priority threads cannot release resources in time
-+ High-priority threads are "indirectly" delayed (should be the highest priority but are executed last)
++ High-priority threads are "indirectly" delayed (should be the highest priority but are executed last)  
 `L（持锁）→ H（等待锁）→ M（抢占L）→ H持续阻塞`
 
 Priority inheritance (PTHREAD_PRIO_INHERIT)
@@ -1330,7 +1330,7 @@ int main() {
 }
 ```
 
-1. **Use alignment attributes from compiler-specific and C++ language features**:
+1. **Use alignment attributes from compiler-specific and C++ language features**:  
 In addition to manual padding, some compilers also provide specific attributes to achieve cache line alignment. In GCC and Clang, you can use`__attribute__((aligned(CACHE_LINE_SIZE)))`To specify the alignment of the structure:
 
 ```cpp
@@ -2345,16 +2345,16 @@ auto some_func() {
 The C++ standard library provides several built-in memory resources to meet the needs of different scenarios:
 
 1. `**std::pmr::monotonic_buffer_resource**`：
- - Suitable for objects with short life cycle
- - Memory is released only when the resource is destroyed
- - Very fast allocation
++ Suitable for objects with short life cycle
++ Memory is released only when the resource is destroyed
++ Very fast allocation
 2. `**std::pmr::unsynchronized_pool_resource**`：
- - Use memory pools (slabs) to manage memory
- - Avoid memory fragmentation
- - Works with objects of many sizes
- - Not thread safe
++ Use memory pools (slabs) to manage memory
++ Avoid memory fragmentation
++ Works with objects of many sizes
++ Not thread safe
 3. `**std::pmr::synchronized_pool_resource**`：
- - `unsynchronized_pool_resource`Thread-safe version of
++ `unsynchronized_pool_resource`Thread-safe version of
 
 
 
@@ -2781,18 +2781,18 @@ inline related content
 1. In C++ language,`inline` At its core is a **link period directive** that addresses the **One Definition Rule (ODR)**.
 + **Core**: allow the same`inline`function or variable in multiple compilation units (`.cpp`file) have exactly the same definition. The linker ensures that only one instance of the definition exists in the final program.
 + **Main uses**:
- - **Define function in header file**: This is`inline`The most fundamental purpose is to avoid "multiple definition" link errors caused by including header files in multiple places.
- - **C++17 **`**inline**`**Variables**: Allows global variables to be defined in header files to ensure their uniqueness throughout the program (such as `inline AppConfig cfg;`）。
++ **Define function in header file**: This is`inline`The most fundamental purpose is to avoid "multiple definition" link errors caused by including header files in multiple places.
++ **C++17 **`**inline**`**Variables**: Allows global variables to be defined in header files to ensure their uniqueness throughout the program (such as `inline AppConfig cfg;`）。
 + **Implicit**`**inline**`** rule**:
- - exist `class`/`struct` Declare internally defined member functions.
- - All function templates and member functions of class templates.
++ exist `class`/`struct` Declare internally defined member functions.
++ All function templates and member functions of class templates.
 2. In the compiler,`inline` Considered a **Performance Optimization Suggestion**. The compiler decides whether to perform this optimization of function inlining.
 + **Core**: Replace function calls with the function body itself, eliminating the fixed overhead of function calls.
 + **Compiler decision-making authority**:
- - `inline` Just a suggestion, the compiler has the right to ignore it. Compilers usually refuse inlining if a function is too large, complex, or recursive.
- - The compiler will automatically inline any appropriate non-`**inline**`**Function**, at high optimization level (`-O2`, `-O3`) or via link-time optimization (LTO).
++ `inline` Just a suggestion, the compiler has the right to ignore it. Compilers usually refuse inlining if a function is too large, complex, or recursive.
++ The compiler will automatically inline any appropriate non-`**inline**`**Function**, at high optimization level (`-O2`, `-O3`) or via link-time optimization (LTO).
 + **Forced inlining**:
- - To override the compiler's judgment, use specific instructions`__attribute__((always_inline))`。
++ To override the compiler's judgment, use specific instructions`__attribute__((always_inline))`。
 3. Points to note:
 
 **Lambdas are very easy to expand inline at compile time.**
@@ -2952,13 +2952,13 @@ double ipow(double x, int n) {
 **Notes**
 
 1. **Compiler Compatibility**:
- - The MASM style is only suitable for MS/Intel compilers and is not supported by 64-bit MS; the GNU style is suitable for GNU/Clang/Intel Linux and has better cross-platform performance.
++ The MASM style is only suitable for MS/Intel compilers and is not supported by 64-bit MS; the GNU style is suitable for GNU/Clang/Intel Linux and has better cross-platform performance.
 2. **Register and stack processing**:
- - Modification of compiler reserved registers (such as`ebp`/`rbx`); when calling external functions, parameter passing and stack cleaning need to be handled manually (for example, 64-bit Windows reserves 32 bytes of shadow space).
++ Modification of compiler reserved registers (such as`ebp`/`rbx`); when calling external functions, parameter passing and stack cleaning need to be handled manually (for example, 64-bit Windows reserves 32 bytes of shadow space).
 3. **Risk of mixing VEX and SSE**:
- - Avoid mixing VEX instructions in the same function (such as`vaddps`) and non-VEX instructions (such as`addps`), will cause Intel CPU state switching penalty (about 70 cycles).
++ Avoid mixing VEX instructions in the same function (such as`vaddps`) and non-VEX instructions (such as`addps`), will cause Intel CPU state switching penalty (about 70 cycles).
 4. **Debug and Verify**:
- - Generate assembly code through a compiler (e.g.`gcc -S`) Verify the correctness of inline assembly; use test programs to compare the output of C++ implementation and assembly implementation to ensure consistent functionality.
++ Generate assembly code through a compiler (e.g.`gcc -S`) Verify the correctness of inline assembly; use test programs to compare the output of C++ implementation and assembly implementation to ensure consistent functionality.
 
 
 
@@ -4175,8 +4175,8 @@ The main types of branching in C++ code include:
 The most basic branch structure. Performance bottlenecks mainly occur in **long **`**if-else if**`** chain** , because the prediction difficulty increases linearly as the number of conditions increases.
 
 + **Optimization ideas:**
- - **Reduce conditions:** Simplify judgment logically.
- - **Reorganization conditions:** Put the most likely (or fastest to calculate) conditions first.Put the code for common scenarios in`if`In the code block, place the error handling logic in`else`code block. Reduce the number of branches as much as possible,Delay or combine multiple error checking logic to ensure that only one error handling branch remains. avoidDependence on “unpredictable conditions” branch.
++ **Reduce conditions:** Simplify judgment logically.
++ **Reorganization conditions:** Put the most likely (or fastest to calculate) conditions first.Put the code for common scenarios in`if`In the code block, place the error handling logic in`else`code block. Reduce the number of branches as much as possible,Delay or combine multiple error checking logic to ensure that only one error handling branch remains. avoidDependence on “unpredictable conditions” branch.
 
 
 
@@ -4185,8 +4185,8 @@ The most basic branch structure. Performance bottlenecks mainly occur in **long 
 A loop is essentially a branch that jumps backwards at the end of each iteration.
 
 + **Performance features:**
- - **Predictable:** For a fixed number of loops (e.g. `for (int i=0; i<100; ++i)`), the branch predictor is almost always correct.
- - **Difficult to predict:** For loops that rely on external data and exit early, branch prediction at the exit point can easily fail.
++ **Predictable:** For a fixed number of loops (e.g. `for (int i=0; i<100; ++i)`), the branch predictor is almost always correct.
++ **Difficult to predict:** For loops that rely on external data and exit early, branch prediction at the exit point can easily fail.
 
 
 
@@ -4196,8 +4196,8 @@ A loop is essentially a branch that jumps backwards at the end of each iteration
 
 + **Inefficiency:** if `case` The distribution of values is sparse (e.g. `1, 10, 1000`), the compiler usually implements it as a tree `if-else` Tree.
 + **Efficient situation (optimization skills):**
- - Will `case` The value is set to **Continuous and increasing** an integer (such as `0, 1, 2, 3, ...`）。
- - In this case, the compiler will optimize it to **Jump Table,**Essentially, it is an array that stores code addresses., jump directly to the target code through one calculation and memory addressing,Implement branch-free multiplexing, and the efficiency has nothing to do with the number of cases.
++ Will `case` The value is set to **Continuous and increasing** an integer (such as `0, 1, 2, 3, ...`）。
++ In this case, the compiler will optimize it to **Jump Table,**Essentially, it is an array that stores code addresses., jump directly to the target code through one calculation and memory addressing,Implement branch-free multiplexing, and the efficiency has nothing to do with the number of cases.
 
 
 
@@ -6109,9 +6109,9 @@ double Func2(double x) {
 
 | Operation Types | Register Type Reference | Typical CPU Cycles | Key Notes and Optimizations |
 | --- | --- | --- | --- |
-| Addition (+), subtraction (-) | | | |
-| Multiplication (*) | `float`and`double`Mixed), otherwise precision conversion overhead will be triggered. | | |
-| Division (/) | `-ffast-math`) to balance speed "when accuracy requirements are relaxed". | | |
+| Addition (+), subtraction (-) |  |  |  |
+| Multiplication (*) | `float`and`double`Mixed), otherwise precision conversion overhead will be triggered. |  |  |
+| Division (/) | `-ffast-math`) to balance speed "when accuracy requirements are relaxed". |  |  |
 | Accuracy selection (`float` vs `double`) | - | - | In non-vector scenarios,`double`(8 bytes) with`float`(4 bytes) Operation efficiency is **similar**; small array/large array is preferred`float`, which can save cache space and improve cache hit rate. |
 
 
@@ -6391,11 +6391,11 @@ float x = temp + temp + sqrtf(temp); // Calculate i*i only once
 | --- | --- | --- |
 | a_x + a_and | a*(x + y) | 2 multiplications + 1 addition → 1 multiplication + 1 addition |
 | -x + -y | -(x + y) | 2 negatives + 1 addition → 1 addition + 1 negative |
-| (a && b) | | (a && c) |
-| !a && !b | !(a | |
+| (a && b) |  | (a && c) |
+| !a && !b | !(a |  |
 
 
-**Example: Vector Operation Optimization in AI**
+**Example: Vector Operation Optimization in AI**  
 In AI vector dot product calculation,`sum += a[i]*w[i] + a[i]*b[i]` can be optimized as `sum += a[i]*(w[i]+b[i])`：
 
 ```cpp
@@ -6489,7 +6489,7 @@ float result = std::bit_cast<float>(i); // Safe to get -2.0
 
 + **Essence of the problem**: Recursion is implemented through the function call stack. Each call needs to save parameters, local variables, and register status, which requires a large stack overhead; and too deep a recursion depth can easily cause stack overflow, destroy data locality, and lead to a decrease in cache hit rate;
 + **Optimization solution**:
- 1. **Recursion to iteration**: Rewrite the recursive algorithm into a loop, and use an explicit stack (such as an array to simulate a stack) to store the intermediate state.
+1. **Recursion to iteration**: Rewrite the recursive algorithm into a loop, and use an explicit stack (such as an array to simulate a stack) to store the intermediate state.
 
 ```cpp
 // Recursive version (inefficient)
@@ -6537,9 +6537,9 @@ void preorder_tail_rec(Node* root) {
 
 + **Essence of the problem**: Passing large objects (such as`std::vector`, custom matrix class), value transfer will trigger object copying (calling the copy constructor), and the cost is much higher than reference transfer;
 + **Optimization solution**:
- 1. **For large objects**`const&`**Transfer**: For parameters that do not need to be modified, use "`const 类型&`” pass to avoid copying, e.g.`void process(const Matrix& mat)`；
- 2. **Small type direct value transfer**: Yes`int`、`float`For scalar types, the cost of value transfer is equivalent to that of reference transfer (or even faster, avoiding pointer indirect access), and there is no need to force the use of references;
- 3. **Avoid temporary object passing**: Pass constants to reference parameters (such as`process(5)`), the compiler will automatically create a temporary object. If you need to pass constants frequently, you can overload the function to adapt constant parameters (such as`void process(int val)`）。
+1. **For large objects**`const&`**Transfer**: For parameters that do not need to be modified, use "`const 类型&`” pass to avoid copying, e.g.`void process(const Matrix& mat)`；
+2. **Small type direct value transfer**: Yes`int`、`float`For scalar types, the cost of value transfer is equivalent to that of reference transfer (or even faster, avoiding pointer indirect access), and there is no need to force the use of references;
+3. **Avoid temporary object passing**: Pass constants to reference parameters (such as`process(5)`), the compiler will automatically create a temporary object. If you need to pass constants frequently, you can overload the function to adapt constant parameters (such as`void process(int val)`）。
 
 
 
@@ -6656,7 +6656,7 @@ The key here is to choose the right `PREFETCH_DISTANCE`. This distance needs to 
 Intel compiler also supports `__builtin_prefetch`, and provides its own set of built-in functions that directly correspond to the prefetch instructions of the x86 architecture.
 
 + **Intrinsics**: need to include `<x86intrin.h>` or `<immintrin.h>` header file.
- - `_mm_prefetch(char const* p, int hint)`
++ `_mm_prefetch(char const* p, int hint)`
 
 `hint` The parameters directly correspond to the processor's prefetch instructions:
 
@@ -7315,16 +7315,16 @@ Actively pull this data from RAM into the CPU's L1/L2/L3 cache.
 
 + **Principle**: When the CPU actually accesses (reads or writes) a certain piece of memory, it loads that piece of memory into the cache line.
 + **Implementation**:
- - Write a loop that traverses all data structures that will be used on the critical path.
- - Within the loop, perform a harmless read operation on each element. To prevent compiler optimizations, use `volatile` Keywords.
++ Write a loop that traverses all data structures that will be used on the critical path.
++ Within the loop, perform a harmless read operation on each element. To prevent compiler optimizations, use `volatile` Keywords.
 
 Make sure the critical code itself is in the CPU cache.
 
 + **Principle**: The CPU will load the corresponding machine instructions into the instruction cache only when executing a certain piece of code.
 + **Implementation**:
- - During the warm-up phase, all core trading functions are called with simulated data.
- - Simulate a complete transaction processing process, from receiving market data, decision analysis, risk checking to generating orders, without actually sending messages to the outside world.
- - Forces the CPU to execute all branches and functions on the critical path, loading their machine instructions into cache lines.
++ During the warm-up phase, all core trading functions are called with simulated data.
++ Simulate a complete transaction processing process, from receiving market data, decision analysis, risk checking to generating orders, without actually sending messages to the outside world.
++ Forces the CPU to execute all branches and functions on the critical path, loading their machine instructions into cache lines.
 
 Frequently run a fake execution path to read out frequently used data and store it in the cache
 
@@ -7420,15 +7420,15 @@ Optimization tips:
 + Use the restrict keyword or __restrict modifier to eliminate pointer aliasing problems
 + Make sure the array size is an integer multiple of the vector width
 + **GCC / Clang**:
- - `-O3`, `-Ofast`: These high-level optimization options usually turn on autovectorization automatically.
- - `-ftree-vectorize`: Explicitly enable vectorization (in `-O3` level is enabled by default).
- - `-fopt-info-vec` or `-Rpass=loop-vectorize` (Clang): Let the compiler output a detailed vectorization report, telling you which loops were vectorized and which were not, and why.
- - `-march=native`: Let the compiler generate optimal instructions for the current machine's CPU architecture, including using the latest SIMD instruction sets (such as AVX2, AVX-512).
- - `-mavx, -mavx2, -mavx512` Enable a specific instruction set
++ `-O3`, `-Ofast`: These high-level optimization options usually turn on autovectorization automatically.
++ `-ftree-vectorize`: Explicitly enable vectorization (in `-O3` level is enabled by default).
++ `-fopt-info-vec` or `-Rpass=loop-vectorize` (Clang): Let the compiler output a detailed vectorization report, telling you which loops were vectorized and which were not, and why.
++ `-march=native`: Let the compiler generate optimal instructions for the current machine's CPU architecture, including using the latest SIMD instruction sets (such as AVX2, AVX-512).
++ `-mavx, -mavx2, -mavx512` Enable a specific instruction set
 + **Intel C++ Compiler**:
- - `-O2`, `-O3`: Automatic vectorization is enabled by default.
- - `-ax<CODES>` or `-x<CODES>`: For example `-xAVX2` Will tell the compiler that the AVX2 instruction set can be used.
- - `-qopt-report` or `-qopt-report-phase=vec`: Generate detailed optimization reports.
++ `-O2`, `-O3`: Automatic vectorization is enabled by default.
++ `-ax<CODES>` or `-x<CODES>`: For example `-xAVX2` Will tell the compiler that the AVX2 instruction set can be used.
++ `-qopt-report` or `-qopt-report-phase=vec`: Generate detailed optimization reports.
 
 **Explicit vectorization instructions (Pragmas)**
 
@@ -7506,13 +7506,13 @@ Low latency (local CPU execution, no GPU data transmission overhead), developmen
 AVX represents registers through specific C++ types and declares built-in functions through dedicated header files to ensure compile-time type safety and correct generation of instructions:
 
 + **Register type**: in double underscore`__`At the beginning, the suffix indicates the register width and data type, for example:
- - `__m128`: 128-bit register, storing 4 32-bit floating point numbers (float);
- - `__m256i`: 256-bit register, storing 8 32-bit integers (int);
- - `__m512d`: 512-bit register, storing 8 64-bit floating point numbers (double);
++ `__m128`: 128-bit register, storing 4 32-bit floating point numbers (float);
++ `__m256i`: 256-bit register, storing 8 32-bit integers (int);
++ `__m512d`: 512-bit register, storing 8 64-bit floating point numbers (double);
 + **Header file dependency**: The corresponding header file must be included to use AVX built-in functions. Common header files include:
- - `<intrin.h>`: General built-in function declaration (applicable to MSVS, GCC);
- - `<emmintrin.h>`: SSE/AVX basic instructions (128-bit operation);
- - `<immintrin.h>`: AVX-2/AVX-512 extended instructions (256/512-bit operation).
++ `<intrin.h>`: General built-in function declaration (applicable to MSVS, GCC);
++ `<emmintrin.h>`: SSE/AVX basic instructions (128-bit operation);
++ `<immintrin.h>`: AVX-2/AVX-512 extended instructions (256/512-bit operation).
 
 
 
@@ -7684,9 +7684,9 @@ float vector_dot_product(float* v1, float* v2, int len) {
 + **Function**: Clear the upper half of the YMM register
 + **Purpose**: Called before transitioning from AVX code to non-AVX code to avoid performance penalties
 + **Usage scenarios**:
- 1. Some components of the program are compiled with AVX, while other parts do not use AVX
- 2. When using CPU distribution (dispatching) technology to compile multi-version functions
- 3. Before AVX code calls an external library function that does not support AVX
+1. Some components of the program are compiled with AVX, while other parts do not use AVX
+2. When using CPU distribution (dispatching) technology to compile multi-version functions
+3. Before AVX code calls an external library function that does not support AVX
 
 
 
@@ -7943,11 +7943,11 @@ This code loops through 8 floating point numbers at a time and performs far bett
 | --- | --- | --- | --- | --- |
 | **Hardware prefetching** | (none, automatic) | all | Transparent to programmers | Can only handle simple mode |
 | **Software prefetching** | `__builtin_prefetch` | GCC, Clang | Flexible to handle complex patterns | Increases programming complexity and may mislead the CPU |
-| | `_mm_prefetch` | Intel, GCC, Clang | Directly corresponds to x86 instructions | Same as above |
-| | `#pragma prefetch` | Intel | Simple, loop-level control | compiler specific |
+|  | `_mm_prefetch` | Intel, GCC, Clang | Directly corresponds to x86 instructions | Same as above |
+|  | `#pragma prefetch` | Intel | Simple, loop-level control | compiler specific |
 | **auto-vectorization** | `-O3 -march=native` | all | Transparent to programmers | Many restrictions, the compiler may be too conservative |
 | **explicit vectorization** | `#pragma omp simd` | GCC, Clang, Intel | Good portability, forced vectorization | Programmers are required to ensure security |
-| | `#pragma ivdep` | GCC, Clang, Intel | Ignore dependencies, more powerful | High risk, may lead to erroneous results |
+|  | `#pragma ivdep` | GCC, Clang, Intel | Ignore dependencies, more powerful | High risk, may lead to erroneous results |
 | **built-in functions** | `_mm256_...` , `vaddq_f32` | all | Ultimate performance and control | Complex, non-portable, error-prone |
 
 
@@ -8026,13 +8026,13 @@ bool has_errors(__m256 result) {
 
 + Vector classes provide a higher level of abstraction and encapsulate built-in functions
 + Advantages:
- - Operator overloading makes the code more intuitive (use +, * instead of _add_ps and other functions)
- - Automatically handle memory alignment
- - Provides richer functionality and better type safety
++ Operator overloading makes the code more intuitive (use +, * instead of _add_ps and other functions)
++ Automatically handle memory alignment
++ Provides richer functionality and better type safety
 + Commonly used libraries:
- - Agner Fog's vectorclass library:[https://github.com/vectorclass](https://github.com/vectorclass)
- - Intel的Short Vector Math Library (SVML)
- - Various open source vector libraries
++ Agner Fog's vectorclass library:[https://github.com/vectorclass](https://github.com/vectorclass)
++ Intel的Short Vector Math Library (SVML)
++ Various open source vector libraries
 + Usage example:
 
 ```cpp
@@ -8044,10 +8044,10 @@ c.store(result); // Store the result
 ```
 
 + Advanced features:
- - mixed precision calculations
- - Conditional execution (mask operation)
- - Horizontal operation (reduction)
- - Seamless integration with scalar code
++ mixed precision calculations
++ Conditional execution (mask operation)
++ Horizontal operation (reduction)
++ Seamless integration with scalar code
 
 
 
@@ -8350,12 +8350,12 @@ void lock() {
 ```
 
 1. `**compare_exchange_weak**`: This is a core atomic operation. it will compare `locked` value and `zero` value.
- - If equal (i.e. `locked` is 0), it will atomically `locked` The value of is updated to 1 and returns `true`. The thread successfully acquires the lock and the loop ends.
- - If not equal (i.e. `locked` is 1), it will fail to update and will `locked` The current value of (that is, 1) is loaded into `zero` in and return `false`。
++ If equal (i.e. `locked` is 0), it will atomically `locked` The value of is updated to 1 and returns `true`. The thread successfully acquires the lock and the loop ends.
++ If not equal (i.e. `locked` is 1), it will fail to update and will `locked` The current value of (that is, 1) is loaded into `zero` in and return `false`。
 2. `**while**`** cycle**: if only `compare_exchange_weak` return `false`(Indicating that the lock was not grabbed), the cycle will continue. Because after failure `zero` The value will be changed to `locked` current value (1), so it must be reset to `0`, so that you can continue to try "replace 0 with 1".
 3. `**memory_order_acq_rel**`: This is a memory sequence.`acq_rel` = `acquire` + `release`。
- - **Acquire**: Ensure that all memory read and write operations after successfully acquiring the lock will not be rescheduled to before acquiring the lock. This ensures that the thread can see all modifications made in the critical section by the previous thread holding the lock.
- - **Release**: Ensures that all memory operations have completed before attempting to acquire the lock.
++ **Acquire**: Ensure that all memory read and write operations after successfully acquiring the lock will not be rescheduled to before acquiring the lock. This ensures that the thread can see all modifications made in the critical section by the previous thread holding the lock.
++ **Release**: Ensures that all memory operations have completed before attempting to acquire the lock.
 
 ```cpp
 void unlock() {
@@ -8370,8 +8370,8 @@ void unlock() {
 
 + **advantage**: The implementation is very simple.
 + **shortcoming**:
- - **unfair**: The order in which threads acquire locks is random, which may lead to "starvation" of some threads.
- - **High Cache Contention**: This is the biggest problem. All waiting threads are in the same atomic variable `locked` Spin on. On a multi-core system, when a thread releases the lock (modify`locked`) will cause the cache lines of all other spinning cores to become invalid. This will cause a large amount of cache coherence traffic (Cache Coherence Traffic), occupy the memory bus, and seriously affect performance, especially when the number of cores is large.
++ **unfair**: The order in which threads acquire locks is random, which may lead to "starvation" of some threads.
++ **High Cache Contention**: This is the biggest problem. All waiting threads are in the same atomic variable `locked` Spin on. On a multi-core system, when a thread releases the lock (modify`locked`) will cause the cache lines of all other spinning cores to become invalid. This will cause a large amount of cache coherence traffic (Cache Coherence Traffic), occupy the memory bus, and seriously affect performance, especially when the number of cores is large.
 
 
 
@@ -8514,11 +8514,11 @@ void unlock(lock_node* node) {
 
 
 + **advantage**:
- - **fair**: Follow first-in-first-out (FIFO) order.
- - **High performance/high scalability**: Each thread spins on a different memory location, greatly reducing cache contention and thus performing very well in multi-core environments.
++ **fair**: Follow first-in-first-out (FIFO) order.
++ **High performance/high scalability**: Each thread spins on a different memory location, greatly reducing cache contention and thus performing very well in multi-core environments.
 + **shortcoming**:
- - Implementation is more complex than the other two.
- - `lock` and `unlock` The interface needs to pass a `lock_node` Object is a little inconvenient to use.
++ Implementation is more complex than the other two.
++ `lock` and `unlock` The interface needs to pass a `lock_node` Object is a little inconvenient to use.
 
 
 
@@ -8603,11 +8603,11 @@ void unlock() {
 
 
 + **advantage**:
- - **fair**: Strict first-in-first-out (FIFO) order.
- - **Simple to implement**: Much simpler than MCS lock.
- - `unlock` Very fast operation, just one `fetch_add`。
++ **fair**: Strict first-in-first-out (FIFO) order.
++ **Simple to implement**: Much simpler than MCS lock.
++ `unlock` Very fast operation, just one `fetch_add`。
 + **shortcoming**:
- - **Cache contention still exists**: Like the Test-and-Set lock, all waiting threads are**same one**Atomic variables `head` Spin on. when `unlock` Revise `head` , it will also invalidate all cache lines waiting for the core, causing bus traffic. Although slightly better than implementation one (because `unlock` The operation itself is fast), but does not scale well under high contention as an MCS lock.
++ **Cache contention still exists**: Like the Test-and-Set lock, all waiting threads are**same one**Atomic variables `head` Spin on. when `unlock` Revise `head` , it will also invalidate all cache lines waiting for the core, causing bus traffic. Although slightly better than implementation one (because `unlock` The operation itself is fast), but does not scale well under high contention as an MCS lock.
 
 
 
@@ -10295,8 +10295,8 @@ bool has_rdtscp_support() {
 }
 ```
 
-Notice:
-● If you need to strictly prevent subsequent command rearrangement, add lfence after rdtscp.
+Notice:  
+● If you need to strictly prevent subsequent command rearrangement, add lfence after rdtscp.  
 ● Use APIC ID to verify whether the timing process spans cores.
 
 **6. Example of timer implemented using rdtscp feature**
@@ -10671,24 +10671,24 @@ The maximum memory bandwidth for the Intel NUC Kit NUC8i5BEH can be calculated a
 
 #### Memory Bound optimization
 + **Cache-friendly data structure:** When designing data structures, consider how to maximize the use of cache locality principles.
- - **Sequential access:** Use hardware prefetcher to access data in the order in memory to improve spatial locality.
- - **Data Compression/Compact:** Reduce data size, improve cache utilization and memory bandwidth efficiency.
- - **Alignment and Padding:** Ensure data structure members are properly aligned in memory to avoid cross-cache line accesses.
++ **Sequential access:** Use hardware prefetcher to access data in the order in memory to improve spatial locality.
++ **Data Compression/Compact:** Reduce data size, improve cache utilization and memory bandwidth efficiency.
++ **Alignment and Padding:** Ensure data structure members are properly aligned in memory to avoid cross-cache line accesses.
 + **Explicit memory prefetching:** Before the data is needed, through software instructions (such as `__builtin_prefetch`) prompts the CPU to load data into cache to hide memory access latency. In a database, this can be used to read ahead data pages.
 + **Huge Pages:** Using 2MB or 1GB huge pages instead of the default 4KB pages can significantly reduce the number of TLB misses and reduce address translation overhead.
 
 #### Core Bound optimization
 + **Concept:** When the performance bottleneck of an application is mainly the **computing power** of the CPU rather than memory access, we call it Core Bound. This is typically represented by the “Core Bound” category indicator in the TMA methodology.
 + **Two main situations:**
- - **Data flow dependency limitations (low ILP):** There are long **data dependency chains** between instructions, causing the CPU's out-of-order execution engine to be unable to fully utilize its parallel processing capabilities. For example, linked list traversal is a typical long dependency chain, and the CPU must wait in sequence for the previous pointer to be dereferenced before processing the next one. In this case, even if the CPU has a large number of idle execution units, it is stalled waiting for dependent data, resulting in low instruction-level parallelism (ILP).
- - **Hardware computing resource shortage (execution port contention):** Some specific execution units (such as multipliers, dividers, floating point units) are overloaded. When a workload frequently executes large numbers of complex instructions of the same type, the CPU's specific execution ports may become saturated and instructions have to be queued for execution. This is usually related to the number of execution units and throughput limitations of the CPU microarchitecture.
++ **Data flow dependency limitations (low ILP):** There are long **data dependency chains** between instructions, causing the CPU's out-of-order execution engine to be unable to fully utilize its parallel processing capabilities. For example, linked list traversal is a typical long dependency chain, and the CPU must wait in sequence for the previous pointer to be dereferenced before processing the next one. In this case, even if the CPU has a large number of idle execution units, it is stalled waiting for dependent data, resulting in low instruction-level parallelism (ILP).
++ **Hardware computing resource shortage (execution port contention):** Some specific execution units (such as multipliers, dividers, floating point units) are overloaded. When a workload frequently executes large numbers of complex instructions of the same type, the CPU's specific execution ports may become saturated and instructions have to be queued for execution. This is usually related to the number of execution units and throughput limitations of the CPU microarchitecture.
 + **Optimization Direction:** Core Bound optimization aims to reduce the total amount of work that the CPU needs to complete, or to complete the work through a more efficient instruction sequence.
- - **Function Inlining:** Insert the code of a small function directly into the call point, eliminating function calls (`CALL`/`RET` instructions) (such as save/restore registers), and expand the scope of compiler optimization so that it can better perform cross-function optimization. **Loop Optimization:** Loops are often the areas where program execution time is most concentrated.
- - Loop-invariant code externalization (moves invariant calculations inside the loop outside the loop), loop unrolling (reduces loop control overhead), loop swapping (changes the order of nested loops to improve memory locality), loop blocking/tiling (breaks large loop data into small pieces to fit in the cache).
- - **Vectorization:**
- 1. Utilizes the CPU's **SIMD (Single Instruction, Multiple Data)** instruction set. SIMD instructions allow one instruction to operate on multiple data elements simultaneously in a single cycle.
- 2. **Autovectorization:** The compiler automatically recognizes and converts code to use SIMD instructions.
- 3. **Explicit vectorization:** When the compiler cannot automatically vectorize or the vectorization is not ideal, manually write SIMD code using compiler intrinsics (intrinsics) or specialized libraries (such as Google Highway) to achieve finer control and higher performance.
++ **Function Inlining:** Insert the code of a small function directly into the call point, eliminating function calls (`CALL`/`RET` instructions) (such as save/restore registers), and expand the scope of compiler optimization so that it can better perform cross-function optimization. **Loop Optimization:** Loops are often the areas where program execution time is most concentrated.
++ Loop-invariant code externalization (moves invariant calculations inside the loop outside the loop), loop unrolling (reduces loop control overhead), loop swapping (changes the order of nested loops to improve memory locality), loop blocking/tiling (breaks large loop data into small pieces to fit in the cache).
++ **Vectorization:**
+1. Utilizes the CPU's **SIMD (Single Instruction, Multiple Data)** instruction set. SIMD instructions allow one instruction to operate on multiple data elements simultaneously in a single cycle.
+2. **Autovectorization:** The compiler automatically recognizes and converts code to use SIMD instructions.
+3. **Explicit vectorization:** When the compiler cannot automatically vectorize or the vectorization is not ideal, manually write SIMD code using compiler intrinsics (intrinsics) or specialized libraries (such as Google Highway) to achieve finer control and higher performance.
 
 
 
@@ -10807,9 +10807,9 @@ gcc documentation:[https://gcc.gnu.org/onlinedocs/](https://gcc.gnu.org/onlinedo
 | Distributive law ((a | b)&&(a | c)=a | (b&&c)) | x | x |
 | DeMorgan's Law (!a&&!b=!(a | b)) | x | x | - | - |
 | !(!a)=a | x | x | x | x | x |
-| a&&!a=false, a | | !a=true | x | x | x |
-| a&&true=a, a | | false=a | x | x | x |
-| a&&false=false, a | | true=true | x | x | x |
+| a&&!a=false, a |  | !a=true | x | x | x |
+| a&&true=a, a |  | false=a | x | x | x |
+| a&&false=false, a |  | true=true | x | x | x |
 | a&&a=a | x | x | x | x | x |
 | (a&&b) | (a&&!b)=a | - | x | x | x |
 | (a&&b) | (!a&&c)=a?b:c | - | x | x | x |
@@ -10870,9 +10870,9 @@ gcc documentation:[https://gcc.gnu.org/onlinedocs/](https://gcc.gnu.org/onlinedo
 + `**-flto**`** (Link Time Optimization) / `**-fipo**` (Inter-Procedural Optimization): ** Enables link-time optimization (LTO), also known as inter-procedural optimization (IPO). Typically, compilers can only optimize one compilation unit (source file) at a time. LTO allows the compiler to globally analyze and optimize the entire program during the link phase, uncovering optimization opportunities across file boundaries such as more aggressive function inlining, dead code elimination, and data flow optimizations.
 + `-fwhole-program` The option Enable WPO enables inter-procedural optimization, treating the entire codebase as a monolithic program, similar to the LTO feature.
 + `**-fprofile-generate**`**: **_**Insert performance probes during compilation to record the execution frequency of the program when it is running (such as the number of function calls, the number of branch jumps, etc.).**_`**-fprofile-use**`**:** The compiler uses the hotspot data collected by program execution with probes to perform more aggressive optimizations on frequently executed code paths, and may reduce optimization overhead on cold paths.
- 1. **Other Important Options:** There are many other options that affect performance, such as:
- - `**-ffast-math**`**:** Allows the compiler to rewire floating-point operations, possibly changing the order of operations, thereby enabling more optimizations (such as vectorization of floating-point operations). Use with caution, however, as it can lead to minor inaccuracies in the results and involves special behavior such as NaNs, infinities, etc. In databases, this is typically used only in analytical queries where numerical precision is less critical.
- - `**-mprefer-vector-width=###**`**:** If you don't want to use certain heavy AVX instructions (like AVX-512, which can cause throttling on some older CPUs), you can set this to 128 or 256 to fix the maximum vector width.
+1. **Other Important Options:** There are many other options that affect performance, such as:
++ `**-ffast-math**`**:** Allows the compiler to rewire floating-point operations, possibly changing the order of operations, thereby enabling more optimizations (such as vectorization of floating-point operations). Use with caution, however, as it can lead to minor inaccuracies in the results and involves special behavior such as NaNs, infinities, etc. In databases, this is typically used only in analytical queries where numerical precision is less critical.
++ `**-mprefer-vector-width=###**`**:** If you don't want to use certain heavy AVX instructions (like AVX-512, which can cause throttling on some older CPUs), you can set this to 128 or 256 to fix the maximum vector width.
 
 **GCC’s most commonly used compilation options**
 
@@ -10899,7 +10899,7 @@ gcc documentation:[https://gcc.gnu.org/onlinedocs/](https://gcc.gnu.org/onlinedo
 | Instruction Scheduling (-fschedule-insns, -fschedule-insns2) | ❌ | ✅ | ✅ | ✅ |
 | Strength reduction (multiplication → shift, division → multiplication reciprocal) (-fstrength-reduce) | ❌ | ✅ | ✅ | ✅ |
 | Inline functions (-finline-functions-called-once, -finline-small-functions) | ❌ | Part | ✅ | ✅+More radical |
-| Loop optimization | | | | |
+| Loop optimization |  |  |  |  |
 | - Loop unrolling (-funroll-loops) | ❌ | ❌ | Part | ✅ |
 | - Loop vectorization (-ftree-vectorize) | ❌ | ❌ | ✅ | ✅ |
 | - loop exchange / block / strip (-floop-interchange, -floop-block) | ❌ | ❌ | ❌ | ✅ |
@@ -11109,40 +11109,40 @@ Disassembly analysis of target files
 | Optimization Types | MS Compilers (Windows) | Gnu and Clang Compilers | Intel Compilers (Windows) | Intel Compilers (Linux) |
 | --- | --- | --- | --- | --- |
 | Speed optimization | /O2 or /Ox | -O3 or -Ofast | /O3 | -O3 |
-| Inter-process optimization | | | /Og | |
+| Inter-process optimization |  |  | /Og |  |
 | Whole program optimization | /GL | --combine -fwhole-program | /Qipo | -ipo |
-| No exception handling | /EHs- | | | |
-| No F.P. Exception Trapping | /fp:except- | -fno-trapping-math -fno-math-errno | | |
-| 无栈帧 | /Oy | -fomit-framepointer -fomit-framepointer | | |
+| No exception handling | /EHs- |  |  |  |
+| No F.P. Exception Trapping | /fp:except- | -fno-trapping-math -fno-math-errno |  |  |
+| 无栈帧 | /Oy | -fomit-framepointer -fomit-framepointer |  |  |
 | 无RTTI | /GR- | -fno-rtti | /GR- | -fno-rtti |
-| Assume no pointer aliases | /Oa | -fno-alias | | |
+| Assume no pointer aliases | /Oa | -fno-alias |  |  |
 | Non-strict floating point | /fp:fast | -ffast-math | /fp:fast /fp:fast=2 | -fp-model fast, -fp-model fast=2 |
-| Fusion multiplication and addition | | -ffp-contract=fast | | |
-| Divide by constant = multiply by reciprocal | | -freciprocal-math | | |
-| Assume no overflow or NAN | | -ffinite-math-only | | |
-| Ignore sign of zeros | | -fno-signed-zeros | | |
-| Simple member pointers | /vms | -fno-complete-member-pointers | /vms | |
-| Quick function call | /Gr | | | |
-| Vector call function | /Gv | | | |
+| Fusion multiplication and addition |  | -ffp-contract=fast |  |  |
+| Divide by constant = multiply by reciprocal |  | -freciprocal-math |  |  |
+| Assume no overflow or NAN |  | -ffinite-math-only |  |  |
+| Ignore sign of zeros |  | -fno-signed-zeros |  |  |
+| Simple member pointers | /vms | -fno-complete-member-pointers | /vms |  |
+| Quick function call | /Gr |  |  |  |
+| Vector call function | /Gv |  |  |  |
 | Function-level linking | /Gy | -ffunction-sections | /Gy | -ffunction-sections |
 | SSE instruction set (128-bit floating point vector) | /arch:SSE | -msse | /arch:SSE | -msse |
 | SSE2 instruction set (128-bit integer or double) | /arch:SSE2 | -msse2 | /arch:SSE2 | -msse2 |
-| SSE3 instruction set | | -msse3 | /arch:SSE3 | -msse3 |
-| Supplementary SSE3 instruction set | | -mssse3 | /arch:SSSE3 | -mssse3 |
-| SSE4.1 instruction set | | -msse4.1 | /arch:SSE4.1 | -msse4.1 |
+| SSE3 instruction set |  | -msse3 | /arch:SSE3 | -msse3 |
+| Supplementary SSE3 instruction set |  | -mssse3 | /arch:SSSE3 | -mssse3 |
+| SSE4.1 instruction set |  | -msse4.1 | /arch:SSE4.1 | -msse4.1 |
 | AVX instruction set | /arch:AVX | -mAVX | /arch:AVX | -mAVX |
 | AVX2 instruction set | /arch:AVX2 | -mAVX2 | /arch:AVX | -mAVX2 |
-| AVX512F instruction set | | -mavx512f | | |
+| AVX512F instruction set |  | -mavx512f |  |  |
 | AVX512VL/BW/DQ instruction set | /arch:AVX512 | -mavx512vl -mavx512bw -mavx512dq | /arch:COREAVX512 | -mavx512vl -mavx512bw -mavx512dq |
-| Autovectorization | /fp:fast /fp:except- | -O2 -fno-trapping-math -fno-math-errno fveclib=libmvec | | |
-| Multi-thread automatic parallelization | | | /Qparallel | -parallel |
+| Autovectorization | /fp:fast /fp:except- | -O2 -fno-trapping-math -fno-math-errno fveclib=libmvec |  |  |
+| Multi-thread automatic parallelization |  |  | /Qparallel | -parallel |
 | OpenMP directive parallelization | /openmp | -fopenmp | /Qopenmp | -openmp |
-| 32-bit code | | -m32 | | |
-| 64-bit code | | -m64 | | |
+| 32-bit code |  | -m32 |  |  |
+| 64-bit code |  | -m64 |  |  |
 | Static linking (multi-threading) | /MT | -static | /MT | -static |
 | Generate assembly listing | /FA | -S -masm=intel | /FA | -S |
-| Generate mapping file | /Fm | | | |
-| Generate optimization report | | | /Qopt-report | -opt-report |
+| Generate mapping file | /Fm |  |  |  |
+| Generate optimization report |  |  | /Qopt-report | -opt-report |
 
 
 **Compiler directives and keywords related to optimization**
@@ -11151,17 +11151,17 @@ Disassembly analysis of target files
 | --- | --- | --- | --- | --- |
 | 16-byte alignment | __declspec(align(16)) | __attribute((aligned(16))) | __declspec(align(16)) | __attribute((aligned(16))) |
 | 16-byte alignment (C++11) | alignas(16) | alignas(16) | alignas(16) | alignas(16) |
-| Assume pointers are aligned | #pragma vector aligned | #pragma vector aligned | | |
+| Assume pointers are aligned | #pragma vector aligned | #pragma vector aligned |  |  |
 | Assume pointers are not aliased | #pragma optimize("a", on) __restrict | __restrict | __declspec(noalias) __restrict #pragma ivdep | __restrict #pragma ivdep |
-| Assume the function is pure | | __attribute((const)) | | __attribute((const)) |
+| Assume the function is pure |  | __attribute((const)) |  | __attribute((const)) |
 | Assume the function does not throw an exception | throw() | throw() | throw() | throw() |
 | Functions are assumed to be called only from the same module | static | static | static | static |
-| Assume that member functions are only called from the same module | | **attribute**((visibility("internal"))) | | **attribute**((visibility("internal"))) |
-| 向量化 | #pragma vector always | #pragma vector always | | |
-| Optimization function | #pragma optimize(...) | | | |
-| Fast call function | __fastcall | __attribute((fastcall)) | __fastcall | |
-| Vector call function | __vectorcall | __vectorcall (Clang only) | __vectorcall | |
-| Non-cached writes | #pragma vector nontemporal | #pragma vector nontemporal | | |
+| Assume that member functions are only called from the same module |  | **attribute**((visibility("internal"))) |  | **attribute**((visibility("internal"))) |
+| 向量化 | #pragma vector always | #pragma vector always |  |  |
+| Optimization function | #pragma optimize(...) |  |  |  |
+| Fast call function | __fastcall | __attribute((fastcall)) | __fastcall |  |
+| Vector call function | __vectorcall | __vectorcall (Clang only) | __vectorcall |  |
+| Non-cached writes | #pragma vector nontemporal | #pragma vector nontemporal |  |  |
 
 
 **Predefined Macros**
@@ -11170,12 +11170,12 @@ Disassembly analysis of target files
 | --- | --- | --- | --- | --- | --- |
 | 编译器标识 | _MSC_VER and not __INTEL_COMPILER | **GNUC** and not __INTEL_COMPILER and not **clang** | **clang** | __INTEL_COMPILER or __INTEL_LLVM_COMPILER | __INTEL_COMPILER or __INTEL_LLVM_COMPILER |
 | 16-bit platforms | not _WIN32 | n.a. | n.a. | n.a. | n.a. |
-| 32-bit platform | not _WIN64 | not _WIN64 | | | |
+| 32-bit platform | not _WIN64 | not _WIN64 |  |  |  |
 | 64-bit platforms | _WIN64 | _LP64 | _LP64 | _WIN64 | _LP64 |
-| Windows platform | _WIN32 | _WIN32 | | | |
+| Windows platform | _WIN32 | _WIN32 |  |  |  |
 | Linux平台 | n.a. | **unix**linux** | **unix**linux** | **unix**linux** | **unix**linux** |
-| x86 platform | _M_IX86 | _M_IX86 | | | |
-| x86-64 platform | _M_IX86 and _WIN64 | _M_X64 | _M_X64 | | |
+| x86 platform | _M_IX86 | _M_IX86 |  |  |  |
+| x86-64 platform | _M_IX86 and _WIN64 | _M_X64 | _M_X64 |  |  |
 
 
 #### Static linking and dynamic linking
@@ -11270,16 +11270,16 @@ Compiler dynamic link option optimization
 
 + **Default**: Use`-fpic`Compiled, including PLT/GOT
 + **Optimization**: use`-fno-pic`compile
- - Advantages: Removes GOT/PLT lookup, faster code
- - Disadvantages: Unable to share code segments (each process requires a separate code instance)
- - **Recommended**: Use this option if symbol coverage is not required
++ Advantages: Removes GOT/PLT lookup, faster code
++ Disadvantages: Unable to share code segments (each process requires a separate code instance)
++ **Recommended**: Use this option if symbol coverage is not required
 
 **64-bit Linux**
 
 + **Recommended**: Use`-fpie`replace`-fpic`
- - Advantages: Generate relative addresses, don't use GOT/PLT for internal references
- - Disadvantage: cannot have public variables
- - **Solution**: Mark global variables and internal functions as`static`or`__attribute__((visibility("hidden")))`
++ Advantages: Generate relative addresses, don't use GOT/PLT for internal references
++ Disadvantage: cannot have public variables
++ **Solution**: Mark global variables and internal functions as`static`or`__attribute__((visibility("hidden")))`
 + **Avoid**:`-mcmodel=large`(Using 64-bit address, low efficiency)
 
 
@@ -12610,7 +12610,7 @@ namespace lfc {
 } // namespace lfc
 ```
 
-###
+### 
 ### 2.Implement thread-safe queues
 **1.disruptor**
 
@@ -13766,8 +13766,8 @@ sizeof(s2): 24 bytes
 
 1. **Internal buffer**: `std::function` The object has a small amount of reserved memory inside it (such as 16 or 32 bytes).
 2. **Storage Policy**:
- - If the callable object to be stored (such as a Lambda) is small and can fit completely into this internal buffer, there will be no heap allocation.
- - If the callable object is too large (usually because it captures a large number of external variables) and exceeds the capacity of the internal buffer,`std::function` Allocate a piece of memory on the heap to store it, and then internally record a pointer to this heap memory.
++ If the callable object to be stored (such as a Lambda) is small and can fit completely into this internal buffer, there will be no heap allocation.
++ If the callable object is too large (usually because it captures a large number of external variables) and exceeds the capacity of the internal buffer,`std::function` Allocate a piece of memory on the heap to store it, and then internally record a pointer to this heap memory.
 
 Alternative implementation:[https://github.com/WG21-SG14/SG14/blob/master/SG14/inplace_function.h](https://github.com/WG21-SG14/SG14/blob/master/SG14/inplace_function.h)
 
@@ -14113,7 +14113,7 @@ namespace Common {
 
 
 ## Transaction data processing
-### Task 1 (data flow merging)
+### Task One (data flow merging)
 ```markdown
 The three data files order.csv snap.csv trans.csv represent the order, snapshot and transaction data of the stock respectively.
 These three sets of data are real-time data streams from three data sources published by the exchange. The first column in the data, time, represents the time when the data was released, and the second column, price, represents the price of the release.
@@ -14256,7 +14256,7 @@ int main() {
 
 
 
-### Task 2 (data dependency issues)
+### Task Two (data dependency issues)
 ```markdown
 When we process data, there will be scenarios where the data are interdependent.
 For example, I named the new data generated after processing a data m1 m1plus, and merged this new data with another data source m1a and processed it again to generate data m1plus2.
@@ -14481,7 +14481,7 @@ int main(int argc, char* argv[]) {
 
 
 
-### Task three (csv<->binary)
+### Task Three (csv<->binary)
 ```markdown
 # background
 There are at least two problems with using csv format to store tickdata:
@@ -14893,7 +14893,7 @@ install(TARGETS tdb DESTINATION bin)
 
 
 
-### Task 4 (incremental calculation and advance calculation)
+### Task Four (incremental calculation and advance calculation)
 **Incremental calculation and advance calculation**
 
 Incremental calculation means that only the changed parts of the data are processed instead of recalculating the entire data set.
@@ -15048,7 +15048,7 @@ private:
 
 
 
-### Task five (handling high-frequency data problems)
+### Task Five (handling high-frequency data problems)
 **1. Data sampling (solve the problem of "irregular time")**
 
 + Closing price sampling: take the last valid quote in the time period, the code logic is "traverse the data in the time period, record the last non-empty quote" (applicable to low-frequency backtesting, assuming that the price does not change when there is no new data);
@@ -15057,17 +15057,17 @@ private:
 
 **2. Judgment of buying and selling direction (solve the problem of "no buying and selling mark")**
 
-+ Tick Rule (based on previous and later transaction prices):
++ Tick Rule (based on previous and later transaction prices):  
 Code logic: If the current transaction price > the previous transaction price → the buyer initiates (uptick); if the current < previous → the seller initiates (downtick); if equal → inherit the last non-zero direction (if the last time it was an uptick, it will be recorded as zero-uptick);
-+ Lee-Ready Rule (combine quotes and ticks):
++ Lee-Ready Rule (combine quotes and ticks):  
 Code logic: first determine whether the transaction price deviates from the midpoint of the bid-ask spread (transaction price > midpoint → buyer, < midpoint → seller); if it is at the midpoint, use the Tick Rule to supplement the judgment;
-+ Bulk Volume Classification (batch volume probability judgment):
++ Bulk Volume Classification (batch volume probability judgment):  
 The code implements the formula $ Pr\left(V_{\tau}=B\right)=Z\left(\frac{p_{\tau}-p_{\tau-1}}{\sigma \Delta P}\right) $ ($ Z $ is the standard normal distribution PDF, $ p_{\tau}-p_{\tau-1} $ is the price difference, $ \sigma \Delta P $ is the standard deviation of the price difference), and then calculate the transaction volume initiated by the buyer $ V_{\tau}^{B}=V_{\tau}×Pr\left(V_{\tau}=B\right) $.
 
 **3. Data noise processing (correction of "ask-ask spread fluctuation")**
 
-Implement the "middle price calculation" logic to eliminate the interference of bid-ask bounce on data
-Code formula: $ \hat{q}_{t_{m}}^{m}=\frac{1}{2}\left(q_{t_{a}}^{a}+q_{t_{b}}^{b}\right) $, where $ t_{m} $ takes the "time stamp of the latest bid/ask price (whoever updates it)" to ensure that the middle price synchronizes market changes in real time;
+Implement the "middle price calculation" logic to eliminate the interference of bid-ask bounce on data  
+Code formula: $ \hat{q}_{t_{m}}^{m}=\frac{1}{2}\left(q_{t_{a}}^{a}+q_{t_{b}}^{b}\right) $, where $ t_{m} $ takes the "time stamp of the latest bid/ask price (whoever updates it)" to ensure that the middle price synchronizes market changes in real time;  
 Advanced: If you need to consider the weight of order volume, the code implements size-weighted middle price $ \tilde{q}_{t}^{s}=\frac{q_{t_{b}}^{b} s_{t_{a}}^{a}+q_{t_{a}}^{a} s_{t_{b}}^{b}}{s_{t_{a}}^{a}+s_{t_{b}}^{b}} $ ($ s $ is the order volume corresponding to the buying/selling price).
 
 
@@ -15683,6 +15683,639 @@ print(df_filtered)
 
 
 
+### Task Eight (Futures Daily Mark-to-Market Processing)
+The core of this task is end-to-end futures daily mark-to-market processing. The main program is `main.py`. Inputs are `trades_cf.csv` (tick-level open/close records, including open time/price, close time/price, direction, lots, fee parameters, etc.) and `cf2309.csv` (daily aggregated market data, including `trade_date`, `datetime`, `close`). The core logic is daily MTM calculation, with a post-processing script for risk/performance statistics and field standardization, ultimately producing unified-format results ready for reporting.
+
+Complete processing flow of the main program (`main.py`): read and clean CSV files (compatible with four encodings: `utf-8`, `utf-8-sig`, `gb18030`, `gbk`, and can automatically handle headers with description rows) -> map natural time to trade date (21:00 and later belongs to the next trade date) -> generate per-trade table `output/trades.csv`, daily position table `output/position.csv`, and daily equity table `output/balance.csv`. Core calculations follow the daily MTM convention.
+
+Core calculation rules: same-day open/close `trade_pnl = (close price - open price) × direction × volume × contract multiplier`; for overnight positions, PnL is split into `hold_pnl` (floating position PnL) and close-day `trade_pnl` based on settlement price changes; fees are total open-close costs and are split equally between open day and close day; `equity`, `daily_ret`, and `nav` are calculated by cumulatively aggregating daily total PnL (`daily_pnl`).
+
+```python
+from __future__ import annotations
+
+import argparse
+from dataclasses import dataclass
+from pathlib import Path
+
+import pandas as pd
+
+
+@dataclass(frozen=True)
+class ContractSpec:
+    tick_size: float
+    size: float
+
+
+def _read_trades(path: Path) -> pd.DataFrame:
+    df = _read_csv_any_encoding(path)
+    df["open_time"] = pd.to_datetime(df["open_time"])
+    df["cover_time"] = pd.to_datetime(df["cover_time"])
+    df["cover_date"] = df["cover_date"].astype(int)
+    df["ls"] = df["ls"].astype(int)
+    df["volume"] = df["volume"].astype(float)
+    return df
+
+
+def _read_daily(path: Path) -> pd.DataFrame:
+    df = _read_csv_any_encoding(path)
+    df["trade_date"] = df["trade_date"].astype(int)
+    df["datetime"] = pd.to_datetime(df["datetime"])
+    df = df.sort_values("trade_date").reset_index(drop=True)
+    return df
+
+
+def _read_csv_any_encoding(path: Path) -> pd.DataFrame:
+    """
+    The provided CSVs are often GBK/GB18030 on Windows.
+    Try a small set of common encodings deterministically.
+    """
+    last_err: Exception | None = None
+    for enc in ("utf-8", "utf-8-sig", "gb18030", "gbk"):
+        try:
+            df = pd.read_csv(path, encoding=enc)
+            # Many provided CSVs contain a human-readable first row (e.g. "表头注释" or "交易日")
+            # and the real header starts from row 2.
+            col0 = str(df.columns[0]) if len(df.columns) else ""
+            if ("表头注释" in col0) or ("交易日" in col0):
+                df = pd.read_csv(path, encoding=enc, header=1)
+            return df
+        except UnicodeDecodeError as e:
+            last_err = e
+            continue
+    raise UnicodeDecodeError(
+        "unknown",
+        b"",
+        0,
+        1,
+        f"Failed to decode {path} with utf-8/utf-8-sig/gb18030/gbk. Last error: {last_err}",
+    )
+
+
+def _build_trade_calendar(daily: pd.DataFrame) -> pd.Series:
+    # Sorted unique trade dates available for settlement/close.
+    cal = pd.Series(daily["trade_date"].unique()).sort_values().reset_index(drop=True)
+    return cal
+
+
+def _next_trade_date(calendar: pd.Series, yyyymmdd: int) -> int:
+    # First trade date >= yyyymmdd.
+    i = int(calendar.searchsorted(yyyymmdd, side="left"))
+    if i >= len(calendar):
+        raise ValueError(f"Timestamp maps beyond available daily data: {yyyymmdd}")
+    return int(calendar.iloc[i])
+
+
+def _map_natural_time_to_trade_date(calendar: pd.Series, ts: pd.Timestamp) -> int:
+    # Per题干：21:00-次日15:00 归属“次日”交易日。简化映射：
+    # - 若自然时间 >= 21:00，归属下一个交易日（>= 次日日期）
+    # - 否则归属当日交易日（>= 当日日期）
+    base_date = ts.date()
+    if ts.time() >= pd.Timestamp("21:00").time():
+        base_date = (ts + pd.Timedelta(days=1)).date()
+    yyyymmdd = int(pd.Timestamp(base_date).strftime("%Y%m%d"))
+    return _next_trade_date(calendar, yyyymmdd)
+
+
+def build_trades_table(trades_raw: pd.DataFrame, daily: pd.DataFrame) -> pd.DataFrame:
+    """
+    Match the demo Excel schema: one row per completed round-trip trade.
+    """
+    df = trades_raw.copy().reset_index(drop=True)
+    df["contract"] = df["symbol"].astype(str)
+    df["open_ts"] = pd.to_datetime(df["open_time"])
+    df["open_px"] = df["open_price"].astype(float)
+    df["open_qty"] = (df["ls"].astype(int) * df["volume"].astype(float)).astype(float)
+    df["multiplier"] = df["size"].astype(float)
+
+    fee_cash = df["fee"].astype(float) * df["size"].astype(float) * df["tick_size"].astype(float)
+    df["fee_open"] = (fee_cash / 2.0).astype(float)
+
+    df["close_ts"] = pd.to_datetime(df["cover_time"])
+    df["close_px"] = df["cover_price"].astype(float)
+    df["close_qty"] = (-df["open_qty"]).astype(float)
+    df["fee_close"] = (fee_cash / 2.0).astype(float)
+    df["pnl_ticks"] = ((df["close_px"] - df["open_px"]) / df["tick_size"].astype(float) * df["ls"].astype(int)).round(3)
+
+    out = df[
+        [
+            "contract",
+            "open_ts",
+            "open_px",
+            "open_qty",
+            "multiplier",
+            "fee_open",
+            "close_ts",
+            "close_px",
+            "close_qty",
+            "fee_close",
+            "pnl_ticks",
+        ]
+    ].copy()
+    out.insert(0, "trade_id", range(len(out)))
+    return out
+
+
+def build_daily_pnls(trades_raw: pd.DataFrame, daily: pd.DataFrame) -> pd.DataFrame:
+    """
+    Compute daily trade_pnl / hold_pnl / trade_cost under mark-to-market:
+    - intraday close: (cover - open) * dir * vol * size
+    - multi-day: split into
+      open_day hold: (close(open_day) - open) * dir * vol * size
+      between days hold: (close(d) - close(prev)) * dir * vol * size
+      cover_day trade: (cover - close(prev_trade_day)) * dir * vol * size
+    Fees: fee is round-trip total (ticks), split equally across open/cover legs,
+          and charged on their respective trade_date.
+    """
+    cal = _build_trade_calendar(daily)
+    close_map = daily.set_index("trade_date")["close"].astype(float)
+
+    # For prev close lookup
+    cal_list = cal.tolist()
+    prev_map: dict[int, int] = {int(cal_list[i]): int(cal_list[i - 1]) for i in range(1, len(cal_list))}
+
+    def prev_trade_date(d: int) -> int:
+        if d not in prev_map:
+            raise ValueError(f"No previous trade day for {d} in daily data")
+        return prev_map[d]
+
+    # accumulate per day
+    acc = pd.DataFrame(index=cal.astype(int))
+    acc["trade_pnl"] = 0.0
+    acc["hold_pnl"] = 0.0
+    acc["trade_cost"] = 0.0
+
+    # fee cost on open/cover days
+    fee_cash = trades_raw["fee"].astype(float) * trades_raw["size"].astype(float) * trades_raw["tick_size"].astype(float)
+    half_fee_cash = fee_cash / 2.0
+
+    for idx, r in trades_raw.reset_index(drop=True).iterrows():
+        dir_ = 1.0 if int(r["ls"]) == 1 else -1.0
+        vol = float(r["volume"])
+        size = float(r["size"])
+        mult = vol * size
+
+        open_day = _map_natural_time_to_trade_date(cal, pd.to_datetime(r["open_time"]))
+        cover_day = int(r["cover_date"])
+
+        # trade cost split by legs
+        acc.loc[open_day, "trade_cost"] += float(half_fee_cash.iloc[idx])
+        acc.loc[cover_day, "trade_cost"] += float(half_fee_cash.iloc[idx])
+
+        open_price = float(r["open_price"])
+        cover_price = float(r["cover_price"])
+
+        if open_day == cover_day:
+            acc.loc[cover_day, "trade_pnl"] += (cover_price - open_price) * dir_ * mult
+            continue
+
+        # Open day holding pnl (today-opened position marked to close)
+        acc.loc[open_day, "hold_pnl"] += (float(close_map.loc[open_day]) - open_price) * dir_ * mult
+
+        # Intermediate days holding pnl
+        open_pos = cal.searchsorted(open_day)
+        cover_pos = cal.searchsorted(cover_day)
+        for i in range(int(open_pos) + 1, int(cover_pos)):
+            d = int(cal.iloc[i])
+            d_prev = prev_trade_date(d)
+            acc.loc[d, "hold_pnl"] += (float(close_map.loc[d]) - float(close_map.loc[d_prev])) * dir_ * mult
+
+        # Cover day trade pnl for historical position (vs yesterday settlement)
+        d_prev = prev_trade_date(cover_day)
+        acc.loc[cover_day, "trade_pnl"] += (cover_price - float(close_map.loc[d_prev])) * dir_ * mult
+
+    acc = acc.reset_index(names=["trade_date"])
+    return acc
+
+
+def build_position_table(trades_raw: pd.DataFrame, daily: pd.DataFrame) -> pd.DataFrame:
+    cal = _build_trade_calendar(daily)
+    close_map = daily.set_index("trade_date")["close"].astype(float)
+
+    cal_list = cal.tolist()
+    prev_map: dict[int, int] = {int(cal_list[i]): int(cal_list[i - 1]) for i in range(1, len(cal_list))}
+
+    def prev_trade_date(d: int) -> int | None:
+        return prev_map.get(d)
+
+    # Map open_day for each trade
+    tmp = trades_raw.copy()
+    tmp["open_day"] = tmp["open_time"].apply(lambda x: _map_natural_time_to_trade_date(cal, pd.to_datetime(x))).astype(int)
+    tmp["cover_day"] = tmp["cover_date"].astype(int)
+    tmp["dir"] = tmp["ls"].map({1: 1, -1: -1}).astype(int)
+    tmp["vol"] = tmp["volume"].astype(float)
+
+    out_rows: list[dict] = []
+    for d in cal.astype(int).tolist():
+        d_prev = prev_trade_date(d)
+        prev_close = float(close_map.loc[d_prev]) if d_prev is not None else None
+
+        # Active trades at end of day: open_day <= d < cover_day
+        active = tmp[(tmp["open_day"] <= d) & (d < tmp["cover_day"])]
+        if active.empty:
+            continue
+
+        for ls in (1, -1):
+            sub = active[active["ls"] == ls]
+            if sub.empty:
+                continue
+
+            total_vol = float(sub["vol"].sum())
+            signed_total = total_vol if ls == 1 else -total_vol
+
+            today_open = sub[sub["open_day"] == d]
+            overnight = sub[sub["open_day"] < d]
+
+            num = 0.0
+            den = 0.0
+            if not today_open.empty:
+                num += float((today_open["vol"] * today_open["open_price"].astype(float)).sum())
+                den += float(today_open["vol"].sum())
+            if not overnight.empty:
+                if prev_close is None:
+                    raise ValueError(f"Need prev close to price overnight position on {d}")
+                num += float(overnight["vol"].sum()) * float(prev_close)
+                den += float(overnight["vol"].sum())
+
+            cost_price = float(num / den) if den != 0 else float("nan")
+
+            out_rows.append(
+                {
+                    "trade_date": int(d),
+                    "symbol": str(sub["symbol"].iloc[0]),
+                    "ls": int(ls),
+                    "number": float(signed_total),
+                    "cost_price": cost_price,
+                    "close": float(close_map.loc[d]),
+                }
+            )
+
+    return pd.DataFrame(out_rows).sort_values(["trade_date", "ls"]).reset_index(drop=True)
+
+
+def format_position_table(position_internal: pd.DataFrame) -> pd.DataFrame:
+    if position_internal.empty:
+        return position_internal.copy()
+    pos = position_internal.copy()
+    pos = pos.rename(columns={"symbol": "contract", "close": "settle_px", "number": "position_qty", "cost_price": "cost_px"})
+    pos["direction"] = pos["ls"].map({1: "LONG", -1: "SHORT"})
+    pos["biz_date"] = pd.to_datetime(pos["trade_date"].astype(str), format="%Y%m%d").dt.strftime("%Y-%m-%d")
+    return pos[["biz_date", "contract", "direction", "cost_px", "settle_px", "position_qty"]].reset_index(drop=True)
+
+
+def build_balance_table(
+    daily: pd.DataFrame,
+    daily_pnls: pd.DataFrame,
+    position: pd.DataFrame,
+    spec: ContractSpec,
+    init_balance: float = 1_000_000.0,
+) -> pd.DataFrame:
+    cal = _build_trade_calendar(daily).astype(int)
+    close_map = daily.set_index("trade_date")["close"].astype(float)
+
+    pnl = daily_pnls.set_index("trade_date")[["trade_pnl", "hold_pnl", "trade_cost"]].reindex(cal, fill_value=0.0)
+
+    # Net exposure for market_value: abs(long + short) * size * close
+    net_pos = (
+        position.groupby("trade_date")["number"].sum().reindex(cal, fill_value=0.0)
+        if not position.empty
+        else pd.Series(0.0, index=cal)
+    )
+    market_value = (net_pos.abs() * spec.size * close_map.reindex(cal)).astype(float)
+
+    df = pd.DataFrame(index=cal)
+    df["trade_pnl"] = pnl["trade_pnl"].astype(float)
+    df["hold_pnl"] = pnl["hold_pnl"].astype(float)
+    df["trade_cost"] = pnl["trade_cost"].astype(float)
+    df["total_pnl"] = df["trade_pnl"] + df["hold_pnl"] - df["trade_cost"]
+
+    df["cum_pnl"] = df["total_pnl"].cumsum()
+    df["balance"] = init_balance + df["cum_pnl"]
+    df["market_value"] = market_value
+
+    prev_balance = df["balance"].shift(1)
+    df["return"] = (df["total_pnl"] / prev_balance).fillna(0.0)
+    df["net"] = (1.0 + df["return"]).cumprod()
+
+    out = df.reset_index(names=["trade_date"])
+    out["biz_date"] = pd.to_datetime(out["trade_date"].astype(str), format="%Y%m%d").dt.strftime("%Y-%m-%d")
+    out = out.rename(
+        columns={
+            "hold_pnl": "carry_pnl",
+            "trade_pnl": "realized_pnl",
+            "trade_cost": "txn_cost",
+            "total_pnl": "daily_pnl",
+            "market_value": "exposure",
+            "cum_pnl": "cum_pnl_amt",
+            "balance": "equity",
+            "return": "daily_ret",
+            "net": "nav",
+        }
+    )[
+        [
+            "biz_date",
+            "carry_pnl",
+            "realized_pnl",
+            "txn_cost",
+            "daily_pnl",
+            "exposure",
+            "cum_pnl_amt",
+            "equity",
+            "daily_ret",
+            "nav",
+        ]
+    ].copy()
+    return out
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="Compute futures MTM trades/position/balance tables.")
+    ap.add_argument("--trades", type=Path, default=Path("trades_cf.csv"))
+    ap.add_argument("--daily", type=Path, default=Path("cf2309.csv"))
+    ap.add_argument("--out", type=Path, default=Path("output"))
+    args = ap.parse_args()
+
+    trades_raw = _read_trades(args.trades)
+    daily = _read_daily(args.daily)
+
+    cal = _build_trade_calendar(daily)
+    open_days = trades_raw["open_time"].apply(lambda x: _map_natural_time_to_trade_date(cal, pd.to_datetime(x))).astype(int)
+    start_day = int(min(open_days.min(), trades_raw["cover_date"].min()))
+    end_day = int(max(open_days.max(), trades_raw["cover_date"].max()))
+
+    spec = ContractSpec(
+        tick_size=float(trades_raw["tick_size"].iloc[0]),
+        size=float(trades_raw["size"].iloc[0]),
+    )
+
+    trades = build_trades_table(trades_raw, daily)
+    daily_pnls = build_daily_pnls(trades_raw, daily)
+    position_internal = build_position_table(trades_raw, daily)
+    balance = build_balance_table(daily, daily_pnls, position_internal, spec=spec)
+    position = format_position_table(position_internal)
+
+    # Slice to relevant date range to match demo style output
+    start_date = pd.to_datetime(str(start_day), format="%Y%m%d").strftime("%Y-%m-%d")
+    end_date = pd.to_datetime(str(end_day), format="%Y%m%d").strftime("%Y-%m-%d")
+    balance = balance[(balance["biz_date"] >= start_date) & (balance["biz_date"] <= end_date)].reset_index(drop=True)
+
+    if not position.empty:
+        position = position[(position["biz_date"] >= start_date) & (position["biz_date"] <= end_date)].reset_index(drop=True)
+
+    # Formatting to better match the provided demo Excel
+    for c in ("fee_open", "fee_close"):
+        if c in trades.columns:
+            trades[c] = trades[c].round(1)
+
+    if not position.empty:
+        for c in ("cost_px", "settle_px", "position_qty"):
+            if c in position.columns:
+                position[c] = position[c].round(6)
+
+    for c in ("carry_pnl", "realized_pnl", "txn_cost", "daily_pnl", "exposure", "cum_pnl_amt", "equity"):
+        if c in balance.columns:
+            balance[c] = balance[c].round(1)
+    if "daily_ret" in balance.columns:
+        balance["daily_ret"] = balance["daily_ret"].round(5)
+    if "nav" in balance.columns:
+        balance["nav"] = balance["nav"].round(6)
+
+    args.out.mkdir(parents=True, exist_ok=True)
+    trades.to_csv(args.out / "trades.csv", index=False, encoding="utf-8-sig")
+    position.to_csv(args.out / "position.csv", index=False, encoding="utf-8-sig")
+    balance.to_csv(args.out / "balance.csv", index=False, encoding="utf-8-sig")
+
+    print(f"Wrote: {args.out / 'trades.csv'}")
+    print(f"Wrote: {args.out / 'position.csv'}")
+    print(f"Wrote: {args.out / 'balance.csv'}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+```
+
+
+
+After the main program runs, 3 core tables are generated, with unified and standardized fields, as follows:
+
+1. `output/trades.csv` (per-trade table): `trade_id, contract, open_ts, open_px, open_qty, multiplier, fee_open, close_ts, close_px, close_qty, fee_close, pnl_ticks`
+
+Sample data:
+
+```plain
+trade_id,contract,open_ts,open_px,open_qty,multiplier,fee_open,close_ts,close_px,close_qty,fee_close,pnl_ticks
+0,cf2309,2023-04-06 21:00:00,14685.0,1.0,5.0,4.3,2023-04-06 21:25:00,14770.0,-1.0,4.3,17.0
+1,cf2309,2023-04-06 21:00:00,14695.0,1.0,5.0,4.3,2023-04-06 21:25:00,14775.0,-1.0,4.3,16.0
+```
+
+2. `output/position.csv` (daily position table): `biz_date, contract, direction, cost_px, settle_px, position_qty`
+3. `output/balance.csv` (daily equity table): `biz_date, carry_pnl, realized_pnl, txn_cost, daily_pnl, exposure, cum_pnl_amt, equity, daily_ret, nav`
+
+Sample data:
+
+```plain
+biz_date,carry_pnl,realized_pnl,txn_cost,daily_pnl,exposure,cum_pnl_amt,equity,daily_ret,nav
+2023-04-07,62.5,1275.0,124.7,1212.8,74512.5,1212.8,1001212.8,0.00121,1.001213
+2023-04-10,-475.0,1250.0,60.2,714.8,74037.5,1927.6,1001927.6,0.00071,1.001928
+```
+
+
+
+A new post-processing script is added. Without changing the original calculation logic in `main.py`, it reads `trades.csv` and `balance.csv` generated by the main program, completes standardized field mapping and risk/performance aggregation. Timing only covers metric computation, excluding CSV read/write, and it can be run directly in the project directory.
+
+```python
+from __future__ import annotations
+
+import time
+from pathlib import Path
+
+import pandas as pd
+
+
+def _max_drawdown(net: pd.Series) -> tuple[float, str, str]:
+    running_peak = net.cummax()
+    drawdown = net / running_peak - 1.0
+    end_idx = int(drawdown.idxmin())
+    start_idx = int(net.loc[:end_idx].idxmax())
+    return float(drawdown.iloc[end_idx]), str(start_idx), str(end_idx)
+
+
+def main() -> None:
+    root = Path(__file__).resolve().parents[1]
+    out_dir = root / "output"
+    balance_path = out_dir / "balance.csv"
+    trades_path = out_dir / "trades.csv"
+
+    balance = pd.read_csv(balance_path, encoding="utf-8-sig")
+    trades = pd.read_csv(trades_path, encoding="utf-8-sig")
+
+    t0 = time.perf_counter_ns()
+
+    bal = balance.copy()
+    bal["date"] = pd.to_datetime(bal["date"])
+    bal["ret"] = bal["return"].astype(float)
+    bal["net"] = bal["net"].astype(float)
+
+    total_days = len(bal)
+    positive_days = int((bal["total_pnl"] > 0).sum())
+    win_day_ratio = positive_days / total_days if total_days else 0.0
+
+    mdd, start_idx, end_idx = _max_drawdown(bal["net"])
+    mdd_start = bal.iloc[int(start_idx)]["date"].strftime("%Y-%m-%d")
+    mdd_end = bal.iloc[int(end_idx)]["date"].strftime("%Y-%m-%d")
+
+    ann_factor = 244.0
+    daily_ret_std = float(bal["ret"].std(ddof=0))
+    annual_vol = daily_ret_std * (ann_factor ** 0.5)
+    annual_ret = (float(bal["net"].iloc[-1]) ** (ann_factor / max(total_days, 1))) - 1.0
+    sharpe = annual_ret / annual_vol if annual_vol > 0 else 0.0
+
+    tr = trades.copy()
+    tr["pnl"] = (
+        (tr["Close_trade_price"].astype(float) - tr["Open_trade_price"].astype(float))
+        * tr["Open_trade_num"].astype(float)
+        * tr["size"].astype(float)
+    )
+    tr["cost"] = tr["open_commission"].astype(float) + tr["close_commission"].astype(float)
+    tr["net_pnl"] = tr["pnl"] - tr["cost"]
+
+    gross_profit = float(tr.loc[tr["net_pnl"] > 0, "net_pnl"].sum())
+    gross_loss = float(-tr.loc[tr["net_pnl"] < 0, "net_pnl"].sum())
+    profit_factor = gross_profit / gross_loss if gross_loss > 0 else 0.0
+
+    risk_report = pd.DataFrame(
+        [
+            {"metric": "start_date", "value": bal["date"].min().strftime("%Y-%m-%d")},
+            {"metric": "end_date", "value": bal["date"].max().strftime("%Y-%m-%d")},
+            {"metric": "trading_days", "value": total_days},
+            {"metric": "win_day_ratio", "value": round(win_day_ratio, 6)},
+            {"metric": "max_drawdown", "value": round(mdd, 6)},
+            {"metric": "max_drawdown_start", "value": mdd_start},
+            {"metric": "max_drawdown_end", "value": mdd_end},
+            {"metric": "annual_return", "value": round(annual_ret, 6)},
+            {"metric": "annual_volatility", "value": round(annual_vol, 6)},
+            {"metric": "sharpe", "value": round(sharpe, 6)},
+            {"metric": "profit_factor", "value": round(profit_factor, 6)},
+            {"metric": "final_net", "value": round(float(bal["net"].iloc[-1]), 6)},
+        ]
+    )
+
+    by_symbol = tr.groupby("Ticker", as_index=False).agg(
+        trades=("Ticker", "count"),
+        net_pnl=("net_pnl", "sum"),
+        avg_net_pnl=("net_pnl", "mean"),
+        win_ratio=("net_pnl", lambda s: float((s > 0).mean())),
+    )
+    by_symbol = by_symbol.sort_values("net_pnl", ascending=False).reset_index(drop=True)
+
+    t1 = time.perf_counter_ns()
+
+    risk_report.to_csv(out_dir / "risk_report.csv", index=False, encoding="utf-8-sig")
+    by_symbol.to_csv(out_dir / "symbol_stats.csv", index=False, encoding="utf-8-sig")
+
+    elapsed_us = (t1 - t0) / 1000.0
+    print(f"process_us={elapsed_us:.2f}")
+    print(f"risk_metrics={len(risk_report)}")
+    print(f"symbol_rows={len(by_symbol)}")
+
+
+if __name__ == "__main__":
+    main()
+```
+
+
+
+During script execution, the main program output is mapped into standardized input tables for unified statistics:
+
+(1) `output/equity_curve.csv` (mapped from `output/balance.csv`): `biz_date, carry_pnl, realized_pnl, txn_cost, daily_pnl, exposure, cum_pnl_amt, equity, daily_ret, nav`
+
+Sample data:
+
+```plain
+biz_date,carry_pnl,realized_pnl,txn_cost,daily_pnl,exposure,cum_pnl_amt,equity,daily_ret,nav
+2023-04-07,62.5,1275.0,124.7,1212.8,74512.5,1212.8,1001212.8,0.00121,1.001213
+2023-04-10,-475.0,1250.0,60.2,714.8,74037.5,1927.6,1001927.6,0.00071,1.001928
+```
+
+(2) `output/deal_journal.csv` (mapped from `output/trades.csv`): `contract, open_ts, open_px, open_qty, size, fee_open, close_ts, close_px, close_qty, fee_close`
+
+Sample data:
+
+```plain
+contract,open_ts,open_px,open_qty,size,fee_open,close_ts,close_px,close_qty,fee_close
+cf2309,2023-04-06 21:00:00,14685.0,1.0,5.0,4.3,2023-04-06 21:25:00,14770.0,-1.0,4.3
+cf2309,2023-04-06 21:00:00,14695.0,1.0,5.0,4.3,2023-04-06 21:25:00,14775.0,-1.0,4.3
+```
+
+
+
+The script finally generates 2 risk/performance summary tables that can be used directly in reports:
+
+(1) `output/risk_report.csv` (portfolio-level metrics): includes 12 core risk/performance metrics: `start_date`, `end_date`, `trading_days`, `win_day_ratio`, `max_drawdown`, `max_drawdown_start`, `max_drawdown_end`, `annual_return`, `annual_volatility`, `sharpe`, `profit_factor`, `final_net`.
+
+Actual results:
+
+```plain
+metric,value
+start_date,2023-04-07
+end_date,2023-07-21
+trading_days,71
+win_day_ratio,0.577465
+max_drawdown,-0.01914
+max_drawdown_start,2023-05-31
+max_drawdown_end,2023-06-08
+annual_return,0.076585
+annual_volatility,0.045569
+sharpe,1.68065
+profit_factor,1.448351
+final_net,1.021705
+```
+
+(2) `output/symbol_stats.csv` (contract-level metrics): includes 5 contract-dimension metrics: `Ticker`, `trades`, `net_pnl`, `avg_net_pnl`, `win_ratio`.
+
+Actual results:
+
+```plain
+Ticker,trades,net_pnl,avg_net_pnl,win_ratio
+cf2309,886,21705.4,24.49819413092551,0.5981941309255079
+```
+
+---
+
+**Execution Instructions and Actual Output**
+
+1. Command to run
+
+Run the main program first, then run the post-processing script:
+
+```bash
+python main.py
+python task_assets/build_risk_report.py
+```
+
+
+
+2. Actual runtime output
+
+After the main program runs, it outputs write notifications for the 3 core tables. After the post-processing script runs, it outputs processing time, number of risk metrics, and number of contract-stat rows. Actual output:
+
+```plain
+process_us=65365.90
+risk_metrics=12
+symbol_rows=1
+```
+
+
+
+Based on the current end-to-end processing results, further optimization can improve report completeness and interpretability:
+
+1. Aggregate risk metrics by week/month to form a layered attribution report and clearly present performance across different horizons;
+2. Add risk-control metrics such as Calmar ratio, Sortino ratio, and consecutive drawdown days to enrich risk evaluation dimensions;
+3. Split transaction fees into detailed components (e.g., exchange fee, slippage estimate) to improve cost-analysis granularity;
+4. For multi-contract backtests, use a three-layer structure of "strategy-contract-direction" for performance contribution analysis to identify each dimension's impact on total returns.
+
+
+
 ## Business logic design-system
 ### 1. Order management system
 1.1 Order management finite state machine
@@ -15699,8 +16332,8 @@ The core elements of finite state machines:
 
 
 
-1.2 Branchless state table
-Branchless state table is a state machine design pattern that uses a table-driven approach to replace traditional conditional branch statements (if-else/switch-case) to implement state transitions.
+1.2 Branchless state table  
+Branchless state table is a state machine design pattern that uses a table-driven approach to replace traditional conditional branch statements (if-else/switch-case) to implement state transitions.  
 In the Boost MSM (Meta State Machine) framework, the branchless state table is implemented through compile-time metaprogramming. The conversion logic is determined at compile time and no conditional judgment is required at runtime.
 
 The following code implements the order state machine for TWAP algorithmic trading, using the Boost MSM library. The core class is`OrderStateMachineImpl`, which defines all states, events, transition rules and business logic, source:[https://github.com/byrnexu/betterquant2](https://github.com/byrnexu/betterquant2)
@@ -16468,11 +17101,11 @@ During maintenance, data or policies can be updated individually without disrupt
 
 1.5 Idempotent and out-of-order return processing of order state machine
 
-1. Idempotent processing principle
-The same execution return arrives repeatedly, and the final state cannot be advanced twice.
+1. Idempotent processing principle  
+The same execution return arrives repeatedly, and the final state cannot be advanced twice.  
 Use stable primary keys (such as order key + exchange return serial number) to remove duplication.
-2. Principle of out-of-order processing
-`ACK/TRADE/CANCEL/REJECT` Arrival order is not guaranteed and the state machine must allow "delayed completion".
+2. Principle of out-of-order processing  
+`ACK/TRADE/CANCEL/REJECT` Arrival order is not guaranteed and the state machine must allow "delayed completion".  
 through intermediate states (e.g. `CANCEL_PENDING`) to express timing competition and avoid illegal transitions.
 
 
@@ -16766,7 +17399,7 @@ ID: 1002 | GOOGL @ 140.2 x 150
 
 
 
-**CQRS (Command Query Responsibility Separation)**: Split the system into two independent models - the command side focuses on processing write operations and business rules (optimizing transaction processing), and the query side specializes in reading operations (optimizing data retrieval). The two can use different technology stacks and expand independently. When combined with event sourcing, they can achieve performance isolation between high-frequency transactions and complex analysis.
+**CQRS (Command Query Responsibility Separation)**: Split the system into two independent models - the command side focuses on processing write operations and business rules (optimizing transaction processing), and the query side specializes in reading operations (optimizing data retrieval). The two can use different technology stacks and expand independently. When combined with event sourcing, they can achieve performance isolation between high-frequency transactions and complex analysis.  
 The cooperation between CQRS and Event Sourcing is as follows:
 
 | Role | Responsibilities | Working with Event Sourcing |
@@ -17600,6 +18233,7 @@ public:
 
 } // namespace lob
 ```
+
 
 
 **Option 2: Hash-based LOB**
@@ -18509,9 +19143,9 @@ public:
 
 + Trigger conditions:`start`/`end` The proportion of invalid items in the interval > configuration threshold (such as 50%).
 + Operation steps:
- 1. Move valid items to the head of the array and arrange them compactly;
- 2. reset `start`/`end` pointer;
- 3. **Key**: Batch update `OrderIndex` Index mapping in (changed by order/price level index).
+1. Move valid items to the head of the array and arrange them compactly;
+2. reset `start`/`end` pointer;
+3. **Key**: Batch update `OrderIndex` Index mapping in (changed by order/price level index).
 + **Trade-off**: Avoid frequent triggering and balance "traversal hole overhead" and "compression + index update overhead".
 
 
@@ -19118,8 +19752,8 @@ public:
 } // namespace lob
 ```
 
-###
-3.message transmissionProtocol Engine (FIX)
+### 
+3.message transmissionProtocol Engine (FIX)  
 The basic building blocks of the FIX protocol are tag-value pairs. Each data field consists of three parts:
 
 1. **Tag**: A unique integer that represents the meaning of the field (for example,`35` represent `MsgType`，`44` represent `Price`）。
@@ -19145,52 +19779,52 @@ The complete FIX message consists of three parts, arranged in order:
 Every message must start with a message header. It contains basic information for message routing and processing.
 
 + **Required fields:**
- - `8=BEGINSTRING`: The version of the FIX protocol (e.g.,`FIX.4.2`, `FIX.4.4`, `FIXT.1.1`）。
- - `9=BODYLENGTH`: **Message body length** (from `Tag 35` Then start to `Tag 10` previous `SOH` Finish). This field is critical for message framing and validation.
- - `35=MSGTYPE`: **Message type** determines the structure and meaning of the message body.
- * Common examples:`D = NewOrderSingle`, `8 = ExecutionReport`, `5 = Logout`, `A = Logon`。
++ `8=BEGINSTRING`: The version of the FIX protocol (e.g.,`FIX.4.2`, `FIX.4.4`, `FIXT.1.1`）。
++ `9=BODYLENGTH`: **Message body length** (from `Tag 35` Then start to `Tag 10` previous `SOH` Finish). This field is critical for message framing and validation.
++ `35=MSGTYPE`: **Message type** determines the structure and meaning of the message body.
++ Common examples:`D = NewOrderSingle`, `8 = ExecutionReport`, `5 = Logout`, `A = Logon`。
 + **Other common header fields:**
- - `34=MSGSEQNUM`: Message sequence number, used to detect packet loss and maintain communication synchronization.
- - `49=SENDERCOMPID`: Sender ID.
- - `56=TARGETCOMPID`: Receiver ID.
- - `52=SENDINGTIME`: Message sending timestamp.
++ `34=MSGSEQNUM`: Message sequence number, used to detect packet loss and maintain communication synchronization.
++ `49=SENDERCOMPID`: Sender ID.
++ `56=TARGETCOMPID`: Receiver ID.
++ `52=SENDINGTIME`: Message sending timestamp.
 
 **2. Message body**
 
 The message body contains specific business data of this specific message type. Its content is completely determined by **in the message header**`MsgType (35)` Decide.
 
 + **Example:**`NewOrderSingle (35=D)`** The message body may contain: **
- - `11=CLORDID`: Client order ID.
- - `55=SYMBOL`: Transaction object (such as stock code).
- - `54=SIDE`: Buying and selling direction (`1 = Buy`, `2 = Sell`）。
- - `38=ORDERQTY`: Order quantity.
- - `44=PRICE`: price.
- - `40=ORDTYPE`: Order type (`1 = Market`, `2 = Limit`）。
++ `11=CLORDID`: Client order ID.
++ `55=SYMBOL`: Transaction object (such as stock code).
++ `54=SIDE`: Buying and selling direction (`1 = Buy`, `2 = Sell`）。
++ `38=ORDERQTY`: Order quantity.
++ `44=PRICE`: price.
++ `40=ORDTYPE`: Order type (`1 = Market`, `2 = Limit`）。
 
 **3. End of message**
 
 The message tail is mainly used for message integrity verification.
 
 + **Required fields:**
- - `10=CHECKSUM`: **Checksum**. This is the last field in the message and is the sum of all bytes modulo 256 (including the SOH delimiter between fields).
- - **Calculation method**: Put the message into `8=` start to arrive `SOH` The ASCII values of all previous characters are added, then modulo 256.
- - **Format**: The checksum must be three digits, for example `052`，`123`。
++ `10=CHECKSUM`: **Checksum**. This is the last field in the message and is the sum of all bytes modulo 256 (including the SOH delimiter between fields).
++ **Calculation method**: Put the message into `8=` start to arrive `SOH` The ASCII values of all previous characters are added, then modulo 256.
++ **Format**: The checksum must be three digits, for example `052`，`123`。
 
 | Section | Label-value pairs | Explanation |
 | :--- | :--- | :--- |
 | **Message Header** | `8=FIX.4.4` | Using FIX version 4.4 |
-| | `9=122` | The message body length is 122 bytes |
-| | `35=D` | This is a `NewOrderSingle` News |
-| | `34=2` | The message sequence number is 2 |
-| | `49=BUYSIDE` | The sender is "BUYSIDE" |
-| | `52=20231027-10:30:00.000` | Sending time |
-| | `56=SELLSIDE` | The recipient is "SELLSIDE" |
+|  | `9=122` | The message body length is 122 bytes |
+|  | `35=D` | This is a `NewOrderSingle` News |
+|  | `34=2` | The message sequence number is 2 |
+|  | `49=BUYSIDE` | The sender is "BUYSIDE" |
+|  | `52=20231027-10:30:00.000` | Sending time |
+|  | `56=SELLSIDE` | The recipient is "SELLSIDE" |
 | **Message body** | `11=ORD10001` | Unique client order ID |
-| | `55=AAPL` | Trading Apple Stock |
-| | `54=1` | Buying and selling direction: Buy (`1`) |
-| | `38=100` | Order quantity: 100 shares |
-| | `40=2` | Order Type: Limit Order (`2`) |
-| | `44=150.25` | Limit price: $150.25 |
+|  | `55=AAPL` | Trading Apple Stock |
+|  | `54=1` | Buying and selling direction: Buy (`1`) |
+|  | `38=100` | Order quantity: 100 shares |
+|  | `40=2` | Order Type: Limit Order (`2`) |
+|  | `44=150.25` | Limit price: $150.25 |
 | **End of message** | `10=052` | Checksum (used to verify that the message was not corrupted during transmission) |
 
 
@@ -19201,8 +19835,8 @@ The message tail is mainly used for message integrity verification.
 The important concept in the FIX protocol is **repeating groups**. It is used to represent a list or array of fields.
 
 + **Structure**:
- 1. A "leading" field indicating how many entries there are in the group.
- 2. Each entry contains the same sequence of fields.
+1. A "leading" field indicating how many entries there are in the group.
+2. Each entry contains the same sequence of fields.
 + **Example**: An execution report may contain multiple transaction records.
 
 ```plain
@@ -20890,7 +21524,7 @@ class CtpTdApi(tdapi.CThostFtdcTraderSpi):
 
 
 
-**ctp multi-account manual trading terminal tool
+**ctp multi-account manual trading terminal tool  
 **[**https://github.com/zzxscodes/ctp-multi-account**](https://github.com/zzxscodes/ctp-multi-account)
 
 <!-- 这是一张图片，ocr 内容为： -->
@@ -20906,53 +21540,53 @@ class CtpTdApi(tdapi.CThostFtdcTraderSpi):
 **Engineering and architecture knowledge points**
 
 + **Multi-account management structure**
- - **Server side core class**:`ServerApp`(Multiple account scheduling),`TcpServer`(TCP monitoring and event loop),`Session`(a TCP connection),`CtpTraderAdapter` / `CtpMdAdapter`(Encapsulation of CTP transaction/market interface).
- - **Multi-account mapping relationship**:
- * `std::unordered_map<std::string, std::unique_ptr<CtpTraderAdapter>> traders_`：`user_id -> 交易通道`
- * `std::unordered_map<std::string, std::vector<Session*>> sessions_by_user_`：`user_id -> 使用该账户的所有 TCP 会话`
- * `std::unordered_map<std::string, std::vector<Session*>> md_subscribers_by_instrument_`：`合约 -> 订阅该合约的所有会话`
- - **One account, multiple terminal reuse**: same `user_id` Log in again and the existing one will be reused. `CtpTraderAdapter`, only add new ones `Session`。
++ **Server side core class**:`ServerApp`(Multiple account scheduling),`TcpServer`(TCP monitoring and event loop),`Session`(a TCP connection),`CtpTraderAdapter` / `CtpMdAdapter`(Encapsulation of CTP transaction/market interface).
++ **Multi-account mapping relationship**:
++ `std::unordered_map<std::string, std::unique_ptr<CtpTraderAdapter>> traders_`：`user_id -> 交易通道`
++ `std::unordered_map<std::string, std::vector<Session*>> sessions_by_user_`：`user_id -> 使用该账户的所有 TCP 会话`
++ `std::unordered_map<std::string, std::vector<Session*>> md_subscribers_by_instrument_`：`合约 -> 订阅该合约的所有会话`
++ **One account, multiple terminal reuse**: same `user_id` Log in again and the existing one will be reused. `CtpTraderAdapter`, only add new ones `Session`。
 + **CTP interface encapsulation and adaptation layer**
- - `CtpTraderAdapter` / `CtpMdAdapter` Encapsulated CTP `TraderApi` / `MdApi`, providing the upper layer with:
- * `init()` / `shutdown()` Life cycle management.
- * `login()`、`send_order()`、`cancel_order()`、`query_account()`、`query_position()`and other business interfaces.
- * Various callbacks: login completion callback, order return callback, query return callback, market callback, etc.
- - **Stub mode and real SDK switching**:
- * Used in Stub mode `ctp_stub/` The fake implementation can be separated from the real CTP library for joint debugging of protocols and business logic.
- * Link to the official SDK in real mode `.so` library, via CMake options `CTP_USE_STUB=TRUE/FALSE` switch.
++ `CtpTraderAdapter` / `CtpMdAdapter` Encapsulated CTP `TraderApi` / `MdApi`, providing the upper layer with:
++ `init()` / `shutdown()` Life cycle management.
++ `login()`、`send_order()`、`cancel_order()`、`query_account()`、`query_position()`and other business interfaces.
++ Various callbacks: login completion callback, order return callback, query return callback, market callback, etc.
++ **Stub mode and real SDK switching**:
++ Used in Stub mode `ctp_stub/` The fake implementation can be separated from the real CTP library for joint debugging of protocols and business logic.
++ Link to the official SDK in real mode `.so` library, via CMake options `CTP_USE_STUB=TRUE/FALSE` switch.
 + **TCP custom protocol design**
- - `protocol.h` The complete **message type enumeration** is defined in `MsgType` And various message body structures:
- * **Request Class**:`LoginReqBody`、`OrderReqBody`、`CancelReqBody`、`QueryReqBody`、`ControlReqBody`、`SubMarketDataReqBody`
- * **Response/Push Class**:`LoginRspBody`、`OrderRspBody`、`CancelRspBody`、`QueryRspBody`、`ControlRspBody`、`MarketDataBody`
- - Customized **Message header + body codec**:
- * `struct Message { MsgType type; std::vector<char> body; };`
- * `kHeaderSize = 8` Byte header,`kMaxBodySize = 1MB` limit.
- * supply `serialize_xxx` / `deserialize_xxx` series of functions, for each `Body` Do binary serialization.
- - Typical application layer message flow:
- * `client` group package `LoginReqBody -> serialize_login_req -> Message::encode() -> send()`
- * `server` exist `Session` After receiving the data `Message::decode()`,according to `MsgType` distributed to `ServerApp::on_*_req()`。
++ `protocol.h` The complete **message type enumeration** is defined in `MsgType` And various message body structures:
++ **Request Class**:`LoginReqBody`、`OrderReqBody`、`CancelReqBody`、`QueryReqBody`、`ControlReqBody`、`SubMarketDataReqBody`
++ **Response/Push Class**:`LoginRspBody`、`OrderRspBody`、`CancelRspBody`、`QueryRspBody`、`ControlRspBody`、`MarketDataBody`
++ Customized **Message header + body codec**:
++ `struct Message { MsgType type; std::vector<char> body; };`
++ `kHeaderSize = 8` Byte header,`kMaxBodySize = 1MB` limit.
++ supply `serialize_xxx` / `deserialize_xxx` series of functions, for each `Body` Do binary serialization.
++ Typical application layer message flow:
++ `client` group package `LoginReqBody -> serialize_login_req -> Message::encode() -> send()`
++ `server` exist `Session` After receiving the data `Message::decode()`,according to `MsgType` distributed to `ServerApp::on_*_req()`。
 + **Multi-account business logic and callback distribution**
- - **Login Process**(`ServerApp::on_login_req`）：
- * check `user_id` Not empty.
- * If it already exists and is logged in, directly reuse the Trader channel and replace the current `Session` bind to the `user_id`, send a successful login response packet.
- * Otherwise create new `CtpTraderAdapter`, set the login completion callback and construct it in the callback `LoginRspBody`, broadcast to all sessions under this account.
- - **Order placing/cancellation/inquiry process**:
- * According to the message `user_id` or current `Session` of `user_id` turn up `CtpTraderAdapter`。
- * If you are not logged in, an error response will be returned immediately.
- * If logged in, call the corresponding adapter interface and multicast the adapter's callback result to `sessions_by_user_[uid]` all conversations in .
- - **Quote subscription and push** (`on_sub_md_req` + `set_market_data_callback`）：
- * maintain `md_subscribers_by_instrument_`, records the subscription session for each contract.
- * During the market correction, CTP `DepthMarketData` Convert to `MarketDataBody`, serialized to `MsgType::MarketData`, distributed to subscribed sessions by contract number.
++ **Login Process**(`ServerApp::on_login_req`）：
++ check `user_id` Not empty.
++ If it already exists and is logged in, directly reuse the Trader channel and replace the current `Session` bind to the `user_id`, send a successful login response packet.
++ Otherwise create new `CtpTraderAdapter`, set the login completion callback and construct it in the callback `LoginRspBody`, broadcast to all sessions under this account.
++ **Order placing/cancellation/inquiry process**:
++ According to the message `user_id` or current `Session` of `user_id` turn up `CtpTraderAdapter`。
++ If you are not logged in, an error response will be returned immediately.
++ If logged in, call the corresponding adapter interface and multicast the adapter's callback result to `sessions_by_user_[uid]` all conversations in .
++ **Quote subscription and push** (`on_sub_md_req` + `set_market_data_callback`）：
++ maintain `md_subscribers_by_instrument_`, records the subscription session for each contract.
++ During the market correction, CTP `DepthMarketData` Convert to `MarketDataBody`, serialized to `MsgType::MarketData`, distributed to subscribed sessions by contract number.
 + **Session/Connection Management**
 
 
 
- - `TcpServer` Responsible for listening on the port, accessing new connections, and creating them using factory mode `Session`。
- - `Session` Responsible:
- * Send and receive binary protocol packets.
- * Maintain a reverse pointer to the server for calling `ServerApp::on_*_req()`。
- * Save currently logged in `user_id` and corresponding `CtpTraderAdapter*`。
- - `ServerApp::unregister_session` On disconnection, from `sessions_by_user_` remove the `Session`, if the account has no session, clear the mapping.
++ `TcpServer` Responsible for listening on the port, accessing new connections, and creating them using factory mode `Session`。
++ `Session` Responsible:
++ Send and receive binary protocol packets.
++ Maintain a reverse pointer to the server for calling `ServerApp::on_*_req()`。
++ Save currently logged in `user_id` and corresponding `CtpTraderAdapter*`。
++ `ServerApp::unregister_session` On disconnection, from `sessions_by_user_` remove the `Session`, if the account has no session, clear the mapping.
 + **CTP multi-account management**: Multiple accounts share the server, and multiple terminals share a CTP channel.
 + **Network architecture**: Customized TCP protocol + server/client mode + Session management.
 + **Protocol Design**:`MsgType` Enumeration, structure message body, binary serialization/deserialization, 1MB body limit.
@@ -20968,47 +21602,47 @@ class CtpTdApi(tdapi.CThostFtdcTraderSpi):
 **Project Purpose**: Use the CTP futures trading interface (Trading Trader / Market Md) to query account funds, handling rates, margins, contracts and other information, and store it into MySQL through the C++ MySQL C API, corresponding to each CTP structure field and database table structure.
 
 + **Quotes Interface**`CThostFtdcMdApi`** / **`CThostFtdcMdSpi`（`ctp_md.hpp`）
- - `SimpleQSpi` inherit `CThostFtdcMdSpi`, override callback `OnFrontConnected`、`OnFrontDisconnected`、`OnRspUserLogin`。
- - Login process: pre-connect → `OnFrontConnected` → Fill in `CThostFtdcReqUserLoginField` → `ReqUserLogin`。
- - use `std::atomic<bool> disconnected` and `is_done` Mark the login completion/disconnection status, and the main thread polls and waits.
++ `SimpleQSpi` inherit `CThostFtdcMdSpi`, override callback `OnFrontConnected`、`OnFrontDisconnected`、`OnRspUserLogin`。
++ Login process: pre-connect → `OnFrontConnected` → Fill in `CThostFtdcReqUserLoginField` → `ReqUserLogin`。
++ use `std::atomic<bool> disconnected` and `is_done` Mark the login completion/disconnection status, and the main thread polls and waits.
 + **Trading Interface**`CThostFtdcTraderApi`** / **`CThostFtdcTraderSpi`（`ctp_td.hpp`）
- - `SimpleTSpi` inherit `CThostFtdcTraderSpi`, to implement query logic for funds, handling fees, margins, contracts, etc.:
- * Login callback `OnRspUserLogin` Push multiple query tasks into `requestQueue`,use `processNextRequest` Serial execution.
- * Query function:`queryTradingAccount`、`queryCommissionRate`、`queryMarginRate`、`queryInstrument`。
- * Corresponding response callback:`OnRspQryTradingAccount`、`OnRspQryInstrumentCommissionRate`、`OnRspQryInstrumentMarginRate`、`OnRspQryInstrument`。
- * In the response callback, put `pData` Pass it directly to the database insertion function, for example `insert_account(pData)`。
- * use `std::vector<std::string> instruments`、`underlying_instruments` Collect the target and basic product codes and only process `OptionsType == 0` futures contracts.
++ `SimpleTSpi` inherit `CThostFtdcTraderSpi`, to implement query logic for funds, handling fees, margins, contracts, etc.:
++ Login callback `OnRspUserLogin` Push multiple query tasks into `requestQueue`,use `processNextRequest` Serial execution.
++ Query function:`queryTradingAccount`、`queryCommissionRate`、`queryMarginRate`、`queryInstrument`。
++ Corresponding response callback:`OnRspQryTradingAccount`、`OnRspQryInstrumentCommissionRate`、`OnRspQryInstrumentMarginRate`、`OnRspQryInstrument`。
++ In the response callback, put `pData` Pass it directly to the database insertion function, for example `insert_account(pData)`。
++ use `std::vector<std::string> instruments`、`underlying_instruments` Collect the target and basic product codes and only process `OptionsType == 0` futures contracts.
 + **SPI callback driver + request queue model**
- - use `std::queue<std::function<void()>> requestQueue` Store pending requests via `processNextRequest` Implement chain calls of "after the last response of a request comes back, then send the next request" to ensure order and reduce throttling pressure.
- - Callback based on `bIsLast` Determine whether this query has ended, and then call `processNextRequest()`。
++ use `std::queue<std::function<void()>> requestQueue` Store pending requests via `processNextRequest` Implement chain calls of "after the last response of a request comes back, then send the next request" to ensure order and reduce throttling pressure.
++ Callback based on `bIsLast` Determine whether this query has ended, and then call `processNextRequest()`。
 + **Main process control (**`main.cpp`**）**
- - `quote()`: Initialize MdApi, register `SimpleQSpi`, connect to the market leader and wait for login completion/disconnection, and then release.
- - `trade()`: initialize TraderApi, register `SimpleTSpi`, connect the transaction frontend and keep running until disconnected.
- - `main()`: call first `create_table()` Initialize the MySQL table and then call `trade()`,at last `close_connection()`。
++ `quote()`: Initialize MdApi, register `SimpleQSpi`, connect to the market leader and wait for login completion/disconnection, and then release.
++ `trade()`: initialize TraderApi, register `SimpleTSpi`, connect the transaction frontend and keep running until disconnected.
++ `main()`: call first `create_table()` Initialize the MySQL table and then call `trade()`,at last `close_connection()`。
 + **MySQL connection management (**`mysql_utils.hpp`**）**
- - Turn off SSL and set the character set to `utf8mb4`, and execute `SET NAMES utf8mb4` To avoid garbled Chinese comments.
- - overall situation `inline MYSQL *conn` reuse connections,`create_connection()` + `close_connection()` Management life cycle.
- - pass `SHOW VARIABLES LIKE 'character_set_client'` Verify whether the character set setting takes effect.
-+ **Table creation statements for four core tables (**`mysql_utils.hpp`**）**
++ Turn off SSL and set the character set to `utf8mb4`, and execute `SET NAMES utf8mb4` To avoid garbled Chinese comments.
++ overall situation `inline MYSQL *conn` reuse connections,`create_connection()` + `close_connection()` Management life cycle.
++ pass `SHOW VARIABLES LIKE 'character_set_client'` Verify whether the character set setting takes effect.
++ **Table creation statements for four core tables (**`mysql_utils.hpp`**）**  
 `markdown/api_struct.md` Field descriptions in:
- - `ctp_account`** **↔** **`CThostFtdcTradingAccountField`
- * 50 fields, completely mapping capital account information (last settlement reserve, currently available funds, margin, deposits and withdrawals, interest, special product fields, etc.).
- * Key points: use `UNIQUE KEY (BrokerID, AccountID, TradingDay)` Make the idempotent constraint of "same brokerage company + account number + unique trading day".
- - `ctp_commission`** **↔** **`CThostFtdcInstrumentCommissionRateField`
- * Handling fee table: opening, closing, closing handling fees (based on amount/number of lots), exchange, business type, investment unit, etc.
- * `UNIQUE KEY (InstrumentID, TradingDay)` It is guaranteed that there is only one fee record for the same contract on the same day.
- - `ctp_margin`** **↔** **`CThostFtdcInstrumentMarginRateField`
- * Margin rate table: long/short margin rate and amount, speculative hedging flag, whether it is charged by the exchange `IsRelative` wait.
- * same `UNIQUE KEY (InstrumentID, TradingDay)` Control uniqueness.
- - `ctp_instrument`** **↔** **`CThostFtdcInstrumentField`
- * Basic information of the contract: contract code, exchange, product code/type, delivery year and month, minimum price change, maximum and minimum order volume, life cycle status, whether it is tradable, etc.
- * Contains options related fields:`UnderlyingInstrID`、`StrikePrice`、`OptionsType`、`UnderlyingMultiple`、`CombinationType`。
- * `UNIQUE KEY (InstrumentID, TradingDay)`, and to `EndDelivDate` Provide clarification when something is missing (fill in `29990101`）。
++ `ctp_account`** **↔** **`CThostFtdcTradingAccountField`
++ 50 fields, completely mapping capital account information (last settlement reserve, currently available funds, margin, deposits and withdrawals, interest, special product fields, etc.).
++ Key points: use `UNIQUE KEY (BrokerID, AccountID, TradingDay)` Make the idempotent constraint of "same brokerage company + account number + unique trading day".
++ `ctp_commission`** **↔** **`CThostFtdcInstrumentCommissionRateField`
++ Handling fee table: opening, closing, closing handling fees (based on amount/number of lots), exchange, business type, investment unit, etc.
++ `UNIQUE KEY (InstrumentID, TradingDay)` It is guaranteed that there is only one fee record for the same contract on the same day.
++ `ctp_margin`** **↔** **`CThostFtdcInstrumentMarginRateField`
++ Margin rate table: long/short margin rate and amount, speculative hedging flag, whether it is charged by the exchange `IsRelative` wait.
++ same `UNIQUE KEY (InstrumentID, TradingDay)` Control uniqueness.
++ `ctp_instrument`** **↔** **`CThostFtdcInstrumentField`
++ Basic information of the contract: contract code, exchange, product code/type, delivery year and month, minimum price change, maximum and minimum order volume, life cycle status, whether it is tradable, etc.
++ Contains options related fields:`UnderlyingInstrID`、`StrikePrice`、`OptionsType`、`UnderlyingMultiple`、`CombinationType`。
++ `UNIQUE KEY (InstrumentID, TradingDay)`, and to `EndDelivDate` Provide clarification when something is missing (fill in `29990101`）。
 + **Structure to SQL mapping**
- - `insert_account` / `insert_commission` / `insert_margin` / `insert_instrument` in, use `snprintf` Use SQL to fill in the CTP fields into the corresponding columns one by one.
- - For certain enum/char fields, use `std::to_string(pData->XXX).c_str()` Convert to string and insert.
- - use `mysql_errno == 1062` Determine the primary key/unique key conflict and treat it as idempotent: duplicate data is ignored directly and is not regarded as an error.
- - pass `output_sql` Synchronously output the generated SQL to the project path `markdown/*.sql` File for easy auditing/backup.
++ `insert_account` / `insert_commission` / `insert_margin` / `insert_instrument` in, use `snprintf` Use SQL to fill in the CTP fields into the corresponding columns one by one.
++ For certain enum/char fields, use `std::to_string(pData->XXX).c_str()` Convert to string and insert.
++ use `mysql_errno == 1062` Determine the primary key/unique key conflict and treat it as idempotent: duplicate data is ignored directly and is not regarded as an error.
++ pass `output_sql` Synchronously output the generated SQL to the project path `markdown/*.sql` File for easy auditing/backup.
 
 
 
@@ -22320,27 +22954,27 @@ Trading strategies/users
 **Typical Transaction Process**
 
 1. **Order submission stage**
- - Trading strategy calls OMS`submit_order()`Submit order
- - OMS creates order records and assigns order IDs
++ Trading strategy calls OMS`submit_order()`Submit order
++ OMS creates order records and assigns order IDs
 2. **Order Verification Phase**
- - Trading strategies called RMS`validate_order()`Verify order
- - RMS checks risk limits (position limits, exposure limits, price slippage, etc.)
- - If the verification passes, continue execution; if the verification fails, reject the order.
++ Trading strategies called RMS`validate_order()`Verify order
++ RMS checks risk limits (position limits, exposure limits, price slippage, etc.)
++ If the verification passes, continue execution; if the verification fails, reject the order.
 3. **Order Execution Phase**
- - Trading strategy calls EMS`execute_order()`Execute order
- - EMS obtains order information from OMS and submits it to the exchange
- - The exchange executes the order and returns the transaction result
++ Trading strategy calls EMS`execute_order()`Execute order
++ EMS obtains order information from OMS and submits it to the exchange
++ The exchange executes the order and returns the transaction result
 4. **Transaction processing stage**
- - EMS receives the transaction information and calls OMS`on_fill()`Update order status
- - EMS calls PMS at the same time`on_fill()`Update positions and cash
- - After the PMS is updated, notify the RMS to update the position data and recalculate the risk indicators.
++ EMS receives the transaction information and calls OMS`on_fill()`Update order status
++ EMS calls PMS at the same time`on_fill()`Update positions and cash
++ After the PMS is updated, notify the RMS to update the position data and recalculate the risk indicators.
 5. **Risk Monitoring Phase**
- - RMS monitors risk indicators in real time
- - When the risk indicator exceeds the threshold, an alarm notification is sent
++ RMS monitors risk indicators in real time
++ When the risk indicator exceeds the threshold, an alarm notification is sent
 6. **Status query phase**
- - Trading strategies can query order status from OMS
- - Trading strategies can query positions and capital status from PMS
- - Trading strategies can query risk indicators and risk reports from RMS
++ Trading strategies can query order status from OMS
++ Trading strategies can query positions and capital status from PMS
++ Trading strategies can query risk indicators and risk reports from RMS
 
 
 
@@ -24741,7 +25375,7 @@ The following stipulations: a positive rate indicates a disadvantage (cost) to o
 
 **Taker**
 
-+ **Buy**: Buy at seller's best ask, nominal cost rising.
++ **Buy**: Buy at seller's best ask, nominal cost rising.  
 Effective Bid Price (for sorting: smaller is better):
 
 $ P^{\mathrm{buy,eff}}_{\mathrm{taker}} = P_{\mathrm{ask}} \left( 1 + \frac{f_{\mathrm{taker}}}{10^4} \right) $
@@ -24750,7 +25384,7 @@ $ P^{\mathrm{buy,eff}}_{\mathrm{taker}} = P_{\mathrm{ask}} \left( 1 + \frac{f_{\
 
 $ P^{\mathrm{buy,eff}}_{\mathrm{taker}} = P_{\mathrm{ask}} \left( 1 + \frac{\text{taker\_fee\_bps}}{10000} \right) $
 
-+ **SELLER**: Sell at buyer's best bid, nominal income decreases.
++ **SELLER**: Sell at buyer's best bid, nominal income decreases.  
 Effective Ask Price (for sorting: bigger is better):
 
 $ P^{\mathrm{sell,eff}}_{\mathrm{taker}} = P_{\mathrm{bid}} \left( 1 - \frac{f_{\mathrm{taker}}}{10^4} \right) $
@@ -24820,7 +25454,7 @@ struct VenuePassiveStat {
 
 **Aggressive routing (buyer scans orders)**
 
-Logic: Press `effective_buy_cost` Traverse venues in ascending order and take
+Logic: Press `effective_buy_cost` Traverse venues in ascending order and take  
 $ \min(\text{Remaining demand}, \text{Ask_qty for this file}, \text{The upper limit of quota for this venue}) $, until the demand is 0 or there is no liquidity.
 
 Amount of orders taken at venue $ i $ (without lot constraint):
@@ -24925,7 +25559,7 @@ $ \text{VWAP slippage (bps)} = \frac{P_{\text{your avg}} - P_{\text{mkt VWAP}}}{
 
 Arrival price $ m $ is the mid (or first touch) when the commonly used mother order arrives.
 
-$ \mathrm{IS\,(bps)} = s \cdot \frac{P_{\mathrm{fill\,avg}} - m}{m} \times 10000, \qquad s = \begin{cases} +1 &amp;amp; \text{Buy} \\ -1 &amp;amp; \text{Sell} \end{cases} $
+$ \mathrm{IS\,(bps)} = s \cdot \frac{P_{\mathrm{fill\,avg}} - m}{m} \times 10000, \qquad s = \begin{cases} +1 &amp;amp;amp; \text{Buy} \\ -1 &amp;amp;amp; \text{Sell} \end{cases} $
 
 + Buyer: Transaction price is below mid → IS is negative → better.
 
@@ -24946,7 +25580,7 @@ $ \mathrm{fill\,rate} = \frac{Q_{\mathrm{filled}}}{Q_{\mathrm{requested}}} $
 
 `requested == 0` When defined as 0 or N/A, division by zero is avoided. Conditional writing:
 
-$ \mathrm{fill\,rate} = \begin{cases} Q_{\mathrm{filled}} / Q_{\mathrm{requested}} &amp;amp; Q_{\mathrm{requested}} &amp;gt; 0 \\ 0 \;\text{或 N/A} &amp;amp; Q_{\mathrm{requested}} = 0 \end{cases} $
+$ \mathrm{fill\,rate} = \begin{cases} Q_{\mathrm{filled}} / Q_{\mathrm{requested}} &amp;amp;amp; Q_{\mathrm{requested}} &amp;amp;gt; 0 \\ 0 \;\text{或 N/A} &amp;amp;amp; Q_{\mathrm{requested}} = 0 \end{cases} $
 
 
 
@@ -24984,7 +25618,6 @@ The STP mechanism of mainstream exchanges (such as ICE, Nasdaq, and China Financ
 | --- | --- |
 | **Check Scope** | Identify related orders by account/customer number, MPID (member ID), Trader ID, custom transaction group and other dimensions |
 | **Disposal Strategy** | - **Reject Taking Order (RTO)**: Reject new incoming active orders - **Reject Resting Order (RRO)**: Cancel pending passive orders (default strategy) - **Reject Both Orders (RBO)**: Cancel orders from both parties at the same time - **Technology Transfer**: Convert self-transactions to internal transfers (Nasdaq optional) |
-
 
 
 **Different STP Strategies**
@@ -25147,6 +25780,7 @@ Current limiting is done to maintain stability and recoverability as the system 
 + Press downstream dependency: provide back-pressure protection for a certain dependency (such as risk control service) (can be superimposed on circuit breaker/downgrade)
 
 
+
 **Current limiting algorithm selection**
 
 **A) **`**ApiRateLimiter**`**(Shard Lock + Token Bucket, general production version)**
@@ -25176,8 +25810,8 @@ Current limiting is done to maintain stability and recoverability as the system 
 + Each key maintains a "theoretical arrival time" `tat`（Theoretical Arrival Time）
 + For each request, calculate the next time the request will occur under the "ideal uniform rate" `tat`
 + Judgment condition: if `now >= tat - tolerance` is allowed and the `tat` Atomic update is `max(tat, now) + increment`
- - `increment` approximately equal to `tokens / rate_per_sec` corresponding time
- - `tolerance` Corresponds to burst capability (allows short-term lookahead)
++ `increment` approximately equal to `tokens / rate_per_sec` corresponding time
++ `tolerance` Corresponds to burst capability (allows short-term lookahead)
 
 **Implementation points and trade-offs**:
 
@@ -25815,10 +26449,10 @@ Lezer (developed by the CodeMirror team) and Tree-sitter (developed by GitHub) a
 + The status of incremental parsing is traceable, making it easy to locate abnormalities in the trading system (such as protocol parsing errors, data packet loss) and reducing troubleshooting costs.
 + In a distributed trading system, data flows between gateways, strategy engines, and risk control modules. The incremental AST of Tree-sitter/Lezer can be reused between modules to avoid repeated parsing and reduce end-to-end delay.
 
-**4.HFT incremental parser - core code
+**4.HFT incremental parser - core code  
 **[**https://github.com/zzxscodes/hft-incremental-parser**](https://github.com/zzxscodes/hft-incremental-parser)
 
-Order format:`BUY|SELL quantity SYMBOL @ price LIMIT|MARKET`
+Order format:`BUY|SELL quantity SYMBOL @ price LIMIT|MARKET`  
 Example:`BUY 100 AAPL @ 150.25 LIMIT`
 
 **1. Type definition (types.hpp)**
@@ -26120,15 +26754,15 @@ void applyStateUpdate(const StateUpdate& update) {
 | **Performance Focus** | Low latency | High throughput, reliability |
 
 
-**Architecture Collaboration**:
+**Architecture Collaboration**:  
 `Client -> [撮合 (命令共识)] -> TradeEvent -> [柜台 (结果共识)] -> AccountState`
 
 
 
 ### 15. Exchange protocol layering and sequence consistency
-1.**Protocol layering**
-Session layer: login, heartbeat, reconnection, sequence number maintenance, retransmission negotiation.
-Business layer: order book increments, transactions, status events, snapshot events.
+1.**Protocol layering**  
+Session layer: login, heartbeat, reconnection, sequence number maintenance, retransmission negotiation.  
+Business layer: order book increments, transactions, status events, snapshot events.  
 Encoding and decoding layer: byte order conversion, field verification, structure mapping.
 
 ```cpp
@@ -26172,9 +26806,9 @@ public:
 };
 ```
 
-**2. Sequence consistency processing**
-Market flow maintenance for each channel `last_seq`, strictly check continuity.
-After detecting the gap, it enters the recovery state: request retransmission, merge playback, and then switch back to the real-time stream.
+**2. Sequence consistency processing**  
+Market flow maintenance for each channel `last_seq`, strictly check continuity.  
+After detecting the gap, it enters the recovery state: request retransmission, merge playback, and then switch back to the real-time stream.  
 The strategy is prohibited from continuing to consume the real-time increment of the target before the recovery is completed.
 
 ```cpp
@@ -26229,9 +26863,9 @@ private:
 };
 ```
 
-**3.Time stamp layering**
-`exchange_ts`:Exchange time.
-`nic_rx_ts`: The network card receives the hardware time.
+**3.Time stamp layering**  
+`exchange_ts`:Exchange time.  
+`nic_rx_ts`: The network card receives the hardware time.  
 `app_ts`: Application layer processing time.
 
 ```cpp
@@ -26329,19 +26963,19 @@ int main() {
 ### 2.Changes in state of market trends and volatility
 1. By analyzing market trends and state changes in volatility, we can determine whether the market is stable. If the state change interval presents a random distribution, it means the market is relatively stable; if it stays in a certain state for a long time (such as long-term high volatility), there may be non-stationarity, which will affect the robustness of the trading system. By analyzing the state changes of market indicators, we can test the stability of the market and provide a basis for the development of trading systems (to avoid failure in non-stationary markets).
 2. **Calculation of key indicators**:
- - **Trend Indicator**: Fit the slope using least squares (`find_slope`) to measure price trends
- - **Volatility Indicator**: uses average true range (ATR,`find_volatility`) to measure market volatility
++ **Trend Indicator**: Fit the slope using least squares (`find_slope`) to measure price trends
++ **Volatility Indicator**: uses average true range (ATR,`find_volatility`) to measure market volatility
 3. **Indicator version processing**:
- - Version 0: Use original indicator values
- - Version 1: current indicator value minus the indicator value "lookback" days ago (oscillator form)
- - Version > 1: The current indicator value minus the indicator value "version×lookback" days ago
++ Version 0: Use original indicator values
++ Version 1: current indicator value minus the indicator value "lookback" days ago (oscillator form)
++ Version > 1: The current indicator value minus the indicator value "version×lookback" days ago
 4. **Status change analysis**:
- - by quantiles (`fractile`parameter) divides the indicator into two states: "above threshold" and "below threshold"
- - The number of days between recording status changes (`gap_analyze`function)
- - Divide the interval days into 11 intervals (1,2,4,8,16,32,64,128,256,512,>512), and count the occurrences of each interval
++ by quantiles (`fractile`parameter) divides the indicator into two states: "above threshold" and "below threshold"
++ The number of days between recording status changes (`gap_analyze`function)
++ Divide the interval days into 11 intervals (1,2,4,8,16,32,64,128,256,512,>512), and count the occurrences of each interval
 5. **Stationality judgment basis**:
- - If the distribution of the occurrence times of each interval is relatively even, it means that the state changes randomly and the market is relatively stable.
- - If a large range (such as > 512) appears too many times, it means that the market has stayed in a certain state for a long time and there is a risk of non-stationarity.
++ If the distribution of the occurrence times of each interval is relatively even, it means that the state changes randomly and the market is relatively stable.
++ If a large range (such as > 512) appears too many times, it means that the market has stayed in a certain state for a long time and there is a risk of non-stationarity.
 
 ```cpp
 #include <iostream>
@@ -26823,27 +27457,27 @@ int main() {
 **1. Solution to mean non-stationarity (centralization)**
 
 + Eliminate the long-term trend deviation of the indicator through "Current Value - Moving Window Mean/Median", and the median is more suitable for scenarios with extreme values.
- - `moving_mean`The function calculates the moving window mean,`moving_median`The function calculates the moving window median;
- - Mean centering:`raw_indicator[i] - moving_mean(...)`；
- - Median centering:`raw_indicator[i] - moving_median(...)`, specifically dealing with mean shifts caused by extreme values.
++ `moving_mean`The function calculates the moving window mean,`moving_median`The function calculates the moving window median;
++ Mean centering:`raw_indicator[i] - moving_mean(...)`；
++ Median centering:`raw_indicator[i] - moving_median(...)`, specifically dealing with mean shifts caused by extreme values.
 
 **2. Solution to variance non-stationarity (standardization)**
 
 + Use "(Current value after centralization) / moving window standard deviation" to eliminate sudden changes in the fluctuation amplitude and stabilize the variance.
- - `moving_std`The function calculates the moving window standard deviation;
- - Double stabilization:`(raw_indicator[i] - 移动均值) / 移动标准差`, simultaneously solving the non-stationary problems of mean and variance.
++ `moving_std`The function calculates the moving window standard deviation;
++ Double stabilization:`(raw_indicator[i] - 移动均值) / 移动标准差`, simultaneously solving the non-stationary problems of mean and variance.
 
 **3. Trade-off relationship between window length**
 
 + A short window can maximize the stability, but will lose a lot of original information; a long window retains a lot of information, but the stability improvement is limited.
- - contrast`WINDOW_SHORT=20`(short window) and`WINDOW_LONG=100`(Long window) mean centering effect;
- - The results show that the ">512-day state number" of the short window is much less than that of the long window, which verifies the conclusion that "short windows are more stationary".
++ contrast`WINDOW_SHORT=20`(short window) and`WINDOW_LONG=100`(Long window) mean centering effect;
++ The results show that the ">512-day state number" of the short window is much less than that of the long window, which verifies the conclusion that "short windows are more stationary".
 
 **4. Quantitative verification of stationarity**
 
 + By looking at the intervals between metric transitions between "above/below median" states, the fewer the long-term states (e.g. >512 days), the better the stability.
- - `analyze_state_gaps`Function statistics status switching interval;
- - The output results focus on ">512-day state times", which visually shows the difference in stationarity of different optimization methods (the original indicator has the highest number of times, and the bi-stationary number of times is the least).
++ `analyze_state_gaps`Function statistics status switching interval;
++ The output results focus on ">512-day state times", which visually shows the difference in stationarity of different optimization methods (the original indicator has the highest number of times, and the bi-stationary number of times is the least).
 
 ```cpp
 #include <iostream>
@@ -27089,8 +27723,8 @@ int main() {
 
 + **Hazards of low entropy**: Low entropy indicators (such as extreme outliers and excessive numerical clustering) will interfere with model training. For example, outliers will cause the model to focus too much on a small number of data and ignore most normal samples; numerical clustering will cause the model to mistakenly regard irrelevant clustering differences as core rules, reducing prediction accuracy.
 + **Optimization means**:
- - Tail cleaning: Find the core data interval of the indicator (covering most normal data) through sorting, and perform monotonic compression (such as exponential function compression) on extreme values outside the interval, which not only preserves the order of the data, but also prevents outliers from destroying the distribution and improves the entropy value.
- - Nonlinear transformation: Select corresponding transformations for different distribution defects, such as square root/cube root to deal with skewed distribution, hyperbolic tangent/logistic function to compress extreme values, cumulative distribution function to match standard distribution, and optimize indicator numerical distribution to improve information content.
++ Tail cleaning: Find the core data interval of the indicator (covering most normal data) through sorting, and perform monotonic compression (such as exponential function compression) on extreme values outside the interval, which not only preserves the order of the data, but also prevents outliers from destroying the distribution and improves the entropy value.
++ Nonlinear transformation: Select corresponding transformations for different distribution defects, such as square root/cube root to deal with skewed distribution, hyperbolic tangent/logistic function to compress extreme values, cumulative distribution function to match standard distribution, and optimize indicator numerical distribution to improve information content.
 
 **3. The relationship between entropy and trading model**
 
@@ -27321,19 +27955,19 @@ cleanup:
 **(1) Regularization type: Ridge regression + Lasso + elastic net (regularization idea) **
 
 + via parameters`alpha`Control regularization type:
- - `alpha=0`: Ridge regression (L2 regularization), penalizing the sum of squares of coefficients ($ \lambda\sum\beta_j^2 $), making the coefficients of highly correlated indicators tend to average, avoiding extreme values of coefficients, and is suitable for scenarios where there is correlation between indicators (such as multiple trend indicators);
- - `alpha=1`: Lasso (L1 regularization), the absolute value sum of penalty coefficients ($ \lambda\sum|\beta_j| $) will return some irrelevant index coefficients to zero (variable selection), which is suitable for screening core indicators;
- - `0<alpha<1`: Elastic net (recommended), combines L1 and L2 penalties at the same time, takes into account "variable selection" and "suppression coefficient extreme values", and is suitable for most trading scenarios.
++ `alpha=0`: Ridge regression (L2 regularization), penalizing the sum of squares of coefficients ($ \lambda\sum\beta_j^2 $), making the coefficients of highly correlated indicators tend to average, avoiding extreme values of coefficients, and is suitable for scenarios where there is correlation between indicators (such as multiple trend indicators);
++ `alpha=1`: Lasso (L1 regularization), the absolute value sum of penalty coefficients ($ \lambda\sum|\beta_j| $) will return some irrelevant index coefficients to zero (variable selection), which is suitable for screening core indicators;
++ `0<alpha<1`: Elastic net (recommended), combines L1 and L2 penalties at the same time, takes into account "variable selection" and "suppression coefficient extreme values", and is suitable for most trading scenarios.
 + `lambda`Control the strength of regularization: the larger the value, the stronger the constraints on the coefficients and the simpler the model (the stronger the generalization ability, but the fitting ability may decrease).
 
 **(2) Training algorithm: coordinate descent method (guaranteed convergence)**
 
 + Core logic: Update coefficients variable by variable, fix other variables each time, only optimize the current variable, improve efficiency through "active set iteration" (only process non-zero coefficients), symbolizing the need for "fast training of linear models";
 + Key steps:
- 1. **Data Standardization**: Perform "mean reduction and standard deviation" processing on input indicators (such as trends, volatility) and target variables (such as returns) (required in the book to reduce numerical errors and improve convergence speed);
- 2. **Fast update of covariance**: When the number of samples (number of historical bars in the market) is much larger than the number of indicators, the covariance matrix between indicators and the cross-covariance between indicators and targets are pre-calculated, reducing the time complexity of each iteration from $ O(N*K) $ (N is the number of samples, K is the number of indicators) to $ O(K^2) $, adapting to the efficient computing requirements of "large samples, multiple indicators" of the trading system;
- 3. **Soft threshold update**: The core operation of Lasso/L1 regularization, applying "threshold clipping" to the optimized coefficients to return small coefficients to zero (implementing variable selection), the formula is:
-$ S(z,\gamma)=\begin{cases}z-\gamma &amp;amp; z&amp;gt;\gamma \\ z+\gamma &amp;amp; z&amp;lt;-\gamma \\ 0 &amp;amp; \text{otherwise}\end{cases} $
+1. **Data Standardization**: Perform "mean reduction and standard deviation" processing on input indicators (such as trends, volatility) and target variables (such as returns) (required in the book to reduce numerical errors and improve convergence speed);
+2. **Fast update of covariance**: When the number of samples (number of historical bars in the market) is much larger than the number of indicators, the covariance matrix between indicators and the cross-covariance between indicators and targets are pre-calculated, reducing the time complexity of each iteration from $ O(N*K) $ (N is the number of samples, K is the number of indicators) to $ O(K^2) $, adapting to the efficient computing requirements of "large samples, multiple indicators" of the trading system;
+3. **Soft threshold update**: The core operation of Lasso/L1 regularization, applying "threshold clipping" to the optimized coefficients to return small coefficients to zero (implementing variable selection), the formula is:  
+$ S(z,\gamma)=\begin{cases}z-\gamma &amp;amp;amp; z&amp;amp;gt;\gamma \\ z+\gamma &amp;amp;amp; z&amp;amp;lt;-\gamma \\ 0 &amp;amp;amp; \text{otherwise}\end{cases} $  
 Among them $ \gamma=\alpha*\lambda $ (the combination of regularization strength and type).
 
 **(3) Lambda Optimization: Path Descent + Cross Validation ("Optimal Regularization Strength Selection") **
@@ -27954,8 +28588,8 @@ For the "regularized strategy parameter optimization" scenario in the trading sy
 **(3) Hybrid optimization: local hill climbing to accelerate convergence**
 
 + After each iteration, press`climb_prob`Probabilistically perform "single-parameter hill-climbing optimization" on individuals (prioritizing the current optimal individual):
- - Integer parameters (such as moving average lookback period): search the upper and lower boundaries value by value to find the optimal performance value;
- - Real parameters (such as position opening threshold): use the simplified Brent algorithm (rule of thirds) to quickly locate the local optimum;
++ Integer parameters (such as moving average lookback period): search the upper and lower boundaries value by value to find the optimal performance value;
++ Real parameters (such as position opening threshold): use the simplified Brent algorithm (rule of thirds) to quickly locate the local optimum;
 + This step combines "global population evolution" and "local fine search" to avoid falling into local optima and improve the accuracy of optimal parameters (the idea of "hybrid optimization to improve efficiency").
 
 **(4) Termination conditions and result output**
@@ -29637,17 +30271,17 @@ int main() {
 ### 10. Unbiased trading simulation
 The core goal of unbiased trading simulation is to eliminate the interference of "future data leakage" and "over-fitting" on the performance evaluation of the trading system, and obtain an unbiased estimate of the future performance of the system by simulating the "training-testing" process under real trading scenarios. Its core principles and ideas can be summarized as the following four points:
 
-1. **Strict time series data division logic**
-Separation of in-sample (IS) and out-of-sample (OOS): Market data (such as logarithmic price candlesticks) must be sorted by timestamp to ensure that the in-sample data is completely earlier than the out-of-sample data, and to prevent future leaks of "training models with future data". When dividing, it is necessary to control the proportion within the sample (usually 0.5~0.8), and ensure that both have sufficient data volume (at least 1 valid data point each) to avoid evaluation bias caused by insufficient data volume.
+1. **Strict time series data division logic**  
+Separation of in-sample (IS) and out-of-sample (OOS): Market data (such as logarithmic price candlesticks) must be sorted by timestamp to ensure that the in-sample data is completely earlier than the out-of-sample data, and to prevent future leaks of "training models with future data". When dividing, it is necessary to control the proportion within the sample (usually 0.5~0.8), and ensure that both have sufficient data volume (at least 1 valid data point each) to avoid evaluation bias caused by insufficient data volume.  
 Guard Buffer mechanism: For the indicator lookback period (such as the number of K lines required for moving average calculation) and the target forward period (such as predicting the future returns of N K lines), a "guard buffer" (size = min (lookback period, forward period)-1) is set at the boundary between the in-sample and out-of-sample periods. For example, if the indicator needs to look back 20 K lines and the target looks forward to 10 K lines, the buffer zone will be 9 K lines to avoid hidden future leakage of in-sample data and out-of-sample data due to "indicator calculation overlap".
-2. **Forward Analysis (Walkforward Analysis): simulate the real transaction iteration process**
-Sliding window training - testing: The historical data is divided into continuous "folds" according to "training window + test window". Within each fold, the training window data is first used to optimize the system parameters (such as the moving average period), and then the test window data is used to calculate out-of-sample returns. Then the entire window is slid forward (sliding step = test window size), and the process is repeated until all data is traversed.
+2. **Forward Analysis (Walkforward Analysis): simulate the real transaction iteration process**  
+Sliding window training - testing: The historical data is divided into continuous "folds" according to "training window + test window". Within each fold, the training window data is first used to optimize the system parameters (such as the moving average period), and then the test window data is used to calculate out-of-sample returns. Then the entire window is slid forward (sliding step = test window size), and the process is repeated until all data is traversed.  
 Fits real trading scenarios: Each round of training only uses "historical data as of the current point in time", and testing is only for "limited time windows in the future", fully replicating the process of "regularly updating the model and gradually executing transactions" in real trading, avoiding overfitting caused by training with the full amount of data at one time, and at the same time capturing the impact of market non-stationarity on system performance.
-3. **Cross-Validation: Supplementary evaluation for efficient use of data**
-The folding logic of time series adaptation: divide the data into N consecutive "folds" according to time, each fold is used as a test set in turn, and the remaining folds (excluding the test set and guard buffer) are used as the training set. Different from traditional cross-validation, guard buffers need to be set up on both sides of the test set to prevent in-sample-test set data overlap caused by indicator lookback/forward.
+3. **Cross-Validation: Supplementary evaluation for efficient use of data**  
+The folding logic of time series adaptation: divide the data into N consecutive "folds" according to time, each fold is used as a test set in turn, and the remaining folds (excluding the test set and guard buffer) are used as the training set. Different from traditional cross-validation, guard buffers need to be set up on both sides of the test set to prevent in-sample-test set data overlap caused by indicator lookback/forward.  
 Balance data utilization and unbiasedness: Solve the problem of "small amount of early training data" in forward testing and make full use of historical data through multiple rounds of training-testing, but you need to pay attention to its limitations - because it includes "future data of the test set" for training, it may introduce a slight optimistic bias to the evaluation of non-stationary markets, so it is usually used as a supplement to forward testing, not a replacement.
-4. **Nested Forward Testing: Handling Selection Bias in Multi-Level Optimization**
-Two-level optimization separation: For the scenario of “system parameter optimization (inner layer) + multi-system selection (outer layer)”, the “selection bias” needs to be eliminated through a nested structure. The inner layer uses forward testing to evaluate the out-of-sample performance of each competing system (such as moving average strategies with different parameters). The outer layer selects the optimal system based on the unbiased results of the inner layer, and then uses an independent outer test window to verify the final performance.
+4. **Nested Forward Testing: Handling Selection Bias in Multi-Level Optimization**  
+Two-level optimization separation: For the scenario of “system parameter optimization (inner layer) + multi-system selection (outer layer)”, the “selection bias” needs to be eliminated through a nested structure. The inner layer uses forward testing to evaluate the out-of-sample performance of each competing system (such as moving average strategies with different parameters). The outer layer selects the optimal system based on the unbiased results of the inner layer, and then uses an independent outer test window to verify the final performance.  
 Avoid "survivor bias": If you directly select the "system with the best performance in the sample" from multiple systems, it is easy to overestimate the performance due to "accidental luck"; the nested structure ensures that the selected system is a system with "real generalization ability" rather than "accidental fitting noise" by "using OOS results to screen the system in the inner layer and verifying it in the outer layer with new OOS results".
 
 ```cpp
@@ -30375,24 +31009,24 @@ int main() {
 ### 11. Statistical analysis of transaction income
 The core goal of transaction income analysis is to objectively evaluate the income quality, risk level and stability of the trading system based on income data obtained through unbiased simulation, and to avoid misjudgments caused by "improper selection of income granularity" or "indicator calculation deviation". Its core principles and ideas can be summarized as the following four points:
 
-1. **Standardized conversion of revenue granularity**
-Conversion of single K-line income for an indefinite look-ahead period system: For a trading system with "uncertain opening-closing time" (such as a breakthrough strategy), it is necessary to split the "cumulative income from opening to closing" into "single K-line income" - by recording the position status of each K-line (long/short/no position), and calculating the single K-line income based on the logarithmic price difference (long = next K-line price - current K Line price, short position is the opposite, no position is 0). This transformation not only eliminates the information loss of "complete transaction returns masking intermediate fluctuations", but also provides a basis for subsequent fine-grained analysis.
-Multi-granularity income adapts to different analysis scenarios: supports further conversion of single K-line income into three types of practical granularity:
-Position-only K-line returns: Exclude zero-profit K-lines without positions, focus on the system’s “actual performance when participating in transactions”, and avoid zero returns diluting the true level of returns;
-Complete transaction income: Accumulated income according to the "opening - closing" cycle, which conforms to traditional transaction analysis habits and is used to evaluate the profit and loss efficiency of a single transaction;
+1. **Standardized conversion of revenue granularity**  
+Conversion of single K-line income for an indefinite look-ahead period system: For a trading system with "uncertain opening-closing time" (such as a breakthrough strategy), it is necessary to split the "cumulative income from opening to closing" into "single K-line income" - by recording the position status of each K-line (long/short/no position), and calculating the single K-line income based on the logarithmic price difference (long = next K-line price - current K Line price, short position is the opposite, no position is 0). This transformation not only eliminates the information loss of "complete transaction returns masking intermediate fluctuations", but also provides a basis for subsequent fine-grained analysis.  
+Multi-granularity income adapts to different analysis scenarios: supports further conversion of single K-line income into three types of practical granularity:  
+Position-only K-line returns: Exclude zero-profit K-lines without positions, focus on the system’s “actual performance when participating in transactions”, and avoid zero returns diluting the true level of returns;  
+Complete transaction income: Accumulated income according to the "opening - closing" cycle, which conforms to traditional transaction analysis habits and is used to evaluate the profit and loss efficiency of a single transaction;  
 Fixed block return: Accumulate the returns of N consecutive K lines (for example, 10 K lines are one block), smooth short-term random fluctuations, and use it to observe the stability of the system in the medium-term time dimension.
-2. **Core indicator calculation based on fine-grained income**
-Reject "reliance on complete transaction income": Emphasis on calculating indicators based on "single K-line income" or "position K-line income only" to avoid misjudgments caused by "small amount of data and covering up intermediate risks" in complete transaction income. For example, if the profit factor (sum of profits/sum of losses) is calculated based on complete transactions, it may exaggerate performance due to "a few large profitable transactions", while calculation based on fine-grained profits can reflect the true profit and loss structure.
-Core indicator system:
-Average return: reflects the expected return per unit time (or unit position K-line) and needs to be calculated using "total return/data volume" to avoid incomparability due to differences in data volume;
-Return standard deviation: unbiased estimate (divided by n-1), which measures the risk of return fluctuations. The smaller the standard deviation, the more stable the system returns;
-Profit factor: It is necessary to distinguish between the "total profit income" and the "absolute total loss income" to avoid including zero income, and use a minimum value (such as 1e-60) to protect the denominator from being zero;
+2. **Core indicator calculation based on fine-grained income**  
+Reject "reliance on complete transaction income": Emphasis on calculating indicators based on "single K-line income" or "position K-line income only" to avoid misjudgments caused by "small amount of data and covering up intermediate risks" in complete transaction income. For example, if the profit factor (sum of profits/sum of losses) is calculated based on complete transactions, it may exaggerate performance due to "a few large profitable transactions", while calculation based on fine-grained profits can reflect the true profit and loss structure.  
+Core indicator system:  
+Average return: reflects the expected return per unit time (or unit position K-line) and needs to be calculated using "total return/data volume" to avoid incomparability due to differences in data volume;  
+Return standard deviation: unbiased estimate (divided by n-1), which measures the risk of return fluctuations. The smaller the standard deviation, the more stable the system returns;  
+Profit factor: It is necessary to distinguish between the "total profit income" and the "absolute total loss income" to avoid including zero income, and use a minimum value (such as 1e-60) to protect the denominator from being zero;  
 Winning rate: number of times of profit/number of total income, reflecting the stability of income, which needs to be comprehensively evaluated in conjunction with the profit factor (high winning rate and low profit factor may still have no actual value due to "small wins and big losses").
-3. **Legality verification of income data**
-Data timing and integrity verification: Before analysis, it is necessary to verify whether the K-line timestamp is strictly incremental (to avoid revenue calculation errors caused by data disorder), whether the revenue sequence is non-empty (at least 1 valid revenue point), and whether the fixed block size is a positive integer (to avoid invalid granularity division), to ensure the legitimacy of the input data and avoid analysis deviations caused by data quality issues.
+3. **Legality verification of income data**  
+Data timing and integrity verification: Before analysis, it is necessary to verify whether the K-line timestamp is strictly incremental (to avoid revenue calculation errors caused by data disorder), whether the revenue sequence is non-empty (at least 1 valid revenue point), and whether the fixed block size is a positive integer (to avoid invalid granularity division), to ensure the legitimacy of the input data and avoid analysis deviations caused by data quality issues.  
 Parameter rationality verification: For systems that rely on parameters (such as moving average breakthrough strategies), it is necessary to verify whether the core parameters (such as moving average lookback period) are positive to avoid signal generation errors caused by illegal parameters and ensure that the source of income data is reliable.
-4. **Balance assessment logic of risks and benefits**
-Reject "reliance on a single indicator": Emphasize the evaluation of the system through a combination of indicators of "average return + standard deviation + profit factor + winning rate". For example: a system with high average return but high standard deviation may have too high risks, and a system with high winning rate but low profit factor may have "small wins and big losses". The cost-effectiveness of risk and return needs to be comprehensively judged.
+4. **Balance assessment logic of risks and benefits**  
+Reject "reliance on a single indicator": Emphasize the evaluation of the system through a combination of indicators of "average return + standard deviation + profit factor + winning rate". For example: a system with high average return but high standard deviation may have too high risks, and a system with high winning rate but low profit factor may have "small wins and big losses". The cost-effectiveness of risk and return needs to be comprehensively judged.  
 Focus on "verification of generalization ability": All return analysis must be based on "out-of-sample returns obtained by unbiased simulation" rather than in-sample returns. In-sample returns are only used for parameter optimization, while out-of-sample returns are the core basis for evaluating the future performance of the system to avoid performance overestimation caused by "fitting in-sample noise".
 
 ```cpp
@@ -31330,15 +31964,15 @@ In ACB (average cost basis), PnL (profit and loss) is divided into two component
 
 + Calculate and accumulate when closing trades
 + Calculation logic:
- - Partial closing:`(price - avg_price) * (-size)`, where -size is the closing quantity
- - Complete position closing:`(price - avg_price) * pos`, settle the profit and loss of all original positions
++ Partial closing:`(price - avg_price) * (-size)`, where -size is the closing quantity
++ Complete position closing:`(price - avg_price) * pos`, settle the profit and loss of all original positions
 
 **2. Unrealized profit and loss (Unrealized PnL, UPnL)**
 
 + Calculation logic:`price * pos - suma`
- - `price`: Current market price
- - `pos`:Current position quantity
- - `suma`:Total holding cost (average price × quantity)
++ `price`: Current market price
++ `pos`:Current position quantity
++ `suma`:Total holding cost (average price × quantity)
 
 **3. Total profit and loss**
 
@@ -32650,13 +33284,13 @@ inline QuoteUpdate AvellanedaStoikov::calculate_quotes(int64_t timestamp_ns) noe
 **Inventory penalty logic**:
 
 + if `q > 0`(Hold long):`inventory_penalty > 0`
- - `bid_price` Lower → harder to buy
- - `ask_price` Lower → Easier to sell
- - The goal is to reduce long inventories
++ `bid_price` Lower → harder to buy
++ `ask_price` Lower → Easier to sell
++ The goal is to reduce long inventories
 + if `q < 0`(Holding a short position):`inventory_penalty < 0`
- - `bid_price` Improve → Easier to buy
- - `ask_price` Improve → harder to sell
- - The goal is to reduce short inventory
++ `bid_price` Improve → Easier to buy
++ `ask_price` Improve → harder to sell
++ The goal is to reduce short inventory
 
 
 
@@ -32752,19 +33386,19 @@ inline void AvellanedaStoikov::on_fill(bool is_buy, double quantity) noexcept {
 **Tuning Strategy**
 
 1. **High Volatility Markets**:
- - Increase `γ`(Increased risk aversion)
- - Increase `T`(Longer timeframe)
- - reduce `base_order_size`(reduce order size)
++ Increase `γ`(Increased risk aversion)
++ Increase `T`(Longer timeframe)
++ reduce `base_order_size`(reduce order size)
 2. **Low Volatility Market**:
- - reduce `γ`(Reduce risk aversion)
- - reduce `T`(shorter time period)
- - Increase `base_order_size`(Increase order size)
++ reduce `γ`(Reduce risk aversion)
++ reduce `T`(shorter time period)
++ Increase `base_order_size`(Increase order size)
 3. **High Liquidity Market**:
- - reduce `κ`(Increase price sensitivity)
- - reduce `min_spread_bps`(smaller spreads allowed)
++ reduce `κ`(Increase price sensitivity)
++ reduce `min_spread_bps`(smaller spreads allowed)
 4. **Low Liquidity Market**:
- - Increase `κ`(reduce price sensitivity)
- - Increase `min_spread_bps`(Ensure sufficient spread)
++ Increase `κ`(reduce price sensitivity)
++ Increase `min_spread_bps`(Ensure sufficient spread)
 
 
 
@@ -33155,8 +33789,8 @@ Physical value = fixed-point integer / Scale // Scale = an integer multiple of 1
 + **Scale selection**: strictly align exchange tick_size (example: IF futures tick=0.2 → Scale=10)
 + **Data type**:`int64_t`(Range ±9e18, supports negative values, consistent across all platforms, CPU native acceleration)
 + **Rounding Rules**:
- - price → align downward tick(`align_price_to_tick`）
- - Funds/Profit and Loss → Round to Cents
++ price → align downward tick(`align_price_to_tick`）
++ Funds/Profit and Loss → Round to Cents
 
 **3. Engineering implementation**
 
@@ -33221,15 +33855,15 @@ For end users, Uniswap provides a simple and intuitive experience. Users select 
 ![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1755049700474-bae42ec7-92bd-449b-87c6-d61e758561e6.png)
 
 + **Trader** -> **Execute Swap**
- - **Input:** 3 Token A + 0.30% handling fee
- - **Output:** 1 Token B
++ **Input:** 3 Token A + 0.30% handling fee
++ **Output:** 1 Token B
 + **Execute Exchange** -> **Uniswap Trading Pair (Uniswap Pair)**
- - **Information:** Transactions change the balance of reserves, resulting in new prices.
- - **Price Curve:** Defined by x*y=k
- - **Reserves:**
- * **Pool Start:** 1200 Token A / 400 Token B = Price 3
- * **Pool End:** 1203.03 / 399 = Price 3.01
- - **Result:** -> **Next price**
++ **Information:** Transactions change the balance of reserves, resulting in new prices.
++ **Price Curve:** Defined by x*y=k
++ **Reserves:**
++ **Pool Start:** 1200 Token A / 400 Token B = Price 3
++ **Pool End:** 1203.03 / 399 = Price 3.01
++ **Result:** -> **Next price**
 
 
 
@@ -33257,9 +33891,9 @@ The price difference between the two pools introduces arbitrage opportunities.
 
 + Define a reserve containing DAI and ETH `Pool` data structure.
 + Implement the following operations:
- - `add_liquidity()`
- - `remove_liquidity()`
- - `swap(input_token, input_amount)`
++ `add_liquidity()`
++ `remove_liquidity()`
++ `swap(input_token, input_amount)`
 
 **2. Arbitrage calculation engine**
 
@@ -33271,7 +33905,7 @@ The price difference between the two pools introduces arbitrage opportunities.
 **3. Test cases**
 
 + Simulate a scenario where a user exchanges 100 DAI for ETH in Pool A.
- - Verify the correctness of pool status updates and output amounts.
++ Verify the correctness of pool status updates and output amounts.
 + Simulate the detection and execution process of arbitrage.
 
 **4. Benchmark testing**
@@ -33680,9 +34314,8 @@ if(UNIX)
 endif()
 ```
 
-###
+### 
 ### 2.uniswap-v3
-
 The main feature of Uniswap-v2 is **"uniform distribution of liquidity"**. As a liquidity provider (LP), the funds provided will be evenly distributed across all possible price ranges from 0 to infinity.
 
 One trading pool contains DAI and USDC, two stablecoins worth approximately $ 1. In v2, the liquidity provided is not only distributed between the most commonly traded price range of $0.99 to $ 1.01, but also to the almost impossible prices of $0.1 and $10,000. This leads to huge **capital inefficiency** because most of the money will never be used.
@@ -34177,9 +34810,8 @@ int main() {
 }
 ```
 
-###
+### 
 ### 3.CEX order book solution
-
 **VectorOrderBook：**
 
 1. **Extreme performance requirements** - High-frequency trading systems require nanosecond latency
@@ -34224,9 +34856,9 @@ int main() {
 
 
 ### 4. Triangular Arbitrage
-Suppose there are three trading pairs (a trading pair refers to a market where two assets are exchanged at a certain ratio).
-The first pair is A-B with an exchange ratio of 1:10 (i.e., 1 A can be exchanged for 10 B, and 10 B can be exchanged for 1 A, the same below);
-The second pair is B-C with an exchange ratio of 1:100;
+Suppose there are three trading pairs (a trading pair refers to a market where two assets are exchanged at a certain ratio).  
+The first pair is A-B with an exchange ratio of 1:10 (i.e., 1 A can be exchanged for 10 B, and 10 B can be exchanged for 1 A, the same below);  
+The second pair is B-C with an exchange ratio of 1:100;  
 The third pair is A-C with an exchange ratio of 1:1000.
 
 Assume we hold 1 unit of asset A. When Price(A,C) changes to 1:1100, we can exchange 1 A for 1100 C via the third pair, then exchange 1100 C for 11 B via the second pair, and finally exchange 11 B for 1.1 A via the first pair, achieving a profit of 0.1 A.
@@ -34235,7 +34867,7 @@ Assume we hold 1 unit of asset A. When Price(A,C) changes to 1:1100, we can exch
 
 **Question 1: When Price(A,C) changes to 1:900, is there an arbitrage opportunity? How to operate?**
 
-**Answer to Question 1**
+**Answer to Question 1**  
 When Price(A,C) changes to 1:900, arbitrage is possible. The operation path is A→B→C→A, with the following steps:
 
 1. Exchange 1 A for 10 B (using the A-B ratio of 1:10);
@@ -34248,7 +34880,7 @@ The final profit is approximately 0.111 A, indicating an arbitrage opportunity.
 
 **Question 2: Write a function to detect arbitrage opportunities and determine the operation when any of the three trading pairs’ exchange ratios change.**
 
-**Arbitrage Detection Function Implementation**
+**Arbitrage Detection Function Implementation**  
 Model the exchange ratios between assets as a rate matrix of a directed graph, and judge arbitrage opportunities by detecting "whether the product of exchange rates along a cyclic path is greater than 1". For 3 assets, two core cyclic paths need to be detected: A→B→C→A and A→C→B→A.
 
 ```cpp
@@ -34338,7 +34970,7 @@ int main() {
 
 **Question 3: With 50,000 similar trading pairs in the market, how to find all possible arbitrage loops?**
 
-**Loop Detection for Massive Trading Pairs**
+**Loop Detection for Massive Trading Pairs**  
 Model trading pairs as a directed graph (nodes are assets, edge weights are the logarithms of exchange rates), and convert the "arbitrage loop" problem into a "positive-weight cycle" detection problem (product > 1 is equivalent to log sum > 0). Since long loops have low practical arbitrage value, limit the loop length (e.g., ≤ 5 steps) and use a modified Bellman-Ford algorithm for efficient detection:
 
 1. **Graph Modeling**: Assets are nodes, and the weight of edge X→Y is ln(rate[X][Y]);
@@ -34789,7 +35421,7 @@ int main() {
 
 **Question 5: If the amount exchanged is not fixed at 1 A but ranges from 0 to 1000 A, and due to slippage costs, the larger the input of A, the lower the return rate, but the absolute return may rise in a certain range. How to design an algorithm to find the maximum profit for each loop and all loops?**
 
-**Maximum Profit Algorithm Under Slippage Costs**
+**Maximum Profit Algorithm Under Slippage Costs**  
 Slippage costs cause the return rate to decrease as the input amount increases, but the absolute return may follow a unimodal distribution (first increases, then decreases). Use the ternary search method to find the optimal input amount in the interval [0,1000]:
 
 1. **Slippage Cost Modeling**: Define function f(X→Y, x) as the amount of Y obtainable by investing x units of X (marginal decreasing);
@@ -34837,9 +35469,9 @@ double findMaxProfit(const Loop& loop, const std::vector<double>& base_rates) {
 
 1. **Asset Pair Screening (Code Logic)**: Calculate the sum of squared price differences of candidate asset pairs $ \sum_{t=1}^{T}\left(S_{i,t}-S_{j,t}\right)^{2} $, and select the pair with the minimum value (e.g., stocks in the same industry);
 2. **Deviation Judgment (Code Formula)**: Calculate the mean of price differences $ E[\Delta S_t]=\frac{1}{T}\sum_{t=1}^T \Delta S_t $ and standard deviation $ \sigma[\Delta S_t]=\sqrt{\frac{1}{T-1}\sum_{t=1}^T (\Delta S_t-E[\Delta S_t])^2} $;
-3. **Trade Trigger**:
-If $ \Delta S_\tau > E[\Delta S_\tau] + 2\sigma[\Delta S_\tau] $, execute "sell i, buy j";
-If $ \Delta S_\tau < E[\Delta S_\tau] - 2\sigma[\Delta S_\tau] $, execute "buy i, sell j".
+3. **Trade Trigger**:  
+If $ \Delta S_\tau &gt; E[\Delta S_\tau] + 2\sigma[\Delta S_\tau] $, execute "sell i, buy j";  
+If $ \Delta S_\tau &lt; E[\Delta S_\tau] - 2\sigma[\Delta S_\tau] $, execute "buy i, sell j".
 
 
 
@@ -34864,7 +35496,7 @@ method to analysize, we should use the previous and next BBO data to calculate t
 ### 6.Binance U-based contract multi-factor
 Project address:[https://github.com/zzxscodes/long-short-infra](https://github.com/zzxscodes/long-short-infra)(Python implementation)
 
-Project structure:
+Project structure:  
 Event-Driven Coordination Process (Process 1) - IPC Server
 
 ```plain
@@ -35264,9 +35896,9 @@ async def run(self):
 `**slug_get.py**`** **
 
 1. **Time zone handling**
- - use `zoneinfo.ZoneInfo("America/New_York")` Get **ET time zone**, fallback to UTC if failed.
- * use `zoneinfo` Handling time zones is safer than manually adding or subtracting time and correctly handles daylight saving time.
- * When writing automatic trading scripts, **must be unified to the market's official time zone (ET)**.
++ use `zoneinfo.ZoneInfo("America/New_York")` Get **ET time zone**, fallback to UTC if failed.
++ use `zoneinfo` Handling time zones is safer than manually adding or subtracting time and correctly handles daylight saving time.
++ When writing automatic trading scripts, **must be unified to the market's official time zone (ET)**.
 2. **1 hour contract slug generation**
 
 ```python
@@ -35287,12 +35919,12 @@ PREFIX_MAP = {
 ```
 
 3. **15 minute contract slug generation**
- - logic:
- * The current time is rounded down to the nearest 15 minutes (0, 15, 30, 45)
- * Convert to unix timestamp
- * spell:`{prefix}-15m-{timestamp}`
- * **High-frequency short-cycle market (15m) is usually identified directly with timestamp** to facilitate back-end retrieval and no duplication of names.
- * Align time to a fixed granularity (15m) to avoid "cross-frame" errors.
++ logic:
++ The current time is rounded down to the nearest 15 minutes (0, 15, 30, 45)
++ Convert to unix timestamp
++ spell:`{prefix}-15m-{timestamp}`
++ **High-frequency short-cycle market (15m) is usually identified directly with timestamp** to facilitate back-end retrieval and no duplication of names.
++ Align time to a fixed granularity (15m) to avoid "cross-frame" errors.
 
 
 
@@ -35303,10 +35935,10 @@ PREFIX_MAP = {
 + for `["btc", "eth", "sol", "xrp"]` 15 minute “up or down” market.
 + use `generate_15min_slug` Give each coin the current 15 minutes to generate slug → reuse `gamma-api` Find the corresponding contract.
 + **Monitor the end time of these 15m contracts**:
- - When the end time is ( N_MINUTES_BEFORE_END ) and ( > 0 ) (within the last N minutes and not yet ended)
- - To determine which side of the YES/NO odds is more "favorable", bet on this side (the limit is a certain percentage of the balance)
- - The typical **"catching odds misalignment near settlement" strategy** makes money based on the assumption that the contract is about to end and the market price "reacts incompletely".
- - Use **handicap price** (YES/NO price) as the winning rate proxy instead of the prediction model.
++ When the end time is ( N_MINUTES_BEFORE_END ) and ( > 0 ) (within the last N minutes and not yet ended)
++ To determine which side of the YES/NO odds is more "favorable", bet on this side (the limit is a certain percentage of the balance)
++ The typical **"catching odds misalignment near settlement" strategy** makes money based on the assumption that the contract is about to end and the market price "reacts incompletely".
++ Use **handicap price** (YES/NO price) as the winning rate proxy instead of the prediction model.
 
 **2. Use of py-clob-client (API certificate and order placement)**
 
@@ -35319,13 +35951,13 @@ self.client = ClobClient(host=HOST, key=PRIVATE_KEY, chain_id=POLYGON, creds=cre
 ```
 
 + Key points:
- - First use the private key to connect once and call `create_or_derive_api_creds()` Generate api_key/api_secret/passphrase.
- - Then use these creds to initialize the real `ClobClient`。
++ First use the private key to connect once and call `create_or_derive_api_creds()` Generate api_key/api_secret/passphrase.
++ Then use these creds to initialize the real `ClobClient`。
 + Knowledge points:
- - **Polymarket’s CLOB transactions require two levels of identity**:
- * On-chain identity (`PRIVATE_KEY`/`FUNDER`）
- * CLOB API identities (dynamically generated creds).
- - When 401 occurs, common root causes are: **No derive creds or creds expired/invalid**.
++ **Polymarket’s CLOB transactions require two levels of identity**:
++ On-chain identity (`PRIVATE_KEY`/`FUNDER`）
++ CLOB API identities (dynamically generated creds).
++ When 401 occurs, common root causes are: **No derive creds or creds expired/invalid**.
 + **Get balance (collateral/USDC)**
 
 ```python
@@ -35372,14 +36004,14 @@ self.client.create_and_post_order(order)
 
 + Use slug first to adjust `https://gamma-api.polymarket.com/markets?slug={slug}`。
 + If the return is empty, several **slug variations** will be tried:
- - `-up-or-down-` → `-updown-`
- - `solana` ↔ `sol`，`bitcoin` ↔ `btc`，`ethereum` ↔ `eth`
++ `-up-or-down-` → `-updown-`
++ `solana` ↔ `sol`，`bitcoin` ↔ `btc`，`ethereum` ↔ `eth`
 + then parse:
- - `clobTokenIds`（YES/NO token id）
- - `endDate`(ISO time, converted to `datetime`）
++ `clobTokenIds`（YES/NO token id）
++ `endDate`(ISO time, converted to `datetime`）
 + Knowledge points:
- - **Real online market slugs are often not completely stable** (the naming may be slightly different), and the code needs to be "fuzzy compatible" in various ways.
- - `clobTokenIds` It may be a string or an array → the code uses `json.loads` Be compatible.
++ **Real online market slugs are often not completely stable** (the naming may be slightly different), and the code needs to be "fuzzy compatible" in various ways.
++ `clobTokenIds` It may be a string or an array → the code uses `json.loads` Be compatible.
 
 **4. Risk control and parameters**
 
@@ -35387,16 +36019,16 @@ self.client.create_and_post_order(order)
 + `MAX_POSITION_RATIO = 0.20`: The amount of a single order shall not exceed 20% of the current balance.
 + Check every 15 seconds and trigger the contract `triggered = True`, to prevent duplicate orders.
 + Key points:
- - **Position control**: Use "balance ratio + single contract to be triggered only once" to control risk.
- - **Monitoring frequency**: every 15 seconds, taking into account real-time performance and API frequency limit.
++ **Position control**: Use "balance ratio + single contract to be triggered only once" to control risk.
++ **Monitoring frequency**: every 15 seconds, taking into account real-time performance and API frequency limit.
 
 **5. Strategy logic (side selection rules)**
 
 + if `YES price > 0.5`: Think the probability of rising is greater → Buy YES.
 + Otherwise: think the probability of falling is greater → buy NO.
 + Key points:
- - "0.5" is the midpoint of a symmetric market: YES/NO fair odds.
- - Simple strategy: **Use the handicap price as the probability**, if it is greater than 0.5, it means it is biased to this side.
++ "0.5" is the midpoint of a symmetric market: YES/NO fair odds.
++ Simple strategy: **Use the handicap price as the probability**, if it is greater than 0.5, it means it is biased to this side.
 
 
 
@@ -35406,23 +36038,23 @@ Example:[https://github.com/zzxscodes/feishu-monitor](https://github.com/zzxscod
 **Monitoring Notes**
 
 + **Common monitoring objects**
- - **Transaction Level**
- * Order success rate, order rejection rate (rejected), and timeout error.
- * Transaction delay (the time from order issuance to transaction).
- * Whether the position, margin, and total account equity are within a reasonable range.
- - **Quotes & Data Level**
- * Whether the market subscription is normal (no data interruption or excessive delay).
- * Whether key tables (such as orders, transactions, account_balances, errors) continue to have new records.
- - **System Level**
- * Whether the program is alive (heartbeat) and whether the CPU/memory is abnormal.
- * Are there a large number of `ERROR/CRITICAL`。
++ **Transaction Level**
++ Order success rate, order rejection rate (rejected), and timeout error.
++ Transaction delay (the time from order issuance to transaction).
++ Whether the position, margin, and total account equity are within a reasonable range.
++ **Quotes & Data Level**
++ Whether the market subscription is normal (no data interruption or excessive delay).
++ Whether key tables (such as orders, transactions, account_balances, errors) continue to have new records.
++ **System Level**
++ Whether the program is alive (heartbeat) and whether the CPU/memory is abnormal.
++ Are there a large number of `ERROR/CRITICAL`。
 + **Common implementation methods**
- - **Polling database/interface**: Check regularly like in the project `account_balances`、`errors` The latest one, if the id changes, it is considered that there is a new event.
- - **Log Collection + Alarm**: The application writes logs to files, and then Prometheus + Loki / ELK, etc. collect and alarm centrally.
- - **Thresholds & Rules**: For example:
- * An alarm is triggered when the balance of an account falls below X.
- * Failure to place orders for N consecutive times triggers an alarm.
- * No new market price/no new log for N minutes triggers the "system is suspected to be stuck" alarm.
++ **Polling database/interface**: Check regularly like in the project `account_balances`、`errors` The latest one, if the id changes, it is considered that there is a new event.
++ **Log Collection + Alarm**: The application writes logs to files, and then Prometheus + Loki / ELK, etc. collect and alarm centrally.
++ **Thresholds & Rules**: For example:
++ An alarm is triggered when the balance of an account falls below X.
++ Failure to place orders for N consecutive times triggers an alarm.
++ No new market price/no new log for N minutes triggers the "system is suspected to be stuck" alarm.
 
 **Feishu Webhook Robot**
 
@@ -35445,20 +36077,20 @@ Example:[https://github.com/zzxscodes/feishu-monitor](https://github.com/zzxscod
 **Key Points**
 
 + **Encapsulated sending function**: for example `send_feishu_text(text: str)`, internally responsible for:
- - Automatically add a unified prefix (such as `AILENDING`) to facilitate filtering in the group.
- - Handling exceptions (network problems, printing logs when the return code is not 200).
++ Automatically add a unified prefix (such as `AILENDING`) to facilitate filtering in the group.
++ Handling exceptions (network problems, printing logs when the return code is not 200).
 + **Control frequency & deduplication**
- - Use the "last sent record id" (e.g. `last_error_id`、`last_asset_id`) to determine whether it is a new event and avoid refreshing the screen.
- - Similar alarms can be merged, for example, only one alarm with the same error will be sent within 5 minutes.
++ Use the "last sent record id" (e.g. `last_error_id`、`last_asset_id`) to determine whether it is a new event and avoid refreshing the screen.
++ Similar alarms can be merged, for example, only one alarm with the same error will be sent within 5 minutes.
 + **Format content**
 
 
 
- - Convert database rows to readable text using line breaks or simple key=value lists.
- - Key fields (symbol, balance, error_message, timestamp, etc.) should be placed as early as possible to facilitate human eyes to judge the severity at a glance.
++ Convert database rows to readable text using line breaks or simple key=value lists.
++ Key fields (symbol, balance, error_message, timestamp, etc.) should be placed as early as possible to facilitate human eyes to judge the severity at a glance.
 + **Upstream**: trading system/strategy program, database (write `errors`, `account_balances`, `orders` wait).
 + **Middle layer**: monitoring script (`feishu_monitor`）：
- - Scheduled query → Determine whether there are new records/whether rules are triggered → Construct text.
++ Scheduled query → Determine whether there are new records/whether rules are triggered → Construct text.
 + **Downstream**: Feishu Webhook robot:
- - Receive JSON → Push alert messages within the group.
++ Receive JSON → Push alert messages within the group.
 
