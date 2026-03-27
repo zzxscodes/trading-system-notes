@@ -10642,9 +10642,10 @@ For the Intel Core i5-8259U processor, the maximum number of FLOPs (single preci
 
 The maximum memory bandwidth for the Intel NUC Kit NUC8i5BEH can be calculated as follows. DDR technology allows 64 bits or 8 bytes to be transferred per memory access.
 
-<!-- 这是一张图片，ocr 内容为： -->
-![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1754980565223-ac825286-acb6-4e51-80b2-6d3f98602e70.png)#### Memory Bound optimization
-
+#### <!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1754980565223-ac825286-acb6-4e51-80b2-6d3f98602e70.png)
+####   
+Memory Bound optimization
 + **Cache-friendly data structure:** When designing data structures, consider how to maximize the use of cache locality principles.
     - **Sequential access:** Use hardware prefetcher to access data in the order in memory to improve spatial locality.
     - **Data Compression/Compact:** Reduce data size, improve cache utilization and memory bandwidth efficiency.
@@ -11128,7 +11129,7 @@ Disassembly analysis of target files
 | Assume the function is pure |  | __attribute((const)) |  | __attribute((const)) |
 | Assume the function does not throw an exception | throw() | throw() | throw() | throw() |
 | Functions are assumed to be called only from the same module | static | static | static | static |
-| Assume that member functions are only called from the same module |  | **attribute**((visibility("internal"))) |  | **attribute**((visibility("internal"))) |
+| Assume that member functions are only called from the same module |  | __attribute((visibility("internal"))) |  | __attribute((visibility("internal"))) |
 | Vectorization | #pragma vector always | #pragma vector always |  |  |
 | Optimization function | #pragma optimize(...) |  |  |  |
 | Fast call function | __fastcall | __attribute((fastcall)) | __fastcall |  |
@@ -11140,12 +11141,12 @@ Disassembly analysis of target files
 
 | Identify types | MS Compiler (Windows) | Gnu Compiler | Clang Compiler | Intel Compiler (Windows) | Intel Compiler (Linux) |
 | --- | --- | --- | --- | --- | --- |
-| Compiler flags | _MSC_VER and not __INTEL_COMPILER | **GNUC** and not __INTEL_COMPILER and not **clang** | **clang** | __INTEL_COMPILER or __INTEL_LLVM_COMPILER | __INTEL_COMPILER or __INTEL_LLVM_COMPILER |
+| Compiler flags | _MSC_VER and not __INTEL_COMPILER | __GNUC__ and not __INTEL_COMPILER and not __clang__ | __clang__ | __INTEL_COMPILER or __INTEL_LLVM_COMPILER | __INTEL_COMPILER or __INTEL_LLVM_COMPILER |
 | 16-bit platforms | not _WIN32 | n.a. | n.a. | n.a. | n.a. |
 | 32-bit platform | not _WIN64 | not _WIN64 |  |  |  |
 | 64-bit platforms | _WIN64 | _LP64 | _LP64 | _WIN64 | _LP64 |
 | Windows platform | _WIN32 | _WIN32 |  |  |  |
-| Linuxplatform | n.a. | **unix** **linux** | **unix** **linux** | **unix** **linux** | **unix** **linux** |
+| Linuxplatform | n.a. | __unix__，__linux__ | __unix__，__linux__ | __unix__，__linux__ | __unix__，__linux__ |
 | x86 platform | _M_IX86 | _M_IX86 |  |  |  |
 | x86-64 platform | _M_IX86 and _WIN64 | _M_X64 | _M_X64 |  |  |
 
@@ -15571,9 +15572,10 @@ int main(int argc, char* argv[]) {
 
 
 
-<!-- 这是一张图片，ocr 内容为： -->
-![](https://cdn.nlark.com/yuque/0/2026/png/35485470/1767619685321-d70ca01e-e867-4a84-b4bb-0ee03a8ea80c.png)### Task Seven (Service Access Log Analysis)
-
+### <!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2026/png/35485470/1767619685321-d70ca01e-e867-4a84-b4bb-0ee03a8ea80c.png)  
+  
+Task Seven (Service Access Log Analysis)
 | service_id | access_time | response_time | flow_bytes | status_code |
 | --- | --- | --- | --- | --- |
 | S001 | 2025/3/20 10:00 | 150 | 512 | 200 |
