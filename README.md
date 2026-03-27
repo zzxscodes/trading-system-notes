@@ -1,4 +1,4 @@
-Trading system development-Zhang Zhixuan
+Trading system development-Zhixuan Zhang
 
 Yuque address: [https://www.yuque.com/bluememories/lanaff/nt8zeoa7rxcl185o](https://www.yuque.com/bluememories/lanaff/nt8zeoa7rxcl185o)  
 Blog garden address: [https://www.cnblogs.com/zzxscodes/p/19695166/trading-system-notes](https://www.cnblogs.com/zzxscodes/p/19695166/trading-system-notes)  
