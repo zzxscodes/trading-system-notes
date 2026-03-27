@@ -10673,9 +10673,12 @@ After understanding the CPU performance bottlenecks in the program through the r
 Sources and use cases:[https://weedge.github.io/perf-book-cn/zh/chapters/6-CPU-Features-For-Performance-Analysis/6-2_TMA-Intel_cn.html](https://weedge.github.io/perf-book-cn/zh/chapters/6-CPU-Features-For-Performance-Analysis/6-2_TMA-Intel_cn.html)
 
 <!-- 这是一张图片，ocr 内容为： -->
-![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1754981310810-5c4b8eb4-c1ca-4004-a742-3ecdd5498aa8.png)### 3. Use compiler and other optimization programs  
-gcc documentation:[https://gcc.gnu.org/onlinedocs/](https://gcc.gnu.org/onlinedocs/)
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1754981310810-5c4b8eb4-c1ca-4004-a742-3ecdd5498aa8.png)
 
+###   
+3. Use compiler and other optimization programs  
+  
+gcc documentation:[https://gcc.gnu.org/onlinedocs/](https://gcc.gnu.org/onlinedocs/)
 
 
 **Comparison of optimization capabilities of different C++ compilers**
@@ -13569,7 +13572,7 @@ private:
 
 
 
-### 3. Custom string implementation
+### 3.Custom string implementation
 ```cpp
 #include <iostream>
 #include <cstring>
@@ -13745,7 +13748,7 @@ Alternative implementation:[https://github.com/WG21-SG14/SG14/blob/master/SG14/i
 
 
 
-### 4. Avoid using Magic Static which has overhead
+### 4.Avoid using Magic Static which has overhead
 **Method 1: Explicit initialization, initialization when the main thread starts, priority used**
 
 **Usage scenarios:** It is suitable for harsh scenarios that have strict requirements on the initialization sequence, require complete control of the life cycle, and pursue the ultimate access performance.
@@ -19709,7 +19712,7 @@ public:
 ```
 
 ### 
-### 3.message transmissionProtocol Engine (FIX)
+### 3.message transmission Protocol Engine (FIX)
 The basic building blocks of the FIX protocol are tag-value pairs. Each data field consists of three parts:
 
 1. **Tag**: A unique integer that represents the meaning of the field (for example,`35` represent `MsgType`,`44` represent `Price`).
@@ -21861,8 +21864,9 @@ private:
 
 Message middleware is responsible for system decoupling and interaction of large-scale trading system architecture and clustered distributed trading systems, and separation of critical paths and cold paths. The following is a simple example. PMS and RMS are divided into the upstream of the architecture, and OMS and EMS are divided into the downstream of the architecture. The downstream is often a performance-sensitive critical path.
 
-<!-- 这是一张图片，ocr 内容为： -->
-![](https://cdn.nlark.com/yuque/0/2026/png/35485470/1768269462634-a35a10f7-8d7d-449e-91fa-8dc264f152eb.png)### 5. OMS, EMS, PMS, and RMS of trading systems  
+### <!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2026/png/35485470/1768269462634-a35a10f7-8d7d-449e-91fa-8dc264f152eb.png)5. OMS, EMS, PMS, and RMS of trading systems
+  
 **OMS - Order Management System**
 
 OMS is responsible for managing the complete life cycle of the order.
