@@ -1,8 +1,7 @@
 # Trading System Development - Zhixuan Zhang
-
-- Yuque: [https://www.yuque.com/bluememories/lanaff/nt8zeoa7rxcl185o](https://www.yuque.com/bluememories/lanaff/nt8zeoa7rxcl185o)
-- CNBlogs: [https://www.cnblogs.com/zzxscodes/p/19695166/trading-system-notes](https://www.cnblogs.com/zzxscodes/p/19695166/trading-system-notes)
-- GitHub: [https://github.com/zzxscodes/trading-system-notes](https://github.com/zzxscodes/trading-system-notes)
++ Yuque: [https://www.yuque.com/bluememories/lanaff/nt8zeoa7rxcl185o](https://www.yuque.com/bluememories/lanaff/nt8zeoa7rxcl185o)
++ CNBlogs: [https://www.cnblogs.com/zzxscodes/p/19695166/trading-system-notes](https://www.cnblogs.com/zzxscodes/p/19695166/trading-system-notes)
++ GitHub: [https://github.com/zzxscodes/trading-system-notes](https://github.com/zzxscodes/trading-system-notes)
 
 
 
@@ -21,7 +20,7 @@
 ```shell
   Start the process: taskset -c 1 ./my_app (running on CPU 1)
   Modify a running process: taskset -pc 3 <PID>  (Move PID process to CPU 3)
-  Query process: taskset -pc <PID> 
+  Query process: tasksset -pc <PID> 
   Bind threads under the process: ps -T -p <PID> taskset -p -c <CPU list> <TID> 
 ```
 
@@ -426,12 +425,14 @@ numactl --preferred=1
 
 **1. Core Idea**
 
-<!-- This is a picture, the ocr content is: -->
-![](https://www.yuque.com/api/filetransfer/images?url=https%3A%2F%2Fimg-blog.csdn.net% 2F20150512112954867%3Fwatermark%2F2%2Ftext%2FaHR0cDovL2Jsb2cuY3Nkbi5uZXQvdXN0Y19keWxhbg %3D%3D%2Ffont%2F5a6L5L2T%2Ffontsize%2F400%2Ffill%2FI0JBQkFCMA%3D%3D%2Fdissolve%2F70%2F gravity%2FCenter&sign=cb8c2242e367c91e67d3e234b23aa2d2de4ad6b4a2e4c8b90887099e7f9a79a9)
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://www.yuque.com/api/filetransfer/images?url=https%3A%2F%2Fimg-blog.csdn.net%2F20150512112954867%3Fwatermark%2F2%2Ftext%2FaHR0cDovL2Jsb2cuY3Nkbi5uZXQvdXN0Y19keWxhbg%3D%3D%2Ffont%2F5a6L5L2T%2Ffontsize%2F400%2Ffill%2FI0JBQkFCMA%3D%3D%2Fdissolve%2F70%2Fgravity%2FCenter&sign=cb8c2242e367c91e67d3e234b23aa2d2de4ad6b4a2e4c8b90887099e7f9a79a9&x-oss-process=image%2Fformat%2Cwebp)
 
 On a server with multiple CPU sockets, each CPU has its own local memory, and accessing local memory is much faster than accessing another CPU's memory (remote memory). Therefore, the key to optimization is to ensure that "whoever calculates has his data by his side".
 
-Advanced scenarios (high-performance networks) are CPU, memory, Consistent with PCIe devices (network cards).**2. Linux memory allocation behavior**
+Advanced scenarios (high-performance networks) are CPU, memory, Consistent with PCIe devices (network cards).  
+  
+**2. Linux memory allocation behavior**
 
 + **Default policy**: Always allocate memory **first** on the **local NUMA node** where the current CPU core is located.
 + **Exception**: When local memory is low, behavior is determined by kernel parameter `vm.zone_reclaim_mode` Decide.
@@ -440,12 +441,12 @@ Advanced scenarios (high-performance networks) are CPU, memory, Consistent with 
 
 **3. Management and optimization tools**
 
-1. `numactl`** (most commonly used)**: Command line tool to specify the NUMA policy of an application when starting it.
+1. `numactl` (most commonly used): Command line tool to specify the NUMA policy of an application when starting it.
     - **Force binding (**`--membind`**)**: `numactl --cpunodebind=0 --membind=0 my_app`
         * **Effect**: Forced `my_app` Can only run on node 0's CPU and can only be allocated from node 0's memory. If node 0 runs out of memory, the allocation will fail. Provides the strongest performance certainty.
     - **Priority Use (**`--preferred`**)**: `numactl --preferred=0 my_app`
         * **Effect**: Prioritize allocation from node 0. If it fails, it will automatically fall back to other nodes. Optimize while ensuring program availability.
-2. `sysctl`** (System level adjustment)**:
+2. `sysctl`(System level adjustment):
     - `sudo sysctl -w vm.zone_reclaim_mode=0`: Ensure that the system adopts the default NUMA allocation behavior to avoid unnecessary local memory reclamation delays.
 
 ```shell
@@ -455,7 +456,7 @@ Advanced scenarios (high-performance networks) are CPU, memory, Consistent with 
 # Then execute sudo sysctl -p to make it take effect
 ```
 
-3. `cpuset`** (Bottom Hard Isolation)**:
+3. `cpuset`(Bottom Hard Isolation):
     - `cpuset` While allocating CPU cores, pass `cpuset.mems` The file is also forcibly bound to the memory node, which is better than `numactl` Lower-level kernel-level isolation has the same effect as `numactl --membind` Similar but more isolated.
 
 **4.Before NUMA**
@@ -2767,6 +2768,7 @@ private:
     static constexpr size_t HPA_PAGE_SIZE_1GB = 1ULL* 1024ULL * 1024ULL * 1024ULL;  // 1GBbig page
 };
 ```
+
 ### 8. Inline and inline assembly
 inline related content
 
@@ -2929,7 +2931,6 @@ double ipow(double x, int n) {
 ```
 
 + Key difference: input needs to be declared explicitly (`x`stored in memory,`n`Store in EAX), output (`y`from the top of the floating point stack), and the modified register (`edx`, `st(1)`).**4. Switch between AT&T syntax and Intel syntax**
-
 + **AT&T Syntax Features**: The order of operands is "source → target" (such as`addl %eax, %ebx`), register plus`%`prefix, constant plusprefix, the address format is`offset(base, index, scale)`(like`0x10(%ebx, %ecx, 4)`).
 + **Intel syntax switch**: add at the beginning of the assembly string`.intel_syntax noprefix`, add at the end`.att_syntax prefix`, to ensure that the subsequent code of the compiler is parsed normally.
 
@@ -4439,7 +4440,7 @@ Introduced in C++14`std::conditional_t`, as`std::conditional<...>::type`Alias, s
 std::conditional_t<condition, type A, type B> // Equivalent to std::conditional<condition, type A, type B>::type
 ```
 
-```cpppp
+```plain
 #include <type_traits>
 
 template <typename T>
@@ -6523,9 +6524,9 @@ void preorder_tail_rec(Node* root) {
 
 + **Essence of the problem**: Passing large objects (such as`std::vector`, custom matrix class), value transfer will trigger object copying (calling the copy constructor), and the cost is much higher than reference transfer;
 + **Optimization solution**:
-    1. **For large objects**`const&`**Transfer**: For parameters that do not need to be modified, use "`const Type&`" pass to avoid copying, e.g.`void process(const Matrix& mat)`;
-    2.**Small type direct value transfer**: Yes`int`,`float`For scalar types, the cost of value transfer is equivalent to that of reference transfer (or even faster, avoiding pointer indirect access), and there is no need to force the use of references;
-    3. **Avoid temporary object passing**: Pass constants to reference parameters (such as`process(5)`), the compiler will automatically create a temporary object. If you need to pass constants frequently, you can overload the function to adapt constant parameters (such as`void process(int val)`).
+    1. **For large objects**`const&`**Transfer**: For parameters that do not need to be modified, use "`const Type&`" pass to avoid copying, e.g.`void process(const Matrix& mat)`;  
+  2.**Small type direct value transfer**: Yes`int`,`float`For scalar types, the cost of value transfer is equivalent to that of reference transfer (or even faster, avoiding pointer indirect access), and there is no need to force the use of references;
+    2. **Avoid temporary object passing**: Pass constants to reference parameters (such as`process(5)`), the compiler will automatically create a temporary object. If you need to pass constants frequently, you can overload the function to adapt constant parameters (such as`void process(int val)`).
 
 
 
@@ -6577,13 +6578,13 @@ Modern processors (SSE and subsequent instruction sets) provide specific instruc
 
 **cache prefetch**Is a hardware or software technology that loads data from slower main memory into the faster CPU cache in advance before it is officially requested by the CPU. The core idea is to predict the data that the program may need in the future and move it closer to the computing core in advance, thereby hiding the latency of memory access and preventing the CPU from being idle waiting for data.
 
-<!-- This is a picture, the ocr content is: -->
+<!-- 这是一张图片，ocr 内容为： -->
 ![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1754008438918-0e899738-57c1-460f-95cd-1b338f5e7c91.png)
 
-<!-- This is a picture, the ocr content is: -->
+<!-- 这是一张图片，ocr 内容为： -->
 ![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1754008467997-d4a71ab8-cc27-4a5f-8640-b6d7ffbdab21.png)
 
-<!-- This is a picture, the ocr content is: -->
+<!-- 这是一张图片，ocr 内容为： -->
 ![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1758545054585-5aaf141c-64af-42bb-9348-161418892fed.png)
 
 Software prefetching is mainly implemented in two ways:**Built-in functions (Intrinsics)** and **Compiler Directives/Pragmas**.
@@ -7336,7 +7337,7 @@ x86 CPU instructions related to cache
 | system level control | INVD | Invalidate all internal caches | L1/L2/L3 | none | special testing environment | High latency, may result in data loss |
 
 
-<!-- This is a picture, the ocr content is: -->
+<!-- 这是一张图片，ocr 内容为： -->
 ![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1753491708830-db9b5c2b-9a45-43a8-b14d-3baf38c25974.png)**vectorization**It is an optimization technology that uses the SIMD hardware unit in the CPU to process multiple data elements in parallel. Modern CPUs (such as SSE, AVX, AVX-512 of x86 architecture; NEON of ARM architecture) all contain SIMD instruction sets.
 
 Add 1 to every element in an array.
@@ -7918,7 +7919,7 @@ This code loops through 8 floating point numbers at a time and performs far bett
 
 | technology | interface/command | compiler | advantage | shortcoming |
 | --- | --- | --- | --- | --- |
-|**Hardware prefetching** | (none, automatic) | all | Transparent to programmers | Can only handle simple mode |
+| **Hardware prefetching** | (none, automatic) | all | Transparent to programmers | Can only handle simple mode |
 | **Software prefetching** | `__builtin_prefetch` | GCC, Clang | Flexible to handle complex patterns | Increases programming complexity and may mislead the CPU |
 |  | `_mm_prefetch` | Intel, GCC, Clang | Directly corresponds to x86 instructions | Same as above |
 |  | `#pragma prefetch` | Intel | Simple, loop-level control | compiler specific |
@@ -8012,7 +8013,7 @@ bool has_errors(__m256 result) {
     - Various open source vector libraries
 + Usage example:
 
-```cpppp
+```plain
 #include "vectorclass.h"
 Vec8f a(array1); // 8 single-precision floating point number vectors
 Vec8f b(array2);
@@ -9667,7 +9668,7 @@ If there is no need to customize copy/move logic or destruction behavior, rely o
 
 `std::string_view`Contains a pointer to the beginning of the immutable string buffer and a size. Since a string is a contiguous series of characters, the pointer and size completely define a valid substring range. generally,`std::string_view`Pointed to by`std::string`Have some memory. But it can also point to a string literal with static storage duration or something like a memory mapped file. The following chart shows`std::string_view`Pointed to by`std::string`Memory owned:
 
-<!-- This is a picture, the ocr content is: -->
+<!-- 这是一张图片，ocr 内容为： -->
 ![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1762394126318-e1eb4446-a923-4827-bd9a-67b3382abf6e.png)
 
 Depend on`std::string_view`The defined character sequence need not terminate with a null character, but a character sequence containing a null character is perfectly valid. on the other hand,`std::string`need to be able to`c_str()`Returns a null-terminated string, which means it always stores extra null characters at the end of the sequence.
@@ -9953,8 +9954,6 @@ Tip: Use high bit stealing to carry the state, and the read operation also parti
 | CPU binding | Execute taskset -c 8-15 ./app | No | Bind the application to the isolated core to ensure exclusive resources | Make sure the application is not preempted by other processes |
 | Real-time scheduling | Execute chrt -f 99 taskset -c 8-15 ./app | No | Set the application to real-time priority to ensure that ordinary tasks are preempted immediately | Only used for a single critical process to avoid system unresponsiveness |
 | NUMA binding | Execute numactl --cpunodebind=0 --membind=0 ./app | No | Bind the application to a specific NUMA node to reduce cross-node delay | Use numactl --show to verify the actual binding result |
-
-
 
 
 ### 32. Latency measurement (clock cycles)
@@ -10615,10 +10614,10 @@ private:
 
 ## Common performance bottlenecks and optimization directions
 ### 1.roofline model
-<!-- This is a picture, the ocr content is: -->
+<!-- 这是一张图片，ocr 内容为： -->
 ![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1751353418603-3bacb410-0af1-4337-bee1-0829643af78e.png)
 
-<!-- This is a picture, the ocr content is: -->
+<!-- 这是一张图片，ocr 内容为： -->
 ![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1751353463643-384c934a-436c-47f9-9170-79b93729710f.png)
 
 
@@ -10638,13 +10637,14 @@ Roofline model talks about procedures**Under the constraints of the two indicato
 
 For the Intel Core i5-8259U processor, the maximum number of FLOPs (single precision floating point) using AVX2 and 2 Fused Multiply Add (FMA) units can be calculated as follows:
 
-<!-- This is a picture, the ocr content is: -->
+<!-- 这是一张图片，ocr 内容为： -->
 ![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1754980511442-5bdaedca-91d6-4f36-801c-9a7e335e4165.png)
 
 The maximum memory bandwidth for the Intel NUC Kit NUC8i5BEH can be calculated as follows. DDR technology allows 64 bits or 8 bytes to be transferred per memory access.
 
-<!-- This is a picture, the ocr content is: -->
+<!-- 这是一张图片，ocr 内容为： -->
 ![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1754980565223-ac825286-acb6-4e51-80b2-6d3f98602e70.png)#### Memory Bound optimization
+
 + **Cache-friendly data structure:** When designing data structures, consider how to maximize the use of cache locality principles.
     - **Sequential access:** Use hardware prefetcher to access data in the order in memory to improve spatial locality.
     - **Data Compression/Compact:** Reduce data size, improve cache utilization and memory bandwidth efficiency.
@@ -10672,8 +10672,8 @@ After understanding the CPU performance bottlenecks in the program through the r
 
 Sources and use cases:[https://weedge.github.io/perf-book-cn/zh/chapters/6-CPU-Features-For-Performance-Analysis/6-2_TMA-Intel_cn.html](https://weedge.github.io/perf-book-cn/zh/chapters/6-CPU-Features-For-Performance-Analysis/6-2_TMA-Intel_cn.html)
 
-<!-- This is a picture, the ocr content is: -->
-![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1754981310810-5c4b8eb4-c1ca-4004-a742-3ecdd5498aa8.png)### 3. Use compiler and other optimization programs
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1754981310810-5c4b8eb4-c1ca-4004-a742-3ecdd5498aa8.png)### 3. Use compiler and other optimization programs  
 gcc documentation:[https://gcc.gnu.org/onlinedocs/](https://gcc.gnu.org/onlinedocs/)
 
 
@@ -11084,36 +11084,37 @@ Disassembly analysis of target files
 | Whole program optimization | /GL | --combine -fwhole-program | /Qipo | -ipo |
 | No exception handling | /EHs- |  |  |  |
 | No F.P. Exception Trapping | /fp:except- | -fno-trapping-math -fno-math-errno |  |  |
-| No stack frame | /Oy | -fomit-framepointer -fomit-framepointer | | |
+| No stack frame | /Oy | -fomit-framepointer -fomit-framepointer |  |  |
 | No RTTI | /GR- | -fno-rtti | /GR- | -fno-rtti |
-| Assume no pointer aliases | /Oa | -fno-alias | | |
+| Assume no pointer aliases | /Oa | -fno-alias |  |  |
 | Non-strict floating point | /fp:fast | -ffast-math | /fp:fast /fp:fast=2 | -fp-model fast, -fp-model fast=2 |
-| Fusion multiplication and addition | | -ffp-contract=fast | | |
-| Divide by constant = multiply by reciprocal | | -freciprocal-math | | |
-| Assume no overflow or NAN | | -ffinite-math-only | | |
-| Ignore sign of zeros | | -fno-signed-zeros | | |
-| Simple member pointers | /vms | -fno-complete-member-pointers | /vms | |
-| Quick function call | /Gr | | | |
-| Vector call function | /Gv | | | |
+| Fusion multiplication and addition |  | -ffp-contract=fast |  |  |
+| Divide by constant = multiply by reciprocal |  | -freciprocal-math |  |  |
+| Assume no overflow or NAN |  | -ffinite-math-only |  |  |
+| Ignore sign of zeros |  | -fno-signed-zeros |  |  |
+| Simple member pointers | /vms | -fno-complete-member-pointers | /vms |  |
+| Quick function call | /Gr |  |  |  |
+| Vector call function | /Gv |  |  |  |
 | Function-level linking | /Gy | -ffunction-sections | /Gy | -ffunction-sections |
 | SSE instruction set (128-bit floating point vector) | /arch:SSE | -msse | /arch:SSE | -msse |
 | SSE2 instruction set (128-bit integer or double) | /arch:SSE2 | -msse2 | /arch:SSE2 | -msse2 |
-| SSE3 instruction set | | -msse3 | /arch:SSE3 | -msse3 |
-| Supplementary SSE3 instruction set | | -mssse3 | /arch:SSSE3 | -mssse3 |
-| SSE4.1 instruction set | | -msse4.1 | /arch:SSE4.1 | -msse4.1 |
+| SSE3 instruction set |  | -msse3 | /arch:SSE3 | -msse3 |
+| Supplementary SSE3 instruction set |  | -mssse3 | /arch:SSSE3 | -mssse3 |
+| SSE4.1 instruction set |  | -msse4.1 | /arch:SSE4.1 | -msse4.1 |
 | AVX instruction set | /arch:AVX | -mAVX | /arch:AVX | -mAVX |
 | AVX2 instruction set | /arch:AVX2 | -mAVX2 | /arch:AVX | -mAVX2 |
-| AVX512F instruction set | | -mavx512f | | |
+| AVX512F instruction set |  | -mavx512f |  |  |
 | AVX512VL/BW/DQ instruction set | /arch:AVX512 | -mavx512vl -mavx512bw -mavx512dq | /arch:COREAVX512 | -mavx512vl -mavx512bw -mavx512dq |
-| Autovectorization | /fp:fast /fp:except- | -O2 -fno-trapping-math -fno-math-errno fveclib=libmvec | | |
-| Multi-thread automatic parallelization | | | /Qparallel | -parallel |
+| Autovectorization | /fp:fast /fp:except- | -O2 -fno-trapping-math -fno-math-errno fveclib=libmvec |  |  |
+| Multi-thread automatic parallelization |  |  | /Qparallel | -parallel |
 | OpenMP directive parallelization | /openmp | -fopenmp | /Qopenmp | -openmp |
-| 32-bit code | | -m32 | | |
-| 64-bit code | | -m64 | | |
+| 32-bit code |  | -m32 |  |  |
+| 64-bit code |  | -m64 |  |  |
 | Static linking (multi-threading) | /MT | -static | /MT | -static |
 | Generate assembly listing | /FA | -S -masm=intel | /FA | -S |
-| Generate mapping file | /Fm | | | |
-| Generate optimization report | | | /Qopt-report | -opt-report |**Compiler directives and keywords related to optimization**
+| Generate mapping file | /Fm |  |  |  |
+| Generate optimization report |  |  | /Qopt-report | -opt-report |
+
 
 | Optimization Types | MS Compilers | Gnu and Clang Compilers | Intel Compilers (Windows) | Intel Compilers (Linux) |
 | --- | --- | --- | --- | --- |
@@ -11125,7 +11126,7 @@ Disassembly analysis of target files
 | Assume the function does not throw an exception | throw() | throw() | throw() | throw() |
 | Functions are assumed to be called only from the same module | static | static | static | static |
 | Assume that member functions are only called from the same module |  | **attribute**((visibility("internal"))) |  | **attribute**((visibility("internal"))) |
-| Vectorization |#pragma vector always | #pragma vector always |  |  |
+| Vectorization | #pragma vector always | #pragma vector always |  |  |
 | Optimization function | #pragma optimize(...) |  |  |  |
 | Fast call function | __fastcall | __attribute((fastcall)) | __fastcall |  |
 | Vector call function | __vectorcall | __vectorcall (Clang only) | __vectorcall |  |
@@ -11136,12 +11137,12 @@ Disassembly analysis of target files
 
 | Identify types | MS Compiler (Windows) | Gnu Compiler | Clang Compiler | Intel Compiler (Windows) | Intel Compiler (Linux) |
 | --- | --- | --- | --- | --- | --- |
-| Compiler flags | _MSC_VER and not __INTEL_COMPILER |**GNUC** and not __INTEL_COMPILER and not **clang** | **clang** | __INTEL_COMPILER or __INTEL_LLVM_COMPILER | __INTEL_COMPILER or __INTEL_LLVM_COMPILER |
+| Compiler flags | _MSC_VER and not __INTEL_COMPILER | **GNUC** and not __INTEL_COMPILER and not **clang** | **clang** | __INTEL_COMPILER or __INTEL_LLVM_COMPILER | __INTEL_COMPILER or __INTEL_LLVM_COMPILER |
 | 16-bit platforms | not _WIN32 | n.a. | n.a. | n.a. | n.a. |
 | 32-bit platform | not _WIN64 | not _WIN64 |  |  |  |
 | 64-bit platforms | _WIN64 | _LP64 | _LP64 | _WIN64 | _LP64 |
 | Windows platform | _WIN32 | _WIN32 |  |  |  |
-| Linuxplatform | n.a. |**unix** **linux** | **unix** **linux** | **unix** **linux** | **unix** **linux** |
+| Linuxplatform | n.a. | **unix** **linux** | **unix** **linux** | **unix** **linux** | **unix** **linux** |
 | x86 platform | _M_IX86 | _M_IX86 |  |  |  |
 | x86-64 platform | _M_IX86 and _WIN64 | _M_X64 | _M_X64 |  |  |
 
@@ -11282,10 +11283,11 @@ unsigned int _mm_CRC32_u8(unsigned int crc, unsigned char data);
 + **Round-Trip Time (RTT)**: The round-trip time from order sending to the exchange, processing and return confirmation, including network transmission, matching engine processing, response return, etc.
 + **Time to First Byte**: The transmission time of the first byte of data from the sender to the receiver, often used to measure network transmission efficiency.
 
-<!-- This is a picture, the ocr content is: -->
+<!-- 这是一张图片，ocr 内容为： -->
 ![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1753750655002-5050c443-9100-4db2-9452-916b96745054.png)
 
 2.**Statistical Latency Metrics**
+
 + **Average delay**: The average time-consuming of all operations reflects the overall performance level and is susceptible to interference from extreme values. In actual scenarios, the certainty of delay is more important.
 + **Median latency (P50)**: It better reflects the latency performance of typical scenarios and excludes the influence of outliers.
 + **Tail delay (P99/P999)**: The maximum delay that 99%/99.9% of operations can complete. It is crucial for systems with extremely high stability requirements (such as market maker systems) and needs to be controlled at the microsecond level or even nanosecond level.
@@ -12582,15 +12584,15 @@ namespace lfc {
 ### 2.Implement thread-safe queues
 **1.disruptor**
 
-<!-- This is a picture, the ocr content is: -->
+<!-- 这是一张图片，ocr 内容为： -->
 ![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1758544813281-994966ce-b4a4-410c-bff1-53903be0872e.png)
 
-<!-- This is a picture, the ocr content is: -->
+<!-- 这是一张图片，ocr 内容为： -->
 ![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1758545299285-ed969d30-d167-41c1-bb22-0f2b685e4716.png)
 
 Disruptor achieves low-latency concurrent communication through modular component design. The functions and collaboration logic of each component are clear, as follows:
 
-|**Component name** | **Core functions** | **Key Features** |
+| **Component name** | **Core functions** | **Key Features** |
 | :--- | :--- | :--- |
 | Producer | Generate and publish events to a ring buffer | There is no competition in the single-producer scenario. Multiple producers seize buffer slots through CAS operations to avoid lock overhead. |
 | Ring Buffer | Core data structure for storing events | Pre-allocated fixed size, no runtime memory allocation/recycling, supports pointer array or structure array to store event containers |
@@ -15566,8 +15568,9 @@ int main(int argc, char* argv[]) {
 
 
 
-<!-- This is a picture, the ocr content is: -->
+<!-- 这是一张图片，ocr 内容为： -->
 ![](https://cdn.nlark.com/yuque/0/2026/png/35485470/1767619685321-d70ca01e-e867-4a84-b4bb-0ee03a8ea80c.png)### Task Seven (Service Access Log Analysis)
+
 | service_id | access_time | response_time | flow_bytes | status_code |
 | --- | --- | --- | --- | --- |
 | S001 | 2025/3/20 10:00 | 150 | 512 | 200 |
@@ -17200,8 +17203,8 @@ int main(){
 
 Event Sourcing: The system does not directly store the current state, but persists all business events that cause state changes, and reconstructs the state at any point in time by replaying these immutable event streams.
 
-1.**State is driven by events**: Do not directly save the current state of the system, but persist all state changes (such as order creation, matching, cancellation) in the form of "immutable events" in a complete and orderly manner.
-2. **State can be reconstructed**: By "replaying" the historical event sequence, the state of the system at any moment can be accurately restored.
+1.**State is driven by events**: Do not directly save the current state of the system, but persist all state changes (such as order creation, matching, cancellation) in the form of "immutable events" in a complete and orderly manner.  
+2. **State can be reconstructed**: By "replaying" the historical event sequence, the state of the system at any moment can be accurately restored.  
 3. **Naturally auditable**: The event log completely records all operation history, which facilitates troubleshooting, compliance auditing and backtesting.
 
 In the trading system, Event Sourcing is particularly suitable for processing core processes such as order life cycle, capital flow, and position changes, and can solve the historical tracing problems in the traditional "status coverage" model.
@@ -17371,7 +17374,7 @@ The cooperation between CQRS and Event Sourcing is as follows:
 
 `Command → Event Store(sole source of truth)→ Query Model(projection)`
 
-```cpppp
+```plain
 #include <iostream>
 #include <vector>
 #include <unordered_map>
@@ -19094,7 +19097,6 @@ public:
 3. Order Index (OrderIndex): O(1) positioning order
 + Storage: Open address hash table (`absl::flat_hash_map`), `Key=orderID`.
 + Merge index:`Value` is the displacement combined value (`High 8 bits = price level index | Low 15 bits = order index`), reverse bit operation during parsing.**Compression optimization mechanism**
-
 + Trigger conditions:`start`/`end` The proportion of invalid items in the interval > configuration threshold (such as 50%).
 + Operation steps:
     1. Move valid items to the head of the array and arrange them compactly;
@@ -21481,10 +21483,10 @@ class CtpTdApi(tdapi.CThostFtdcTraderSpi):
 ctp multi-account manual trading terminal tool  
 [**https://github.com/zzxscodes/ctp-multi-account**](https://github.com/zzxscodes/ctp-multi-account)
 
-<!-- This is a picture, the ocr content is: -->
+<!-- 这是一张图片，ocr 内容为： -->
 ![](https://cdn.nlark.com/yuque/0/2026/png/35485470/1773323381777-754fe5c0-0d09-4963-ba96-0b0d8b956eb9.png)
 
-<!-- This is a picture, the ocr content is: -->
+<!-- 这是一张图片，ocr 内容为： -->
 ![](https://cdn.nlark.com/yuque/0/2026/png/35485470/1773323389171-2df28d30-8215-4afa-ace3-c13a1817bc97.png)**Project as a whole**
 
 + **Project positioning**: **Multi-account unified access** framework based on CTP. through a `ctp_server` Unify the management of transactions and market connections of multiple accounts, and expose customized TCP protocols to the outside world; through the command line `ctp_client` To test login, query, order placement, order cancellation, market subscription, etc.
@@ -21494,8 +21496,8 @@ ctp multi-account manual trading terminal tool
 + **Multi-account management structure**
     - **Server side core class**:`ServerApp`(Multiple account scheduling),`TcpServer`(TCP monitoring and event loop),`Session`(a TCP connection),`CtpTraderAdapter` / `CtpMdAdapter`(Encapsulation of CTP transaction/market interface).
     - **Multi-account mapping relationship**:
-        * `std::unordered_map<std::string, std::unique_ptr<CtpTraderAdapter>> traders_`:`user_id -> Trading channel`* `std::unordered_map<std::string, std::vector<Session*>> sessions_by_user_`:`user_id -> All TCP sessions using this account`* `std::unordered_map<std::string, std::vector<Session*>> md_subscribers_by_instrument_`:`Contract -> Subscribe to all sessions of this contract`
-    -**One account, multiple terminal reuse**: same `user_id` Log in again and the existing one will be reused. `CtpTraderAdapter`, only add new ones `Session`.
+        * `std::unordered_map<std::string, std::unique_ptr<CtpTraderAdapter>> traders_`:`user_id -> Trading channel`* `std::unordered_map<std::string, std::vector<Session*>> sessions_by_user_`:`user_id -> All TCP sessions using this account`* `std::unordered_map<std::string, std::vector<Session*>> md_subscribers_by_instrument_`:`Contract -> Subscribe to all sessions of this contract`  
+  -**One account, multiple terminal reuse**: same `user_id` Log in again and the existing one will be reused. `CtpTraderAdapter`, only add new ones `Session`.
 + **CTP interface encapsulation and adaptation layer**
     - `CtpTraderAdapter` / `CtpMdAdapter` Encapsulated CTP `TraderApi` / `MdApi`, providing the upper layer with:
         * `init()` / `shutdown()` Life cycle management.
@@ -21859,8 +21861,8 @@ private:
 
 Message middleware is responsible for system decoupling and interaction of large-scale trading system architecture and clustered distributed trading systems, and separation of critical paths and cold paths. The following is a simple example. PMS and RMS are divided into the upstream of the architecture, and OMS and EMS are divided into the downstream of the architecture. The downstream is often a performance-sensitive critical path.
 
-<!-- This is a picture, the ocr content is: -->
-![](https://cdn.nlark.com/yuque/0/2026/png/35485470/1768269462634-a35a10f7-8d7d-449e-91fa-8dc264f152eb.png)### 5. OMS, EMS, PMS, and RMS of trading systems
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2026/png/35485470/1768269462634-a35a10f7-8d7d-449e-91fa-8dc264f152eb.png)### 5. OMS, EMS, PMS, and RMS of trading systems  
 **OMS - Order Management System**
 
 OMS is responsible for managing the complete life cycle of the order.
@@ -25505,7 +25507,7 @@ $ \text{VWAP slippage (bps)} = \frac{P_{\text{your avg}} - P_{\text{mkt VWAP}}}{
 
 Arrival price $ m $ is the mid (or first touch) when the commonly used mother order arrives.
 
-$ \mathrm{IS\,(bps)} = s \cdot \frac{P_{\mathrm{fill\,avg}} - m}{m} \times 10000, \qquad s = \begin{cases} +1 &amp;amp;amp; \text{Buy} \\ -1 &amp;amp;amp; \text{Sell} \end{cases} $
+$ \mathrm{IS\,(bps)} = s \cdot \frac{P_{\mathrm{fill\,avg}} - m}{m} \times 10000, \qquad s = \begin{cases} +1 &amp;amp;amp;amp; \text{Buy} \\ -1 &amp;amp;amp;amp; \text{Sell} \end{cases} $
 
 + Buyer: Transaction price is below mid → IS is negative → better.
 
@@ -25526,7 +25528,7 @@ $ \mathrm{fill\,rate} = \frac{Q_{\mathrm{filled}}}{Q_{\mathrm{requested}}} $
 
 `requested == 0` When defined as 0 or N/A, division by zero is avoided. Conditional writing:
 
-$ \mathrm{fill\,rate} = \begin{cases} Q_{\mathrm{filled}} / Q_{\mathrm{requested}} &amp;amp;amp; Q_{\mathrm{requested}} &amp;amp;gt; 0 \\ 0 \;\text{or N/A} &amp;amp;amp; Q_{\mathrm{requested}} = 0 \end{cases}$
+$  \mathrm{fill\,rate} = \begin{cases} Q_{\mathrm{filled}} / Q_{\mathrm{requested}} &amp;amp;amp;amp; Q_{\mathrm{requested}} &amp;amp;amp;gt; 0 \\ 0 \;\text{or N/A} &amp;amp;amp;amp; Q_{\mathrm{requested}} = 0 \end{cases} $
 
 
 
@@ -26701,7 +26703,7 @@ void applyStateUpdate(const StateUpdate& update) {
 
 
 **Architecture Collaboration**:  
-`Client -> [Matching (Command Consensus)] -> TradeEvent -> [Counter (Result Consensus)] -> AccountState`### 15. Exchange protocol layering and sequence consistency
+`Client -> [Matching (Command Consensus)] -> TradeEvent -> [Counter (Result Consensus)] -> AccountState`### 15. Exchange protocol layering and sequence consistency  
 1.**Protocol layering**  
 Session layer: login, heartbeat, reconnection, sequence number maintenance, retransmission negotiation.  
 Business layer: order book increments, transactions, status events, snapshot events.  
@@ -27408,7 +27410,6 @@ int main() {
 + Use "(Current value after centralization) / moving window standard deviation" to eliminate sudden changes in the fluctuation amplitude and stabilize the variance.
     - `moving_std`The function calculates the moving window standard deviation;
     - Double stabilization:`(raw_indicator[i] - moving mean) / moving standard deviation`, simultaneously solving the non-stationary problems of mean and variance.**3. Trade-off relationship between window length**
-
 + A short window can maximize the stability, but will lose a lot of original information; a long window retains a lot of information, but the stability improvement is limited.
     - contrast`WINDOW_SHORT=20`(short window) and`WINDOW_LONG=100`(Long window) mean centering effect;
     - The results show that the ">512-day state number" of the short window is much less than that of the long window, which verifies the conclusion that "short windows are more stationary".
@@ -27907,7 +27908,7 @@ cleanup:
     1. **Data Standardization**: Perform "mean reduction and standard deviation" processing on input indicators (such as trends, volatility) and target variables (such as returns) (required in the book to reduce numerical errors and improve convergence speed);
     2. **Fast update of covariance**: When the number of samples (number of historical bars in the market) is much larger than the number of indicators, the covariance matrix between indicators and the cross-covariance between indicators and targets are pre-calculated, reducing the time complexity of each iteration from $ O(N*K) $ (N is the number of samples, K is the number of indicators) to $ O(K^2) $, adapting to the efficient computing requirements of "large samples, multiple indicators" of the trading system;
     3. **Soft threshold update**: The core operation of Lasso/L1 regularization, applying "threshold clipping" to the optimized coefficients to return small coefficients to zero (implementing variable selection), the formula is:  
-$ S(z,\gamma)=\begin{cases}z-\gamma &amp;amp;amp; z&amp;amp;gt;\gamma \\ z+\gamma &amp;amp;amp; z&amp;amp;lt;-\gamma \\ 0 &amp;amp;amp; \text{otherwise}\end{cases} $  
+$ S(z,\gamma)=\begin{cases}z-\gamma &amp;amp;amp;amp; z&amp;amp;amp;gt;\gamma \\ z+\gamma &amp;amp;amp;amp; z&amp;amp;amp;lt;-\gamma \\ 0 &amp;amp;amp;amp; \text{otherwise}\end{cases} $  
 Among them $ \gamma=\alpha*\lambda $ (the combination of regularization strength and type).
 
 **(3) Lambda Optimization: Path Descent + Cross Validation ("Optimal Regularization Strength Selection") **
@@ -31502,6 +31503,7 @@ int main() {
 }
 
 ```
+
 ### 12.Permutation test verification strategyincome
 Replacement test passed**Randomly rearrange sample labels**(such as the positive and negative marks of transaction income), destroy the potential correlation in the original data, generate an "uncorrelated" reference distribution, and then judge the statistical significance of the original data. In trading systems, it is often used to verify "whether the strategy returns are significantly better than random":
 
@@ -31669,7 +31671,7 @@ private:
 };
 ```
 
-```cpppp
+```plain
 #include "PermutationTest.h"
 
 // test function
@@ -33788,12 +33790,13 @@ Uniswap charges a fee of **0.30%** per transaction, which is added back to the r
 
 For end users, Uniswap provides a simple and intuitive experience. Users select an input token and an output token, specify the input amount, and the protocol calculates the output amount they will receive. Once confirmed, the exchange is executed and the output tokens are immediately sent to the user's wallet.
 
-<!-- This is a picture, the ocr content is: -->
+<!-- 这是一张图片，ocr 内容为： -->
 ![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1755049700474-bae42ec7-92bd-449b-87c6-d61e758561e6.png)
 
-+**Trader** -> **Execute Swap**
-    - **Input:** 3 Token A + 0.30% handling fee
++**Trader** -> **Execute Swap**  
+    - **Input:** 3 Token A + 0.30% handling fee  
     - **Output:** 1 Token B
+
 + **Execute Exchange** -> **Uniswap Trading Pair (Uniswap Pair)**
     - **Information:** Transactions change the balance of reserves, resulting in new prices.
     - **Price Curve:** Defined by x*y=k
@@ -35406,8 +35409,8 @@ double findMaxProfit(const Loop& loop, const std::vector<double>& base_rates) {
 1. **Asset Pair Screening (Code Logic)**: Calculate the sum of squared price differences of candidate asset pairs $ \sum_{t=1}^{T}\left(S_{i,t}-S_{j,t}\right)^{2} $, and select the pair with the minimum value (e.g., stocks in the same industry);  
 2. **Deviation Judgment (Code Formula)**: Calculate the mean of price differences $ E[\Delta S_t]=\frac{1}{T}\sum_{t=1}^T \Delta S_t $ and standard deviation $ \sigma[\Delta S_t]=\sqrt{\frac{1}{T-1}\sum_{t=1}^T (\Delta S_t-E[\Delta S_t])^2} $;  
 3. **Trade Trigger**:  
-If $ \Delta S_\tau &amp;gt; E[\Delta S_\tau] + 2\sigma[\Delta S_\tau] $, execute "sell i, buy j";  
-If $ \Delta S_\tau &amp;lt; E[\Delta S_\tau] - 2\sigma[\Delta S_\tau] $, execute "buy i, sell j".
+If $ \Delta S_\tau &amp;amp;gt; E[\Delta S_\tau] + 2\sigma[\Delta S_\tau] $, execute "sell i, buy j";  
+If $ \Delta S_\tau &amp;amp;lt; E[\Delta S_\tau] - 2\sigma[\Delta S_\tau] $, execute "buy i, sell j".
 
 
 
