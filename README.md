@@ -425,7 +425,7 @@ numactl --preferred=1
 
 **1. Core Idea**
 
-<!-- 这是一张图片，ocr 内容为： -->
+<!-- this is a picture，ocr content is： -->
 ![](https://www.yuque.com/api/filetransfer/images?url=https%3A%2F%2Fimg-blog.csdn.net%2F20150512112954867%3Fwatermark%2F2%2Ftext%2FaHR0cDovL2Jsb2cuY3Nkbi5uZXQvdXN0Y19keWxhbg%3D%3D%2Ffont%2F5a6L5L2T%2Ffontsize%2F400%2Ffill%2FI0JBQkFCMA%3D%3D%2Fdissolve%2F70%2Fgravity%2FCenter&sign=cb8c2242e367c91e67d3e234b23aa2d2de4ad6b4a2e4c8b90887099e7f9a79a9&x-oss-process=image%2Fformat%2Cwebp)
 
 On a server with multiple CPU sockets, each CPU has its own local memory, and accessing local memory is much faster than accessing another CPU's memory (remote memory). Therefore, the key to optimization is to ensure that "whoever calculates has his data by his side".
