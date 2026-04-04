@@ -474,7 +474,7 @@ NUMA optimization is an iterative process that requires continuous performance a
 ```shell
 $ numastat -m # View memory policy
 $ numastat -c # View the memory access statistics of each CPU
-$ numbered -p <pid> # View NUMA statistics for a specific process
+$ numastat -p <pid> # View NUMA statistics for a specific process
 ```
 
 + `perf`: Performance analysis tool under Linux that can track various hardware events, such as cache misses (`cache-misses`), remote memory access (`mem_load_retired.l3_miss` wait). Discover potential NUMA bottlenecks by analyzing these events.
@@ -494,41 +494,106 @@ Factors to consider:
 
 **Explicit NUMA-aware memory allocation**
 
-The following is libnuma's common interfaces and related system call tables:
+The following tables list common **libnuma** APIs and NUMA-related syscalls (see [numa(3)](https://man7.org/linux/man-pages/man3/numa.3.html) and upstream [numa.h](https://github.com/numactl/numactl/blob/master/numa.h); policy constants in [mbind(2)](https://man7.org/linux/man-pages/man2/mbind.2.html)):
 
-| **Classification** | **Function signature** | **Return value type** | **Key description** |
+| **Classification** | **Function signature** | **Return type** | **Description** |
 | :--- | :--- | :--- | :--- |
-| **Initialization and version** | `void numa_available(void);` | `void` | Check NUMA support, terminate the program if not supported |
-|  | `const char *numa_version(void);` | `const char *` | Returns the library version string (such as`libnuma 2.0.14`) |
-| **Node information query** | `int numa_max_node(void);` | `int` | Returns the maximum node number (starts from 0, returns - 1 if there are no nodes) |
-|  | `int numa_num_configured_nodes(void);` | `int` | Returns the total number of configured nodes |
-|  | `extern struct bitmask *numa_all_nodes_ptr;` | Global variable | Contains a predefined bitmask of all available nodes |
-|  | `extern struct bitmask *numa_nodes_ptr;` | Global variables | Bitmask of nodes accessible to the current process |
-| **Memory Allocation** | `void *numa_alloc_onnode(size_t size, int node);` | `void *` | Allocate memory on the specified node and return on failure`NULL` |
-|  | `void *numa_alloc_local(size_t size);` | `void *` | Allocate memory on the local node and return on failure`NULL` |
-|  | `void *numa_alloc_interleaved(size_t size);` | `void *` | Cross-allocate memory to all nodes, return on failure`NULL` |
-|  | `void numa_free(void *ptr, size_t size);` | `void` | Release`numa_alloc_*`Allocated memory (size needs to be specified) |
-|  | `void *numa_realloc(void *oldptr, size_t oldsize, size_t newsize);` | `void *` | Reallocate memory and maintain node affinity, return on failure`NULL` |
-| **Memory Policy Settings** | `void numa_set_localalloc(void);` | `void` | Set the default policy to "Local node first" |
-|  | `void numa_set_interleave_mask(const struct bitmask *mask);` | `void` | Press`mask`Node set set cross assignment mode |
-|  | `void numa_set_bind_mask(const struct bitmask *mask);` | `void` | Limit memory allocation to`mask`Specify node |
-|  | `void numa_set_preferred(int node);` | `void` | Set the preferred node for memory allocation |
-| **Process Affinity** | `int numa_run_on_node(int node);` | `int` | Bind the current process to the node`node`CPU, returns 0 on success, -1 on failure |
-|  | `int numa_run_on_node_mask(const struct bitmask *mask);` | `int` | Bind the current process to`mask`CPU of the node set, returns 0 on success, -1 on failure |
-|  | `int numa_sched_setaffinity(pid_t pid, const struct bitmask *mask);` | `int` | Setup process`pid`The CPU affinity of`mask`Node, returns 0 on success, -1 on failure |
-| **Node attribute query** | `long long numa_node_size64(int node, int *free);` | `long long` | Returns the total memory of the node (bytes),`free`Output free memory (KB), return - 1 on failure |
-|  | `int numa_node_of_cpu(int cpu);` | `int` | Return to CPU`cpu`The node it belongs to, returns - 1 on failure |
-| **Bit mask operation** | `struct bitmask *numa_bitmask_alloc(unsigned int nbits);` | `struct bitmask *` | Allocate accommodation`nbits`Bit mask of bits, returned on failure`NULL` |
-|  | `void numa_bitmask_free(struct bitmask *b);` | `void` | release bitmask`b`(`b`for`NULL`no operation) |
-|  | `void numa_bitmask_setall(struct bitmask *b);` | `void` | Settings`b`All bits of (including all nodes) |
-|  | `void numa_bitmask_clearall(struct bitmask *b);` | `void` | Clear`b`All bits of (excluding any nodes) |
-|  | `void numa_bitmask_setbit(struct bitmask *b, unsigned int i);` | `void` | Settings`b`of the`i`bit (contains node`i`) |
-|  | `void numa_bitmask_clearbit(struct bitmask *b, unsigned int i);` | `void` | Clear`b`of the`i`bits (excluding nodes`i`) |
-|  | `int numa_bitmask_is_set(const struct bitmask *b, unsigned int i);` | `int` | Check`b`of the`i`If the bit is set, 1 is returned, otherwise 0 is returned |
-|  | `struct bitmask *numa_allocate_nodemask(void);` | `struct bitmask *` | Allocates a node bitmask of default size (equivalent to`numa_bitmask_alloc(numa_max_node()+1)`) |
-|  | `void numa_free_nodemask(struct bitmask *b);` | `void` | Release`numa_allocate_nodemask`assigned bitmask |
-| **Large pages + NUMA related system calls** | `void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset);` | `void *` | allocate memory (`MAP_HUGETLB`flag for large pages), returns on failure`MAP_FAILED` |
-|  | `int mbind(void *start, size_t length, int policy, const unsigned long *nmask, unsigned int maxnode, unsigned int flags);` | `int` | Set the NUMA policy for the memory block (such as`MPOL_BIND`), returns 0 on success, -1 on failure |
+| **Initialization** | `int numa_available(void);` | `int` | Must be called first; **−1** means other libnuma calls are undefined (not `void`) |
+| **API version** | `#define LIBNUMA_API_VERSION` | macro | Compile-time API level (currently 2); there is **no** standard `numa_version()` |
+| **Topology** | `int numa_max_node(void);` | `int` | Highest node id on this system |
+|  | `int numa_max_possible_node(void);` | `int` | Upper bound related to kernel node representation |
+|  | `int numa_num_configured_nodes(void);` | `int` | Number of memory nodes |
+|  | `int numa_num_possible_nodes(void);` | `int` | Size of kernel node mask |
+|  | `int numa_num_configured_cpus(void);` | `int` | Number of CPUs |
+|  | `int numa_num_possible_cpus(void);` | `int` | Size of kernel CPU mask |
+|  | `struct bitmask *numa_get_mems_allowed(void);` | `struct bitmask *` | Nodes allowed under current cpuset |
+|  | `int numa_num_task_cpus(void);` | `int` | CPUs available to this task |
+|  | `int numa_num_task_nodes(void);` | `int` | Nodes on which this task may allocate |
+| **Globals** | `extern struct bitmask *numa_all_nodes_ptr;` | global | Allocatable nodes for this task (do not modify) |
+|  | `extern struct bitmask *numa_nodes_ptr;` | global | Nodes exposed by the kernel |
+|  | `extern struct bitmask *numa_no_nodes_ptr;` | global | Empty node set |
+|  | `extern struct bitmask *numa_all_cpus_ptr;` | global | CPUs this task may run on |
+| **Parsing** | `struct bitmask *numa_parse_nodestring(const char *s);` | `struct bitmask *` | e.g. `0-3,7`, `all`, `!1` |
+|  | `struct bitmask *numa_parse_nodestring_all(const char *s);` | `struct bitmask *` | Same, not limited to current nodeset |
+|  | `struct bitmask *numa_parse_cpustring(const char *s);` | `struct bitmask *` | Parse CPU list |
+|  | `struct bitmask *numa_parse_cpustring_all(const char *s);` | `struct bitmask *` | Same, not limited to current cpuset |
+|  | `int numa_parse_bitmap(char *line, struct bitmask *mask);` | `int` | Parse sysfs-style hex bitmap |
+| **Node size / placement** | `long numa_node_size(int node, long *freep);` | `long` | Node memory; optional free bytes via `freep` |
+|  | `long long numa_node_size64(int node, long long *freep);` | `long long` | 64-bit-safe variant |
+|  | `int numa_node_of_cpu(int cpu);` | `int` | NUMA node of CPU |
+|  | `int numa_distance(int node1, int node2);` | `int` | SLIT distance (multiples of 10; 0 on error) |
+|  | `int numa_pagesize(void);` | `int` | Page size |
+| **Preferred / many** | `int numa_preferred(void);` | `int` | Current preferred node |
+|  | `int numa_preferred_err(void);` | `int` | Preferred node with error if unavailable |
+|  | `void numa_set_preferred(int node);` | `void` | Set preferred; `node == -1` → local |
+|  | `int numa_has_preferred_many(void);` | `int` | `MPOL_PREFERRED_MANY` support |
+|  | `void numa_set_preferred_many(struct bitmask *m);` | `void` | Multiple preferred nodes |
+|  | `struct bitmask *numa_preferred_many(void);` | `struct bitmask *` | Query; caller must `numa_bitmask_free` |
+|  | `int numa_has_home_node(void);` | `int` | Home-node feature |
+|  | `int numa_set_mempolicy_home_node(void *start, unsigned long len, int home_node, int flags);` | `int` | Set home node for a range |
+| **Policy / bind** | `void numa_set_localalloc(void);` | `void` | Prefer local node |
+|  | `void numa_set_interleave_mask(struct bitmask *m);` | `void` | Page interleave; empty mask disables |
+|  | `struct bitmask *numa_get_interleave_mask(void);` | `struct bitmask *` | Current interleave mask |
+|  | `void numa_set_weighted_interleave_mask(struct bitmask *m);` | `void` | Weighted interleave |
+|  | `struct bitmask *numa_get_weighted_interleave_mask(void);` | `struct bitmask *` | Current weighted mask |
+|  | `void numa_set_membind(struct bitmask *m);` | `void` | **Allocate only from nodes in mask** (replaces incorrect `numa_set_bind_mask`) |
+|  | `void numa_set_membind_balancing(struct bitmask *m);` | `void` | Membind + optional kernel NUMA balancing |
+|  | `struct bitmask *numa_get_membind(void);` | `struct bitmask *` | Current membind mask |
+|  | `void numa_bind(struct bitmask *m);` | `void` | Run on nodes’ CPUs + membind |
+|  | `void numa_set_bind_policy(int strict);` | `void` | Strict vs preferred for binds |
+|  | `void numa_set_strict(int flag);` | `void` | Fail if existing pages violate policy |
+| **Allocation** | `void *numa_alloc_onnode(size_t size, int node);` | `void *` | Allocate on node |
+|  | `void *numa_alloc_local(size_t size);` | `void *` | Allocate on local node |
+|  | `void *numa_alloc_interleaved(size_t size);` | `void *` | Interleaved on all nodes |
+|  | `void *numa_alloc_interleaved_subset(size_t size, struct bitmask *m);` | `void *` | Interleaved subset |
+|  | `void *numa_alloc_weighted_interleaved(size_t size);` | `void *` | Weighted interleave |
+|  | `void *numa_alloc_weighted_interleaved_subset(size_t size, struct bitmask *m);` | `void *` | Weighted subset |
+|  | `void *numa_alloc(size_t size);` | `void *` | Use current task policy |
+|  | `void *numa_realloc(void *old, size_t oldsz, size_t newsz);` | `void *` | Resize; preserve policy when possible |
+|  | `void numa_free(void *ptr, size_t size);` | `void` | Free `numa_alloc_*` |
+| **Ranges / migration** | `void numa_interleave_memory(void *p, size_t sz, struct bitmask *m);` | `void` | Interleave mapped, not-yet-faulted region |
+|  | `void numa_weighted_interleave_memory(void *p, size_t sz, struct bitmask *m);` | `void` | Weighted interleave on range |
+|  | `void numa_tonode_memory(void *p, size_t sz, int node);` | `void` | Place pages on node |
+|  | `void numa_tonodemask_memory(void *p, size_t sz, struct bitmask *m);` | `void` | Place on node set |
+|  | `void numa_setlocal_memory(void *p, size_t sz);` | `void` | Place on current node |
+|  | `void numa_police_memory(void *p, size_t sz);` | `void` | Enforce policy (RMW; watch races) |
+|  | `int numa_move_pages(pid_t pid, unsigned long count, void **pages, const int *nodes, int *status, int flags);` | `int` | Wrapper for `move_pages(2)` |
+|  | `int numa_migrate_pages(pid_t pid, struct bitmask *from, struct bitmask *to);` | `int` | Wrapper for `migrate_pages(2)` |
+| **CPU affinity** | `int numa_run_on_node(int node);` | `int` | Run on node; `-1` clears |
+|  | `int numa_run_on_node_mask(struct bitmask *m);` | `int` | Run on node mask |
+|  | `int numa_run_on_node_mask_all(struct bitmask *m);` | `int` | Same, ignores cpuset |
+|  | `struct bitmask *numa_get_run_node_mask(void);` | `struct bitmask *` | Runnable node mask |
+|  | `int numa_node_to_cpus(int node, struct bitmask *mask);` | `int` | **Fills** pre-allocated cpumask |
+|  | `void numa_node_to_cpu_update(void);` | `void` | Refresh after CPU hotplug |
+|  | `int numa_sched_getaffinity(pid_t pid, struct bitmask *mask);` | `int` | `sched_getaffinity` wrapper |
+|  | `int numa_sched_setaffinity(pid_t pid, struct bitmask *mask);` | `int` | `sched_setaffinity` wrapper |
+|  | `struct bitmask *numa_allocate_cpumask(void);` | `struct bitmask *` | Allocate CPU mask |
+|  | `void numa_free_cpumask(struct bitmask *b);` | `void` | Free CPU mask |
+| **Bitmasks** | `struct bitmask *numa_bitmask_alloc(unsigned int n);` | `struct bitmask *` | Allocate n bits |
+|  | `void numa_bitmask_free(struct bitmask *b);` | `void` | Free bitmask |
+|  | `struct bitmask *numa_bitmask_setall(struct bitmask *b);` | `struct bitmask *` | Set all bits |
+|  | `struct bitmask *numa_bitmask_clearall(struct bitmask *b);` | `struct bitmask *` | Clear all bits |
+|  | `struct bitmask *numa_bitmask_setbit(struct bitmask *b, unsigned i);` | `struct bitmask *` | Set bit |
+|  | `struct bitmask *numa_bitmask_clearbit(struct bitmask *b, unsigned i);` | `struct bitmask *` | Clear bit |
+|  | `int numa_bitmask_isbitset(const struct bitmask *b, unsigned i);` | `int` | Test bit (not `is_set`) |
+|  | `int numa_bitmask_equal(const struct bitmask *a, const struct bitmask *b);` | `int` | Equality |
+|  | `unsigned int numa_bitmask_weight(const struct bitmask *b);` | `unsigned int` | Popcount |
+|  | `unsigned int numa_bitmask_nbytes(const struct bitmask *b);` | `unsigned int` | Mask size in bytes |
+|  | `struct bitmask *numa_allocate_nodemask(void);` | `struct bitmask *` | Node mask |
+|  | `void numa_free_nodemask(struct bitmask *b);` | `void` | Free node mask |
+|  | `void copy_bitmask_to_nodemask(...);` etc. | `void` | Copy to/from `nodemask_t` |
+| **Errors** | `void numa_error(char *where);` | `void` | Overridable |
+|  | `void numa_warn(int n, char *fmt, ...);` | `void` | Overridable |
+|  | `extern int numa_exit_on_error;` etc. | `int` | Global behavior flags |
+| **Mapping** | `void *mmap(...);` | `void *` | Huge pages: `MAP_HUGETLB`, etc. |
+| **Syscalls** | `long mbind(void *addr, unsigned long len, int mode, const unsigned long *nodemask, unsigned long maxnode, unsigned int flags);` | `long` | Range policy; `#include <numaif.h>`, link `-lnuma` |
+|  | `long set_mempolicy(int mode, const unsigned long *nmask, unsigned long maxnode);` | `long` | Per-thread default policy |
+|  | `long get_mempolicy(int *mode, unsigned long *nmask, unsigned long maxnode, void *addr, int flags);` | `long` | Query policy / page node |
+|  | `long move_pages(...);` | `long` | Move explicit pages |
+|  | `long migrate_pages(...);` | `long` | Migrate by node sets |
+|  | `int getcpu(unsigned *cpu, unsigned *node, struct getcpu_cache *tcache);` | `int` | Current CPU / node |
+
+**Common `mbind` / `set_mempolicy` modes**: `MPOL_DEFAULT`, `MPOL_BIND`, `MPOL_INTERLEAVE`, `MPOL_WEIGHTED_INTERLEAVE`, `MPOL_PREFERRED`, `MPOL_PREFERRED_MANY`, `MPOL_LOCAL`. Flags such as `MPOL_MF_MOVE`, `MPOL_MF_STRICT`: see [mbind(2)](https://man7.org/linux/man-pages/man2/mbind.2.html).
 
 
 **Example: Allocate memory on a specific node**
@@ -577,18 +642,17 @@ int main() {
     int current_cpu = 0;
 
     for (int i = 0; i < num_nodes; ++i) {
-        // Get all CPUs on the current NUMA node
-        struct bitmask *cpus_on_node = numa_node_to_cpus(i);
-        if (cpus_on_node == nullptr) {
+        // CPUs on this node: allocate cpumask, then numa_node_to_cpus fills it in
+        struct bitmask *cpus_on_node = numa_allocate_cpumask();
+        if (numa_node_to_cpus(i, cpus_on_node) < 0) {
             std::cerr << "Failed to get CPUs for node " << i << std::endl;
+            numa_free_cpumask(cpus_on_node);
             continue;
         }
 
-        // Traverse all CPUs on the node and create a thread for each CPU
-        for (int cpu = 0; cpu <= cpus_on_node->size; ++cpu) {
+        for (int cpu = 0; cpu < numa_num_configured_cpus(); ++cpu) {
             if (numa_bitmask_isbitset(cpus_on_node, cpu)) {
-                threads.emplace_back(worker_function, current_cpu, cpu);
-                current_cpu++;
+                threads.emplace_back(worker_function, current_cpu++, cpu);
             }
         }
         numa_free_cpumask(cpus_on_node);
@@ -672,8 +736,8 @@ int main() {
     }
 
     // Automatically unlock when the program exits
-    munlock(lockedMem, memSize);
-    munmap(lockedMem);
+    munlock(lockMem, memSize);
+    munmap(lockMem, memSize);
     return 0;
 }
 ```
@@ -6535,15 +6599,31 @@ void preorder_tail_rec(Node* root) {
 
 Modern processors (SSE and subsequent instruction sets) provide specific instructions for directly operating data caches, which can be accessed through inline functions. Pay attention to prioritizing data cache layout optimization, and then consider optimization in this direction.
 
-| Function | Assembly instructions | Inline functions | Instruction set |
+| Function | Assembly | Intrinsic | ISA |
 | --- | --- | --- | --- |
-| Prefetch data | PREFETCH | `_mm_prefetch` | SSE |
-| 4 bytes cacheless storage | MOVNTI | `_mm_stream_si32` | SSE2 |
-| 8 bytes cacheless storage | MOVNTI | `_mm_stream_si64` | SSE |
-| 16 bytes of cacheless storage | MOVNTPS | `_mm_stream_ps` | SSE |
-| 16 bytes uncached storage | MOVNTPD | `_mm_stream_pd` | SSE2 |
-| 16 bytes uncached storage | MOVNTDQ | `_mm_stream_si128` | SSE2 |
+| Prefetch (T0/T1/T2/NTA) | PREFETCHT0, … | `_mm_prefetch(p, hint)` — hints below | SSE |
+| 4-byte nontemporal store | MOVNTI | `_mm_stream_si32` | SSE2 |
+| 8-byte nontemporal store | MOVNTI | `_mm_stream_si64` | SSE |
+| 16-byte NT store (float) | MOVNTPS | `_mm_stream_ps` | SSE |
+| 16-byte NT store (double) | MOVNTPD | `_mm_stream_pd` | SSE2 |
+| 16-byte NT store (integer) | MOVNTDQ | `_mm_stream_si128` | SSE2 |
+| 256-bit NT store (8×float) | VMOVNTPS | `_mm256_stream_ps` | AVX |
+| 256-bit NT store (4×double) | VMOVNTPD | `_mm256_stream_pd` | AVX |
+| 256-bit NT store (32 B int) | VMOVNTDQ | `_mm256_stream_si256` | AVX |
+| 512-bit NT store (16×float) | VMOVNTPS | `_mm512_stream_ps` | AVX-512F |
+| 512-bit NT store (8×double) | VMOVNTPD | `_mm512_stream_pd` | AVX-512F |
+| 512-bit NT store (64 B int) | VMOVNTDQ | `_mm512_stream_si512` | AVX-512F |
 
+**`_mm_prefetch` hints** ([Intel Intrinsics Guide](https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html)):
+
+| Macro | Instruction | Summary |
+| --- | --- | --- |
+| `_MM_HINT_T0` | PREFETCHT0 | Prefetch into cache hierarchy including L1 |
+| `_MM_HINT_T1` | PREFETCHT1 | Prefetch into L2 and below |
+| `_MM_HINT_T2` | PREFETCHT2 | Prefetch into L3 and below |
+| `_MM_HINT_NTA` | PREFETCHNTA | Non-temporal prefetch, minimize cache pollution |
+
+**References**: [Intel Intrinsics Guide](https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html); instruction details in [Intel SDM](https://www.intel.com/content/www/us/en/developer/articles/technical/intel-sdm.html) Volume 2.
 
 **Prefetch**
 
@@ -7355,7 +7435,7 @@ Add 1 to every element in an array.
 | int64_t | 64 | 1 | 64 | MMX |
 | char | 8 | 16 | 128 | SSE2 |
 | short int | 16 | 8 | 128 | SSE2 |
-| you | 32 | 4 | 128 | SSE2 |
+| int | 32 | 4 | 128 | SSE2 |
 | int64_t | 64 | 2 | 128 | SSE2 |
 | _Float16 | 16 | 8 | 128 | AVX512FP16 |
 | float | 32 | 4 | 128 | SSE |
@@ -7465,7 +7545,7 @@ Asserting that the data in the loop is memory aligned helps the compiler generat
 
 **AVX built-in functions**
 
-[**https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html**](https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html)
+[**Intel Intrinsics Guide**](https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html) · [**Intel SDM (Volume 2)**](https://www.intel.com/content/www/us/en/developer/articles/technical/intel-sdm.html)
 
 **1.Definition and advantages of AVX built-in functions**
 
@@ -7544,17 +7624,21 @@ void aussie_avx512_multiply_16_floats(float v1[16], float v2[16], float result[1
 }
 ```
 
-**Command naming rules**: AVX built-in function names follow "`_mm[width]_operation_datatype`" format, for example`_mm256_mul_ps`, "256" means 256-bit register, "mul" means multiplication, and "ps" means "packed single-precision" (packed 32-bit floating point number).**(2) Commonly used vertical operation instructions**
+**Command naming rules**: AVX built-in function names follow "_mm[width]_operation_datatype" format, for example_mm256_mul_ps, "256" means 256-bit register, "mul" means multiplication, and "ps" means "packed single-precision" (packed 32-bit floating point number).
 
-| Operation type | AVX (128-bit) instructions | AVX-2 (256-bit) instructions | Functional description |
-| --- | --- | --- | --- |
-| initialization | `_mm_setzero_ps` | `_mm256_setzero_ps` | Set all elements of the register to 0 |
-| Loading | `_mm_loadu_ps` | `_mm256_loadu_ps` | Load data from array to register |
-| Storage | `_mm_storeu_ps` | `_mm256_storeu_ps` | Store data from register to array |
-| Addition | `_mm_add_ps` | `_mm256_add_ps` | Element-level addition |
-| Multiplication | `_mm_mul_ps` | `_mm256_mul_ps` | Element-level multiplication |
-| Fusion multiplication and addition | `_mm_fmadd_ps` | `_mm256_fmadd_ps` | Multiply first and then add (reduce the number of instructions) |
-| Dot product | `_mm_dp_ps` | `_mm256_dp_ps` | Vector dot product (elements multiplied and then summed) |
+**(2) Commonly used vertical operation instructions**
+
+| Operation type | AVX (128-bit) | AVX2 (256-bit) | AVX-512 (512-bit) | Description |
+| --- | --- | --- | --- | --- |
+| Zero | `_mm_setzero_ps` | `_mm256_setzero_ps` | `_mm512_setzero_ps` | Packed float zeros |
+| Load (unaligned) | `_mm_loadu_ps` | `_mm256_loadu_ps` | `_mm512_loadu_ps` | Load from memory |
+| Store (unaligned) | `_mm_storeu_ps` | `_mm256_storeu_ps` | `_mm512_storeu_ps` | Store to memory |
+| Add | `_mm_add_ps` | `_mm256_add_ps` | `_mm512_add_ps` | Element-wise add |
+| Mul | `_mm_mul_ps` | `_mm256_mul_ps` | `_mm512_mul_ps` | Element-wise multiply |
+| FMA | `_mm_fmadd_ps` | `_mm256_fmadd_ps` | `_mm512_fmadd_ps` | Fused multiply-add (needs FMA) |
+| Dot-product style | `_mm_dp_ps` | `_mm256_dp_ps` | No single `_mm512_dp_ps`; use `mul` + `fmadd` + `reduce` / masks | See Intrinsics Guide |
+
+**AVX-512 naming**: `ps`/`pd` = packed float/double; integers often `epi32`, `epu32`, etc.; predicated forms are typically `_mm512_mask_*` (requires mask registers).
 
 
 **Horizontal operation: Parallel calculation of internal elements of a single vector**
