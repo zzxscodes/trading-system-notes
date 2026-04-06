@@ -26927,6 +26927,225 @@ struct TimeTriple {
 }
 ```
 
+### 16. Pre-serialized orders
+
+Pre-serialized orders means building the **on-the-wire byte template** off the hot path (symbol load, session ready, config changes) and, at send time, **patching in place** only fields that change every order (e.g. `ClOrdID`, price, quantity, timestamps, checksum/signature slots). This avoids full string formatting, repeated tag walks, and allocations on the decision→send path. On the binary side, [FIX Simple Binary Encoding (SBE)](https://github.com/FIXTradingCommunity/fix-simple-binary-encoding) emphasizes fixed layouts and offset-based access for low-latency encode/decode (see its [Introduction](https://github.com/FIXTradingCommunity/fix-simple-binary-encoding/blob/master/v1-0-RC3/doc/01Introduction.md)). Open-source stacks such as [fixpp](https://github.com/sashamakarenko/fixpp) often reuse message buffers and update only fields that change.
+
+**System design notes**:  
+1. **Layered templates**: split session/sequence headers from the business body; if sequence numbers must be assigned at the gateway, patch at egress while the strategy keeps a template without seq or with placeholders.  
+2. **Field contract**: know which fields change on every send vs rarely; bake fixed fields as compile-time constants or write them once at startup.  
+3. **Correctness**: pre-serialization does not replace risk checks or the OMS state machine.  
+4. **Protocol fidelity**: tag-value FIX needs SOH and body length; binary protocols should use generated code/SBE schema offsets.
+
+**Example** (illustrative: fixed prefix + hot path only patches quantity; replace with real tag layout or SBE-generated structs in production):
+
+```cpp
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <span>
+#include <string_view>
+
+// Pre-allocate wire buffer; hot path patches only a few fields (not a full FIX message—pattern only).
+struct PreSerializedNewOrder {
+    static constexpr std::size_t kCap = 512;
+    std::array<std::byte, kCap> buf{};
+    std::size_t len{0};
+    // Quantity offset and width in the template (lock with codegen or tests).
+    std::size_t qty_off{0};
+    std::uint32_t qty_width{8};
+
+    // Cold path: build template (placeholder "QTY=00000000|").
+    void build_template_cold_path() {
+        std::string_view prefix = "HEAD|SYM=IF2501|SIDE=1|TYPE=2|QTY=";
+        std::string_view suffix = "|PX=PLACEHOLDER|\n";
+        len = 0;
+        auto append = [&](std::string_view s) {
+            std::memcpy(buf.data() + len, s.data(), s.size());
+            len += s.size();
+        };
+        append(prefix);
+        qty_off = len;
+        append("00000000");
+        qty_width = 8;
+        append(suffix);
+    }
+
+    // Hot path: overwrite quantity ASCII (production may use binary fixed-point).
+    void patch_quantity_hot_path(std::uint32_t qty) noexcept {
+        // Simplified: assumes qty < 1e8; use fixed-width zero fill + bounds checks in production.
+        char tmp[9];
+        for (int i = 7; i >= 0; --i) {
+            tmp[i] = static_cast<char>('0' + (qty % 10));
+            qty /= 10;
+        }
+        tmp[8] = '\0';
+        std::memcpy(reinterpret_cast<char*>(buf.data()) + qty_off, tmp, qty_width);
+    }
+
+    [[nodiscard]] std::span<const std::byte> wire() const noexcept {
+        return {buf.data(), len};
+    }
+};
+```
+
+**Advanced: class template specialization + tag dispatch (one code path, multiple venues)**  
+Use empty **tag types** (`SHFETag`, `CFFEXTag`, …) as template parameters and **fully specialize** `PreserializedOrder<>`: the constructor (cold path) pre-fills fixed fields and endianness; hot paths only touch cached pointers via `update_*`. Shared send logic uses **`if constexpr`** to add venue-specific steps (e.g. local order id vs order ref).  
+**Note**: The `SHFEProtocol` / `CFFEXProtocol` layouts below are **example layouts only**—they are not real gateway binary messages or official field order/endianness.
+
+**Design recap**  
+1. **Tag dispatching**: empty classes carry venue semantics in the type system.  
+2. **Class template specialization**: the primary template is declared only, forcing a full specialization per venue; protocol details stay in the compilation unit.  
+3. **`if constexpr`**: in helpers like `simulate_send_order`, expand different side logic per `ExchangeTag` ; unselected branches are not instantiated.
+
+**Full code example**
+
+```cpp
+#include <algorithm>
+#include <cstdint>
+#include <cstring>
+#include <endian.h>
+#include <arpa/inet.h>
+#include <iostream>
+#include <string_view>
+#include <type_traits>
+
+// Step 1: example protocol layouts (#pragma pack(1); not real wire formats)
+#pragma pack(push, 1)
+
+struct SHFEProtocol {
+    uint16_t msg_type;
+    uint16_t body_len;
+    uint32_t local_order_id;
+    uint64_t account_id;
+    uint8_t  direction;
+    uint64_t price;
+    uint64_t qty;
+};
+
+struct CFFEXProtocol {
+    uint32_t magic;
+    uint64_t order_ref;
+    char     contract[8];
+    uint8_t  price_type;
+    uint64_t price;
+    uint32_t qty;
+};
+
+#pragma pack(pop)
+
+// Step 2: primary template declaration only
+template <typename ExchangeTag>
+class PreserializedOrder;
+
+// Step 3: full specializations per venue
+class SHFETag {};
+template <>
+class PreserializedOrder<SHFETag> {
+public:
+    explicit PreserializedOrder(uint64_t account_id, uint8_t direction) noexcept
+        : local_order_id_(0) {
+        std::memset(buffer_, 0, sizeof(buffer_));
+        auto* order = reinterpret_cast<SHFEProtocol*>(buffer_);
+        order->msg_type = htons(0x0201);
+        order->body_len = htons(static_cast<uint16_t>(sizeof(SHFEProtocol)));
+        order->account_id = htobe64(account_id);
+        order->direction = direction;
+        price_ptr_ = &order->price;
+        qty_ptr_ = &order->qty;
+        id_ptr_ = &order->local_order_id;
+    }
+
+    void update_price(uint64_t price) noexcept { *price_ptr_ = htobe64(price); }
+    void update_qty(uint64_t qty) noexcept { *qty_ptr_ = htobe64(qty); }
+    void next_id() noexcept {
+        ++local_order_id_;
+        *id_ptr_ = htonl(local_order_id_);
+    }
+
+    const void* data() const noexcept { return buffer_; }
+    static constexpr size_t size() noexcept { return sizeof(SHFEProtocol); }
+    static constexpr std::string_view name() noexcept { return "SHFE"; }
+
+private:
+    alignas(64) uint8_t buffer_[sizeof(SHFEProtocol)];
+    uint64_t* price_ptr_;
+    uint64_t* qty_ptr_;
+    uint32_t* id_ptr_;
+    uint32_t local_order_id_;
+};
+
+class CFFEXTag {};
+template <>
+class PreserializedOrder<CFFEXTag> {
+public:
+    explicit PreserializedOrder(std::string_view contract) noexcept : order_ref_(0) {
+        std::memset(buffer_, 0, sizeof(buffer_));
+        auto* order = reinterpret_cast<CFFEXProtocol*>(buffer_);
+        order->magic = htonl(0x43464658);
+        const size_t n = (std::min)(contract.size(), sizeof(order->contract) - 1u);
+        std::memcpy(order->contract, contract.data(), n);
+        order->price_type = 0x01;
+        price_ptr_ = &order->price;
+        qty_ptr_ = &order->qty;
+        ref_ptr_ = &order->order_ref;
+    }
+
+    void update_price(uint64_t price) noexcept { *price_ptr_ = htobe64(price); }
+    void update_qty(uint32_t qty) noexcept { *qty_ptr_ = htonl(qty); }
+    void next_ref() noexcept {
+        ++order_ref_;
+        *ref_ptr_ = htobe64(order_ref_);
+    }
+
+    const void* data() const noexcept { return buffer_; }
+    static constexpr size_t size() noexcept { return sizeof(CFFEXProtocol); }
+    static constexpr std::string_view name() noexcept { return "CFFEX"; }
+
+private:
+    alignas(64) uint8_t buffer_[sizeof(CFFEXProtocol)];
+    uint64_t* price_ptr_;
+    uint32_t* qty_ptr_;
+    uint64_t* ref_ptr_;
+    uint64_t order_ref_;
+};
+
+// Step 4: shared send flow
+template <typename ExchangeTag>
+void simulate_send_order(PreserializedOrder<ExchangeTag>& order,
+                         uint64_t price, uint64_t qty) noexcept {
+    order.update_price(price);
+    if constexpr (std::is_same_v<ExchangeTag, CFFEXTag>) {
+        order.update_qty(static_cast<uint32_t>(qty));
+    } else {
+        order.update_qty(qty);
+    }
+
+    if constexpr (std::is_same_v<ExchangeTag, SHFETag>) {
+        order.next_id();
+    } else if constexpr (std::is_same_v<ExchangeTag, CFFEXTag>) {
+        order.next_ref();
+    }
+
+    std::cout << "[" << order.name() << "] pre-serialized order ready | "
+              << "Size: " << order.size() << " bytes | "
+              << "Price: " << price << " | Qty: " << qty << std::endl;
+}
+
+// Step 5: usage
+int main() {
+    std::cout << "=== Multi-venue pre-serialized orders ===\n\n";
+
+    PreserializedOrder<SHFETag> shfe_order(88888888, 0);
+    simulate_send_order(shfe_order, 123450, 10);
+
+    PreserializedOrder<CFFEXTag> cffex_order("IF2406");
+    simulate_send_order(cffex_order, 4500000000ULL, 5);
+
+    return 0;
+}
+```
 
 
 ## Business logic design-calculation
