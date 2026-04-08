@@ -6533,6 +6533,19 @@ i |= 0x80000000;
 float result = std::bit_cast<float>(i); // Safe to get -2.0
 ```
 
+For a **type-safe union**, dispatching on the active type is usually done with `std::visit` (which alternative runs is **runtime**; the visitor must cover every alternative):
+
+```cpp
+#include <variant>
+#include <iostream>
+
+int main() {
+    std::variant<int, float> v{42};
+    std::visit([](auto&& x) { std::cout << x << '\n'; }, v);
+    v = 3.14f;
+    std::visit([](auto&& x) { std::cout << x << '\n'; }, v);
+}
+```
 
 
 ### 20. Function call optimization that cannot be inlined
