@@ -593,8 +593,8 @@ The following tables list common **libnuma** APIs and NUMA-related syscalls (see
 |  | `long migrate_pages(...);` | `long` | Migrate by node sets |
 |  | `int getcpu(unsigned *cpu, unsigned *node, struct getcpu_cache *tcache);` | `int` | Current CPU / node |
 
-**Common `mbind` / `set_mempolicy` modes**: `MPOL_DEFAULT`, `MPOL_BIND`, `MPOL_INTERLEAVE`, `MPOL_WEIGHTED_INTERLEAVE`, `MPOL_PREFERRED`, `MPOL_PREFERRED_MANY`, `MPOL_LOCAL`. Flags such as `MPOL_MF_MOVE`, `MPOL_MF_STRICT`: see [mbind(2)](https://man7.org/linux/man-pages/man2/mbind.2.html).
 
+**Common **`mbind`** / **`set_mempolicy`** modes**: `MPOL_DEFAULT`, `MPOL_BIND`, `MPOL_INTERLEAVE`, `MPOL_WEIGHTED_INTERLEAVE`, `MPOL_PREFERRED`, `MPOL_PREFERRED_MANY`, `MPOL_LOCAL`. Flags such as `MPOL_MF_MOVE`, `MPOL_MF_STRICT`: see [mbind(2)](https://man7.org/linux/man-pages/man2/mbind.2.html).
 
 **Example: Allocate memory on a specific node**
 
@@ -4992,7 +4992,7 @@ cfactor.set_real(2.0); // Compilation error: const object cannot call non-const 
 
 **3. Const restrictions on non-member functions**
 
-**Non-member functions (such as global functions and friend functions) cannot be **`const`**Modification**——`const` Function modifications only apply to class member functions (limiting the function's permission to modify the object state). If you need to restrict non-member functions from modifying parameters, you need to use it at the parameter level. `const`,For example:
+Non-member functions (such as global functions and friend functions) cannot be `const`**Modification**——`const` Function modifications only apply to class member functions (limiting the function's permission to modify the object state). If you need to restrict non-member functions from modifying parameters, you need to use it at the parameter level. `const`,For example:
 
 ```cpp
 //Non-member function: restrict modification through parameter const, not the function itself const
@@ -5092,9 +5092,63 @@ float result = v1.dot(v2); // The compiler is optimized for 4-dimensional vector
 
 
 
-**4.consteval: compile-time enforcement and calculation of functions**
+**4. std::nontype_t (C++26) and non-type template parameters**
 
-`consteval` The modified function is called**immediate function**, forcing function**Must be executed at compile time**, the return value must be a compile-time constant:
+**Definition and form**  
+C++26 introduces `std::nontype_t` and the variable template `std::nontype` in the `<utility>` header. For a `V` usable as a constant template argument, `std::nontype_t<V>` is an **empty tag type** (no data members) used in function or constructor parameter lists to carry that constant and participate in overload resolution (tag dispatch). `std::nontype<V>` has type `std::nontype_t<V>`; in context you can write `std::nontype<f>`, which serves the same purpose as `std::nontype_t<f>{}`. `V` must satisfy the standard’s requirements for a constant template argument.
+
+**Role**  
+A function parameter cannot be declared `constexpr`; even when the call site passes a constant, the parameter is not a constant expression inside the function, so it cannot be used in `static_assert` or as a template argument. By contrast, a non-type template parameter (NTTP) declared with `template <auto V>` is fixed by a compile-time constant at instantiation. `nontype_t` lets **value-style** APIs (constructors, ordinary functions) encode—in the parameter type—that the argument participates in overload resolution as an NTTP, so the compiler can distinguish a runtime pointer or value from a compile-time binding supplied through the template argument list.
+
+```cpp
+void g(int x) {
+    // static_assert(x > 0);  // error: x is not a constant expression
+}
+
+template <auto V>
+void h(std::nontype_t<V>);  // V fixed by the template argument; parameter type carries that constant for overload selection
+```
+
+**Role in **`std::function_ref`  
+`std::function_ref` provides two constructor styles: one accepts a pointer or similar handle to a callable and stores it at runtime; the other accepts `std::nontype_t<f>` and binds the callable `f` as a non-type template argument, without storing a large object such as a runtime member pointer inside the object. On several ABIs (e.g. Itanium C++ ABI), member function pointers are typically much larger than ordinary function pointers; a small, trivially copyable reference type that does not reserve storage for a member pointer then relies on the latter form for compile-time binding. See the C++26 definition of `std::function_ref` for full signatures.
+
+```cpp
+void sample();
+
+// sketch: two constructors (full definition in the standard <functional>)
+// template <class Signature>
+// class function_ref {
+// public:
+//     template <class F>
+//     explicit function_ref(F* fp) noexcept;
+//     template <auto f>
+//     function_ref(std::nontype_t<f>) noexcept;
+// };
+```
+
+**Other uses**  
+In user-defined types, overloads such as `operator[](std::nontype_t<I>)` let the index `I` be a template argument so `I` can be used in `static_assert` and other compile-time checks inside the function.
+
+```cpp
+template <typename T, std::size_t N>
+struct FixedArray {
+    T data_[N];
+    template <std::size_t I>
+    T& operator[](std::nontype_t<I>) {
+        static_assert(I < N);
+        return data_[I];
+    }
+};
+```
+
+**Relation to language evolution**  
+If the language later adds `constexpr` parameters or an equivalent mechanism, explicit `nontype_t` tagging can be needed less often; under the current rules, `nontype_t` is the standard-library facility that connects NTTPs to value-style APIs.
+
+
+
+**5.consteval: compile-time enforcement and calculation of functions**
+
+`consteval` The modified function is called **immediate function**, forcing function **Must be executed at compile time**, the return value must be a compile-time constant:
 
 + If the function cannot be calculated at compile time (such as relying on runtime data), it will be compiled directly and an error will be reported.
 + Its return value can be directly used as a template non-type parameter without additional `const` Modify
@@ -5114,6 +5168,57 @@ int n = 4;
 const int runtime_dim = n; // runtime_dim is a runtime constant
 Vector<runtime_dim> v3; // Compilation error!
 ```
+
+
+
+**6. constexpr and consteval**
+
+**Three kinds of functions**
+
+| Category | When it runs | Constraints |
+| --- | --- | --- |
+| Ordinary function | Runtime only | None |
+| `constexpr` | Compile time or runtime (depends on context) | The function body must meet the `constexpr` requirements of the current evaluation context |
+| `consteval` | Must run at compile time (immediate function) | Otherwise ill-formed |
+
+
+**Who may call whom**
+
++ A `constexpr` function may call non-`constexpr` functions, but if constant evaluation follows that path, that evaluation cannot finish as a constant expression.
++ A `consteval` function may also contain calls to non-`constexpr` code, but **constant evaluation must not reach them**.
++ An ordinary function may call `constexpr` functions; the result is evaluated at runtime.
++ An ordinary function may call `consteval` functions, but **arguments must be compile-time constants** (otherwise the immediate-function call cannot be formed).
++ When `consteval` calls `constexpr`, the latter is forced onto the compile-time path.
+
+**C++23: **`if consteval`
+
+Inside a `constexpr` function, tell constant evaluation apart from runtime evaluation and use the best implementation for each (e.g. a hand-written compile-time `strlen` at compile time, the library implementation at runtime):
+
+```cpp
+constexpr size_t f(const char* s) {
+    if consteval {
+        return compile_time_strlen(s);
+    } else {
+        return runtime_strlen(s);
+    }
+}
+```
+
+**C++23: **`constexpr`** consteval propagation (escalation)**
+
+If a `constexpr` template function passes an argument to a `consteval` function, the whole call may be required to be a compile-time evaluation in that context; a non-compile-time argument fails. This propagates the “must be compile-time” constraint to callers.
+
+**Common pitfalls**
+
++ **Pitfall 1**: parameters of a `consteval` function **are not constant expressions inside the body** (even if the call site always passes a constant), so you cannot write `static_assert(i == 1)` that depends directly on parameter `i`; promote the value to a template parameter / NTTP channel or use other metaprogramming.
++ **Pitfall 2**: a “fake” `constexpr` function—declared `constexpr` but in substance relying purely on runtime code—cannot be used in constant contexts.
+
+**Practice**
+
++ If it must run entirely at compile time → prefer `consteval`.
++ One body for both compile-time and runtime → `constexpr` + `if consteval`.
++ Runtime-only → no need for `constexpr`.
++ Avoid `constexpr` that is neither reliably usable in constant evaluation nor clearly intentional; for library APIs, prefer `constexpr` when practical.
 
 
 
@@ -6548,6 +6653,7 @@ int main() {
 ```
 
 
+
 ### 20. Function call optimization that cannot be inlined
 **(1) Recursion: stack overhead and cache invalidation**
 
@@ -6627,7 +6733,8 @@ Modern processors (SSE and subsequent instruction sets) provide specific instruc
 | 512-bit NT store (8×double) | VMOVNTPD | `_mm512_stream_pd` | AVX-512F |
 | 512-bit NT store (64 B int) | VMOVNTDQ | `_mm512_stream_si512` | AVX-512F |
 
-**`_mm_prefetch` hints** ([Intel Intrinsics Guide](https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html)):
+
+`_mm_prefetch`** hints** ([Intel Intrinsics Guide](https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html)):
 
 | Macro | Instruction | Summary |
 | --- | --- | --- |
@@ -6635,6 +6742,7 @@ Modern processors (SSE and subsequent instruction sets) provide specific instruc
 | `_MM_HINT_T1` | PREFETCHT1 | Prefetch into L2 and below |
 | `_MM_HINT_T2` | PREFETCHT2 | Prefetch into L3 and below |
 | `_MM_HINT_NTA` | PREFETCHNTA | Non-temporal prefetch, minimize cache pollution |
+
 
 **References**: [Intel Intrinsics Guide](https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html); instruction details in [Intel SDM](https://www.intel.com/content/www/us/en/developer/articles/technical/intel-sdm.html) Volume 2.
 
@@ -7637,7 +7745,9 @@ void aussie_avx512_multiply_16_floats(float v1[16], float v2[16], float result[1
 }
 ```
 
-**Command naming rules**: AVX built-in function names follow "_mm[width]_operation_datatype" format, for example_mm256_mul_ps, "256" means 256-bit register, "mul" means multiplication, and "ps" means "packed single-precision" (packed 32-bit floating point number).
+**Command naming rules**: AVX built-in function names follow "`_mm[width]_operation_datatype`" format, for example`_mm256_mul_ps`, "256" means 256-bit register, "mul" means multiplication, and "ps" means "packed single-precision" (packed 32-bit floating point number).
+
+****
 
 **(2) Commonly used vertical operation instructions**
 
@@ -7651,7 +7761,9 @@ void aussie_avx512_multiply_16_floats(float v1[16], float v2[16], float result[1
 | FMA | `_mm_fmadd_ps` | `_mm256_fmadd_ps` | `_mm512_fmadd_ps` | Fused multiply-add (needs FMA) |
 | Dot-product style | `_mm_dp_ps` | `_mm256_dp_ps` | No single `_mm512_dp_ps`; use `mul` + `fmadd` + `reduce` / masks | See Intrinsics Guide |
 
+
 **AVX-512 naming**: `ps`/`pd` = packed float/double; integers often `epi32`, `epu32`, etc.; predicated forms are typically `_mm512_mask_*` (requires mask registers).
+
 
 
 **Horizontal operation: Parallel calculation of internal elements of a single vector**
@@ -26684,12 +26796,11 @@ Actual measurement: ~86 ns/parse, about 11.6 million times/second.
 
 **Core logic**: First reach a consensus on the operation command, and then execute the same logic on all nodes.
 
-```mermaid
-graph TD
+<!-- 这是一个文本绘图，源码为：graph TD
     A[User request] --> B[Write command log<br/>Raft/WAL]
     B --> C[state machine execution]
-    C --> D[system status]
-```
+    C --> D[system status] -->
+![](https://cdn.nlark.com/yuque/__mermaid_v3/7f81cc2d53809e11da811ea3fccf3e2b.svg)
 
 **Log content**:`PlaceNewOrder`, `CancelOrder`, `AmendOrder`
 
@@ -26699,12 +26810,11 @@ graph TD
 
 **Core logic**: The master node executes first, then reaches consensus on the final status result and synchronizes it.
 
-```mermaid
-graph TD
+<!-- 这是一个文本绘图，源码为：graph TD
     A[Business execution] --> B[Generation results]
     B --> C[result copy]
-    C --> D[Other node applications]
-```
+    C --> D[Other node applications] -->
+![](https://cdn.nlark.com/yuque/__mermaid_v3/f67f1f3f39931e016dd4089770906f1c.svg)
 
 **Log content**:`TradeResult`, `BalanceUpdate`, `PositionUpdate`
 
@@ -26806,7 +26916,11 @@ void applyStateUpdate(const StateUpdate& update) {
 
 
 **Architecture Collaboration**:  
-`Client -> [Matching (Command Consensus)] -> TradeEvent -> [Counter (Result Consensus)] -> AccountState`### 15. Exchange protocol layering and sequence consistency  
+`Client -> [Matching (Command Consensus)] -> TradeEvent -> [Counter (Result Consensus)] -> AccountState`
+
+
+
+### 15. Exchange protocol layering and sequence consistency
 1.**Protocol layering**  
 Session layer: login, heartbeat, reconnection, sequence number maintenance, retransmission negotiation.  
 Business layer: order book increments, transactions, status events, snapshot events.  
@@ -26940,11 +27054,13 @@ struct TimeTriple {
 }
 ```
 
-### 16. Pre-serialized orders
 
+
+### 16. Pre-serialized orders
 Pre-serialized orders means building the **on-the-wire byte template** off the hot path (symbol load, session ready, config changes) and, at send time, **patching in place** only fields that change every order (e.g. `ClOrdID`, price, quantity, timestamps, checksum/signature slots). This avoids full string formatting, repeated tag walks, and allocations on the decision→send path. On the binary side, [FIX Simple Binary Encoding (SBE)](https://github.com/FIXTradingCommunity/fix-simple-binary-encoding) emphasizes fixed layouts and offset-based access for low-latency encode/decode (see its [Introduction](https://github.com/FIXTradingCommunity/fix-simple-binary-encoding/blob/master/v1-0-RC3/doc/01Introduction.md)). Open-source stacks such as [fixpp](https://github.com/sashamakarenko/fixpp) often reuse message buffers and update only fields that change.
 
 **System design notes**:  
+
 1. **Layered templates**: split session/sequence headers from the business body; if sequence numbers must be assigned at the gateway, patch at egress while the strategy keeps a template without seq or with placeholders.  
 2. **Field contract**: know which fields change on every send vs rarely; bake fixed fields as compile-time constants or write them once at startup.  
 3. **Correctness**: pre-serialization does not replace risk checks or the OMS state machine.  
@@ -27004,13 +27120,14 @@ struct PreSerializedNewOrder {
 ```
 
 **Advanced: class template specialization + tag dispatch (one code path, multiple venues)**  
-Use empty **tag types** (`SHFETag`, `CFFEXTag`, …) as template parameters and **fully specialize** `PreserializedOrder<>`: the constructor (cold path) pre-fills fixed fields and endianness; hot paths only touch cached pointers via `update_*`. Shared send logic uses **`if constexpr`** to add venue-specific steps (e.g. local order id vs order ref).  
+Use empty **tag types** (`SHFETag`, `CFFEXTag`, …) as template parameters and **fully specialize** `PreserializedOrder<>`: the constructor (cold path) pre-fills fixed fields and endianness; hot paths only touch cached pointers via `update_*`. Shared send logic uses `if constexpr` to add venue-specific steps (e.g. local order id vs order ref).  
 **Note**: The `SHFEProtocol` / `CFFEXProtocol` layouts below are **example layouts only**—they are not real gateway binary messages or official field order/endianness.
 
 **Design recap**  
+
 1. **Tag dispatching**: empty classes carry venue semantics in the type system.  
 2. **Class template specialization**: the primary template is declared only, forcing a full specialization per venue; protocol details stay in the compilation unit.  
-3. **`if constexpr`**: in helpers like `simulate_send_order`, expand different side logic per `ExchangeTag` ; unselected branches are not instantiated.
+3. `if constexpr`: in helpers like `simulate_send_order`, expand different side logic per `ExchangeTag` ; unselected branches are not instantiated.
 
 **Full code example**
 
@@ -27159,6 +27276,7 @@ int main() {
     return 0;
 }
 ```
+
 
 
 ## Business logic design-calculation
