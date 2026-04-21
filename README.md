@@ -3503,6 +3503,33 @@ private:
 };
 ```
 
+**Ring buffer wrap-boundary write optimization: double-mmap alias mapping**
+
+If boundary crossing is frequent, the usual implementation splits each write into two copies (tail then head).  
+With double-mmap aliasing, the same backing memory is mapped twice into adjacent virtual ranges, so the ring appears contiguous in virtual address space and wrap-boundary writes can be handled as one linear copy.
+
+Typical flow:
+1. reserve a `2*N` virtual range;
+2. create an `N`-byte backing object (for example `memfd_create + ftruncate`);
+3. map that same backing into both halves using `mmap(..., MAP_SHARED | MAP_FIXED, ...)`.
+
+```cpp
+// Pseudocode: map one backing object into two adjacent virtual ranges
+// reserve = mmap(nullptr, 2*N, PROT_NONE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+// fd = memfd_create(...); ftruncate(fd, N);
+// mmap(reserve,     N, PROT_READ|PROT_WRITE, MAP_SHARED|MAP_FIXED, fd, 0);
+// mmap(reserve + N, N, PROT_READ|PROT_WRITE, MAP_SHARED|MAP_FIXED, fd, 0);
+// enqueue can treat reserve + write_idx as one contiguous window (len <= N)
+```
+
+When to use and trade-offs:
+- best fit when boundary crossing is frequent and copy cost dominates;
+- in practice `N` should be page-aligned; on failure, roll back mappings/descriptors cleanly;
+- extra mappings increase page-table footprint and may increase TLB pressure;
+
+References:
+- https://yukunj.github.io/blogs/double_mmap_trick
+- https://abhinavag.medium.com/a-fast-circular-ring-buffer-4d102ef4d4a3
 
 
 ### 10.spmc shared memory lock-free queue application
