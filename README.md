@@ -1,7 +1,12 @@
-# Trading System Development - Zhixuan Zhang
-+ Yuque: [https://www.yuque.com/bluememories/lanaff/nt8zeoa7rxcl185o](https://www.yuque.com/bluememories/lanaff/nt8zeoa7rxcl185o)
+# Trading System Development - Zhixuan Zhang  
+
+中文版本：[https://www.yuque.com/bluememories/lanaff/eud01pmbglsxf6gu](https://www.yuque.com/bluememories/lanaff/eud01pmbglsxf6gu)
+
++ Yuque: [https://www.yuque.com/bluememories/lanaff/lg6rl7fku813w1id](https://www.yuque.com/bluememories/lanaff/lg6rl7fku813w1id)
 + CNBlogs: [https://www.cnblogs.com/zzxscodes/p/19695166/trading-system-notes](https://www.cnblogs.com/zzxscodes/p/19695166/trading-system-notes)
 + GitHub: [https://github.com/zzxscodes/trading-system-notes](https://github.com/zzxscodes/trading-system-notes)
+
+<font style="color:rgb(31, 35, 41);">Special thanks to Sourav Ghosh for his excellent book </font>_<font style="color:rgb(31, 35, 41);">Building Low Latency Applications with C++</font>_<font style="color:rgb(31, 35, 41);">.</font>
 
 
 
@@ -431,7 +436,7 @@ numactl --preferred=1
 On a server with multiple CPU sockets, each CPU has its own local memory, and accessing local memory is much faster than accessing another CPU's memory (remote memory). Therefore, the key to optimization is to ensure that "whoever calculates has his data by his side".
 
 Advanced scenarios (high-performance networks) are CPU, memory, Consistent with PCIe devices (network cards).  
-  
+
 **2. Linux memory allocation behavior**
 
 + **Default policy**: Always allocate memory **first** on the **local NUMA node** where the current CPU core is located.
@@ -736,8 +741,8 @@ int main() {
     }
 
     // Automatically unlock when the program exits
-    munlock(lockMem, memSize);
-    munmap(lockMem, memSize);
+    munlock(lockedMem, memSize);
+    munmap(lockedMem);
     return 0;
 }
 ```
@@ -3148,6 +3153,61 @@ namespace Common {
 
 ```
 
+  
+
+
+```markdown
+**SPSC cache-friendly optimization (cached peer indices)**
+
+The implementation above is already lock-free / wait-free for SPSC (no RMW spin loops).  
+The next improvement targets cache-coherency traffic:
+
+- producer `enqueue` repeatedly reading consumer-owned `head` causes cross-core cache-line state transitions;
+- consumer `dequeue` repeatedly reading producer-owned `tail` has the symmetric cost.
+
+A common V3 optimization is to keep per-thread cached copies of peer indices: `head_cached_` / `tail_cached_`.  
+Only when the queue is *possibly full* or *possibly empty* do we refresh from atomics (`acquire`). This reduces shared cache-line reads and often improves throughput while reducing jitter.
+
+```cpp
+// Hot-path sketch (same SPSC design)
+bool enqueue(const T& item) {
+    const size_t t = tail_.load(std::memory_order_relaxed);
+    const size_t next_t = (t + 1) & mask_;  // power-of-two capacity: avoid %
+
+    // Fast path uses cached head
+    if (next_t == head_cached_) {
+        head_cached_ = head_.load(std::memory_order_acquire);
+        if (next_t == head_cached_) return false; // truly full
+    }
+
+    buffer_[t] = item;
+    tail_.store(next_t, std::memory_order_release);
+    return true;
+}
+
+bool dequeue(T& item) {
+    const size_t h = head_.load(std::memory_order_relaxed);
+
+    // Fast path uses cached tail
+    if (h == tail_cached_) {
+        tail_cached_ = tail_.load(std::memory_order_acquire);
+        if (h == tail_cached_) return false; // truly empty
+    }
+
+    item = buffer_[h];
+    head_.store((h + 1) & mask_, std::memory_order_release);
+    return true;
+}
+```
+
+Implementation notes:
+- cached copies are only for fast checks; boundary truth still comes from atomics;
+- `release` publishes slot writes, `acquire` observes peer progress;
+- combine with `alignas(64)` to further reduce false sharing.
+```
+
+  
+  
 Log service based on this
 
 ```cpp
@@ -3503,8 +3563,7 @@ private:
 };
 ```
 
-
-
+  
 **Ring buffer wrap-boundary write optimization: double-mmap alias mapping**
 
 If boundary crossing is frequent, the usual implementation splits each write into two copies (tail then head).  
@@ -6741,7 +6800,7 @@ void preorder_tail_rec(Node* root) {
 + **Essence of the problem**: Passing large objects (such as`std::vector`, custom matrix class), value transfer will trigger object copying (calling the copy constructor), and the cost is much higher than reference transfer;
 + **Optimization solution**:
     1. **For large objects**`const&`**Transfer**: For parameters that do not need to be modified, use "`const Type&`" pass to avoid copying, e.g.`void process(const Matrix& mat)`;  
-  2.**Small type direct value transfer**: Yes`int`,`float`For scalar types, the cost of value transfer is equivalent to that of reference transfer (or even faster, avoiding pointer indirect access), and there is no need to force the use of references;
+2.**Small type direct value transfer**: Yes`int`,`float`For scalar types, the cost of value transfer is equivalent to that of reference transfer (or even faster, avoiding pointer indirect access), and there is no need to force the use of references;
     2. **Avoid temporary object passing**: Pass constants to reference parameters (such as`process(5)`), the compiler will automatically create a temporary object. If you need to pass constants frequently, you can overload the function to adapt constant parameters (such as`void process(int val)`).
 
 
@@ -7778,9 +7837,9 @@ void aussie_avx512_multiply_16_floats(float v1[16], float v2[16], float result[1
 }
 ```
 
-**Command naming rules**: AVX built-in function names follow "`_mm[width]_operation_datatype`" format, for example`_mm256_mul_ps`, "256" means 256-bit register, "mul" means multiplication, and "ps" means "packed single-precision" (packed 32-bit floating point number).
+**Command naming rules**: AVX built-in function names follow "_mm[width]_operation_datatype" format, for example_mm256_mul_ps, "256" means 256-bit register, "mul" means multiplication, and "ps" means "packed single-precision" (packed 32-bit floating point number).
 
-****
+
 
 **(2) Commonly used vertical operation instructions**
 
@@ -10885,8 +10944,8 @@ For the Intel Core i5-8259U processor, the maximum number of FLOPs (single preci
 The maximum memory bandwidth for the Intel NUC Kit NUC8i5BEH can be calculated as follows. DDR technology allows 64 bits or 8 bytes to be transferred per memory access.
 
 #### <!-- 这是一张图片，ocr 内容为： -->
-![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1754980565223-ac825286-acb6-4e51-80b2-6d3f98602e70.png)
-####   
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1754980565223-ac825286-acb6-4e51-80b2-6d3f98602e70.png)  
+  
 Memory Bound optimization
 + **Cache-friendly data structure:** When designing data structures, consider how to maximize the use of cache locality principles.
     - **Sequential access:** Use hardware prefetcher to access data in the order in memory to improve spatial locality.
@@ -10918,10 +10977,11 @@ Sources and use cases:[https://weedge.github.io/perf-book-cn/zh/chapters/6-CPU-F
 <!-- 这是一张图片，ocr 内容为： -->
 ![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1754981310810-5c4b8eb4-c1ca-4004-a742-3ecdd5498aa8.png)
 
-###   
-3. Use compiler and other optimization programs  
-  
+### 
+### 3.Use compiler and other optimization programs  
+
 gcc documentation:[https://gcc.gnu.org/onlinedocs/](https://gcc.gnu.org/onlinedocs/)
+
 
 
 **Comparison of optimization capabilities of different C++ compilers**
@@ -14323,6 +14383,5007 @@ namespace Common {
     next_send_valid_index_ += len;
     ASSERT(next_send_valid_index_ < McastBufferSize, "Mcast socket buffer filled up and sendAndRecv() not called.");
   }
+}
+```
+
+
+
+## actual project
+### 1. Trading system architecture
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1745039295280-ce7f122a-31ce-4ad0-b487-9991b615b48c.png)
+
+
+
+### 2. Exchange part
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1745039414435-32c8a327-b827-4948-bddd-75220cfdc58b.png)
+
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1745039437491-3d393916-337b-4a63-b6fd-eec97cc410c3.png)
+
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1745039455036-94ad3d3d-f456-443e-8484-5f51e29db793.png)
+
+
+
+### 3. Market participants part
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1745039607161-f2e2629f-dc5a-4f89-a5b7-7dd162132fd8.png)
+
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1745039477694-275d37b5-944e-4845-b61f-6e64d294b6ce.png)
+
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1745039494108-a3d5a767-ec27-4d84-8f2c-c2080a4ccbc7.png)
+
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1745039527989-898341e3-89e7-44ba-b477-5ad4af44894c.png)
+
+
+
+### 4. Some actual projects of the exchange
+#### Definition of basic data types of exchanges
+<font style="color:rgb(28, 31, 35);">• Order number (OrderId), used to identify the order</font>
+
+<font style="color:rgb(28, 31, 35);">• TickerId, used to identify the trading instrument </font>
+
+<font style="color:rgb(28, 31, 35);">• Client ID (ClientId), used by exchanges to identify different clients </font>
+
+<font style="color:rgb(28, 31, 35);">• Price, used to record the price of a trading instrument </font>
+
+<font style="color:rgb(28, 31, 35);">• Quantity (Qty), used to record the quantity value of the order </font>
+
+<font style="color:rgb(28, 31, 35);">• </font><font style="color:rgba(0, 0, 0, 0.85);">Priority, used to determine the position of orders placed at a certain price level in the first-in, first-out (FIFO) queue</font><font style="color:rgb(28, 31, 35);">• </font><font style="color:rgba(0, 0, 0, 0.85);">Trading direction (Side), used to indicate whether the order is buying or selling.</font>
+
+<font style="color:rgb(28, 31, 35);">• </font><font style="color:rgb(0, 0, 0) !important;">Trading algorithm type (AlgoType)</font><font style="color:rgba(0, 0, 0, 0.85) !important;">, used to identify the type of trading algorithm, such as random algorithm (RANDOM), maker algorithm (MAKER), taker algorithm (TAKER),</font>**<font style="color:rgba(0, 0, 0, 0.85) !important;">It is used by market participants to decide which trading strategy to adopt and is part of the market participants’content.</font>**<font style="color:rgba(0, 0, 0, 0.85) !important;">。</font>
+
+#### <font style="color:rgba(0, 0, 0, 0.85);">Definition of basic limited data volume of exchanges</font>
+<font style="color:rgb(28, 31, 35);">• "Log Queue Size (LOG_QUEUE_SIZE)" represents the size of the lock-free queue used by the logger. It represents the maximum number of characters that can be stored in memory without the logger queue filling up. </font>
+
+<font style="color:rgb(28, 31, 35);">• "Maximum number of trading instruments (ME_MAX_TICKERS)" indicates the number of trading instruments supported by the exchange. </font>
+
+<font style="color:rgb(28, 31, 35);">• "Maximum Outstanding Customer Updates (ME_MAX_CLIENT_UPDATES)" represents the maximum number of outstanding order requests from all customers that the matching engine has not yet processed. This also represents the maximum number of order responses from the matching engine that the order server has not yet issued. </font>
+
+<font style="color:rgb(28, 31, 35);">• "Maximum Market Updates (ME_MAX_MARKET_UPDATES)" represents the maximum number of market updates generated by the matching engine but not yet published by the market data publisher. </font>
+
+<font style="color:rgb(28, 31, 35);">• “ME_MAX_NUM_CLIENTS” represents the maximum number of market participants that can exist simultaneously in our trading ecosystem. </font>
+
+<font style="color:rgb(28, 31, 35);">• "Maximum number of order numbers (ME_MAX_ORDER_IDS)" is the maximum number of orders that a single trading instrument may have. </font>
+
+<font style="color:rgb(28, 31, 35);">• "Maximum Price Levels (ME_MAX_PRICE_LEVELS)" represents the maximum depth of price levels for limit order books maintained by the matching engine. </font>
+
+#### <font style="color:rgb(28, 31, 35);">Matching engine related variable method definitions</font>
+**Client request related**
+
+1. `ClientRequestType` enumerate
+
+```cpp
+enum class ClientRequestType : uint8_t {
+    INVALID = 0,
+    NEW = 1,
+    CANCEL = 2
+};
+```
+
++ **Explanation**: This enumeration defines the type of client request.`INVALID` Represents an invalid request;`NEW` Indicates a new order request;`CANCEL` Indicates a request to cancel an order.
+2. `MEClientRequest` Structure
+
+```cpp
+struct MEClientRequest {
+    ClientRequestType type_ = ClientRequestType::INVALID;
+    ClientId client_id_ = ClientId_INVALID;
+    TickerId ticker_id_ = TickerId_INVALID;
+    OrderId order_id_ = OrderId_INVALID;
+    Side side_ = Side::INVALID;
+    Price price_ = Price_INVALID;
+    Qty qty_ = Qty_INVALID;
+};
+```
+
++ **Explanation**: This structure stores the order request information sent by the client to the matching engine.
+    - `type_`: Type of order request, derived from `ClientRequestType` enumerate.
+    - `client_id_`: The customer's unique identifier.
+    - `ticker_id_`: Unique identifier of the trading instrument.
+    - `order_id_`: The unique identifier of the order.
+    - `side_`: The buying and selling direction of the order.
+    - `price_`: The price of the order.
+    - `qty_`: The quantity of the order.
+3. `OMClientRequest` Structure
+
+```cpp
+struct OMClientRequest {
+    size_t seq_num_ = 0;
+    MEClientRequest me_client_request_;
+};
+```
+
++ **Explanation**: This structure contains the sequence number requested by the client and the specific matching engine client request.
+    - `seq_num_`: The sequence number of the request, used for sorting and tracking.
+    - `me_client_request_`:Specific matching engine client request.
+4. `ClientRequestLFQueue` type definition
+
+```cpp
+typedef LFQueue<MEClientRequest> ClientRequestLFQueue;
+```
+
++ **Explanation**: Lock-free queue type, used for storage `MEClientRequest` Object to facilitate efficient processing of client requests.
+
+
+
+**Client response related**
+
+5. `ClientResponseType` enumerate
+
+```cpp
+enum class ClientResponseType : uint8_t {
+    INVALID = 0,
+    ACCEPTED = 1,
+    CANCELED = 2,
+    FILLED = 3,
+    CANCEL_REJECTED = 4
+};
+```
+
++ **Explanation**: This enumeration defines the type of client response.`INVALID` Indicates an invalid response;`ACCEPTED` Indicates that the order request has been accepted;`CANCELED` Indicates that the order has been cancelled;`FILLED` Indicates that the order has been completed;`CANCEL_REJECTED` Indicates that the order cancellation request was rejected.
+6. `MEClientResponse`Structure
+
+```cpp
+struct MEClientResponse {
+    ClientResponseType type_ = ClientResponseType::INVALID;
+    ClientId client_id_ = ClientId_INVALID;
+    TickerId ticker_id_ = TickerId_INVALID;
+    OrderId client_order_id_ = OrderId_INVALID;
+    OrderId market_order_id_ = OrderId_INVALID;
+    Side side_ = Side::INVALID;
+    Price price_ = Price_INVALID;
+    Qty exec_qty_ = Qty_INVALID;
+    Qty leaves_qty_ = Qty_INVALID;
+};
+```
+
++ **Explanation**: This structure stores the order response information sent by the matching engine to the client.
+    - `type_`: Type of order response, derived from `ClientResponseType` enumerate.
+    - `client_id_`: The customer's unique identifier.
+    - `ticker_id_`: Unique identifier of the trading instrument.
+    - `client_order_id_`: The unique identifier of the client order.
+    - `market_order_id_`: Unique identifier for the market order.
+    - `side_`: The buying and selling direction of the order.
+    - `price_`: The order transaction price.
+    - `exec_qty_`: The number of completed orders.
+    - `leaves_qty_`: The number of remaining unfilled orders.
+7. `OMClientResponse` Structure
+
+```cpp
+struct OMClientResponse {
+    size_t seq_num_ = 0;
+    MEClientResponse me_client_response_;
+};
+```
+
++ **Explanation**: This structure contains the sequence number of the client response and the specific matching engine client response.
+    - `seq_num_`: The sequence number of the response, used for sorting and tracking.
+    - `me_client_response_`:Specific matching engine client response.
+8. `ClientResponseLFQueue` type definition
+
+```cpp
+typedef LFQueue<MEClientResponse> ClientResponseLFQueue;
+```
+
++ **Explanation**: Lock-free queue type, used for storage `MEClientResponse` Object to facilitate efficient processing of client responses.
+
+
+
+**Market Update Type Enum**
+
+```cpp
+enum class MarketUpdateType : uint8_t {
+    INVALID = 0,
+    CLEAR = 1,
+    ADD = 2,
+    MODIFY = 3,
+    CANCEL = 4,
+    TRADE = 5,
+    SNAPSHOT_START = 6,
+    SNAPSHOT_END = 7
+};
+```
+
++ **Explanation**: This enumeration defines different types of market update events.
+    - `INVALID`: Indicates an invalid market update type.
+    - `CLEAR`: Used to clear market data related information.
+    - `ADD`: Indicates new market data, such as new orders being added to the order book.
+    - `MODIFY`: Represents modification of existing market data, such as modifying the price and quantity of orders, etc.
+    - `CANCEL`: Means to cancel a certain market data, such as canceling an unfilled order.
+    - `TRADE`: Indicates that a transaction has occurred, that is, an order has been completed.
+    - `SNAPSHOT_START`: The event that marks the beginning of a snapshot of market data.
+    - `SNAPSHOT_END`: The event that marks the end of a snapshot of market data.
+
+**Market update structure**
+
+```cpp
+struct MEMarketUpdate {
+    MarketUpdateType type_ = MarketUpdateType::INVALID;
+    OrderId order_id_ = OrderId_INVALID;
+    TickerId ticker_id_ = TickerId_INVALID;
+    Side side_ = Side::INVALID;
+    Price price_ = Price_INVALID;
+    Qty qty_ = Qty_INVALID;
+    Priority priority_ = Priority_INVALID;
+};
+```
+
++ **Explanation**: This structure is used to encapsulate the market update information generated by the matching engine.
+    - `type_`:Type of market update, given by `MarketUpdateType` Enumeration specified.
+    - `order_id_`: The associated order ID.
+    - `ticker_id_`: ID of the trading instrument.
+    - `side_`: The buying and selling direction of the order.
+    - `price_`: The price of the order.
+    - `qty_`: The quantity of the order.
+    - `priority_`: The priority of the order in the queue.
+
+**Market Data Publisher Market Update Structure**
+
+```cpp
+struct MDPMarketUpdate {
+    size_t seq_num_ = 0;
+    MEMarketUpdate me_market_update_;
+};
+```
+
++ **Explanation**: This structure is used to encapsulate the market update information passed from the matching engine to the market data publisher.
+    - `seq_num_`: The sequence number of market updates, used to ensure the order of messages.
+    - `me_market_update_`: Specific matching engine market updates.
+
+**Lock-free queue type**
+
+```cpp
+typedef Common::LFQueue<Exchange::MEMarketUpdate> MEMarketUpdateLFQueue;
+typedef Common::LFQueue<Exchange::MDPMarketUpdate> MDPMarketUpdateLFQueue;
+```
+
++ **Explanation**: These two type definitions represent storage `MEMarketUpdate` and `MDPMarketUpdate` A lock-free queue of objects.
+
+#### 
+#### Overall data structure design of order book
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1745040987172-42f0fdc1-95d0-4022-a382-e47997c0bb63.png)
+
+`MEOrder` kind
+
+```cpp
+// The MEOrder class represents an order and contains various attributes of the order
+class MEOrder {
+public:
+    TickerId ticker_id_; // Securities code identification
+    ClientId client_id_; // Client ID
+    OrderId client_order_id_; // Customer order ID
+    OrderId market_order_id_; // Market order identification
+    Side side_; // Order direction
+    Price price_; // order price
+    Qty qty_; // order quantity
+    Priority priority_; // order priority
+    MEOrder* prev_order_; // Previous order pointer
+    MEOrder* next_order_; // next order pointer
+};
+```
+
+`MEOrdersAtPrice` structure
+
+```cpp
+struct MEOrdersAtPrice {
+    Side side_ = Side::INVALID;
+    Price price_ = Price_INVALID;
+
+    MEOrder *first_me_order_ = nullptr;
+
+    /// MEOrdersAtPrice also serves as a node in a doubly linked list of price levels arranged in order from most aggressive to least aggressive price.
+    MEOrdersAtPrice *prev_entry_ = nullptr;
+    MEOrdersAtPrice *next_entry_ = nullptr;
+
+    /// Only needed for use with MemPool.
+    MEOrdersAtPrice() = default;
+
+    MEOrdersAtPrice(Side side, Price price, MEOrder *first_me_order, MEOrdersAtPrice *prev_entry, MEOrdersAtPrice *next_entry)
+        : side_(side), price_(price), first_me_order_(first_me_order), prev_entry_(prev_entry), next_entry_(next_entry) {}
+  };
+```
+
+`MEOrderBook` kind
+
+```cpp
+// The MEOrderBook class represents an order book that manages all orders for a specific security
+class MEOrderBook {
+public:
+    //Constructor, initialize the order book
+    MEOrderBook(TickerId ticker_id, Logger *logger, MatchingEngine *matching_engine)
+        : ticker_id_(ticker_id), matching_engine_(matching_engine), 
+          //Initialize the price level memory pool, the maximum number of price levels is ME_MAX_PRICE_LEVLS
+          orders_at_price_pool_(ME_MAX_PRICE_LEVELS), 
+          // Initialize the order memory pool, the maximum number of orders is ME_MAX_ORDER_IDS
+          order_pool_(ME_MAX_ORDER_IDS), 
+          logger_(logger) {}
+
+    // Destructor, releases the resources occupied by the order book
+    ~MEOrderBook() {
+        // Record the log information of order book destruction
+        logger_->log("%:% %() % OrderBook\n%\n", __FILE__, __LINE__, __FUNCTION__, 
+                     Common::getCurrentTimeStr(&time_str_), toString(false, true));
+        //Clear the matching engine pointer
+        matching_engine_ = nullptr;
+        // Clear the order price level pointer
+        bids_by_price_ = asks_by_price_ = nullptr;
+        // Clear the mapping array from customer orders to order objects
+        for (auto &itr : cid_oid_to_order_) {
+            itr.fill(nullptr);
+        }
+    }
+
+    //Add new order to order book
+    void add(ClientId client_id, OrderId client_order_id, TickerId ticker_id, 
+             Side side, Price price, Qty qty) noexcept {
+        // Generate new market order number
+        const auto new_market_order_id = generateNewMarketOrderId();
+        // Construct the client response that the order has been accepted
+        client_response_ = {ClientResponseType::ACCEPTED, client_id, ticker_id, 
+                            client_order_id, new_market_order_id, side, price, 0, qty};
+        //Send client response to matching engine
+        matching_engine_->sendClientResponse(&client_response_);
+        // Check if there is a matching order and get the remaining quantity
+        const auto leaves_qty = checkForMatch(client_id, client_order_id, ticker_id, 
+                                              side, price, qty, new_market_order_id);
+        // If there is remaining quantity
+        if (leaves_qty > 0) {
+            // Get the next priority
+            const auto priority = getNextPriority(price);
+            //Allocate a new order object from the order memory pool
+            auto order = order_pool_.allocate(ticker_id, client_id, client_order_id, 
+                                              new_market_order_id, side, price, leaves_qty, priority, nullptr, nullptr);
+            //Add order to order book
+            addOrder(order);
+            // Construct market update information for adding orders
+            market_update_ = {MarketUpdateType::ADD, new_market_order_id, ticker_id, 
+                              side, price, leaves_qty, priority};
+            // Send market updates to the matching engine
+            matching_engine_->sendMarketUpdate(&market_update_);
+        }
+    }
+
+    //Cancel the specified order for the specified customer
+    void cancel(ClientId client_id, OrderId order_id, TickerId ticker_id) noexcept {
+        // Check if the customer ID is valid
+        auto is_cancelable = (client_id < cid_oid_to_order_.size());
+        MEOrder *exchange_order = nullptr;
+        if (is_cancelable) {
+            // Get the order object corresponding to the customer order
+            auto &co_itr = cid_oid_to_order_.at(client_id);
+            exchange_order = co_itr.at(order_id);
+            // Check if the order exists
+            is_cancelable = (exchange_order != nullptr);
+        }
+        // If the order cannot be canceled
+        if (!is_cancelable) {
+            // Construct the client response when the cancellation order is rejected
+            client_response_ = {ClientResponseType::CANCEL_REJECTED, client_id, ticker_id, 
+                                order_id, OrderId_INVALID, Side::INVALID, Price_INVALID, 
+                                Qty_INVALID, Qty_INVALID};
+        } else {
+            // Construct the client response that the order has been canceled
+            client_response_ = {ClientResponseType::CANCELED, client_id, ticker_id, 
+                                order_id, exchange_order->market_order_id_, 
+                                exchange_order->side_, exchange_order->price_, 
+                                Qty_INVALID, exchange_order->qty_};
+            // Construct market update information for canceled orders
+            market_update_ = {MarketUpdateType::CANCEL, exchange_order->market_order_id_, 
+                              ticker_id, exchange_order->side_, exchange_order->price_, 
+                              0, exchange_order->priority_};
+            //Remove order from order book
+            removeOrder(exchange_order);
+            // Send market updates to the matching engine
+            matching_engine_->sendMarketUpdate(&market_update_);
+        }
+        //Send client response to matching engine
+        matching_engine_->sendClientResponse(&client_response_);
+    }
+
+private:
+    // Generate next market order number
+    auto generateNewMarketOrderId() noexcept -> OrderId {
+        return next_market_order_id_++;
+    }
+
+    //Convert price to index in price hierarchy array
+    auto priceToIndex(Price price) const noexcept {
+        return (price % ME_MAX_PRICE_LEVELS);
+    }
+
+    // Get the corresponding order information based on the price
+    auto getOrdersAtPrice(Price price) const noexcept -> MEOrder {
+        return price_orders_at_price_.at(priceToIndex(price));
+    }
+
+    //Add new price level information to the order book
+    auto addOrdersAtPrice(MEOrdersAtPrice *new_orders_at_price) noexcept {
+        //Save the new price level information into the array
+        price_orders_at_price_.at(priceToIndex(new_orders_at_price->price_)) = new_orders_at_price;
+        // Get the corresponding best price level based on the order direction
+        const auto best_orders_by_price = (new_orders_at_price->side_ == Side::BUY? 
+                                           bids_by_price_ : asks_by_price_);
+        // If the best price level is empty
+        if (!best_orders_by_price) {
+            // Set new best price tier
+            (new_orders_at_price->side_ == Side::BUY? 
+             bids_by_price_ : asks_by_price_) = new_orders_at_price;
+            //Initialize the front and back pointers of the new price level
+            new_orders_at_price->prev_entry_ = new_orders_at_price->next_entry_ = new_orders_at_price;
+        } else {
+            auto target = best_orders_by_price;
+            // Determine whether to add it to the target
+            bool add_after = ((new_orders_at_price->side_ == Side::SELL && 
+                               new_orders_at_price->price_ > target->price_) ||
+                              (new_orders_at_price->side_ == Side::BUY && 
+                               new_orders_at_price->price_ < target->price_));
+            if (add_after) {
+                target = target->next_entry_;
+                add_after = ((new_orders_at_price->side_ == Side::SELL && 
+                              new_orders_at_price->price_ > target->price_) ||
+                             (new_orders_at_price->side_ == Side::BUY && 
+                              new_orders_at_price->price_ < target->price_));
+            }
+            // Find the appropriate insertion position
+            while (add_after && target != best_orders_by_price) {
+                add_after = ((new_orders_at_price->side_ == Side::SELL && 
+                              new_orders_at_price->price_ > target->price_) ||
+                             (new_orders_at_price->side_ == Side::BUY && 
+                              new_orders_at_price->price_ < target->price_));
+                if (add_after)
+                    target = target->next_entry_;
+            }
+            // After adding to the target
+            if (add_after) {
+                if (target == best_orders_by_price) {
+                    target = best_orders_by_price->prev_entry_;
+                }
+                new_orders_at_price->prev_entry_ = target;
+                target->next_entry_->prev_entry_ = new_orders_at_price;
+                new_orders_at_price->next_entry_ = target->next_entry_;
+                target->next_entry_ = new_orders_at_price;
+            } else {
+                //Add before target
+                new_orders_at_price->prev_entry_ = target->prev_entry_;
+                new_orders_at_price->next_entry_ = target;
+                target->prev_entry_->next_entry_ = new_orders_at_price;
+                target->prev_entry_ = new_orders_at_price;
+                // If the new price level becomes the best price level
+                if ((new_orders_at_price->side_ == Side::BUY && 
+                     new_orders_at_price->price_ > best_orders_by_price->price_) ||
+                    (new_orders_at_price->side_ == Side::SELL && 
+                     new_orders_at_price->price_ < best_orders_by_price->price_)) {
+                    target->next_entry_ = (target->next_entry_ == best_orders_by_price? 
+                                           new_orders_at_price : target->next_entry_);
+                    (new_orders_at_price->side_ == Side::BUY? 
+                     bids_by_price_ : asks_by_price_) = new_orders_at_price;
+                }
+            }
+        }
+    }
+
+    //Remove the price level information of the specified price from the order book
+    auto removeOrdersAtPrice(Side side, Price price) noexcept {
+        // Get the corresponding best price level based on the order direction
+        const auto best_orders_by_price = (side == Side::BUY? 
+                                           bids_by_price_ : asks_by_price_);
+        // Get the price tier to be removed
+        auto orders_at_price = getOrdersAtPrice(price);
+        // If the price level has only one element
+        if (orders_at_price->next_entry_ == orders_at_price) {
+            // Set the best price tier to nullptr
+            (side == Side::BUY? 
+             bids_by_price_ : asks_by_price_) = nullptr;
+        } else {
+            //Update the before and after pointers
+            orders_at_price->prev_entry_->next_entry_ = orders_at_price->next_entry_;
+            orders_at_price->next_entry_->prev_entry_ = orders_at_price->prev_entry_;
+            // If the best price tier is removed
+            if (orders_at_price == best_orders_by_price) {
+                (side == Side::BUY? 
+                 bids_by_price_ : asks_by_price_) = orders_at_price->next_entry_;
+            }
+            // Clear the front and rear pointers of the current price level
+            orders_at_price->prev_entry_ = orders_at_price->next_entry_ = nullptr;
+        }
+        // Set the corresponding position in the array to nullptr
+        price_orders_at_price_.at(priceToIndex(price)) = nullptr;
+        // Release the memory of the price level object
+        orders_at_price_pool_.deallocate(orders_at_price);
+    }
+
+    // Get the next priority for the specified price
+    auto getNextPriority(Price price) noexcept {
+        // Get order information at the specified price
+        const auto orders_at_price = getOrdersAtPrice(price);
+        if (!orders_at_price)
+            return 1lu;
+        // Return the priority of the previous order plus 1
+        return orders_at_price->first_me_order_->prev_order_->priority_ + 1;
+    }
+
+    //Perform order matching operation
+    auto match(TickerId ticker_id, ClientId client_id, Side side, 
+               OrderId client_order_id, OrderId new_market_order_id, 
+               MEOrder *itr, Qty *leaves_qty) noexcept {
+        const auto order = itr;
+        const auto order_qty = order->qty_;
+        // Calculate the filling quantity
+        const auto fill_qty = std::min(*leaves_qty, order_qty);
+        //Update remaining quantity
+        *leaves_qty -= fill_qty;
+        //Update order quantity
+        order->qty_ -= fill_qty;
+        // Construct and send the buyer's order transaction client response
+        client_response_ = {ClientResponseType::FILLED, client_id, ticker_id, 
+                            client_order_id, new_market_order_id, side, 
+                            itr->price_, fill_qty, *leaves_qty};
+        matching_engine_->sendClientResponse(&client_response_);
+        // Construct and send the seller's order transaction client response
+        client_response_ = {ClientResponseType::FILLED, order->client_id_, ticker_id, 
+                            order->client_order_id_, order->market_order_id_, 
+                            order->side_, itr->price_, fill_qty, order->qty_};
+        matching_engine_->sendClientResponse(&client_response_);
+        // Construct and send market update information
+        market_update_ = {MarketUpdateType::TRADE, OrderId_INVALID, ticker_id, 
+                          side, itr->price_, fill_qty, Priority_INVALID};
+        matching_engine_->sendMarketUpdate(&market_update_);
+        // If the order quantity is 0
+        if (!order->qty_) {
+            // Construct and send market update information for canceled orders
+            market_update_ = {MarketUpdateType::CANCEL, order->market_order_id_, 
+                              ticker_id, order->side_, order->price_, 
+                              order_qty, Priority_INVALID};
+            matching_engine_->sendMarketUpdate(&market_update_);
+            //Remove order from order book
+            removeOrder(order);
+        } else {
+            // Construct and send market updates for modified orders
+            market_update_ = {MarketUpdateType::MODIFY, order->market_order_id_, 
+                              ticker_id, order->side_, order->price_, 
+                              order->qty_, order->priority_};
+            matching_engine_->sendMarketUpdate(&market_update_);
+        }
+    }
+
+    // Check if there is a matching order
+    auto checkForMatch(ClientId client_id, OrderId client_order_id, 
+                       TickerId ticker_id, Side side, Price price, 
+                       Qty qty, OrderId new_market_order_id) noexcept {
+        auto leaves_qty = qty;
+        // If it is a purchase order
+        if (side == Side::BUY) {
+            // Traverse the selling price level
+            while (leaves_qty && asks_by_price_) {
+                const auto ask_itr = asks_by_price_->first_me_order_;
+                // If the price does not meet the matching conditions, exit the loop
+                if (price < ask_itr->price_) {
+                    break;
+                }
+                //Perform matching operation
+                match(ticker_id, client_id, side, client_order_id, 
+                      new_market_order_id, ask_itr, &leaves_qty);
+            }
+        }
+        // If it is a sell order
+        if (side == Side::SELL) {
+            // Traverse the buying price level
+            while (leaves_qty && bids_by_price_) {
+                const auto bid_itr = bids_by_price_->first_me_order_;
+                // If the price does not meet the matching conditions, exit the loop
+                if (price > bid_itr->price_) {
+                    break;
+                }
+                //Perform matching operation
+                match(ticker_id, client_id, side, client_order_id, 
+                      new_market_order_id, bid_itr, &leaves_qty);
+            }
+        }
+        return leaves_qty;
+    }
+
+    // Remove the specified order from the order book
+    auto removeOrder(MEOrder *order) noexcept {
+        // Get the price level of the order
+        auto orders_at_price = getOrdersAtPrice(order->price_);
+        // If the price level has only one element
+        if (order->prev_order_ == order) {
+            //Remove this price tier
+            removeOrdersAtPrice(order->side_, order->price_);
+        } else {
+            const auto order_before = order->prev_order_;
+            const auto order_after = order->next_order_;
+            //Update the pointers of the previous and next orders
+            order_before->next_order_ = order_after;
+            order_after->prev_order_ = order_before;
+            // If the removal is the first order at this price level
+            if (orders_at_price->first_me_order_ == order) {
+                orders_at_price->first_me_order_ = order_after;
+            }
+            //Clear the front and back pointers of the order
+            order->prev_order_ = order->next_order_ = nullptr;
+        }
+        //Set the corresponding position in the mapping array of customer orders to order objects to nullptr
+        cid_oid_to_order_.at(order->client_id_).at(order->client_order_id_) = nullptr;
+        // Release the memory of the order object
+        order_pool_.deallocate(order);
+    }
+
+    //Add order to order book
+    auto addOrder(MEOrder *order) noexcept {
+        // Get the price level of the order
+        const auto orders_at_price = getOrdersAtPrice(order->price_);
+        // If the price level is empty
+        if (!orders_at_price) {
+            // Initialize the front and back pointers of the order
+            order->next_order_ = order->prev_order_ = order;
+            // Allocate a new price tier object from the price tier memory pool
+            auto new_orders_at_price = orders_at_price_pool_.allocate(
+                order->side_, order->price_, order, nullptr, nullptr);
+            //Add new price level information to the order book
+            addOrdersAtPrice(new_orders_at_price);
+        } else {
+            auto first_order = (orders_at_price? 
+                                orders_at_price->first_me_order_ : nullptr);
+            //Update the front and back pointers of the order and insert them into the price hierarchy
+            first_order->prev_order_->next_order_ = order;
+            order->prev_order_ = first_order->prev_order_;
+            order->next_order_ = first_order;
+            first_order->prev_order_ = order;
+        }
+        //Update the mapping array of customer orders to order objects
+        cid_oid_to_order_.at(order->client_id_).at(order->client_order_id_) = order;
+    }
+
+private:
+    TickerId ticker_id_; // The securities code identifier corresponding to the order book
+    MatchingEngine *matching_engine_; // Matching engine pointer
+    ClientOrderHashMap cid_oid_to_order_; // Mapping array from customer order to order object
+    MemPool<MEOrdersAtPrice> orders_at_price_pool_; // Price level memory pool
+    MEOrdersAtPrice *bids_by_price_; // Bid price level pointer
+    MEOrdersAtPrice *asks_by_price_; // Ask price level pointer
+    OrdersAtPriceHashMap price_orders_at_price_; // Price level array
+    MemPool<MEOrder> order_pool_; // order memory pool
+    MEClientResponse client_response_; // Client response object
+    MEMarketUpdate market_update_; // Market update object
+    OrderId next_market_order_id_ = 1; // Next market order number
+    std::string time_str_; // time string
+    Logger *logger_; // Logger pointer
+};
+```
+
+`MatchingEngine` kind
+
+```cpp
+//The MatchingEngine class represents a matching engine used to process the client's order request and perform order matching.
+class MatchingEngine {
+public:
+    //Constructor, initialize the matching engine
+    MatchingEngine(ClientRequestLFQueue *client_requests, 
+                   ClientResponseLFQueue *client_responses,
+                   MEMarketUpdateLFQueue *market_updates)
+        : incoming_requests_(client_requests), 
+          outgoing_ogw_responses_(client_responses), 
+          outgoing_md_updates_(market_updates),
+          // Initialize the logger, the log file name is exchange_matching_engine.log
+          logger_("exchange_matching_engine.log") {
+        //Create an order book for each security symbol
+        for (size_t i = 0; i < ticker_order_book_.size(); ++i) {
+            ticker_order_book_[i] = new MEOrderBook(i, &logger_, this);
+        }
+    }
+
+    // Destructor, releases the resources occupied by the matching engine
+    ~MatchingEngine() {
+        // Stop the matching engine from running
+        run_ = false;
+        using namespace std::literals::chrono_literals;
+        //The thread sleeps for 1 second to ensure that the thread has enough time to stop
+        std::this_thread::sleep_for(1s);
+        //Clear the request queue pointer
+        incoming_requests_ = nullptr;
+        //Clear the response queue pointer
+        outgoing_ogw_responses_ = nullptr;
+        // Clear the market update queue pointer
+        outgoing_md_updates_ = nullptr;
+        // Release memory for each order book
+        for (auto &order_book : ticker_order_book_) {
+            delete order_book;
+            order_book = nullptr;
+        }
+    }
+
+    //Start the matching engine
+    void start() {
+        //Set the run flag to true
+        run_ = true;
+        //Create and start a new thread and execute the run method
+        ASSERT(Common::createAndStartThread(-1, "Exchange/MatchingEngine", 
+                                            [this]() { run(); }) != nullptr, 
+               "Failed to start MatchingEngine thread.");
+    }
+
+    // Stop the matching engine from running
+    void stop() {
+        //Set the run flag to false
+        run_ = false;
+    }
+
+    // Process the order request sent by the client
+    auto processClientRequest(const MEClientRequest *client_request) noexcept {
+        // Get the corresponding order book based on the security code in the request
+        auto order_book = ticker_order_book_[client_request->ticker_id_];
+        switch (client_request->type_) {
+            case ClientRequestType::NEW: {
+                // If it is a new order request, call the add method of the order book
+                order_book->add(client_request->client_id_, client_request->order_id_, 
+                                client_request->ticker_id_, client_request->side_, 
+                                client_request->price_, client_request->qty_);
+            }
+            break;
+            case ClientRequestType::CANCEL: {
+                // If it is an order cancellation request, call the cancel method of the order book
+                order_book->cancel(client_request->client_id_, client_request->order_id_, 
+                                   client_request->ticker_id_);
+            }
+            break;
+            default: {
+                //If the request type is invalid, record the error log
+                FATAL("Received invalid client-request-type:" + 
+                      clientRequestTypeToString(client_request->type_));
+            }
+            break;
+        }
+    }
+
+    //Send response information of order processing results to the client
+    auto sendClientResponse(const MEClientResponse *client_response) noexcept {
+        //Record the log information of the sent response
+        logger_.log("%:% %() % Sending %\n", __FILE__, __LINE__, __FUNCTION__, 
+                    Common::getCurrentTimeStr(&time_str_), client_response->toString());
+        // Get the next writable position from the response queue
+        auto next_write = outgoing_ogw_responses_->getNextToWriteTo();
+        //Move the response information to this location
+        *next_write = std::move(*client_response);
+        //Update the write index of the response queue
+        outgoing_ogw_responses_->updateWriteIndex();
+    }
+
+    // Release market updates to the market
+    auto sendMarketUpdate(const MEMarketUpdate *market_update) noexcept {
+        //Record log information for sending market updates
+        logger_.log("%:% %() % Sending %\n", __FILE__, __LINE__, __FUNCTION__, 
+                    Common::getCurrentTimeStr(&time_str_), market_update->toString());
+        // Get the next writable position from the market update queue
+        auto next_write = outgoing_md_updates_->getNextToWriteTo();
+        // Copy market update information to this location
+        *next_write = *market_update;
+        // Update the write index of the market update queue
+        outgoing_md_updates_->updateWriteIndex();
+    }
+
+    // Match the main loop of the engine thread and continue to process client requests
+    auto run() noexcept {
+        //Record the log information when the thread starts running
+        logger_.log("%:% %() %\n", __FILE__, __LINE__, __FUNCTION__, 
+                    Common::getCurrentTimeStr(&time_str_));
+        // Continue processing requests while the run flag is true
+        while (run_) {
+            // Get the next request to read from the request queue
+            const auto me_client_request = incoming_requests_->getNextToRead();
+            if (me_client_request) {
+                //Record the log information of processing requests
+                logger_.log("%:% %() % Processing %\n", __FILE__, __LINE__, __FUNCTION__, 
+                            Common::getCurrentTimeStr(&time_str_), me_client_request->toString());
+                // handle the request
+                processClientRequest(me_client_request);
+                //Update the read index of the request queue
+                incoming_requests_->updateReadIndex();
+            }
+        }
+    }
+
+private:
+    OrderBookHashMap ticker_order_book_; // Mapping array from security code to order book
+    ClientRequestLFQueue *incoming_requests_; // Client request queue pointer
+    ClientResponseLFQueue *outgoing_ogw_responses_; // Client response queue pointer
+    MEMarketUpdateLFQueue *outgoing_md_updates_; // Market update queue pointer
+    bool run_ = false; // run flag
+    std::string time_str_; // time string
+    Logger logger_; // logger
+};
+```
+
+`MEOrder` Class represents an order.`MEOrderBook` This class is responsible for managing all orders for a specific security, including order addition, cancellation, matching and other operations.`MatchingEngine` The class serves as a matching engine, processing the client's order request and matching orders, and is responsible for communicating with the client and the market.
+
+
+
+**Matching engine handles order logic**
+
+**Processing new passive orders**
+
+When the matching engine receives a new order request submitted by the client,`MEOrderBook::add()` The method is called first. The first step in this method is to generate a new market order ID, which is used in subsequent client responses and market updates. Next, it builds a `MEClientResponse` object, fill in the response information of the order acceptance, and pass `MatchingEngine::sendClientResponse()` Method sent to the client to inform the client that the order has been accepted.
+
+Subsequently,`add()` method call `checkForMatch()` Method, based on information such as the direction (buy or sell), price and quantity of the new order, check whether it can partially or completely match the passive order on the other side of the existing order book. If the new order does not match the existing order at all, or there is still quantity left after only a partial match,`add()` The method continues with subsequent steps.
+
+at this time,`add()` The method is called first `getNextPriority()` The method obtains the priority of the order at the corresponding price level. If there is an order at this price level, the priority is the priority of the last order at this price level plus 1; if there is no order at this price level, the priority is 1. Then, from `order_pool_` Allocate a new one in the memory pool `MEOrder` object and set its properties.
+
+after,`add()` method call `addOrder()` Method adds an order to the order book.`addOrder()` method passes first `getOrdersAtPrice()` The method checks the price corresponding to the order `MEOrdersAtPrice` Whether the entry exists. If it does not exist, from `orders_at_price_pool_` allocate a new one in `MEOrdersAtPrice` object, initialize it, and call `addOrdersAtPrice()` method to add it to the order book; if it exists, a new order is appended to the price at that price level `MEOrder` The end of the doubly linked list and updates the relevant pointer. At the same time, add the pointer of the order to `cid_oid_to_order_` container to quickly find orders by client ID and order ID.
+
+at last,`add()` method to build a `MEMarketUpdate` Object, fill in market update information (such as data related to new orders), and call `MatchingEngine::sendMarketUpdate()` The method sends it to the matching engine, which is published by the market data publishing component to update the market data.
+
+
+
+**Processing order cancellation requests**
+
+When an order cancellation request is received,`MEOrderBook::cancel()` The method is triggered. First, this method checks whether the customer ID requesting the order cancellation is valid and whether the corresponding order placed by the customer exists. If the order does not exist or the customer ID is invalid, create one `CANCEL_REJECTED` type `MEClientResponse` object and pass `MatchingEngine::sendClientResponse()` Method sent to the client to inform the order cancellation request that the order cancellation request was rejected.
+
+If the order is valid, build a `CANCELED` type `MEClientResponse` objects as well as `CANCEL` type `MEMarketUpdate` Object containing information about the canceled order. and then call `removeOrder()` Method removes the order from the order book.`removeOrder()` The method first obtains the price level at which the order is located. If there is only one order at this price level, call `removeOrdersAtPrice()` Method to remove the price level; if there are multiple orders, update the pointers of the previous and previous orders and remove the order from the doubly linked list. Finally, place the order in `cid_oid_to_order_` The corresponding position in the container is set to `nullptr`, release the memory of the order object. After completing the order removal, go through `MatchingEngine::sendMarketUpdate()` method to send market updates and then `CANCELED` Type of client response sent to the client.
+
+
+
+**Match active orders and update order book**
+
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1745043465849-000a83c4-6967-4421-bbce-62ba8bb3dde1.png)
+
+As you can see from the picture, taking the buy order as an example, when there is a buy order (`Trade Side=BUY Qty=25 Price=117`) enters, the matching engine will match the sell order (`Side=SELL`) to match orders. In the diagram, a sell order with a price of 117 will be considered first. When matching, judgment will be made based on the quantity and price conditions of the order.
+
+Assume that the quantity at price 117 is first matched to 20, the priority is 11, and the market order ID is 1200. `MEOrder`, since the buy order quantity is 25, the sell order will be fully filled. At this time, the matching engine will update the status information of the relevant order, such as updating the quantity of the sell order to 0. For buy orders with 5 remaining unfilled orders, they will continue to be matched with sell orders at the same price or higher (if any). If the next quantity at price 117 is matched to 10, priority is 13, and market order ID is 1400 `MEOrder`, then another 5 transactions will be completed, and the sell order will have 5 remaining.
+
+During the entire matching process, every time a transaction is completed, the matching engine will build a corresponding `MEClientResponse` object(`FILLED` Type), including transaction quantity, price and other information, sent to the buyer and seller clients. At the same time, build `MEMarketUpdate` object(`TRADE` Type), contains transaction-related information, and is sent to the market data publishing component for market updates. If an order is fully executed, the order will be removed from the order book and the corresponding `CANCEL` Type market update; if part of the transaction is completed, the remaining quantity of the order is updated and sent `MODIFY` Type market updates to accurately reflect the status of the order book.
+
+
+
+#### Market data protocol design
++ **Protocol Format**: The market data protocol has an internal format used by the matching engine and a public format for market participants. The internal format is `MEMarketUpdate` Structure, the public format will be encapsulated in `MDPMarketUpdate` In the structure, the simple binary encoding (SBE) format is used.
++ **Snapshot Data**: Regarding the content of market data snapshots, snapshot messages contain complete information about the limit order book at a given time and can be used by market participants to reconstruct the complete limit order book. In addition to the market data snapshot section, there is also incremental data used to synchronize the status of the limit order book.
+
+
+
+#### Order gateway server related variable method definitions
+1. `FIFOSequencer` kind
++ `incoming_requests_`：`ClientRequestLFQueue*` Type, a pointer to the client request queue, is used to store requests sent by the client, and is a key channel for interacting with external request data.
++ `logger_`：`Logger*` Type, pointer to the logger, used to record log information related to this type of operation to facilitate debugging and monitoring system running status.
++ `pending_client_requests_`：`std::array<RecvTimeClientRequest, ME_MAX_PENDING_REQUESTS>` Type used to store pending client requests. Each element contains the reception time of the request and the specific client request content, providing data storage for subsequent sequential processing of requests.
++ `pending_size_`：`size_t` type, record `pending_client_requests_` The number of pending requests stored in the array, used to track the status of pending requests and control the operation of adding requests.
+
+**Key method code**
+
+```cpp
+//Add client request to pending list
+auto FIFOSequencer::addClientRequest(Nanos rx_time, const MEClientRequest &request) {
+    // Check whether the number of pending requests has reached the maximum capacity of the array
+    if (pending_size_ >= pending_client_requests_.size()) {
+        // If the maximum capacity is exceeded, record an error log indicating that there are too many pending requests.
+        FATAL("Too many pending reuqests");
+    }
+    // Encapsulate the request and its reception time into the RecvTimeClientRequest structure and add it to the pending request array
+    pending_client_requests_.at(pending_size++) = std::move(RecvTimeClientRequest{rx_time, request});
+}
+
+// Sort all pending requests by receipt time and write them to the incoming_requests_ queue
+auto FIFOSequencer::sequenceAndPublish() {
+    // If the number of pending requests is 0, return directly without any subsequent operations.
+    if(UNLIKELY(!pending_size_)) return;
+
+    // Record logs to display the number of pending requests currently being processed
+    logger_->log("%:% %() % Processing % requests.\n", __FILE__, __LINE__, __FUNCTION__, Common::getCurrentTimeStr(&time_str_), pending_size_);
+    // Sort the pending requests in the pending_client_requests_ array in ascending order according to the reception time
+    std::sort(pending_client_requests_.begin(), pending_client_requests_.begin() + pending_size_);
+
+    // Traverse the sorted array of pending requests
+    for (size_t i = 0; i < pending_size_; ++i) {
+        // Get the currently pending client request
+        const auto &client_request = pending_client_requests_.at(i);
+        //Record logs, showing the reception time and request content of the current request, as well as the operation of writing it to the FIFO queue
+        logger_->log("%:% %() % Writing RX:% Req:% to FIFO.\n", __FILE__, __LINE__, __FUNCTION__, Common::getCurrentTimeStr(&time_str_),
+                     client_request.recv_time_, client_request.request_.toString());
+        // Get the next writable position pointer from the incoming_requests_ queue
+        auto next_write = incoming_requests_->getNextToWriteTo();
+        //Move the current request content to a writable location to write the request to the queue
+        *next_write = std::move(client_request.request_);
+        // Update the write index of the incoming_requests_ queue to mark that a request has been written at this location
+        incoming_requests_->updateWriteIndex();
+    }
+
+    // After all pending requests have been processed, reset the number of pending requests to 0
+    pending_size_ = 0;
+}
+```
+
+
+
+2. `OrderServer` kind
++ `iface_`：`std::string` Type, which stores the name of the network interface that the server listens on, is used to specify the network interface on which the server receives client connections.
++ `port_`：`int` Type, the port number that the storage server listens to, and the client establishes a connection with the server through this port.
++ `outgoing_responses_`：`ClientResponseLFQueue*` Type, a pointer to the client's response queue, used to store response data to be sent to the client.
++ `run_`：`volatile bool` Type, used to control the running status of the server. as `true` When , the server is in running state and continues to process client requests and responses; when `false` , the server stops running.
++ `time_str_`：`std::string` Type, used to store time strings, used when recording logs, to record the time when the operation occurred.
++ `logger_`：`Logger` Type, logger object, used to record various information during server operation, such as logs of operations such as receiving requests and sending responses.
++ `cid_next_outgoing_seq_num_`：`std::array<size_t, ME_MAX_NUM_CLIENTS>` Type that stores the next response sequence number to be sent by each client. Indexing by client ID ensures that responses from each client are sent in the correct order.
++ `cid_next_exp_seq_num_`：`std::array<size_t, ME_MAX_NUM_CLIENTS>` Type that stores the sequence number of the next request each client expects to receive. Used to verify whether the sequence number requested by the client is correct and ensure that the requests are processed in order.
++ `cid_tcp_socket_`：`std::array<Common::TCPSocket *, ME_MAX_NUM_CLIENTS>` Type that stores the TCP socket pointer corresponding to each client. Through the client ID index, the mapping relationship between the client and the corresponding TCP connection is established.
++ `tcp_server_`：`Common::TCPServer` Type, TCP server instance, used to listen for new client connections, receive client requests, and send response data.
++ `fifo_sequencer_`：`FIFOSequencer` Type, first-in-first-out serializer object, ensures that client requests are processed in the order they are received, and the received requests are passed to the subsequent processing module.
+
+**Key method code**
+
+```cpp
+// Start the server
+auto OrderServer::start() -> void {
+    //Set the server running flag to true
+    run_ = true;
+    // Make the TCP server start listening on the specified network interface and port
+    tcp_server_.listen(iface_, port_);
+
+    //Create and start a new thread to run the server's main loop function run(). If the thread creation fails, log an error message
+    ASSERT(Common::createAndStartThread(-1, "Exchange/OrderServer", [this]() { run(); }) != nullptr, "Failed to start OrderServer thread.");
+}
+
+// Stop the server
+auto OrderServer::stop() -> void {
+    //Set the server running flag to false
+    run_ = false;
+}
+
+//The main loop function of the server
+auto OrderServer::run() noexcept {
+    //Record logs to display information about the start of the server's main loop
+    logger_.log("%:% %() %\n", __FILE__, __LINE__, __FUNCTION__, Common::getCurrentTimeStr(&time_str_));
+    // When the server running flag is true, continue to process client requests and responses in a loop
+    while (run_) {
+        //Poll the TCP server to check if there are new client connections or data arriving
+        tcp_server_.poll();
+        // Handle the sending and receiving operations of the TCP server, including receiving client requests and sending responses
+        tcp_server_.sendAndRecv();
+
+        // Traverse the client response queue to be sent
+        for (auto client_response = outgoing_responses_->getNextToRead(); outgoing_responses_->size() && client_response; client_response = outgoing_responses_->getNextToRead()) {
+            // Get the next response sequence number to be sent by the current client
+            auto &next_outgoing_seq_num = cid_next_outgoing_seq_num_[client_response->client_id_];
+            //Record logs, displaying the client ID, response sequence number and response content being processed
+            logger_.log("%:% %() % Processing cid:% seq:% %\n", __FILE__, __LINE__, __FUNCTION__, Common::getCurrentTimeStr(&time_str_),
+                        client_response->client_id_, next_outgoing_seq_num, client_response->toString());
+
+            // Assert that the TCP socket corresponding to the current client is not empty and ensure that there is an available connection to send a response
+            ASSERT(cid_tcp_socket_[client_response->client_id_] != nullptr,
+                   "Dont have a TCPSocket for ClientId:" + std::to_string(client_response->client_id_));
+            // Send the next response sequence number to be sent over the TCP socket
+            cid_tcp_socket_[client_response->client_id_]->send(&next_outgoing_seq_num, sizeof(next_outgoing_seq_num));
+            //Send client response data through TCP socket
+            cid_tcp_socket_[client_response->client_id_]->send(client_response, sizeof(MEClientResponse));
+
+            // Update the read index of the client response queue to be sent and mark the response as processed
+            outgoing_responses_->updateReadIndex();
+
+            // Increment the sequence number of the next response to be sent to prepare for the next send
+            ++next_outgoing_seq_num;
+        }
+    }
+}
+
+//Callback function to handle received client request
+auto OrderServer::recvCallback(TCPSocket *socket, Nanos rx_time) noexcept {
+    //Record log, display the received socket information, received data length and receiving time
+    logger_.log("%:% %() % Received socket:% len:% rx:%\n", __FILE__, __LINE__, __FUNCTION__, Common::getCurrentTimeStr(&time_str_),
+                socket->socket_fd_, socket->next_rcv_valid_index_, rx_time);
+
+    // Check whether the received data length is enough for an OMClientRequest
+    if (socket->next_rcv_valid_index_ >= sizeof(OMClientRequest)) {
+        size_t i = 0;
+        // Traverse the received data and parse the data according to the size of OMClientRequest
+        for (; i + sizeof(OMClientRequest) <= socket->next_rcv_valid_index_; i += sizeof(OMClientRequest))
+        {
+            // Parse the received data into the OMClientRequest structure pointer
+            auto request = reinterpret_cast<const OMClientRequest *>(socket->inbound_data_.data() + i);
+            //Record logs and display received request information
+            logger_.log("%:% %() % Received %\n", __FILE__, __LINE__, __FUNCTION__, Common::getCurrentTimeStr(&time_str_), request->toString());
+
+            // If the TCP socket corresponding to the current client ID is empty, it means that this is the first request of the client and the socket is recorded.
+            if (UNLIKELY(cid_tcp_socket_[request->me_client_request_.client_id_] == nullptr)) { 
+                cid_tcp_socket_[request->me_client_request_.client_id_] = socket;
+            }
+
+            // If the currently requested socket does not match a logged socket for this client, log and skip the request (TODO: a reject response should be sent to the client)
+            if (cid_tcp_socket_[request->me_client_request_.client_id_] != socket) { 
+                logger_.log("%:% %() % Received ClientRequest from ClientId:% on different socket:% expected:%\n", __FILE__, __LINE__, __FUNCTION__,
+                            Common::getCurrentTimeStr(&time_str_), request->me_client_request_.client_id_, socket->socket_fd_,
+                            cid_tcp_socket_[request->me_client_request_.client_id_]->socket_fd_);
+                continue;
+            }
+
+            // Get the next request sequence number expected to be received by the current client
+            auto &next_exp_seq_num = cid_next_exp_seq_num_[request->me_client_request_.client_id_];
+            // If the received request sequence number does not match the expected sequence number, log and skip the request (TODO: a reject response should be sent to the client)
+            if (request->seq_num_ != next_exp_seq_num) { 
+                logger_.log("%:% %() % Incorrect sequence number. ClientId:% SeqNum expected:% received:%\n", __FILE__, __LINE__, __FUNCTION__,
+                            Common::getCurrentTimeStr(&time_str_), request->me_client_request_.client_id_, next_exp_seq_num, request->seq_num_);
+                continue;
+            }
+
+            // Increment the next request sequence number expected to be received
+            ++next_exp_seq_num;
+            // Add received client requests to the FIFO sequencer for sequential processing
+            fifo_sequencer_.addClientRequest(rx_time, request->me_client_request_);
+        }
+        //Move the unprocessed data to the beginning of the array and update the effective length of the received data
+        memcpy(socket->inbound_data_.data(), socket->inbound_data_.data() + i, socket->next_rcv_valid_index_ - i);
+        socket->next_rcv_valid_index_ -= i;
+    }
+}
+
+//Callback function after receiving data is completed
+auto OrderServer::recvFinishedCallback() noexcept {
+    //Call the sequenceAndPublish method of the FIFO sequencer to sort the received requests and publish them to the subsequent processing module
+    fifo_sequencer_.sequenceAndPublish();
+}
+```
+
+`FIFOSequencer` The class is mainly used in the trading system to ensure that client requests are processed in the order they are received. It plays an important role in the request processing process of the entire system. The following is a detailed explanation of its function and implementation mechanism:
+
+**effect**
+
+1. **Request sorting processing**: The client will continuously send various order requests.`FIFOSequencer` The core function is to store and process these requests in the order they are received, ensuring that requests received first are processed first, avoiding confusion in request processing, and maintaining the orderliness and fairness of the system.
+2. **Connection data flow**: It serves as an intermediate component that connects the receiving part of the client request and the subsequent processing module (such as matching engine, etc.).
+
+**Implementation Mechanism**
+
+1. **Data Storage:**
+    - `FIFOSequencer` The class uses a `std::array<RecvTimeClientRequest, ME_MAX_PENDING_REQUESTS>` array of type `pending_client_requests_` To store pending client requests.`RecvTimeClientRequest` The structure contains two members,`recv_time_` Used to record the reception time of the request,`request_` Store specific client requests (`MEClientRequest` type). In this way, not only the request itself is stored, but also the reception time information of the request is retained, providing a basis for subsequent sorting.
+    - `pending_size_` Variables are used to record `pending_client_requests_` The number of pending requests already stored in the array. When a new request comes,`pending_size_` It will increase accordingly and is used to control the requested addition operation and determine whether the array is full.
+2. **ADD REQUEST**:`addClientRequest` Method used to add client requests to the pending list. When receiving a new client request, this method first checks `pending_size_` whether it has been reached `pending_client_requests_` The maximum capacity of the array `ME_MAX_PENDING_REQUESTS`. If the maximum capacity is exceeded, it will be called `FATAL` The macro records an error log indicating that there are too many pending requests. If not exceeded, the requested reception time will be `rx_time` and request content `request` packaged into `RecvTimeClientRequest` structure and added to `pending_client_requests_` In the array, at the same time, `pending_size_` Increment by 1.
+3. **Sort and publish**:
+    - `sequenceAndPublish` Methods are the key to achieving sequential processing of requests. First, it checks `pending_size_` Whether it is 0, if it is 0, it will be returned directly because there is no pending request.
+    - Next, it records a log showing the number of pending requests currently being processed to monitor system health. Then, use `std::sort` algorithm pair `pending_client_requests_` Pending requests already in the array, according to reception time `recv_time_` Sort in ascending order. In this way, the requests are arranged in the order they are received.
+    - After the sorting is completed, a loop is used to traverse the sorted `pending_client_requests_` array. For each request, a log is first recorded showing the time the request was received and the content of the request, as well as being written to it. `incoming_requests_` Queue operations. Then, from `incoming_requests_` Queue (points to `ClientRequestLFQueue` Get the next writable position pointer from the pointer) `next_write`, change the current request content `client_request.request_` Move to this location and implement writing the request to the queue. Finally, update `incoming_requests_` The write index of the queue to mark where a request has been written.
+    - When all pending requests have been written to the queue, the `pending_size_` Reset to 0 to prepare for the next round of receiving and processing requests.
+
+
+
+#### Market update data publisher related variable method definitions
+1. `SnapshotSynthesizer` kind
++ `snapshot_md_updates_`：`MDPMarketUpdateLFQueue*` Type, a pointer to the market update queue, used to store market data update information, and is a key channel for obtaining data.
++ `logger_`：`Logger` Type, logger object, used to record log information related to this type of operation to facilitate debugging and monitoring system running status.
++ `run_`：`volatile bool` Type, used to control the running status of this class. as `true` When , continuously process market data updates and synthesize snapshots; when `false` when, stop running.
++ `time_str_`：`std::string` Type, used to store time strings, used when recording logs, to record the time when the operation occurred.
++ `snapshot_socket_`：`McastSocket` Type, multicast socket object used to send synthetic market data snapshot information to the specified network address.
++ `ticker_orders_`：`std::array<std::array<MEMarketUpdate *, ME_MAX_ORDER_IDS>, ME_MAX_TICKERS>` type, a two-dimensional array used to store each security code (`TickerId`), each element points to `MEMarketUpdate` pointer to facilitate management and search of order data.
++ `last_inc_seq_num_`：`size_t` Type that records the sequence number of the last incremental market update sent, used to verify the order and integrity of market updates.
++ `last_snapshot_time_`：`Nanos` Type, records the time when the market data snapshot was last released, and is used to control the frequency of snapshot release.
++ `order_pool_`：`MemPool<MEMarketUpdate>` Type, memory pool object, used for allocation and release `MEMarketUpdate` Object memory to improve memory usage efficiency.
+
+**Key method code**
+
+```cpp
+// Constructor, initialize related member variables and create multicast socket
+SnapshotSynthesizer::SnapshotSynthesizer(MDPMarketUpdateLFQueue *market_updates, const std::string &iface,
+                                        const std::string &snapshot_ip, int snapshot_port)
+        : snapshot_md_updates_(market_updates), logger_("exchange_snapshot_synthesizer.log"), snapshot_socket_(logger_), order_pool_(ME_MAX_ORDER_IDS) {
+    //Initialize the multicast socket and log error information if it fails
+    ASSERT(snapshot_socket_.init(snapshot_ip, iface, snapshot_port, /*is_listening*/ false) >= 0,
+           "Unable to create snapshot mcast socket. error:" + std::string(std::strerror(errno)));
+    // Initialize all elements of the ticker_orders_ array to nullptr
+    for(auto& orders : ticker_orders_)
+       orders.fill(nullptr);
+}
+
+// Add market updates to the snapshot
+auto SnapshotSynthesizer::addToSnapshot(const MDPMarketUpdate *market_update) {
+    // Get market update details
+    const auto &me_market_update = market_update->me_market_update_;
+    // Get the order array pointer corresponding to the security code
+    auto *orders = &ticker_orders_.at(me_market_update.ticker_id_);
+    // Perform different processing based on market update type
+    switch (me_market_update.type_) {
+        case MarketUpdateType::ADD: {
+            // Check if the order already exists
+            auto order = orders->at(me_market_update.order_id_);
+            ASSERT(order == nullptr, "Received:" + me_market_update.toString() + " but order already exists:" + (order ? order->toString() : ""));
+            // Allocate a new MEMarketUpdate object from the memory pool and store order information
+            orders->at(me_market_update.order_id_) = order_pool_.allocate(me_market_update);
+        }
+        break;
+        case MarketUpdateType::MODIFY: {
+            // Get the order to be modified
+            auto order = orders->at(me_market_update.order_id_);
+            ASSERT(order != nullptr, "Received:" + me_market_update.toString() + " but order does not exist.");
+            // Verify the consistency of the order
+            ASSERT(order->order_id_ == me_market_update.order_id_, "Expecting existing order to match new one.");
+            ASSERT(order->side_ == me_market_update.side_, "Expecting existing order to match new one.");
+            // Update order quantity and price
+            order->qty_ = me_market_update.qty_;
+            order->price_ = me_market_update.price_;
+        }
+        break;
+        case MarketUpdateType::CANCEL: {
+            // Get the order to be canceled
+            auto order = orders->at(me_market_update.order_id_);
+            ASSERT(order != nullptr, "Received:" + me_market_update.toString() + " but order does not exist.");
+            // Verify the consistency of the order
+            ASSERT(order->order_id_ == me_market_update.order_id_, "Expecting existing order to match new one.");
+            ASSERT(order->side_ == me_market_update.side_, "Expecting existing order to match new one.");
+            // Release the order memory and set the corresponding position in the array to nullptr
+            order_pool_.deallocate(order);
+            orders->at(me_market_update.order_id_) = nullptr;
+        }
+        break;
+        case MarketUpdateType::SNAPSHOT_START:
+        case MarketUpdateType::CLEAR:
+        case MarketUpdateType::SNAPSHOT_END:
+        case MarketUpdateType::TRADE:
+        case MarketUpdateType::INVALID:
+        break;
+    }
+
+    // Verify whether the serial numbers of market updates are consecutive
+    ASSERT(market_update->seq_num_ == last_inc_seq_num_ + 1, "Expected incremental seq_nums to increase.");
+    // Update the sequence number of the last incremental market update sent
+    last_inc_seq_num_ = market_update->seq_num_;
+}
+
+// Publish market data snapshot
+auto SnapshotSynthesizer::publishSnapshot() {
+    //Record the number of messages in the snapshot
+    size_t snapshot_size = 0;
+
+    // Create and send a market update message starting from the snapshot
+    const MDPMarketUpdate start_market_update{snapshot_size++, {MarketUpdateType::SNAPSHOT_START, last_inc_seq_num_}};
+    logger_.log("%:% %() % %\n", __FILE__, __LINE__, __FUNCTION__, getCurrentTimeStr(&time_str_), start_market_update.toString());
+    snapshot_socket_.send(&start_market_update, sizeof(MDPMarketUpdate));
+
+    // Traverse the order array of each security code
+    for (size_t ticker_id = 0; ticker_id < ticker_orders_.size(); ++ticker_id) {
+        const auto &orders = ticker_orders_.at(ticker_id);
+
+        // Create and send a market update message to clear the order
+        MEMarketUpdate me_market_update;
+        me_market_update.type_ = MarketUpdateType::CLEAR;
+        me_market_update.ticker_id_ = ticker_id;
+        const MDPMarketUpdate clear_market_update{snapshot_size++, me_market_update};
+        logger_.log("%:% %() % %\n", __FILE__, __LINE__, __FUNCTION__, getCurrentTimeStr(&time_str_), clear_market_update.toString());
+        snapshot_socket_.send(&clear_market_update, sizeof(MDPMarketUpdate));
+
+        // Traverse all orders under the current security code and send order information
+        for (const auto order: orders) {
+            if (order) {
+                const MDPMarketUpdate market_update{snapshot_size++, *order};
+                logger_.log("%:% %() % %\n", __FILE__, __LINE__, __FUNCTION__, getCurrentTimeStr(&time_str_), market_update.toString());
+                snapshot_socket_.send(&market_update, sizeof(MDPMarketUpdate));
+                snapshot_socket_.sendAndRecv();
+            }
+        }
+    }
+
+    //Create and send snapshot end market update message
+    const MDPMarketUpdate end_market_update{snapshot_size++, {MarketUpdateType::SNAPSHOT_END, last_inc_seq_num_}};
+    logger_.log("%:% %() % %\n", __FILE__, __LINE__, __FUNCTION__, getCurrentTimeStr(&time_str_), end_market_update.toString());
+    snapshot_socket_.send(&end_market_update, sizeof(MDPMarketUpdate));
+    snapshot_socket_.sendAndRecv();
+
+    // Log, showing the number of orders in the published snapshot
+    logger_.log("%:% %() % Published snapshot of % orders.\n", __FILE__, __LINE__, __FUNCTION__, getCurrentTimeStr(&time_str_), snapshot_size - 1);
+}
+
+//Main running function
+void SnapshotSynthesizer::run() {
+    // Record the log and display the information when the function starts running
+    logger_.log("%:% %() %\n", __FILE__, __LINE__, __FUNCTION__, getCurrentTimeStr(&time_str_));
+    // When the run flag is true, continue to loop to process market data updates
+    while (run_) {
+        // Traverse the market update queue and process each market update message
+        for (auto market_update = snapshot_md_updates_->getNextToRead(); snapshot_md_updates_->size() && market_update; market_update = snapshot_md_updates_->getNextToRead()) {
+            logger_.log("%:% %() % Processing %\n", __FILE__, __LINE__, __FUNCTION__, getCurrentTimeStr(&time_str_),
+                        market_update->toString().c_str());
+
+            // Add market updates to the snapshot
+            addToSnapshot(market_update);
+
+            // Update the read index of the market update queue
+            snapshot_md_updates_->updateReadIndex();
+        }
+
+        // Publish a snapshot if more than 60 seconds have passed since the last snapshot was published
+        if (getCurrentNanos() - last_snapshot_time_ > 60 * NANOS_TO_SECS) {
+            last_snapshot_time_ = getCurrentNanos();
+            publishSnapshot();
+        }
+    }
+}
+```
+
+
+
+2. `MarketDataPublisher` kind
++ `next_inc_seq_num_`：`size_t` Type, records the sequence number of the next incremental market update to be sent, used to ensure the sequence of incremental updates.
++ `outgoing_md_updates_`：`MEMarketUpdateLFQueue*` Type, pointer to the market update queue used to store market data updates to be sent.
++ `snapshot_md_updates_`：`MDPMarketUpdateLFQueue` Type, market update queue object, used to store market data update information for `SnapshotSynthesizer` class use.
++ `run_`：`volatile bool` Type, used to control the running status of this class. as `true` When , continue to send market data updates; when `false` when, stop running.
++ `time_str_`：`std::string` Type, used to store time strings, used when recording logs, to record the time when the operation occurred.
++ `logger_`：`Logger` Type, logger object, used to record log information related to this type of operation to facilitate debugging and monitoring system running status.
++ `incremental_socket_`：`McastSocket` Type, multicast socket object used to send incremental market data updates to the specified network address.
++ `snapshot_synthesizer_`：`SnapshotSynthesizer*` type, points to `SnapshotSynthesizer` A pointer to a class used to synthesize market data snapshots and publish them.
+
+**Key method code**
+
+```cpp
+//Constructor, initialize related member variables and create multicast socket and SnapshotSynthesizer objects
+MarketDataPublisher::MarketDataPublisher(MEMarketUpdateLFQueue *market_updates, const std::string &iface,
+                                         const std::string &snapshot_ip, int snapshot_port,
+                                         const std::string &incremental_ip, int incremental_port)
+        : outgoing_md_updates_(market_updates), snapshot_md_updates_(ME_MAX_MARKET_UPDATES),
+          run_(false), logger_("exchange_market_data_publisher.log"), incremental_socket_(logger_) {
+    //Initialize the multicast socket and log error information if it fails
+    ASSERT(incremental_socket_.init(incremental_ip, iface, incremental_port, /*is_listening*/ false) >= 0,
+           "Unable to create incremental mcast socket. error:" + std::string(std::strerror(errno)));
+    // Create SnapshotSynthesizer object
+    snapshot_synthesizer_ = new SnapshotSynthesizer(&snapshot_md_updates_, iface, snapshot_ip, snapshot_port);
+}
+
+// Main running function, continuously sends market data updates and processes snapshot synthesis
+auto MarketDataPublisher::run() noexcept -> void {
+    // Record the log and display the information when the function starts running
+    logger_.log("%:% %() %\n", __FILE__, __LINE__, __FUNCTION__, Common::getCurrentTimeStr(&time_str_));
+    // When the run flag is true, continue to loop to process market data updates
+    while (run_) {
+        // Traverse the market update queue and process each market update message
+        for (auto market_update = outgoing_md_updates_->getNextToRead();
+             outgoing_md_updates_->size() && market_update; market_update = outgoing_md_updates_->getNextToRead()) {
+            logger_.log("%:% %() % Sending seq:% %\n", __FILE__, __LINE__, __FUNCTION__, Common::getCurrentTimeStr(&time_str_), next_inc_seq_num_,
+                        market_update->toString().c_str());
+            //Send the sequence number for the incremental market update
+            incremental_socket_.send(&next_inc_seq_num_, sizeof(next_inc_seq_num_));
+            //Send market updates
+            incremental_socket_.send(market_update, sizeof(MEMarketUpdate));
+            // Update the read index of the market update queue
+            outgoing_md_updates_->updateReadIndex();
+
+            // Get the next writable position of the snapshot update queue
+            auto next_write = snapshot_md_updates_.getNextToWriteTo();
+            //Set the serial number and market update information of the snapshot update
+            next_write->seq_num_ = next_inc_seq_num_;
+            next_write->me_market_update_ = *market_update;
+            //Update the write index of the snapshot update queue
+            snapshot_md_updates_.updateWriteIndex();
+
+            // Increment the sequence number of the next incremental market update to be sent
+            ++next_inc_seq_num_;
+        }
+
+        //Send and receive multicast data
+        incremental_socket_.sendAndRecv();
+    }
+}
+```
+
+`SnapshotSynthesizer` The function and implementation mechanism of
+
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1745047084766-f23ca675-6198-4b7a-bfc9-9d3dc875ff9b.png)
+
+**effect**
+
++ **Synthetic Market Data Snapshot**:`SnapshotSynthesizer` The main function is to update the information based on the received market data and synthesize a snapshot of the market data at a certain moment.
++ **Control snapshot release frequency**: By recording the time of the last snapshot release, control the snapshot release frequency to avoid wasting network bandwidth and system resource consumption caused by releasing snapshots too frequently. It also ensures that market participants can obtain relatively timely market status information.
+
+**Implementation Mechanism**
+
++ **Data storage and update**: use two-dimensional array `ticker_orders_` Stores all order information under each security code. When market update information is received, depending on the update type (`ADD`、`MODIFY`、`CANCEL` etc.) Yes `ticker_orders_` The order information in the array is updated accordingly. For example, for `ADD` type update, allocate a new one from the memory pool `MEMarketUpdate` object and stores order information; for `MODIFY` Type of update, update the quantity and price of the order after verifying the consistency of the order; for `CANCEL` Type update, release the order memory and set the corresponding position in the array to `nullptr`. At the same time, through `last_inc_seq_num_` Record the sequence number of the last incremental market update received, verifying the order and integrity of market updates.
++ **Snapshot publishing process**: When publishing a snapshot, first send a `SNAPSHOT_START` Type of market update message that informs market participants that a snapshot has begun. Then, iterate through the order array of each security code and first send an `CLEAR` Type of market update message, clear the previous order information, then traverse all orders under the current security code, and send the information of each order. Finally, send a `SNAPSHOT_END` Type of market update message informing market participants that the snapshot has ended. Throughout the process, the number of messages in the snapshot is recorded and communicated via the multicast socket `snapshot_socket_` Send market update messages.
++ **Run Loop Control**: in `run` Method, continuously update the queue from the market `snapshot_md_updates_` To obtain market update information, call `addToSnapshot` method adds it to the snapshot and updates the queue's read index. At the same time, check whether the time since the last snapshot was released exceeds 60 seconds. If it exceeds, call `publishSnapshot` Method publishes a snapshot.
+
+**Detailed explanation of snapshot format**
+
+1. **Start ID**
+    - snapshot with `MarketUpdateType::SNAPSHOT_START` type `MDPMarketUpdate` message to begin with. of this message `seq_num_` Set to 0 to clearly mark the starting position of the snapshot message. Like marking a starting point on a map, market participants know where snapshot information is received and processed from. At the same time, the message `OrderId` The value is set to the last delta sequence number used to build this snapshot, which facilitates subsequent synchronization with delta market data streams.
+2. **Treat as securities**
+    - **CLEAR COMMAND**: For each security (use `TickerId` logo), send first `MarketUpdateType::CLEAR` type `MDPMarketUpdate` information. Its function is to inform the client to clear the currently stored order book information related to the security before applying subsequent messages. This is to ensure that when the client receives new snapshot information, the data is basically clean and interference-free, and to avoid mixing old and new information.
+    - **Add Order Information**: For every order that exists for this security in the snapshot, it will be sent `MarketUpdateType::ADD` type `MDPMarketUpdate` information . The message contains specific information about the order, such as order ID, buying and selling direction, price, quantity, etc. By sending these messages in sequence, the latest status of all orders placed on the security is delivered to the client, just like placing each piece of the puzzle accurately, gradually building a complete order picture.
+3. **End mark**
+    - When all securities-related information has been sent, it will be sent `MarketUpdateType::SNAPSHOT_END` type `MDPMarketUpdate` information. This message will also `OrderId` The value is set to the last incremental sequence number used to build this snapshot, marking the end of the snapshot message. When market participants receive this message, they know that they have completely received the market snapshot information at the current moment.
+
+
+
+**Implementation mechanism of incremental update data**
+
+**Data source and storage**
+
+`MarketDataPublisher` Similar to `outgoing_md_updates_` pointed to `MEMarketUpdateLFQueue` Obtain market data update information from the queue. This queue stores market data changes generated by other parts of the system (such as matching engines, etc.). These changes are based on `MEMarketUpdate` It exists in the form of a structure and contains key information such as the type of market update (such as order addition, modification, cancellation, etc.), order ID, security code, buying and selling direction, price, quantity, etc.
+
+**Serial Number Management**
+
+pass `next_inc_seq_num_` Variable to manage the sequence number of incremental updates. This sequence number is sent first when each market update is sent, and the recipient can verify the order and integrity of the data based on the sequence number. After each market update is sent,`next_inc_seq_num_` will be incremented by 1 to ensure that the sequence number for the next market update is consecutive and unique.
+
+**Data sent**
+
+use `incremental_socket_` Multicast socket to send incremental market data updates. exist `run` In the loop of the method, for the `outgoing_md_updates_` For each market update fetched in the queue, the sequence number is sent first and then `MEMarketUpdate` The contents of the structure. After sending is completed, update `outgoing_md_updates_` The read index of the queue marking this market update as processed.
+
+**Association with snapshot compositing**
+
+`MarketDataPublisher` class will also store market update information at the same time `snapshot_md_updates_` in queue for `SnapshotSynthesizer` class use. When storing, it is set `snapshot_md_updates_` The sequence number and market update information of the corresponding element in the queue are updated and written to the index. so,`SnapshotSynthesizer` The class can obtain complete market update data from the queue and use it to synthesize market data snapshots, ensuring the consistency and coherence of snapshot data and incremental update data.
+
+**Sending and receiving interaction**
+
+After each round of incremental market updates is sent, call `incremental_socket_` of `sendAndRecv` Method to perform data sending and receiving operations. Confirm the delivery of data, receive possible feedback information, and ensure the reliability of data transmission.
+
+
+
+#### Exchange main program operation implementation
+```c
+#include <csignal>
+#include "matcher/matching_engine.h"
+#include "market_data/market_data_publisher.h"
+#include "order_server/order_server.h"
+
+Common::Logger* logger = nullptr;
+Exchange::MatchingEngine* matching_engine = nullptr;
+Exchange::MarketDataPublisher* market_data_publisher = nullptr;
+Exchange::OrderServer* order_server = nullptr;
+
+// Signal processing function, used to process the SIGINT signal (usually the signal sent when the user presses Ctrl + C)
+void signal_handler(int) {
+    using namespace std::literals::chrono_literals;
+    //The thread sleeps for 10 seconds, waiting for resource release or other cleanup work.
+    std::this_thread::sleep_for(10s);
+
+    // Release the memory occupied by logger and set the pointer to nullptr
+    delete logger;
+    logger = nullptr;
+    // Release the memory occupied by the matching engine matching_engine and set the pointer to nullptr
+    delete matching_engine;
+    matching_engine = nullptr;
+    // Release the memory occupied by the market data publisher market_data_publisher and set the pointer to nullptr
+    delete market_data_publisher;
+    market_data_publisher = nullptr;
+    // Release the memory occupied by the order server order_server and set the pointer to nullptr
+    delete order_server;
+    order_server = nullptr;
+
+    //The thread sleeps again for 10 seconds, waiting for the system to stabilize or other subsequent operations.
+    std::this_thread::sleep_for(10s);
+
+    //The program exits normally
+    exit(EXIT_SUCCESS);
+}
+
+int main(int, char **) {
+    //Create a logger object to record system operation logs. The file name is exchange_main.log.
+    logger = new Common::Logger("exchange_main.log");
+
+    //Register the SIGINT signal processing function signal_handler, and call this function when the SIGINT signal is received
+    std::signal(SIGINT, signal_handler);
+    const int sleep_time = 100 * 1000;
+
+    //Create a client request queue with a maximum capacity of ME_MAX_CLIENT_UPDATES
+    Exchange::ClientRequestLFQueue client_requests(ME_MAX_CLIENT_UPDATES);
+    //Create a client response queue with a maximum capacity of ME_MAX_CLIENT_UPDATES
+    Exchange::ClientResponseLFQueue client_responses(ME_MAX_CLIENT_UPDATES);
+    // Create a market update queue with a maximum capacity of ME_MAX_MARKET_UPDATES
+    Exchange::MEMarketUpdateLFQueue market_updates(ME_MAX_MARKET_UPDATES);
+
+    std::string time_str;
+
+    //Record the log information of starting the matching engine
+    logger->log("%:% %() % Starting Matching Engine...\n", __FILE__, __LINE__, __FUNCTION__, Common::getCurrentTimeStr(&time_str));
+    // Create a matching engine object and pass in pointers to the client request queue, client response queue and market update queue
+    matching_engine = new Exchange::MatchingEngine(&client_requests, &client_responses, &market_updates);
+    //Start the matching engine
+    matching_engine->start();
+
+    const std::string mkt_pub_iface = "lo";
+    const std::string snap_pub_ip = "233.252.14.1", inc_pub_ip = "233.252.14.3";
+    const int snap_pub_port = 20000, inc_pub_port = 20001;
+
+    //Record the log information of the market data publisher that is started
+    logger->log("%:% %() % Starting Market Data Publisher...\n", __FILE__, __LINE__, __FUNCTION__, Common::getCurrentTimeStr(&time_str));
+    // Create a market data publisher object and pass in parameters such as market update queue, network interface, snapshot publishing IP address, snapshot publishing port number, incremental publishing IP address, and incremental publishing port number.
+    market_data_publisher = new Exchange::MarketDataPublisher(&market_updates, mkt_pub_iface, snap_pub_ip, snap_pub_port, inc_pub_ip, inc_pub_port);
+    // Start market data publisher
+    market_data_publisher->start();
+
+    const std::string order_gw_iface = "lo";
+    const int order_gw_port = 12345;
+
+    //Record the log information of starting the order server
+    logger->log("%:% %() % Starting Order Server...\n", __FILE__, __LINE__, __FUNCTION__, Common::getCurrentTimeStr(&time_str));
+    // Create an order server object and pass in parameters such as client request queue, client response queue, network interface and port number.
+    order_server = new Exchange::OrderServer(&client_requests, &client_responses, order_gw_iface, order_gw_port);
+    //Start the order server
+    order_server->start();
+
+    while (true) {
+        // Record thread sleep log information and let threads sleep every once in a while to avoid excessive use of CPU resources.
+        logger->log("%:% %() % Sleeping for a few milliseconds..\n", __FILE__, __LINE__, __FUNCTION__, Common::getCurrentTimeStr(&time_str));
+        usleep(sleep_time * 1000);
+    }
+}
+```
+
+
+
+### 5. Some actual projects of market participants
+#### Market participant basic data types
+Partially consistent with the exchange
+
+#### Definition of basic limited data volume for market participants
+Partially consistent with the exchange
+
+
+
+#### Market update data consumer related variable method definitions
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1745119168365-ed995873-55cd-41f6-8a14-60da8ab7240d.png)
+
+1. `MarketDataConsumer` kind
++ `next_exp_inc_seq_num_`：`size_t` Type, with an initial value of 1, used to record the sequence number of the next expected incremental market update message, ensuring that incremental messages are received in order.
++ `incoming_md_updates_`：`Exchange::MEMarketUpdateLFQueue*` Type that points to a lock-free queue used to store received market update messages so that they can be processed later.
++ `run_`：`volatile bool` type, used to control `MarketDataConsumer` The running status of the thread, when `run_` for `true` , the thread continues to run, receiving and processing market data.
++ `time_str_`：`std::string` Type, a string used to store the current time to facilitate recording the time of operations in the log.
++ `logger_`：`Logger` Type, used to record log information during program running to facilitate debugging and monitoring.
++ `incremental_mcast_socket_` and `snapshot_mcast_socket_`：`Common::McastSocket` Type, used to receive incremental market update data and snapshot market update data respectively.
++ `in_recovery_`：`bool` Type, flag whether it is in recovery state. When it is detected that the message sequence numbers are discontinuous, it enters the recovery state and attempts to synchronize through snapshot data.
++ `iface_`：`std::string` Type that stores the network interface name used for multicast socket initialization.
++ `snapshot_ip_`：`std::string` Type, multicast IP address where snapshot data is stored.
++ `snapshot_port_`：`int` Type, multicast port number where snapshot data is stored.
++ `snapshot_queued_msgs_` and `incremental_queued_msgs_`：`QueuedMarketUpdates` type(`std::map<size_t, Exchange::MEMarketUpdate>`), used to store queued snapshot market update messages and incremental market update messages respectively. The key is the message sequence number and the value is the market update message.
+
+**Important method**
+
+```cpp
+//Constructor, initialize market data consumer
+MarketDataConsumer::MarketDataConsumer(Common::ClientId client_id, Exchange::MEMarketUpdateLFQueue *market_updates,
+                                       const std::string &iface,
+                                       const std::string &snapshot_ip, int snapshot_port,
+                                       const std::string &incremental_ip, int incremental_port)
+    : incoming_md_updates_(market_updates), run_(false),
+      logger_("trading_market_data_consumer_" + std::to_string(client_id) + ".log"),
+      incremental_mcast_socket_(logger_), snapshot_mcast_socket_(logger_),
+      iface_(iface), snapshot_ip_(snapshot_ip), snapshot_port_(snapshot_port) {
+    //Define the receive callback function
+    auto recv_callback = [this](auto socket) {
+        recvCallback(socket);
+    };
+
+    //Set the receive callback function of the incremental multicast socket
+    incremental_mcast_socket_.recv_callback_ = recv_callback;
+    //Initialize the incremental multicast socket and log error information if it fails.
+    ASSERT(incremental_mcast_socket_.init(incremental_ip, iface, incremental_port, /*is_listening*/ true) >= 0,
+           "Unable to create incremental mcast socket. error:" + std::string(std::strerror(errno)));
+    // Join the incremental multicast group and log error information if it fails.
+    ASSERT(incremental_mcast_socket_.join(incremental_ip),
+           "Join failed on:" + std::to_string(incremental_mcast_socket_.socket_fd_) + " error:" + std::string(std::strerror(errno)));
+
+    //Set the receive callback function of the snapshot multicast socket
+    snapshot_mcast_socket_.recv_callback_ = recv_callback;
+}
+
+// Start the market data consumer thread
+auto MarketDataConsumer::start() {
+    run_ = true;
+    //Create and start the thread, and log error information if it fails
+    ASSERT(Common::createAndStartThread(-1, "Trading/MarketDataConsumer", [this]() { run(); }) != nullptr, "Failed to start MarketData thread.");
+}
+
+// Stop the market data consumer thread
+auto MarketDataConsumer::stop() -> void {
+    run_ = false;
+}
+
+// Thread main loop, continues to receive and process data
+auto MarketDataConsumer::run() noexcept -> void {
+    logger_.log("%:% %() %\n", __FILE__, __LINE__, __FUNCTION__, Common::getCurrentTimeStr(&time_str_));
+    while(run_) {
+        // Handle sending and receiving of incremental multicast sockets
+        incremental_mcast_socket_.sendAndRecv();
+        // Handle sending and receiving of snapshot multicast sockets
+        snapshot_mcast_socket_.sendAndRecv();
+    }
+}
+
+//Start the snapshot synchronization process
+auto MarketDataConsumer::startSnapshotSync() -> void {
+    // Clear queued snapshots and incremental messages
+    snapshot_queued_msgs_.clear();
+    incremental_queued_msgs_.clear();
+
+    // Initialize the snapshot multicast socket and log error information if it fails.
+    ASSERT(snapshot_mcast_socket_.init(snapshot_ip_, iface_, snapshot_port_, /*is_listening*/ true) >= 0,
+           "Unable to create snapshot mcast socket. error:" + std::string(std::strerror(errno)));
+    // Join the snapshot multicast group, and log error information if it fails.
+    ASSERT(snapshot_mcast_socket_.join(snapshot_ip_), // IGMP multicast subscription.
+           "Join failed on:" + std::to_string(snapshot_mcast_socket_.socket_fd_) + " error:" + std::string(std::strerror(errno)));
+}
+
+// Check whether snapshot synchronization is completed
+auto MarketDataConsumer::checkSnapshotSync() -> void {
+    if(snapshot_queued_msgs_.empty()) {
+        return;
+    }
+
+    // Get the first snapshot message
+    const auto &first_snapshot_msg = snapshot_queued_msgs_.begin()->second;
+    if(first_snapshot_msg.type_ != Exchange::MarketUpdateType::SNAPSHOT_START) {
+        logger_.log("%:% %() % Returning because have not seen a SNAPSHOT_START yet.\n",
+                    __FILE__, __LINE__, __FUNCTION__, Common::getCurrentTimeStr(&time_str_));
+        snapshot_queued_msgs_.clear();
+        return;
+    }
+
+    std::vector<Exchange::MEMarketUpdate> final_events;
+
+    auto have_complete_snapshot = true;
+    size_t next_snapshot_seq = 0;
+    // Traverse the queued snapshot messages
+    for(auto &snapshot_itr: snapshot_queued_msgs_) {
+        logger_.log("%:% %() % % => %\n", __FILE__, __LINE__, __FUNCTION__,
+                    Common::getCurrentTimeStr(&time_str_), snapshot_itr.first, snapshot_itr.second.toString());
+        if(snapshot_itr.first != next_snapshot_seq) {
+            have_complete_snapshot = false;
+            logger_.log("%:% %() % Detected gap in snapshot stream expected:% found:% %.\n", __FILE__, __LINE__, __FUNCTION__,
+                        Common::getCurrentTimeStr(&time_str_), next_snapshot_seq, snapshot_itr.first, snapshot_itr.second.toString());
+            break;
+        }
+
+        if(snapshot_itr.second.type_ != Exchange::MarketUpdateType::SNAPSHOT_START && 
+                snapshot_itr.second.type_ != Exchange::MarketUpdateType::SNAPSHOT_END)
+            final_events.push_back(snapshot_itr.second);
+        ++next_snapshot_seq;
+    }
+
+    if(!have_complete_snapshot){
+        logger_.log("%:% %() % Returning because found gaps in snapshot stream.\n",
+                    __FILE__, __LINE__, __FUNCTION__, Common::getCurrentTimeStr(&time_str_));
+        snapshot_queued_msgs_.clear();
+        return;
+    }
+
+    // Get the last snapshot message
+    const auto &last_snapshot_msg = snapshot_queued_msgs_.rbegin()->second;
+    if(last_snapshot_msg.type_ != Exchange::MarketUpdateType::SNAPSHOT_END){
+        logger_.log("%:% %() % Returning because have not seen a SNAPSHOT_END yet.\n",
+                    __FILE__, __LINE__, __FUNCTION__, Common::getCurrentTimeStr(&time_str_));
+        return;
+    }
+
+    auto have_complete_incremental = true;
+    size_t num_incrementals = 0;
+    next_exp_inc_seq_num_ = last_snapshot_msg.order_id_ + 1;
+    // Traverse the queued incremental messages
+    for(auto inc_itr = incremental_queued_msgs_.begin(); inc_itr != incremental_queued_msgs_.end(); ++inc_itr){
+        logger_.log("%:% %() % Checking next_exp:% vs. seq:% %.\n", __FILE__, __LINE__, __FUNCTION__,
+                    Common::getCurrentTimeStr(&time_str_), next_exp_inc_seq_num_, inc_itr->first, inc_itr->second.toString());
+        
+        if (inc_itr->first < next_exp_inc_seq_num_)
+            continue;
+
+        if (inc_itr->first != next_exp_inc_seq_num_){
+            logger_.log("%:% %() % Detected gap in incremental stream expected:% found:% %.\n", __FILE__, __LINE__, __FUNCTION__,
+                        Common::getCurrentTimeStr(&time_str_), next_exp_inc_seq_num_, inc_itr->first, inc_itr->second.toString());
+            have_complete_incremental = false;
+            break;
+        }
+
+        logger_.log("%:% %() % % => %\n", __FILE__, __LINE__, __FUNCTION__,
+                    Common::getCurrentTimeStr(&time_str_), inc_itr->first, inc_itr->second.toString());
+
+        if (inc_itr->second.type_ != Exchange::MarketUpdateType::SNAPSHOT_START &&
+            inc_itr->second.type_ != Exchange::MarketUpdateType::SNAPSHOT_END)
+            final_events.push_back(inc_itr->second);
+
+        ++next_exp_inc_seq_num_;
+        ++num_incrementals;
+    }
+
+    if (!have_complete_incremental) {
+        logger_.log("%:% %() % Returning because have gaps in queued incrementals.\n",
+                    __FILE__, __LINE__, __FUNCTION__, Common::getCurrentTimeStr(&time_str_));
+        snapshot_queued_msgs_.clear();
+        return;
+    }
+
+    // Write the final market update message to the queue
+    for (const auto &itr: final_events) {
+        auto next_write = incoming_md_updates_->getNextToWriteTo();
+        *next_write = itr;
+        incoming_md_updates_->updateWriteIndex();
+    }
+
+    logger_.log("%:% %() % Recovered % snapshot and % incremental orders.\n", __FILE__, __LINE__, __FUNCTION__,
+                Common::getCurrentTimeStr(&time_str_), snapshot_queued_msgs_.size() - 2, num_incrementals);
+
+    // Clear queued snapshots and incremental messages
+    snapshot_queued_msgs_.clear();
+    incremental_queued_msgs_.clear();
+    in_recovery_ = false;
+
+    //Leave the snapshot multicast group
+    snapshot_mcast_socket_.leave(snapshot_ip_, snapshot_port_);
+}
+
+// Queue market update messages and check for snapshot sync
+auto MarketDataConsumer::queueMessage(bool is_snapshot, const Exchange::MDPMarketUpdate *request){
+    if (is_snapshot) {
+        if (snapshot_queued_msgs_.find(request->seq_num_) != snapshot_queued_msgs_.end()) {
+            logger_.log("%:% %() % Packet drops on snapshot socket. Received for a 2nd time:%\n", __FILE__, __LINE__, __FUNCTION__,
+                        Common::getCurrentTimeStr(&time_str_), request->toString());
+            snapshot_queued_msgs_.clear();
+        }
+        snapshot_queued_msgs_[request->seq_num_] = request->me_market_update_;
+    } else {
+        incremental_queued_msgs_[request->seq_num_] = request->me_market_update_;
+    }
+  
+    logger_.log("%:% %() % size snapshot:% incremental:% % => %\n", __FILE__, __LINE__, __FUNCTION__,
+                Common::getCurrentTimeStr(&time_str_), snapshot_queued_msgs_.size(), incremental_queued_msgs_.size(), request->seq_num_, request->toString());
+  
+    // Check whether snapshot synchronization is completed
+    checkSnapshotSync();
+}
+
+//Callback function to receive data
+auto MarketDataConsumer::recvCallback(McastSocket *socket) noexcept -> void {
+    const auto is_snapshot = (socket->socket_fd_ == snapshot_mcast_socket_.socket_fd_);
+    if (UNLIKELY(is_snapshot && !in_recovery_)) { // If a snapshot message is received but is not in the recovery state, discard the message
+        socket->next_rcv_valid_index_ = 0;
+
+        logger_.log("%:% %() % WARN Not expecting snapshot messages.\n",
+                    __FILE__, __LINE__, __FUNCTION__, Common::getCurrentTimeStr(&time_str_));
+
+        return;
+    }
+
+    if (socket->next_rcv_valid_index_ >= sizeof(Exchange::MDPMarketUpdate)) {
+        size_t i = 0;
+        // Traverse the received data
+        for (; i + sizeof(Exchange::MDPMarketUpdate) <= socket->next_rcv_valid_index_; i += sizeof(Exchange::MDPMarketUpdate)) {
+            auto request = reinterpret_cast<const Exchange::MDPMarketUpdate *>(socket->inbound_data_.data() + i);
+            logger_.log("%:% %() % Received % socket len:% %\n", __FILE__, __LINE__, __FUNCTION__,
+                        Common::getCurrentTimeStr(&time_str_),
+                        (is_snapshot ? "snapshot" : "incremental"), sizeof(Exchange::MDPMarketUpdate), request->toString());
+      
+            const bool already_in_recovery = in_recovery_;
+            in_recovery_ = (already_in_recovery || request->seq_num_ != next_exp_inc_seq_num_);
+      
+            if (UNLIKELY(in_recovery_)) {
+                if (UNLIKELY(!already_in_recovery)) { // If you have just entered the recovery state, start the snapshot synchronization process
+                    logger_.log("%:% %() % Packet drops on % socket. SeqNum expected:% received:%\n", __FILE__, __LINE__, __FUNCTION__,
+                                Common::getCurrentTimeStr(&time_str_), (is_snapshot ? "snapshot" : "incremental"), next_exp_inc_seq_num_, request->seq_num_);
+                    startSnapshotSync();
+                }
+      
+                // Queue the message and check for snapshot synchronization
+                queueMessage(is_snapshot, request);
+            } else if (!is_snapshot) { // If it is not in the recovery state and an incremental message is received, process it normally
+                logger_.log("%:% %() % %\n", __FILE__, __LINE__, __FUNCTION__,
+                            Common::getCurrentTimeStr(&time_str_), request->toString());
+      
+                ++next_exp_inc_seq_num_;
+      
+                auto next_write = incoming_md_updates_->getNextToWriteTo();
+                *next_write = std::move(request->me_market_update_);
+                incoming_md_updates_->updateWriteIndex();
+            }
+        }
+        // Process remaining data
+        memcpy(socket->inbound_data_.data(), socket->inbound_data_.data() + i, socket->next_rcv_valid_index_ - i);
+        socket->next_rcv_valid_index_ -= i;
+    }
+}
+```
+
+2. **Synchronization mechanism for market update data**
+
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1745119454953-ebc54d00-ecf0-4119-8b02-9fa45914ba8a.png)
+
+`MarketDataConsumer` This class is responsible for receiving and processing market update data, and its synchronization mechanism is mainly implemented through the combination of incremental data and snapshot data. The following is the specific synchronization mechanism and method call execution process:
+
+**Normal state**
+
++ `MarketDataConsumer` After starting,`start()` The method will create and start a thread, in the main loop of the thread `run()` in, call continuously `incremental_mcast_socket_.sendAndRecv()` and `snapshot_mcast_socket_.sendAndRecv()` method to receive data.
++ Called when incremental market update data is received `recvCallback()` method. If the received message sequence number is the same as `next_exp_inc_seq_num_` Consistent, indicating that the data is normal, write this message `incoming_md_updates_` Queue and update `next_exp_inc_seq_num_`。
+
+**Restore Status**
+
++ If the received message sequence number is the same as `next_exp_inc_seq_num_` Inconsistency indicates data loss and enters recovery state (`in_recovery_` set to `true`）。
++ call `startSnapshotSync()` Method, clear the queued snapshots and incremental messages, initialize and join the snapshot multicast group, and start receiving snapshot data.
++ Received snapshot and delta messages will go through `queueMessage()` Method queued to `snapshot_queued_msgs_` and `incremental_queued_msgs_` middle.
++ `queueMessage()` method will call `checkSnapshotSync()` Method to check whether snapshot and delta messages are complete.
+    - `checkSnapshotSync()` The method checks whether the snapshot message contains `SNAPSHOT_START` and `SNAPSHOT_END`, and whether the serial numbers are consecutive.
+    - Also check whether the sequence number of the incremental message is changed from the last one of the snapshot message `order_id_` Start a series.
+    - If the snapshot and incremental messages are complete, the final market update message is written `incoming_md_updates_` Queue, clear the queued messages, exit the recovery state, and leave the snapshot multicast group.
+
+
+
+#### Order gateway client related variable method definitions
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1745120971346-079141cb-2daf-433a-b9fd-07a4949d5d28.png)
+
+1. `OrderGateway` kind
++ `client_id_`：`ClientId` Type, constant, representing the client's unique identifier, used to identify the client served by this gateway.
++ `ip_`：`std::string` Type that stores the IP address of the server to connect to.
++ `iface_`：`std::string` Type, constant, stores the network interface name, used to specify the interface used for network connections.
++ `port_`：`int` Type, constant, stores the port number of the server to be connected.
++ `outgoing_requests_`：`Exchange::ClientRequestLFQueue*` Type, pointer to the client request queue used to store client requests to be sent to the server.
++ `incoming_responses_`：`Exchange::ClientResponseLFQueue*` Type, pointer to the client response queue used to store client responses received from the server.
++ `run_`：`volatile bool` type, used to control `OrderGateway` The running status of the thread,`true` Indicates that the thread is running,`false` Indicates that the thread is stopped.
++ `time_str_`：`std::string` Type, a string used to store the current time, used when logging.
++ `logger_`：`Logger` Type, used to record log information during program running to facilitate debugging and monitoring.
++ `next_outgoing_seq_num_`：`size_t` Type, with an initial value of 1, is used to record the sequence number of the next request to be sent, ensuring that requests are sent in order.
++ `next_exp_seq_num_`：`size_t` Type, with an initial value of 1, used to record the sequence number of the next response expected to be received, ensuring that responses are received in order.
++ `tcp_socket_`：`Common::TCPSocket` Type, used to establish a TCP connection with the server to send and receive data.
+
+**Important method**
+
+```cpp
+//Constructor, initialize OrderGateway object
+OrderGateway::OrderGateway(ClientId client_id,
+                           Exchange::ClientRequestLFQueue *client_requests,
+                           Exchange::ClientResponseLFQueue *client_responses,
+                           std::string ip, const std::string &iface, int port)
+    : client_id_(client_id), ip_(ip), iface_(iface), port_(port), outgoing_requests_(client_requests), incoming_responses_(client_responses),
+      logger_("trading_order_gateway_" + std::to_string(client_id) + ".log"), tcp_socket_(logger_) {
+    //Set the receive callback function of the TCP socket
+    tcp_socket_.recv_callback_ = [this](auto socket, auto rx_time)
+    { recvCallback(socket, rx_time); };
+}
+
+// Start the OrderGateway thread
+auto OrderGateway::start() {
+    run_ = true;
+    //Try to connect to the specified IP address and port, and log an error message if the connection fails.
+    ASSERT(tcp_socket_.connect(ip_, iface_, port_, false) >= 0,
+           "Unable to connect to ip:" + ip_ + " port:" + std::to_string(port_) + " on iface:" + iface_ + " error:" + std::string(std::strerror(errno)));
+    //Create and start the thread, and log error information if it fails
+    ASSERT(Common::createAndStartThread(-1, "Trading/OrderGateway", [this]() { run(); }) != nullptr, "Failed to start OrderGateway thread.");
+}
+
+// Stop the OrderGateway thread
+auto OrderGateway::stop() -> void {
+    run_ = false;
+}
+
+//Thread main loop, continuously processing the sending and receiving of data
+auto OrderGateway::run() noexcept -> void {
+    logger_.log("%:% %() %\n", __FILE__, __LINE__, __FUNCTION__, Common::getCurrentTimeStr(&time_str_));
+    while (run_) {
+        // Handle TCP socket send and receive operations
+        tcp_socket_.sendAndRecv();
+
+        // Traverse the client request queue to be sent
+        for(auto client_request = outgoing_requests_->getNextToRead(); client_request; client_request = outgoing_requests_->getNextToRead()) {
+            //Record logs, showing the client ID, serial number and request content to be sent
+            logger_.log("%:% %() % Sending cid:% seq:% %\n", __FILE__, __LINE__, __FUNCTION__,
+                        Common::getCurrentTimeStr(&time_str_), client_id_, next_outgoing_seq_num_, client_request->toString());
+            //Send the next request sequence number to be sent
+            tcp_socket_.send(&next_outgoing_seq_num_, sizeof(next_outgoing_seq_num_));
+            //Send client request
+            tcp_socket_.send(client_request, sizeof(Exchange::MEClientRequest));
+            // Update the read index of the client request queue to be sent
+            outgoing_requests_->updateReadIndex();
+            // Increment the sequence number of the next request to be sent
+            next_outgoing_seq_num_++;
+        }
+    }
+}
+
+//Callback function to receive data
+auto OrderGateway::recvCallback(TCPSocket *socket, Nanos rx_time) noexcept -> void {
+    //Record log, display the received socket information, received data length and receiving time
+    logger_.log("%:% %() % Received socket:% len:% %\n", __FILE__, __LINE__, __FUNCTION__, Common::getCurrentTimeStr(&time_str_), socket->socket_fd_, socket->next_rcv_valid_index_, rx_time);
+
+    // Check whether the received data length is enough for an OMClientResponse
+    if (socket->next_rcv_valid_index_ >= sizeof(Exchange::OMClientResponse)) {
+        size_t i = 0;
+        // Traverse the received data and parse the data according to the size of OMClientResponse
+        for (; i + sizeof(Exchange::OMClientResponse) <= socket->next_rcv_valid_index_; i += sizeof(Exchange::OMClientResponse)) {
+            // Parse the received data into the OMClientResponse structure pointer
+            auto response = reinterpret_cast<const Exchange::OMClientResponse *>(socket->inbound_data_.data() + i);
+            //Record log and display the received response information
+            logger_.log("%:% %() % Received %\n", __FILE__, __LINE__, __FUNCTION__, Common::getCurrentTimeStr(&time_str_), response->toString());
+
+            // Check whether the client ID in the response is consistent with the current client ID. If it is inconsistent, log the error message and skip the response.
+            if(response->me_client_response_.client_id_ != client_id_) { 
+                logger_.log("%:% %() % ERROR Incorrect client id. ClientId expected:% received:%.\n", __FILE__, __LINE__, __FUNCTION__,
+                    Common::getCurrentTimeStr(&time_str_), client_id_, response->me_client_response_.client_id_);
+                continue;
+            }
+            // Check whether the sequence number of the response is consistent with the expected sequence number. If it is inconsistent, log the error message and skip the response.
+            if(response->seq_num_ != next_exp_seq_num_) { 
+                logger_.log("%:% %() % ERROR Incorrect sequence number. ClientId:%. SeqNum expected:% received:%.\n", __FILE__, __LINE__, __FUNCTION__,
+                    Common::getCurrentTimeStr(&time_str_), client_id_, next_exp_seq_num_, response->seq_num_);
+                continue;
+            }
+
+            // Increment the sequence number of the next response expected to be received
+            ++next_exp_seq_num_;
+
+            // Get the next writable position pointer of the client response queue
+            auto next_write = incoming_responses_->getNextToWriteTo();
+            //Move the received response content to a writable location
+            *next_write = std::move(response->me_client_response_);
+            //Update the write index of the client response queue
+            incoming_responses_->updateWriteIndex();
+        }
+        //Move the unprocessed data to the beginning of the array and update the effective length of the received data
+        memcpy(socket->inbound_data_.data(), socket->inbound_data_.data() + i, socket->next_rcv_valid_index_ - i);
+        socket->next_rcv_valid_index_ -= i;
+    }
+}
+```
+
+2. **Order data synchronization mechanism**
+
+`OrderGateway` The main function of the class is to act as a gateway between the client and the server, responsible for sending client requests and receiving server responses. Its synchronization mechanism is based on sequence numbers and the reliability of the TCP protocol to ensure the order and integrity of data. The following is the specific synchronization mechanism and method call execution process:
+
+**Startup phase**
+
++ call `start()` method, will `run_` flag set to `true`, indicating that the thread starts running.
++ try to pass `tcp_socket_.connect()` Method establishes a TCP connection with the specified server.
++ Create and start a new thread, call in the thread `run()` method.
+
+**Running Phase**
+
++ in `run()` In the main loop of the method, it is continuously called `tcp_socket_.sendAndRecv()` Method handles TCP socket send and receive operations.
++ traverse `outgoing_requests_` The queue will send the client requests to be sent to the server in order, and the sequence number of the request will be sent first. `next_outgoing_seq_num_`, and increment the sequence number.
+
+**receiving response phase**
+
++ When receiving the response from the server,`tcp_socket_` will call `recvCallback()` method to process.
++ in `recvCallback()` In the method, check whether the client ID of the received response is consistent with the current client ID, and whether the sequence number of the response is consistent with the expected sequence number. `next_exp_seq_num_` consistent.
++ If the check passes, write the response content `incoming_responses_` queue and increment `next_exp_seq_num_`。
+
+**Stop phase**
+
++ call `stop()` method, will `run_` flag set to `false`, stop the thread from running.
+
+
+
+#### Trading engine related variable method definitions
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1745121023795-855ac4b2-f7b6-4c0b-af8b-5b9b7f1ae2b0.png)
+
+1. `MarketOrder` Structure
++ `order_id_`：`OrderId` Type, the unique identifier of the order, the initial value is `OrderId_INVALID`, used to distinguish different orders.
++ `side_`：`Side` Enumeration type, the direction of the order (such as buy or sell), the initial value is `Side::INVALID`。
++ `price_`：`Price` Type, price of the order, initial value is `Price_INVALID`。
++ `qty_`：`Qty` Type, quantity of order, initial value is `Qty_INVALID`。
++ `priority_`：`Priority` Type, priority of order, initial value is `Priority_INVALID`。
++ `prev_order_`：`MarketOrder*` Type, pointer to the previous order, used to build a doubly linked list, the initial value is `nullptr`。
++ `next_order_`：`MarketOrder*` Type, pointer to the next order, used to build a doubly linked list, the initial value is `nullptr`。
+2. `MarketOrdersAtPrice` Structure
++ `side_`：`Side` Enumeration type, the direction of placing orders at this price level, the initial value is `Side::INVALID`。
++ `price_`：`Price` Type, the price of this price level, the initial value is `Price_INVALID`。
++ `first_mkt_order_`：`MarketOrder*` Type, pointer to the first order at this price level, initial value is `nullptr`。
++ `prev_entry_`：`MarketOrdersAtPrice*` Type, pointer to the previous price level, used to build a doubly linked list, the initial value is `nullptr`。
++ `next_entry_`：`MarketOrdersAtPrice*` Type, a pointer to the next price level, used to build a doubly linked list, the initial value is `nullptr`。
+3. `BBO` Structure
++ `bid_price_`：`Price` Type, the best price for buying orders, the initial value is `Price_INVALID`。
++ `ask_price_`：`Price` Type, the best price for selling orders, the initial value is `Price_INVALID`。
++ `bid_qty_`：`Qty` Type, the quantity corresponding to the best price of the purchase order, the initial value is `Qty_INVALID`。
++ `ask_qty_`：`Qty` Type, the quantity corresponding to the best price of the selling order, the initial value is `Qty_INVALID`。
+4. **The role of BBO and related content**
+
+`BBO`The (Best Bid Offer) structure mainly provides an abstraction for components that only need brief information about price and liquidity at the top of the order book, but do not need the complete order book data. It contains the best price for a buy order (`bid_price_`), the quantity corresponding to the best buying price (`bid_qty_`), the best selling price (`ask_price_`) and the quantity corresponding to the best selling price (`ask_qty_`）。
+
+In trading systems, many components do not require complete order book information, such as some simple trading strategy modules or monitoring systems. They only care about the best buying and selling prices and corresponding quantities in the current market.`BBO` The structure provides such a simple interface so that these components can quickly obtain the key information they need without having to deal with the complex data of the entire order book.
+
+
+
+1. `MarketOrderBook` kind
++ `ticker_id_`：`TickerId` Type, constant, represents the security code identifier corresponding to the order book, and is used to uniquely identify the securities associated with the order book.
++ `trade_engine_`：`TradeEngine*` Type, pointer to the trading engine that owns this limit order book. When the order book changes or a transaction occurs, it is used to send notifications to the trading engine. The initial value is `nullptr`。
++ `oid_to_order_`：`OrderHashMap` type(`std::array<MarketOrder *, ME_MAX_ORDER_IDS>`), is a hash map, the key is the order ID (`OrderId`), the value is `MarketOrder` Pointer, used to quickly find the corresponding order object through the order ID.
++ `orders_at_price_pool_`：`MemPool<MarketOrdersAtPrice>` type, which is a memory pool used to manage `MarketOrdersAtPrice` Memory allocation and release of objects can improve memory usage efficiency.
++ `bids_by_price_`：`MarketOrdersAtPrice*` Type, a pointer pointing to the buying price level, that is, pointing to the point corresponding to the best buying price (highest buying price) `MarketOrdersAtPrice` Object, initial value is `nullptr`。
++ `asks_by_price_`：`MarketOrdersAtPrice*` Type, a pointer pointing to the selling price level, that is, pointing to the point corresponding to the best selling price (lowest selling price) `MarketOrdersAtPrice` Object, initial value is `nullptr`。
++ `price_orders_at_price_`：`OrdersAtPriceHashMap` type(`std::array<MarketOrdersAtPrice *, ME_MAX_PRICE_LEVELS>`), is a hash map, the key is price (`Price`), the value is `MarketOrdersAtPrice` Pointer, used to quickly find the corresponding price level object through price.
++ `order_pool_`：`MemPool<MarketOrder>` type, which is a memory pool used to manage `MarketOrder` Memory allocation and release of objects to improve memory usage efficiency.
++ `bbo_`：`BBO` Type, which stores the best bid and offer price (Best Bid Offer) information of the order book, including the best price and quantity of buying orders and the best price and quantity of selling orders.
++ `time_str_`：`std::string` Type, a string used to store the current time, used when logging.
++ `logger_`：`Logger*` Type, pointer to the logger, used to record log information during program running to facilitate debugging and monitoring.
+
+**Important method**
+
+```cpp
+//Constructor, initialize MarketOrderBook object
+MarketOrderBook::MarketOrderBook(TickerId ticker_id, Logger *logger)
+    : ticker_id_(ticker_id), orders_at_price_pool_(ME_MAX_PRICE_LEVELS), order_pool_(ME_MAX_ORDER_IDS), logger_(logger) {
+}
+
+// Destructor, releases related resources and records logs
+MarketOrderBook::~MarketOrderBook() {
+    logger_->log("%:% %() % OrderBook\n%\n", __FILE__, __LINE__, __FUNCTION__,
+                 Common::getCurrentTimeStr(&time_str_), toString(false, true));
+
+    trade_engine_ = nullptr;
+    bids_by_price_ = asks_by_price_ = nullptr;
+    oid_to_order_.fill(nullptr);
+}
+
+// Handle market data updates and update the limit order book
+auto MarketOrderBook::onMarketUpdate(const Exchange::MEMarketUpdate *market_update) noexcept -> void {
+    // Determine whether buying and selling orders need to be updated
+    const auto bid_updated = (bids_by_price_ && market_update->side_ == Side::BUY && market_update->price_ >= bids_by_price_->price_);
+    const auto ask_updated = (asks_by_price_ && market_update->side_ == Side::SELL && market_update->price_ <= asks_by_price_->price_);
+
+    //Perform corresponding operations based on market update type
+    switch (market_update->type_) {
+        case Exchange::MarketUpdateType::ADD: {
+            // Allocate a new MarketOrder object from the memory pool
+            auto order = order_pool_.allocate(market_update->order_id_, market_update->side_, market_update->price_,
+                                              market_update->qty_, market_update->priority_, nullptr, nullptr);
+            //Add new order to order book
+            addOrder(order);
+        }
+        break;
+        case Exchange::MarketUpdateType::MODIFY: {
+            // Find the corresponding order by order ID
+            auto order = oid_to_order_.at(market_update->order_id_);
+            //Update order quantity
+            order->qty_ = market_update->qty_;
+        }
+        break;
+        case Exchange::MarketUpdateType::CANCEL: {
+            // Find the corresponding order by order ID
+            auto order = oid_to_order_.at(market_update->order_id_);
+            // Remove the order from the order book
+            removeOrder(order);
+        }
+        break;
+        case Exchange::MarketUpdateType::TRADE: {
+            // Notify the trading engine of transaction updates
+            trade_engine_->onTradeUpdate(market_update, this);
+            return;
+        }
+        break;
+        case Exchange::MarketUpdateType::CLEAR: { 
+            // Clear the entire limit order book, freeing the memory of all MarketOrdersAtPrice and MarketOrder objects
+            for (auto &order: oid_to_order_) {
+                if (order)
+                    order_pool_.deallocate(order);
+            }
+            oid_to_order_.fill(nullptr);
+
+            if(bids_by_price_) {
+                for(auto bid = bids_by_price_->next_entry_; bid != bids_by_price_; bid = bid->next_entry_)
+                    orders_at_price_pool_.deallocate(bid);
+                orders_at_price_pool_.deallocate(bids_by_price_);
+            }
+
+            if(asks_by_price_) {
+                for(auto ask = asks_by_price_->next_entry_; ask != asks_by_price_; ask = ask->next_entry_)
+                    orders_at_price_pool_.deallocate(ask);
+                orders_at_price_pool_.deallocate(asks_by_price_);
+            }
+
+            bids_by_price_ = asks_by_price_ = nullptr;
+        }
+        break;
+        case Exchange::MarketUpdateType::INVALID:
+        case Exchange::MarketUpdateType::SNAPSHOT_START:
+        case Exchange::MarketUpdateType::SNAPSHOT_END:
+            break;
+    }
+
+    // Update best buy and sell price (BBO) information
+    updateBBO(bid_updated, ask_updated);
+
+    // Record log, including current time, market update information and BBO information
+    logger_->log("%:% %() % % %", __FILE__, __LINE__, __FUNCTION__,
+                 Common::getCurrentTimeStr(&time_str_), market_update->toString(), bbo_.toString());
+
+    // Notify the trading engine of order book updates
+    trade_engine_->onOrderBookUpdate(market_update->ticker_id_, market_update->price_, market_update->side_, this);
+}
+
+//Set trading engine pointer
+auto MarketOrderBook::setTradeEngine(TradeEngine *trade_engine) {
+    trade_engine_ = trade_engine;
+}
+
+//Update BBO information and decide whether to update buying or selling orders based on parameters
+auto MarketOrderBook::updateBBO(bool update_bid, bool update_ask) noexcept {
+    if(update_bid) {
+        if(bids_by_price_) {
+            //Set the BBO buying price to the best buying price
+            bbo_.bid_price_ = bids_by_price_->price_;
+            //Set the buying quantity of BBO to the order quantity corresponding to the best buying price
+            bbo_.bid_qty_ = bids_by_price_->first_mkt_order_->qty_;
+            // Accumulate the quantity of all orders at the same price level for buy orders
+            for(auto order = bids_by_price_->first_mkt_order_->next_order_; order != bids_by_price_->first_mkt_order_; order = order->next_order_)
+                bbo_.bid_qty_ += order->qty_;
+        }
+        else {
+            // If there is no bid price level, set the BBO bid price and quantity to invalid values
+            bbo_.bid_price_ = Price_INVALID;
+            bbo_.bid_qty_ = Qty_INVALID;
+        }
+    }
+
+    if(update_ask) {
+        if(asks_by_price_) {
+            // Set the selling price of BBO to the best selling price
+            bbo_.ask_price_ = asks_by_price_->price_;
+            //Set the selling quantity of BBO to the order quantity corresponding to the best selling price
+            bbo_.ask_qty_ = asks_by_price_->first_mkt_order_->qty_;
+            // Accumulate the quantity of all orders at the same price level for sell orders
+            for(auto order = asks_by_price_->first_mkt_order_->next_order_; order != asks_by_price_->first_mkt_order_; order = order->next_order_)
+                bbo_.ask_qty_ += order->qty_;
+        }
+        else {
+            // If there is no selling price level, set the selling price and quantity of BBO to invalid values
+            bbo_.ask_price_ = Price_INVALID;
+            bbo_.ask_qty_ = Qty_INVALID;
+        }
+    }
+}
+
+// Get BBO information
+auto MarketOrderBook::getBBO() const noexcept -> const BBO* {
+    return &bbo_;
+}
+
+//Convert price to index
+auto MarketOrderBook::priceToIndex(Price price) const noexcept {
+    return (price % ME_MAX_PRICE_LEVELS);
+}
+
+// Get the price level object corresponding to the price
+auto MarketOrderBook::getOrdersAtPrice(Price price) const noexcept -> MarketOrdersAtPrice * {
+    return price_orders_at_price_.at(priceToIndex(price));
+}
+
+//Add new price level object to the order book
+auto MarketOrderBook::addOrdersAtPrice(MarketOrdersAtPrice *new_orders_at_price) noexcept {
+    //Add the new price tier object to the hash map
+    price_orders_at_price_.at(priceToIndex(new_orders_at_price->price_)) = new_orders_at_price;
+
+    // Get the optimal price level pointer of the current buying and selling order
+    const auto best_orders_by_price = (new_orders_at_price->side_ == Side::BUY ? bids_by_price_ : asks_by_price_);
+    if (UNLIKELY(!best_orders_by_price)) {
+        // If the current order does not have a price level, set the new price level as the optimal price level
+        (new_orders_at_price->side_ == Side::BUY ? bids_by_price_ : asks_by_price_) = new_orders_at_price;
+        new_orders_at_price->prev_entry_ = new_orders_at_price->next_entry_ = new_orders_at_price;
+    } else {
+        auto target = best_orders_by_price;
+        // Determine whether the new price level should be added after the target price level
+        bool add_after = ((new_orders_at_price->side_ == Side::SELL && new_orders_at_price->price_ > target->price_) ||
+                          (new_orders_at_price->side_ == Side::BUY && new_orders_at_price->price_ < target->price_));
+        if (add_after) {
+            target = target->next_entry_;
+            add_after = ((new_orders_at_price->side_ == Side::SELL && new_orders_at_price->price_ > target->price_) ||
+                         (new_orders_at_price->side_ == Side::BUY && new_orders_at_price->price_ < target->price_));
+        }
+        // Find the appropriate insertion position
+        while (add_after && target != best_orders_by_price) {
+            add_after = ((new_orders_at_price->side_ == Side::SELL && new_orders_at_price->price_ > target->price_) ||
+                         (new_orders_at_price->side_ == Side::BUY && new_orders_at_price->price_ < target->price_));
+            if (add_after)
+                target = target->next_entry_;
+        }
+
+        if (add_after) { 
+            //Add after the target price level
+            if (target == best_orders_by_price) {
+                target = best_orders_by_price->prev_entry_;
+            }
+            new_orders_at_price->prev_entry_ = target;
+            target->next_entry_->prev_entry_ = new_orders_at_price;
+            new_orders_at_price->next_entry_ = target->next_entry_;
+            target->next_entry_ = new_orders_at_price;
+        } else { 
+            // Add before target price level
+            new_orders_at_price->prev_entry_ = target->prev_entry_;
+            new_orders_at_price->next_entry_ = target;
+            target->prev_entry_->next_entry_ = new_orders_at_price;
+            target->prev_entry_ = new_orders_at_price;
+
+            if ((new_orders_at_price->side_ == Side::BUY && new_orders_at_price->price_ > best_orders_by_price->price_) ||
+                (new_orders_at_price->side_ == Side::SELL &&
+                 new_orders_at_price->price_ < best_orders_by_price->price_)) {
+                target->next_entry_ = (target->next_entry_ == best_orders_by_price ? new_orders_at_price
+                                                                                   : target->next_entry_);
+                (new_orders_at_price->side_ == Side::BUY ? bids_by_price_ : asks_by_price_) = new_orders_at_price;
+            }
+        }
+    }
+}
+
+// Remove the price level object with specified price and direction from the order book
+auto MarketOrderBook::removeOrdersAtPrice(Side side, Price price) noexcept {
+    // Get the optimal price level pointer of the current buying and selling order
+    const auto best_orders_by_price = (side == Side::BUY ? bids_by_price_ : asks_by_price_);
+    // Get the price level object of the specified price
+    auto orders_at_price = getOrdersAtPrice(price);
+
+    if (UNLIKELY(orders_at_price->next_entry_ == orders_at_price)) { 
+        // If there is only one object at this price level, set the optimal price level pointer of the order to nullptr
+        (side == Side::BUY ? bids_by_price_ : asks_by_price_) = nullptr;
+    } else {
+        //Remove the price level object from the doubly linked list
+        orders_at_price->prev_entry_->next_entry_ = orders_at_price->next_entry_;
+        orders_at_price->next_entry_->prev_entry_ = orders_at_price->prev_entry_;
+
+        if (orders_at_price == best_orders_by_price) {
+            // If the price level is the optimal price level, update the optimal price level pointer
+            (side == Side::BUY ? bids_by_price_ : asks_by_price_) = orders_at_price->next_entry_;
+        }
+
+        orders_at_price->prev_entry_ = orders_at_price->next_entry_ = nullptr;
+    }
+
+    // Remove the price tier object from the hash map
+    price_orders_at_price_.at(priceToIndex(price)) = nullptr;
+
+    // Release the memory of the price level object
+    orders_at_price_pool_.deallocate(orders_at_price);
+}
+
+// Remove the specified order from the order book
+auto MarketOrderBook::removeOrder(MarketOrder *order) noexcept -> void {
+    // Get the price level object where the order is located
+    auto orders_at_price = getOrdersAtPrice(order->price_);
+
+    if (order->prev_order_ == order) { 
+        // If there is only one order at this price level, remove this price level
+        removeOrdersAtPrice(order->side_, order->price_);
+    } else { 
+        //Remove the order from the doubly linked list
+        const auto order_before = order->prev_order_;
+        const auto order_after = order->next_order_;
+        order_before->next_order_ = order_after;
+        order_after->prev_order_ = order_before;
+
+        if (orders_at_price->first_mkt_order_ == order) {
+            // If the order is the first order in the price level, update the first order pointer in the price level
+            orders_at_price->first_mkt_order_ = order_after;
+        }
+
+        order->prev_order_ = order->next_order_ = nullptr;
+    }
+
+    // Remove the order from the hash map
+    oid_to_order_.at(order->order_id_) = nullptr;
+    // Release the memory of this order
+    order_pool_.deallocate(order);
+}
+
+//Add new order to the order book
+auto MarketOrderBook::addOrder(MarketOrder *order) noexcept -> void {
+    // Get the price level object where the order is located
+    const auto orders_at_price = getOrdersAtPrice(order->price_);
+
+    if (!orders_at_price) {
+        // If the price level does not exist, create a new price level object
+        order->next_order_ = order->prev_order_ = order;
+
+        auto new_orders_at_price = orders_at_price_pool_.allocate(order->side_, order->price_, order, nullptr, nullptr);
+        addOrdersAtPrice(new_orders_at_price);
+    } else {
+        // If the price level exists, add the new order to the end of the price level's order queue
+        auto first_order = (orders_at_price ? orders_at_price->first_mkt_order_ : nullptr);
+
+        first_order->prev_order_->next_order_ = order;
+        order->prev_order_ = first_order->prev_order_;
+        order->next_order_ = first_order;
+        first_order->prev_order_ = order;
+    }
+
+    //Add new order to hash map
+    oid_to_order_.at(order->order_id_) = order;
+}
+```
+
+2. **Order book maintenance mechanism and related content**
+
+`MarketOrderBook` The order book maintenance mechanism of the class revolves around market data updates. By processing different types of updates, it realizes the dynamic maintenance of the order book, and at the same time provides the update and query of the best buying and selling price (BBO) information.
+
+**Market data update processing**:  
+When market data updates are received (`onMarketUpdate` method), first determine whether the buying and selling orders need to be updated (based on the best price of the current order book and the price and direction of the updated data). Then proceed accordingly based on the market update type:  
+- **Add new order(**`ADD`**Type)**: from order memory pool (`order_pool_`) allocate a new one in `MarketOrder` Object, find the corresponding price level based on the order price (create a new price level if it does not exist), add the new order to the end of the order queue at that price level, and update the hash map (`oid_to_order_`) to record the existence of the order.  
+- **Modify order(**`MODIFY`**Type)**: Pass order ID in hash map (`oid_to_order_`) to find the corresponding order and update the quantity information of the order.  
+- **Cancel order (**`CANCEL`**Type)**: Find the order in the hash map through the order ID, remove it from the order queue at the price level (if there is only one order at the price level, remove the price level), delete the order record from the hash map, and finally release the memory of the order object.  
+- **Transaction occurs(**`TRADE`**Type)**: Notify transaction update information to the associated transaction engine (`trade_engine_`), which are further processed by the trading engine.  
+- **ORDER BOOK CLEAR(**`CLEAR`**Type)**: Traverse HashMap(`oid_to_order_`), frees the memory of all order objects, and clears the hash map. At the same time, traverse the price level linked lists of buying and selling orders, release the memory of all price level objects and the order objects they contain, and finally set the optimal price level pointers of buying and selling orders to `nullptr`。
+
+**Best Bid and Bid (BBO) Update**:  
+`updateBBO` The method handles the BBO information update of buying and selling orders respectively according to the incoming parameters (whether to update buying or selling orders). If there is a price level in the corresponding direction (buy order has `bids_by_price_`, the selling order is `asks_by_price_`), the price of BBO is set to the price of the optimal price level in that direction, and the quantity is set to the sum of all order quantities at that price level; if there is no price level in the corresponding direction, the price and quantity of BBO are set to invalid values.
+
+**Price tiers and order management**:  
+- **Price tiers added (**`addOrdersAtPrice`**Method)**: Add a new price tier object to the hash map (`price_orders_at_price_`), and insert it into the appropriate position of the price level linked list according to the price and buying and selling direction (arranged in order of price from best to worst), and at the same time update the optimal price level pointer of the buying or selling order (`bids_by_price_` or `asks_by_price_`）。  
+- **Price tiers removed(**`removeOrdersAtPrice`**Method)**: Remove the price level object with the specified price and direction from the hash map, delete the object from the price level list (if the price level is the optimal price level, update the optimal price level pointer), and finally release the memory of the price level object.  
+- **Order Added(**`addOrder`**Method)**: Find the corresponding price level based on the order price (create a new price level if it does not exist), add the order to the end of the order queue at that price level, and update the hash map (`oid_to_order_`) to record the existence of the order.  
+- **Order Removal(**`removeOrder`**Method)**: Remove the order from the order queue at the price level (if there is only one order at the price level, remove the price level), delete the order record from the hash map, and finally release the memory of the order object.
+
+
+
+1. `FeatureEngine` kind
++ `time_str_`：`std::string` Type, a string used to store the current time, used when recording logs to facilitate recording the time when the operation occurred.
++ `logger_`：`Common::Logger*` type, pointer to the logger to use for logging `FeatureEngine` Various information during operation is convenient for debugging and monitoring.
++ `mkt_price_`：`double` Type, the initial value is `Feature_INVALID`（`std::numeric_limits<double>::quiet_NaN()`), used to store the calculated fair market price, is one of the two features calculated by the feature engine.
++ `agg_trade_qty_ratio_`：`double` Type, the initial value is `Feature_INVALID`（`std::numeric_limits<double>::quiet_NaN()`), used to store the calculated ratio of the number of aggressive trades to the number of best bids and offers (BBO), is another feature calculated by the feature engine.
+
+**Important method**
+
+```cpp
+// Handle order book update events and calculate fair market price
+auto FeatureEngine::onOrderBookUpdate(TickerId ticker_id, Price price, Side side, MarketOrderBook* book) noexcept -> void {
+    // Get the best bid and offer (BBO) of the order book
+    const auto bbo = book->getBBO();
+    // Check whether BBO's buying price and selling price are valid
+    if(LIKELY(bbo->bid_price_ != Price_INVALID && bbo->ask_price_ != Price_INVALID)) {
+        // Calculate fair market price based on formula
+        mkt_price_ = (bbo->bid_price_ * bbo->ask_qty_ + bbo->ask_price_ * bbo->bid_qty_) / static_cast<double>(bbo->bid_qty_ + bbo->ask_qty_);
+    }
+
+    // Log, showing information about order book updates, including security symbol, price, direction, fair market price and aggressive trade volume ratio
+    logger_->log("%:% %() % ticker:% price:% side:% mkt-price:% agg-trade-ratio:%\n", __FILE__, __LINE__, __FUNCTION__,
+                 Common::getCurrentTimeStr(&time_str_), ticker_id, Common::priceToString(price).c_str(),
+                 Common::sideToString(side).c_str(), mkt_price_, agg_trade_qty_ratio_);
+}
+
+// Handle the transaction update event and calculate the ratio of the number of aggressive transactions to the number of BBOs
+auto FeatureEngine::onTradeUpdate(const Exchange::MEMarketUpdate *market_update, MarketOrderBook* book) noexcept -> void {
+    // Get the best bid and offer (BBO) of the order book
+    const auto bbo = book->getBBO();
+    // Check whether BBO's buying price and selling price are valid
+    if(LIKELY(bbo->bid_price_ != Price_INVALID && bbo->ask_price_ != Price_INVALID)) {
+        // Calculate aggressive trade volume ratio based on trade direction and BBO volume
+        agg_trade_qty_ratio_ = static_cast<double>(market_update->qty_) / (market_update->side_ == Side::BUY ? bbo->ask_qty_ : bbo->bid_qty_);
+    }
+
+    // Record logs to display relevant information about transaction updates, including transaction information, fair market price and aggressive transaction quantity ratio
+    logger_->log("%:% %() % % mkt-price:% agg-trade-ratio:%\n", __FILE__, __LINE__, __FUNCTION__,
+                 Common::getCurrentTimeStr(&time_str_),
+                 market_update->toString().c_str(), mkt_price_, agg_trade_qty_ratio_);
+}
+
+// Get the calculated fair market price
+auto FeatureEngine::getMktPrice() const noexcept {
+    return mkt_price_;
+}
+
+// Get the calculated ratio of the number of aggressive trades to the number of BBOs
+auto FeatureEngine::getAggTradeQtyRatio() const noexcept {
+    return agg_trade_qty_ratio_;
+}
+```
+
+2. **Feature engine working mechanism and **`**mkt_price_**`**、**`**agg_trade_qty_ratio_**`**The meaning and function**
+
+**Feature engine working mechanism**
+
+`FeatureEngine` The class acts as a feature engine and is mainly responsible for calculating specific features based on order book updates and trading events. When the order book is updated,`onOrderBookUpdate` When the method is called, it will obtain the best bid and offer (BBO) of the order book. If the BBO price is valid, the fair market price will be calculated based on the BBO's buying price, selling price, buying quantity and selling quantity, and the relevant logs will be recorded. When a transaction event occurs,`onTradeUpdate` The method is called, and the BBO information is also obtained, the ratio of the number of aggressive transactions to the number of BBO is calculated based on the number and direction of the transactions, and the log is recorded.
+
+`mkt_price_`**The meaning and function**
+
+`mkt_price_` Represents the fair market price, which is calculated based on the best bid and ask quotes from the order book and their corresponding quantities. In the trading system, the fair market price can be used as a reference price to help market participants understand the reasonable price level of the current market and be used for trading decisions, risk assessment, etc. For example, investors can judge whether the current market price is reasonable based on the fair market price, and thus decide whether to conduct buying or selling operations.
+
+`agg_trade_qty_ratio_`**The meaning and function**
+
+`agg_trade_qty_ratio_` Represents the ratio of the number of aggressive trades to the number of BBOs. It reflects how aggressive the trade volume is relative to the BBO volume in a trade. This ratio can be used to analyze the trading activity and aggressiveness of the market. For example, a higher ratio may indicate that market trading is more active and there are more aggressive trading behaviors; a lower ratio may indicate that the market is relatively stable and trading is more conservative. By monitoring this ratio, market participants can better understand the trading dynamics of the market and formulate corresponding trading strategies.
+
+
+
+1. `PositionInfo` Structure
++ `position_`：`int32_t` Type, records the number of positions in a single trading instrument, a positive number indicates a long position, a negative number indicates a short position, and the initial value is 0.
++ `real_pnl_`：`double` Type, records the realized profit and loss, that is, the profit and loss caused by the closed transaction, the initial value is 0.
++ `unreal_pnl_`：`double` Type, records unrealized profit and loss, that is, the profit and loss of the current position calculated based on market price changes, and the initial value is 0.
++ `total_pnl_`：`double` Type, records total profit and loss, which is the sum of realized profit and loss and unrealized profit and loss, and the initial value is 0.
++ `open_vwap_`：`std::array<double, sideToIndex(Side::MAX) + 1>` Type, records the weighted average price of opening positions in different directions (buy and sell).
++ `volume_`：`Qty` Type, records the total transaction volume of the trading instrument, the initial value is 0.
++ `bbo_`：`const BBO*` Type, pointing to the best bid and offer (BBO) of the current trading instrument, with an initial value of `nullptr`。
+
+**Important method**
+
+```cpp
+// Process transaction information, update positions, profit and loss and trading volume
+auto PositionInfo::addFill(const Exchange::MEClientResponse *client_response, Logger *logger) noexcept {
+    //Record the old position quantity
+    const auto old_position = position_;
+    // Get the index of the current transaction direction
+    const auto side_index = sideToIndex(client_response->side_);
+    // Get the index of the opposite transaction direction
+    const auto opp_side_index = sideToIndex(client_response->side_ == Side::BUY ? Side::SELL : Side::BUY);
+    // Get the value of the current transaction direction (1 means buy, -1 means sell)
+    const auto side_value = sideToValue(client_response->side_);
+    //Update position quantity
+    position_ += client_response->exec_qty_ * side_value;
+    //Update transaction volume
+    volume_ += client_response->exec_qty_;
+
+    if (old_position * sideToValue(client_response->side_) >= 0) { 
+        // Open or increase a position, update the weighted average price of opening a position
+        open_vwap_[side_index] += (client_response->price_ * client_response->exec_qty_);
+    } else { 
+        // Reduce position
+        const auto opp_side_vwap = open_vwap_[opp_side_index] / std::abs(old_position);
+        open_vwap_[opp_side_index] = opp_side_vwap * std::abs(position_);
+        // Calculate realized profit and loss
+        real_pnl_ += std::min(static_cast<int32_t>(client_response->exec_qty_), std::abs(old_position)) *
+                     (opp_side_vwap - client_response->price_) * sideToValue(client_response->side_);
+        if (position_ * old_position < 0) { 
+            // Reversal of position direction
+            open_vwap_[side_index] = (client_response->price_ * std::abs(position_));
+            open_vwap_[opp_side_index] = 0;
+        }
+    }
+
+    if (!position_) { 
+        // Close position
+        open_vwap_[sideToIndex(Side::BUY)] = open_vwap_[sideToIndex(Side::SELL)] = 0;
+        unreal_pnl_ = 0;
+    } else {
+        if (position_ > 0)
+            // Long position, calculate unrealized profit and loss
+            unreal_pnl_ =
+                (client_response->price_ - open_vwap_[sideToIndex(Side::BUY)] / std::abs(position_)) *
+                std::abs(position_);
+        else
+            // Short position, calculate unrealized profit and loss
+            unreal_pnl_ =
+                (open_vwap_[sideToIndex(Side::SELL)] / std::abs(position_) - client_response->price_) *
+                std::abs(position_);
+    }
+
+    // Calculate total profit and loss
+    total_pnl_ = unreal_pnl_ + real_pnl_;
+
+    std::string time_str;
+    // record log
+    logger->log("%:% %() % % %\n", __FILE__, __LINE__, __FUNCTION__, Common::getCurrentTimeStr(&time_str),
+                toString(), client_response->toString().c_str());
+}
+
+//Process the update of the best bid and offer (BBO) and update the unrealized profit and loss
+auto PositionInfo::updateBBO(const BBO *bbo, Logger *logger) noexcept {
+    std::string time_str;
+    //Update BBO pointer
+    bbo_ = bbo;
+
+    if (position_ && bbo->bid_price_ != Price_INVALID && bbo->ask_price_ != Price_INVALID) {
+        // Calculate the middle price
+        const auto mid_price = (bbo->bid_price_ + bbo->ask_price_) * 0.5;
+        if (position_ > 0)
+            // For long positions, unrealized profit and loss is updated based on the middle price
+            unreal_pnl_ =
+                (mid_price - open_vwap_[sideToIndex(Side::BUY)] / std::abs(position_)) *
+                std::abs(position_);
+        else
+            // For short positions, unrealized profit and loss is updated based on the mid-price
+            unreal_pnl_ =
+                (open_vwap_[sideToIndex(Side::SELL)] / std::abs(position_) - mid_price) *
+                std::abs(position_);
+
+        const auto old_total_pnl = total_pnl_;
+        // Calculate total profit and loss
+        total_pnl_ = unreal_pnl_ + real_pnl_;
+
+        if (total_pnl_ != old_total_pnl)
+            //When the total profit and loss changes, record the log
+            logger->log("%:% %() % % %\n", __FILE__, __LINE__, __FUNCTION__, Common::getCurrentTimeStr(&time_str),
+                        toString(), bbo_->toString());
+    }
+}
+```
+
+2. `PositionKeeper` kind
++ `time_str_`：`std::string` Type, a string used to store the current time, used when logging.
++ `logger_`：`Common::Logger*` type, pointer to the logger to use for logging `PositionKeeper` Various information during operation.
++ `ticker_position_`：`std::array<PositionInfo, ME_MAX_TICKERS>` type, is a hash map container, from `TickerId` mapped to `PositionInfo`, used to store position information for all trading instruments.
+
+**Important method**
+
+```cpp
+//Constructor, initialize PositionKeeper object
+PositionKeeper::PositionKeeper(Common::Logger *logger)
+    : logger_(logger) {
+}
+
+// Process transaction information and call the addFill method of the corresponding trading tool
+auto PositionKeeper::addFill(const Exchange::MEClientResponse *client_response) noexcept {
+    ticker_position_.at(client_response->ticker_id_).addFill(client_response, logger_);
+}
+
+// Process the update of the best bid and offer (BBO) and call the updateBBO method of the corresponding trading instrument
+auto PositionKeeper::updateBBO(TickerId ticker_id, const BBO *bbo) noexcept {
+    ticker_position_.at(ticker_id).updateBBO(bbo, logger_);
+}
+
+// Get the position information of the specified trading instrument
+auto PositionKeeper::getPositionInfo(TickerId ticker_id) const noexcept {
+    return &(ticker_position_.at(ticker_id));
+}
+```
+
+3.`PositionInfo`**Processing order execution**
+
+When a trading strategy order is executed,`PositionKeeper`The tracked position (position) and profit and loss (PnLs) of the trading instruments involved in the execution need to be updated. It does this by converting the`MEClientResponse`Message provided to`PositionInfo::addFIll()`method to achieve this.
+
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1745139983658-cb3615c3-acaf-4f80-a471-db325cf10029.png)
+
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1745139997702-dc552f4a-8c10-4616-8d61-c3f9ddbbaccf.png)
+
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1745140027292-b93907fc-3ff0-420e-93b4-434bd38d1718.png)
+
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1745140045044-a68e6df6-5e7a-4572-bc39-4b4f6ae17b83.png)
+
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1745140059000-f27608bf-965d-4fb5-8915-c68e44040852.png)
+
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1745140088255-2bab8259-e47a-4d0d-b993-73834b67f252.png)
+
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1745140104066-9db8d84f-75e2-41a8-9b4a-e9e607cafa7e.png)
+
+The following explains in detail the algorithm example of how to update realized profit and loss (PnL – real) and unrealized profit and loss (PnL – unreal):
+
+1. **Meaning of variables involved**
++ **position**
+    - **old (old position)**: The number of positions before the current execution message is processed.
+    - **new (new position)**: The number of positions after processing the current execution message.
++ **open_vwap (volume-weighted average price of open interest)**
+    - **BUY (buy direction)**: Only the sum of the product of the execution price and the execution quantity for buy execution.
+    - **SELL (Sell direction)**: Only the sum of the product of the execution price and execution quantity for sell execution.
++ **VWAP (Volume Weighted Average Price)**
+    - **BUY (buying direction)**: The actual volume-weighted average price of the current long/positive position (expressed in price units, not price multiplied by quantity).
+    - **SELL (Selling Direction)**: The actual volume-weighted average price of the current short/negative position (expressed in price units, not price times quantity).
++ **PnL (Profit and Loss)**
+    - **real (realized profit and loss)**: Process the realized profit and loss after this execution.
+    - **unreal (unrealized profit and loss)**: handles the unrealized profit and loss for open positions after this execution.
+2. **Specific calculation process**
++ **First Buy**: Suppose a buy execution is received and 10 are bought at a price of 100.0.
+    - **Position Update**: The old position is 0 and the new position becomes 10.
+    - **open_vwap - BUY update**: Because it is a buy operation, open_vwap - BUY becomes $ 100.0×10 = 1000.0  $.
+    - **VWAP - BUY Update**: The VWAP - BUY of the long position at this time is $ 1000.0÷10 = 100.0 $.
+    - **Profit and Loss Update**: Realized profit and loss PnL - real and unrealized profit and loss PnL - unreal are currently 0.
++ **Buy again**: Assume that another buy execution is received and 10 are bought at a price of 90.0.
+    - **Position Update**: The old position is 10, the new position becomes $ 10 + 10 = 20  $.
+    - **open_vwap - BUY update**: open_vwap - BUY becomes $ 1000.0+10×90 = 1900.0 $.
+    - **VWAP - BUY Update**: VWAP - BUY becomes $ 1900.0÷20 = 95.0 $.
+    - **Unrealized P&L Update**: Calculate unrealized P&L using a VWAP of 95.0 and the latest execution price of 90.0. The price difference between the two is $ 90 - 95 = -5  $, multiplied by the new position 20, the unrealized profit and loss PnL - unreal is $ -5×20 = -100.0 $. At this time, the VWAP of the long position is higher than the current market price (represented by the latest execution price), so the unrealized profit and loss is negative.
++ **First Sell**: Assume a sell execution is received, selling 10 at a price of 92.0.
+    - **Position Update**: The old position is 20, the new position becomes $ 20 - 10 = 10  $.
+    - **open_vwap and VWAP update**: Because it is a sell execution, open_vwap - BUY and VWAP - BUY do not change.
+    - **Realized profit and loss calculation**: Use the sell execution price of 92.0, the VWAP of the long position of 95.0 and the execution quantity of 10 to calculate the realized profit and loss PnL - real, which is $ (92 - 95) × 10 = -30 $.
+    - **Unrealized profit and loss**: Since there are 10 long positions left, and the calculation logic of open positions at this time is related to the realized profit and loss, the unrealized profit and loss PnL - unreal is also -30.0.
++ **Sell Again (Position Flip)**: Suppose a sell execution is received and 20 are sold at a price of 97.0.
+    - **Position Update**: The old position is 10, the new position becomes $ 10 - 20 = -10  $ (the position changes from long to short), and open_vwap-BUY and VWAP-BUY are set to 0 at the same time.
+    - **open_vwap - SELL update**: Because the short position is -10 and the strike price is 97.0, open_vwap - SELL becomes $ 97×10 = 970.0  $.
+    - **Realized profit and loss calculation**: The VWAP of the previous long position was 95.0, this time it was sold at 97.0, the price difference is $ 97 - 95 = 2  $, multiplied by the closing quantity of 10 to get the profit of $ 2×10 = 20  $, plus the previous realized profit and loss of -30, the final realized profit and loss PnL - real is $ 20+(-30)= -10  $.
+    - **Unrealized profit and loss**: The current VWAP - SELL is 97.0, which is the same as the current execution price, so the unrealized profit and loss PnL - unreal is 0.
++ **Continue selling (short position increases)**: Assume a sell execution is received, selling 20 at a price of 94.0.
+    - **Position update**: The old position is -10, and the new position becomes $ -10 - 20 = -30  $.
+    - **open_vwap - SELL update**: open_vwap - SELL becomes $ 970+20×94 = 2850.0  $.
+    - **VWAP – SELL UPDATE**: VWAP – SELL becomes $ 2850÷30 = 95.0 $.
+    - **Realized profit and loss**: The position is increased, there is no closing operation, and the realized profit and loss PnL - real remains unchanged.
+    - **Unrealized profit and loss calculation**: Use the difference between the latest execution price of 94.0 and VWAP-SELL 95.0, $ 95 - 94 = 1  $, multiplied by the new position -30, and the unrealized profit and loss PnL - unreal is $ 1×30 = 30  $.
++ **Another sell (short position continues to increase)**: Assume a sell execution is received, selling 10 at a price of 90.0.
+    - **Position update**: The old position is -30, and the new position becomes $ -30 - 10 = -40  $.
+    - **open_vwap - SELL update**: open_vwap - SELL becomes $ 2850+10×90 = 3750.0  $.
+    - **VWAP – SELL UPDATE**: VWAP – SELL becomes $ 3750÷40 = 93.75 $.
+    - **Realized profit and loss**: The position is increased, there is no closing operation, and the realized profit and loss PnL - real remains unchanged.
+    - **Unrealized profit and loss calculation**: Use the spread $ 93.75 - 90 = 3.75  $ and multiply it by the new position -40 to get the unrealized profit and loss PnL - unreal as $ 3.75×40 = 150  $.
++ **Buy to close**: Suppose a buy execution is received and 40 are bought at a price of 88.0.
+    - **Position Update**: The old position is -40, and the new position becomes $ -40 + 40 = 0  $ (the short position is closed).
+    - **open_vwap and VWAP update**: Since there are no open positions anymore, open_vwap and VWAP both become 0 for the buy and sell direction.
+    - **Realized profit and loss calculation**: Calculated using the previous VWAP - SELL 93.75, execution price 88.0 and position 40, that is, $ (93.75 - 88) × 40 = 230 $ , plus the previous realized profit and loss -10, the final realized profit and loss PnL - real is $ 230 + (-10) = 220 $ .
+    - **Unrealized profit and loss**: The open position is 0, and the unrealized profit and loss PnL - unreal is 0.
+4. `PositionKeeper`Working mechanism and summary of the meaning and function of all PnL variables**
+
+`PositionKeeper`working mechanism 
+
+`PositionKeeper` It is a high-level position management class used to calculate and manage positions, profits and losses, and trading volumes of all trading instruments. It passes a hash map container `ticker_position_` Stores each trading instrument `PositionInfo`. When there is transaction information, call `addFill` Method, based on transaction information, the positions, realized profits and losses, and transaction volume of the corresponding trading instrument are updated. When the best bid and offer (BBO) changes, call `updateBBO` Method, update the unrealized profit and loss and total profit and loss of the corresponding trading instrument according to the new BBO.
+
+**The meaning and function of PnL variables**
+
++ `real_pnl_`: Realized profit and loss, reflecting the actual profit and loss generated by closed transactions. It helps traders understand the actual amount of money they have gained or lost and is used to evaluate the actual profitability of a trading strategy.
++ `unreal_pnl_`: Unrealized profit and loss, reflecting the potential profit and loss of the current position calculated based on market price changes. It allows traders to understand the value changes of current positions and help judge the impact of market trends on positions.
++ `total_pnl_`: Total profit and loss is the sum of realized profit and loss and unrealized profit and loss. It comprehensively reflects the overall profit and loss status of traders on all trading instruments and is an important indicator for evaluating trading performance.
+
+
+
+1. `OMOrderState` enumerate
++ `OMOrderState` It is an enumeration type used to represent the type or operation status of the order structure in the order manager. The specific values and meanings are as follows:
+    - `INVALID`: The value is 0, indicating an invalid status, used to indicate an order status that is not initialized correctly or does not comply with the rules.
+    - `PENDING_NEW`: The value is 1, indicating the status of pending creation, indicating that the order has been submitted but has not yet officially entered the active order list of the trading system.
+    - `LIVE`: The value is 2, indicating active status, the order is in normal trading status, and can participate in operations such as transaction matching.
+    - `PENDING_CANCEL`: The value is 3, indicating the pending cancellation status. The order has been submitted for cancellation, but the cancellation operation has not been completely processed.
+    - `DEAD`: The value is 4, indicating that it has expired and the order can no longer participate in transactions, such as it has been fully completed or the cancellation operation has been completed.
+2. `OMOrder` Structure
++ `ticker_id_`：`TickerId` Type, which stores the security code identifier corresponding to the order. The initial value is `TickerId_INVALID`, used to identify the specific trading instrument involved in the order.
++ `order_id_`：`OrderId` Type, the unique identifier of the order, the initial value is `OrderId_INVALID`, used to distinguish different orders.
++ `side_`：`Side` Enumeration type, the direction of the order (such as buy or sell), the initial value is `Side::INVALID`。
++ `price_`：`Price` Type, price of the order, initial value is `Price_INVALID`。
++ `qty_`：`Qty` Type, quantity of order, initial value is `Qty_INVALID`。
++ `order_state_`：`OMOrderState` Type, status of the order, initial value is `OMOrderState::INVALID`, used to track the status changes of orders during the transaction process.
+3. **Related Type Definition**
++ `OMOrderSideHashMap`：`typedef std::array<OMOrder, sideToIndex(Side::MAX) + 1>` Type, defines a direction from order (`Side`)arrive `OMOrder` A hash map array used to store order information in a specific direction.
++ `OMOrderTickerSideHashMap`：`typedef std::array<OMOrderSideHashMap, ME_MAX_TICKERS>` Type, defines a security code from (`TickerId`) to order direction (`Side`) to `OMOrder` A hash map array used to store order information in different directions under different securities codes.
+4. `OMOrder` Summary of functions
+
+`OMOrder` The structure is mainly used to represent a single strategy order in the order manager. It contains key information of the order, such as security code, order number, trading direction, price, quantity, order status, etc. Through this information, the order manager can effectively track, manage and process orders.`OMOrderState` Enumerations are used to clarify the status of orders at different stages, allowing the order manager to perform corresponding operations based on the order status, such as order creation, transaction matching, order cancellation, etc.`OMOrderSideHashMap` and `OMOrderTickerSideHashMap` Type definitions provide a way to organize and store orders, allowing order managers to quickly find and process order information for specific securities codes and directions.
+
+
+
+1. `RiskCheckResult` enumerate
++ `RiskCheckResult` Is an enumeration type used to represent the results of risk checks. The specific values and meanings are as follows:
+    - `INVALID`: A value of 0 indicates an invalid result, possibly due to improper initialization or other anomalies that render the risk check results unusable.
+    - `ORDER_TOO_LARGE`: A value of 1 indicates that the order size is too large, that is, the number of orders submitted exceeds the maximum order size allowed.
+    - `POSITION_TOO_LARGE`: A value of 2 indicates that the position size is too large, that is, after the order is executed, the number of positions will exceed the maximum allowed position.
+    - `LOSS_TOO_LARGE`: A value of 3 indicates that the loss is too large, that is, the total profit and loss of the current position is lower than the maximum allowed loss.
+    - `ALLOWED`: A value of 4 means that the order passes the risk check and can be sent for trading.
+
+**Important method**
+
+```cpp
+// Convert RiskCheckResult enumeration value to string representation
+inline auto riskCheckResultToString(RiskCheckResult result) {
+    // Make branch judgment based on enumeration value
+    switch (result) {
+        case RiskCheckResult::INVALID:
+            // If the result is invalid, return the corresponding string
+            return "INVALID";
+        case RiskCheckResult::ORDER_TOO_LARGE:
+            // If the order size is too large, return the corresponding string
+            return "ORDER_TOO_LARGE";
+        case RiskCheckResult::POSITION_TOO_LARGE:
+            // If the position size is too large, return the corresponding string
+            return "POSITION_TOO_LARGE";
+        case RiskCheckResult::LOSS_TOO_LARGE:
+            // If the loss is too large, return the corresponding string
+            return "LOSS_TOO_LARGE";
+        case RiskCheckResult::ALLOWED:
+            // If the risk check passes, return the corresponding string
+            return "ALLOWED";
+    }
+
+    // If the enumeration value is not the above known situation, return an empty string
+    return "";
+}
+```
+
+2.`RiskCfg` Structure
+
++ `max_order_size_`：`Qty` Type, used to obtain the maximum number of orders allowed, the initial value is `0`。
++ `max_position_`：`Qty` Type, used to obtain the maximum allowed number of positions, the initial value is `0`。
++ `max_loss_`：`Double` Type, used to obtain the maximum allowable loss, the initial value is `0`。
+3. `RiskInfo` Structure
++ `position_info_`：`const PositionInfo*` type, points to `PositionInfo` The pointer to the structure is used to obtain the position information of a specific trading instrument. The initial value is `nullptr`。
++ `risk_cfg_`：`RiskCfg` Type, which stores the risk configuration information of a specific trading instrument and is used for comparison with the actual situation during risk checks.
+
+**Important method**
+
+```cpp
+// Check the risk before trading to determine whether it is allowed to send orders with the specified quantity and direction
+auto RiskInfo::checkPreTradeRisk(Side side, Qty qty) const noexcept {
+    // Check whether the order size is too large
+    if (UNLIKELY(qty > risk_cfg_.max_order_size_))
+        // If the order quantity exceeds the maximum order size, return the risk check result of the order size being too large
+        return RiskCheckResult::ORDER_TOO_LARGE;
+    // Check whether the position size is too large
+    if (UNLIKELY(std::abs(position_info_->position_ + sideToValue(side) * static_cast<int32_t>(qty)) > static_cast<int32_t>(risk_cfg_.max_position_)))
+        // If the number of positions after the order is executed exceeds the maximum position, return the risk check result that the position size is too large
+        return RiskCheckResult::POSITION_TOO_LARGE;
+    // Check whether the loss is too large
+    if (UNLIKELY(position_info_->total_pnl_ < risk_cfg_.max_loss_))
+        // If the total profit and loss of the current position is lower than the maximum loss value, return the risk check result of excessive loss
+        return RiskCheckResult::LOSS_TOO_LARGE;
+
+    // If the above risk checks pass, return the allowed risk check results
+    return RiskCheckResult::ALLOWED;
+}
+```
+
+4. `RiskManager` kind
++ `time_str_`：`std::string` Type, a string used to store the current time, used when logging.
++ `logger_`：`Common::Logger*` type, pointer to the logger to use for logging `RiskManager` Various information during operation.
++ `ticker_risk_`：`TickerRiskInfoHashMap` type(`std::array<RiskInfo, ME_MAX_TICKERS>`), is a hash map container, from `TickerId` mapped to `RiskInfo`, used to store risk information for all trading instruments.
+
+**Important method**
+
+```cpp
+//Constructor, initialize RiskManager object
+RiskManager::RiskManager(Common::Logger *logger, const PositionKeeper *position_keeper, const TradeEngineCfgHashMap &ticker_cfg)
+    : logger_(logger) {
+    for (TickerId i = 0; i < ME_MAX_TICKERS; ++i) {
+        //Set the position information pointer of each trading instrument
+        ticker_risk_.at(i).position_info_ = position_keeper->getPositionInfo(i);
+        //Set risk allocation information for each trading instrument
+        ticker_risk_.at(i).risk_cfg_ = ticker_cfg[i].risk_cfg_;
+    }
+}
+
+// Check the risk before trading and call the checkPreTradeRisk method of the corresponding trading instrument
+auto RiskManager::checkPreTradeRisk(TickerId ticker_id, Side side, Qty qty) const noexcept {
+    return ticker_risk_.at(ticker_id).checkPreTradeRisk(side, qty);
+}
+```
+
+5. **Summary of how Risk Manager works**
+
+`RiskManager` The class acts as a risk manager and is mainly responsible for calculating and checking the risks of all trading instruments. During initialization, through the constructor from `PositionKeeper` Obtain position information for each trading instrument and retrieve it from `TradeEngineCfgHashMap` Get the risk profile information for each trading instrument, stored in `ticker_risk_` in the container. When it is necessary to check the pre-trade risk of a trading instrument, call `checkPreTradeRisk` method, which will call the corresponding trading instrument `RiskInfo` in the structure `checkPreTradeRisk` Method, based on the position information and risk allocation information, check whether the order size, position size and loss situation meet the requirements, and return the corresponding `RiskCheckResult` Enumeration value to determine whether the order can be sent for trading.
+
+
+
+1. `OrderManager` kind
++ `trade_engine_`：`TradeEngine*` Type, pointer to the trading engine object, used to send client requests for the trading engine, the initial value is `nullptr`。
++ `risk_manager_`：`const RiskManager&` Type, a constant reference to a risk manager used for risk checking before trading.
++ `time_str_`：`std::string` Type, a string used to store the current time, used when logging.
++ `logger_`：`Common::Logger*` type, pointer to the logger to use for logging `OrderManager` Various information during operation.
++ `ticker_side_order_`：`OMOrderTickerSideHashMap` type(`std::array<OMOrderSideHashMap, ME_MAX_TICKERS>`), is a hash map container, from `TickerId` mapped to `Side` and then mapped to `OMOrder`, used to store order information for different securities codes and directions.
++ `next_order_id_`：`OrderId` Type used to set the order number for new order requests issued, with an initial value of 1.
+
+**Important method**
+
+```cpp
+//Constructor, initialize OrderManager object
+OrderManager::OrderManager(Common::Logger *logger, TradeEngine *trade_engine, RiskManager& risk_manager)
+    : trade_engine_(trade_engine), risk_manager_(risk_manager), logger_(logger) {
+}
+
+// Process order updates and update order status based on client response
+auto OrderManager::onOrderUpdate(const Exchange::MEClientResponse *client_response) noexcept -> void {
+    //Record client response information log
+    logger_->log("%:% %() % %\n", __FILE__, __LINE__, __FUNCTION__, Common::getCurrentTimeStr(&time_str_),
+                 client_response->toString().c_str());
+    // Get the order pointer corresponding to the security code and direction
+    auto order = &(ticker_side_order_.at(client_response->ticker_id_).at(sideToIndex(client_response->side_)));
+    //Record order information log
+    logger_->log("%:% %() % %\n", __FILE__, __LINE__, __FUNCTION__, Common::getCurrentTimeStr(&time_str_),
+                 order->toString().c_str());
+
+    //Update order status based on client response type
+    switch (client_response->type_) {
+        case Exchange::ClientResponseType::ACCEPTED: {
+            // If the order is accepted, set the order status to active
+            order->order_state_ = OMOrderState::LIVE;
+        }
+        break;
+        case Exchange::ClientResponseType::CANCELED: {
+            // If the order is canceled, set the order status to expired
+            order->order_state_ = OMOrderState::DEAD;
+        }
+        break;
+        case Exchange::ClientResponseType::FILLED: {
+            // If the order is filled, update the remaining quantity of the order
+            order->qty_ = client_response->leaves_qty_;
+            // If the remaining quantity is 0, set the order status to expired
+            if(!order->qty_)
+                order->order_state_ = OMOrderState::DEAD;
+        }
+        break;
+        case Exchange::ClientResponseType::CANCEL_REJECTED:
+        case Exchange::ClientResponseType::INVALID: {
+        }
+        break;
+    }
+}
+
+//Send new order and update OMOrder object
+auto OrderManager::newOrder(OMOrder *order, TickerId ticker_id, Price price, Side side, Qty qty) noexcept -> void {
+    //Create new order request
+    const Exchange::MEClientRequest new_request{Exchange::ClientRequestType::NEW, trade_engine_->clientId(), ticker_id,
+                                                next_order_id_, side, price, qty};
+    //Send a new order request through the trading engine
+    trade_engine_->sendClientRequest(&new_request);
+
+    //Update the incoming OMOrder object information
+    *order = {ticker_id, next_order_id_, side, price, qty, OMOrderState::PENDING_NEW};
+    // Increment the next order number
+    ++next_order_id_;
+
+    // Record the log of sending new orders
+    logger_->log("%:% %() % Sent new order % for %\n", __FILE__, __LINE__, __FUNCTION__,
+                 Common::getCurrentTimeStr(&time_str_),
+                 new_request.toString().c_str(), order->toString().c_str());
+}
+
+//Send order cancellation request and update OMOrder object
+auto OrderManager::cancelOrder(OMOrder *order) noexcept -> void {
+    //Create order cancellation request
+    const Exchange::MEClientRequest cancel_request{Exchange::ClientRequestType::CANCEL, trade_engine_->clientId(),
+                                                   order->ticker_id_, order->order_id_, order->side_, order->price_,
+                                                   order->qty_};
+    //Send order cancellation request via trading engine
+    trade_engine_->sendClientRequest(&cancel_request);
+
+    //Set the order status to pending cancellation
+    order->order_state_ = OMOrderState::PENDING_CANCEL;
+
+    //Record the log of sending canceled orders
+    logger_->log("%:% %() % Sent cancel % for %\n", __FILE__, __LINE__, __FUNCTION__,
+                 Common::getCurrentTimeStr(&time_str_),
+                 cancel_request.toString().c_str(), order->toString().c_str());
+}
+
+//Move the order, perform risk check first, then send the order and update the OMOrder object
+auto OrderManager::moveOrder(OMOrder *order, TickerId ticker_id, Price price, Side side, Qty qty) noexcept {
+    //Process according to the current status of the order
+    switch (order->order_state_) {
+        case OMOrderState::LIVE: {
+            // If the order is currently active and the price is different from the target price, cancel the order
+            if(order->price_ != price) {
+                cancelOrder(order);
+            }
+        }
+        break;
+        case OMOrderState::INVALID:
+        case OMOrderState::DEAD: {
+            // If the target price is valid
+            if(LIKELY(price != Price_INVALID)) {
+                // Perform pre-trade risk checks
+                const auto risk_result = risk_manager_.checkPreTradeRisk(ticker_id, side, qty);
+                // If the risk check passes
+                if(LIKELY(risk_result == RiskCheckResult::ALLOWED)) {
+                    //Send new order
+                    newOrder(order, ticker_id, price, side, qty);
+                } else
+                    //If the risk check fails, record the log
+                    logger_->log("%:% %() % Ticker:% Side:% Qty:% RiskCheckResult:%\n", __FILE__, __LINE__, __FUNCTION__,
+                                 Common::getCurrentTimeStr(&time_str_),
+                                 tickerIdToString(ticker_id), sideToString(side), qtyToString(qty),
+                                 riskCheckResultToString(risk_result));
+            }
+        }
+        break;
+        case OMOrderState::PENDING_NEW:
+        case OMOrderState::PENDING_CANCEL:
+            break;
+    }
+}
+
+// Move multiple orders and adjust the orders based on the given buy and sell price and quantity
+auto OrderManager::moveOrders(TickerId ticker_id, Price bid_price, Price ask_price, Qty clip) noexcept {
+    // Get the order pointer in the buy direction and move the order
+    {
+        auto bid_order = &(ticker_side_order_.at(ticker_id).at(sideToIndex(Side::BUY)));
+        moveOrder(bid_order, ticker_id, bid_price, Side::BUY, clip);
+    }
+
+    // Get the order pointer in the selling direction and move the order
+    {
+        auto ask_order = &(ticker_side_order_.at(ticker_id).at(sideToIndex(Side::SELL)));
+        moveOrder(ask_order, ticker_id, ask_price, Side::SELL, clip);
+    }
+}
+
+// Get the buy and sell order hash map of the specified security code
+auto OrderManager::getOMOrderSideHashMap(TickerId ticker_id) const {
+    return &(ticker_side_order_.at(ticker_id));
+}
+```
+
+2. `OrderManager` working mechanism 
+
+`OrderManager` This class is mainly responsible for managing the orders of the trading algorithm and simplifying the complexity of order management in the trading strategy. Its working mechanism is as follows:
+
+**Order Update Processing**
+
+When a client response is received, call `onOrderUpdate` method:
+
+1. Information logs that record client responses and corresponding orders.
+2. Update the order status according to the client response type (acceptance, cancellation, transaction, etc.), such as setting the order status to active, expired, etc.
+
+**New Order Sent**
+
+call `newOrder` Method to send new order:
+
+1. Create a new order request, including information such as order type, client ID, security code, order number, trading direction, price and quantity.
+2. Send a new order request to the trading engine.
+3. Update the incoming `OMOrder` Object information, set the relevant attributes of the order and set the status to pending creation, while incrementing the next order number.
+4. Log of sending new orders.
+
+**Cancel order**
+
+call `cancelOrder` Method to cancel order:
+
+1. Create an order cancellation request, including information such as order type, client ID, security code, order number, transaction direction, price and quantity.
+2. Send an order cancellation request to the trading engine.
+3. Set order status to pending cancellation.
+4. Record the log of sending canceled orders.
+
+**Mobile Orders**
+
+call `moveOrder` Method to move orders:
+
+1. Process according to the current status of the order:
+    - If the order is active and the price is different from the target price, call first `cancelOrder` Method to cancel the order.
+    - If the order is invalid or expired and the target price is valid, perform a pre-trade risk check (call the Risk Manager's `checkPreTradeRisk` method).
+        * If the risk check passes, call `newOrder` Method to send new order.
+        * If the risk check fails, record the risk check results log.
+
+**Move Multiple Orders**
+
+call `moveOrders` method, obtain the order pointers in the buying and selling directions respectively, and then call `moveOrder` Method adjusts the order based on the given buy and sell price and quantity.
+
+**Get order hash map**
+
+call `getOMOrderSideHashMap` The method obtains the hash map of the buy and sell orders of the specified security code to facilitate order management and query.
+
+
+
+1. `TradeEngineCfg` Structure
++ `clip_`：`Qty` Type, used to store transaction-related quantity limit values, the initial value is 0,<font style="color:rgba(0, 0, 0, 0.85);">Indicates the size of each order that our trading strategy can place</font>。
++ `threshold_`：`double` Type, used to store a threshold value, the initial value is 0,<font style="color:rgba(0, 0, 0, 0.85);">The trading strategy will use this parameter to decide whether a trading decision needs to be made by comparing it with the characteristic value.</font>
++ `risk_cfg_`：`RiskCfg` Type, which stores risk configuration information and is used for risk inspection and management before transactions.
+2. `TradeEngine` kind
++ `client_id_`：`const ClientId` Type, the client unique identifier of the trading engine, used to identify the client to which the trading engine belongs.
++ `ticker_order_book_`：`MarketOrderBookHashMap` Type (essentially a container) is a hash map container, starting from `TickerId` mapped to `MarketOrderBook`, used to store order book information corresponding to different securities codes.
++ `outgoing_ogw_requests_`：`Exchange::ClientRequestLFQueue*` Type, pointer to the lock-free queue used to publish client requests to be sent to the order gateway and forwarded to the exchange, the initial value is `nullptr`。
++ `incoming_ogw_responses_`：`Exchange::ClientResponseLFQueue*` Type, pointer to a lock-free queue used to receive client responses written from the order gateway based on data received from the exchange, initial value is `nullptr`。
++ `incoming_md_updates_`：`Exchange::MEMarketUpdateLFQueue*` Type, pointer to a lock-free queue used to receive market data updates written from market data consumers based on data received from exchanges, initial value is `nullptr`。
++ `last_event_time_`：`Nanos` Type used to record the time (in nanoseconds) when the last event occurred, with an initial value of 0.
++ `run_`：`volatile bool` Type, used to control the running status of the main thread of the trading engine,`true` means running,`false` Indicates stop.
++ `time_str_`：`std::string` Type, a string used to store the current time, used when logging.
++ `logger_`：`Logger` Type, used to record various information during the operation of the trading engine.
++ `feature_engine_`：`FeatureEngine` Type, Feature Engine object, used to calculate features of trading algorithms.
++ `position_keeper_`：`PositionKeeper` Type, Position Manager object used to track positions, P&L and volume.
++ `order_manager_`：`OrderManager` Type, order manager object used to simplify the task of order management in trading algorithms.
++ `risk_manager_`：`RiskManager` Type, Risk Manager object used for tracking and conducting pre-trade risk checks.
++ `mm_algo_`：`MarketMaker*` Type, market maker algorithm object pointer, initial value is `nullptr`, created based on the algorithm type.
++ `taker_algo_`：`LiquidityTaker*` Type, liquidity acquisition algorithm object pointer, initial value is `nullptr`, created based on the algorithm type.
++ `algoOnOrderBookUpdate_`：`std::function<void(TickerId ticker_id, Price price, Side side, MarketOrderBook *book)>` Type, function wrapper for distributing order book update events to trading algorithms.
++ `algoOnTradeUpdate_`：`std::function<void(const Exchange::MEMarketUpdate *market_update, MarketOrderBook *book)>` Type, function wrapper for distributing trading events to trading algorithms.
++ `algoOnOrderUpdate_`：`std::function<void(const Exchange::MEClientResponse *client_response)>` Type, function wrapper for distributing client responses to trading algorithms.
+
+**Important method**
+
+```cpp
+//Constructor, initialize TradeEngine object
+TradeEngine::TradeEngine(Common::ClientId client_id,
+                         AlgoType algo_type,
+                         const TradeEngineCfgHashMap &ticker_cfg,
+                         Exchange::ClientRequestLFQueue *client_requests,
+                         Exchange::ClientResponseLFQueue *client_responses,
+                         Exchange::MEMarketUpdateLFQueue *market_updates)
+    : client_id_(client_id), outgoing_ogw_requests_(client_requests), incoming_ogw_responses_(client_responses),
+      incoming_md_updates_(market_updates), logger_("trading_engine_" + std::to_string(client_id) + ".log"),
+      feature_engine_(&logger_),
+      position_keeper_(&logger_),
+      order_manager_(&logger_, this, risk_manager_),
+      risk_manager_(&logger_, &position_keeper_, ticker_cfg) {
+    for (size_t i = 0; i < ticker_order_book_.size(); ++i) {
+        // Create order book objects for each security symbol and set up the trading engine
+        ticker_order_book_[i] = new MarketOrderBook(i, &logger_);
+        ticker_order_book_[i]->setTradeEngine(this);
+    }
+
+    // Initialize callback function wrapper for order book updates, trading events and client responses
+    algoOnOrderBookUpdate_ = [this](auto ticker_id, auto price, auto side, auto book) {
+        defaultAlgoOnOrderBookUpdate(ticker_id, price, side, book);
+    };
+    algoOnTradeUpdate_ = [this](auto market_update, auto book) { defaultAlgoOnTradeUpdate(market_update, book); };
+    algoOnOrderUpdate_ = [this](auto client_response) { defaultAlgoOnOrderUpdate(client_response); };
+
+    //Create a trading algorithm instance based on the algorithm type
+    if (algo_type == AlgoType::MAKER) {
+        mm_algo_ = new MarketMaker(&logger_, this, &feature_engine_, &order_manager_, ticker_cfg);
+    } else if (algo_type == AlgoType::TAKER) {
+        taker_algo_ = new LiquidityTaker(&logger_, this, &feature_engine_, &order_manager_, ticker_cfg);
+    }
+
+    for (TickerId i = 0; i < ticker_cfg.size(); ++i) {
+        //Record initialization information log
+        logger_.log("%:% %() % Initialized % Ticker:% %.\n", __FILE__, __LINE__, __FUNCTION__,
+                    Common::getCurrentTimeStr(&time_str_),
+                    algoTypeToString(algo_type), i,
+                    ticker_cfg.at(i).toString());
+    }
+}
+
+// Destructor, clean up resources
+TradeEngine::~TradeEngine() {
+    run_ = false;
+
+    using namespace std::literals::chrono_literals;
+    std::this_thread::sleep_for(1s);
+
+    // Release market maker algorithm object resources
+    delete mm_something_; mm_something_ = nullptr;
+    // Release liquidity to obtain algorithm object resources
+    delete taker_something_; taker_something_ = nullptr;
+
+    for (auto &order_book: ticker_order_book_) {
+        // Release order book object resources
+        delete order_book;
+        order_book = nullptr;
+    }
+
+    // Clear the relevant queue pointer
+    outgoing_ogw_requests_ = nullptr;
+    incoming_ogw_responses_ = nullptr;
+    incoming_md_updates_ = nullptr;
+}
+
+//Start the main thread of the trading engine
+auto TradeEngine::start() -> void {
+    run_ = true;
+    //Create and start the trading engine thread, and record an error log if it fails
+    ASSERT(Common::createAndStartThread(-1, "Trading/TradeEngine", [this] { run(); }) != nullptr, "Failed to start TradeEngine thread.");
+}
+
+// Stop the trading engine main thread
+auto TradeEngine::stop() -> void {
+    // Wait for all responses and updates to be processed
+    while(incoming_ogw_responses_->size() || incoming_md_updates_->size()) {
+        logger_.log("%:% %() % Sleeping till all updates are consumed ogw-size:% md-size:%\n", __FILE__, __LINE__, __FUNCTION__,
+                    Common::getCurrentTimeStr(&time_str_), incoming_ogw_responses_->size(), incoming_md_updates_->size());
+
+        using namespace std::literals::chrono_literals;
+        std::this_thread::sleep_for(10ms);
+    }
+
+    // Record position information log
+    logger_.log("%:% %() % POSITIONS\n%\n", __FILE__, __LINE__, __FUNCTION__, Common::getCurrentTimeStr(&time_str_),
+                position_keeper_.toString());
+
+    run_ = false;
+}
+
+//Write client request to lock-free queue
+auto TradeEngine::sendClientRequest(const Exchange::MEClientRequest *client_request) noexcept -> void {
+    //Record send request log
+    logger_.log("%:% %() % Sending %\n", __FILE__, __LINE__, __FUNCTION__, Common::getCurrentTimeStr(&time_str_),
+                client_request->toString().c_str());
+    // Get the next writable position of the queue
+    auto next_write = outgoing_ogw_requests_->getNextToWriteTo();
+    //Move request data to the queue
+    *next_write = std::move(*client_request);
+    //Update the write index of the queue
+    outgoing_ogw_requests_->updateWriteIndex();
+}
+
+// Main loop of the main thread of the trading engine
+auto TradeEngine::run() noexcept -> void {
+    //Record start running log
+    logger_.log("%:% %() %\n", __FILE__, __LINE__, __FUNCTION__, Common::getCurrentTimeStr(&time_str_));
+    while (run_) {
+        // Process the response in the client response queue
+        for (auto client_response = incoming_ogw_responses_->getNextToRead(); client_response; client_response = incoming_ogw_responses_->getNextToRead()) {
+            logger_.log("%:% %() % Processing %\n", __FILE__, __LINE__, __FUNCTION__, Common::getCurrentTimeStr(&time_str_),
+                        client_response->toString().c_str());
+            // Handle order updates
+            onOrderUpdate(client_response);
+            //Update the read index of the queue
+            incoming_ogw_responses_->updateReadIndex();
+            //Update the last event time
+            last_event_time_ = Common::getCurrentNanos();
+        }
+
+        // Handle updates in the market data update queue
+        for (auto market_update = incoming_md_updates_->getNextToRead(); market_update; market_update = incoming_md_updates_->getNextToRead()) {
+            logger_.log("%:% %() % Processing %\n", __FILE__, __LINE__, __FUNCTION__, Common::getCurrentTimeStr(&time_str_),
+                        market_update->toString().c_str());
+            // Assertion checks whether the security code is valid
+            ASSERT(market_update->ticker_id_ < ticker_order_book_.size(),
+                   "Unknown ticker-id on update:" + market_update->toString());
+            // Let the order book handle market data updates
+            ticker_order_book_[market_update->ticker_id_]->onMarketUpdate(market_update);
+            //Update the read index of the queue
+            incoming_md_updates_->updateReadIndex();
+            //Update the last event time
+            last_event_time_ = Common::getCurrentNanos();
+        }
+    }
+}
+
+// Handle order book updates
+auto TradeEngine::onOrderBookUpdate(TickerId ticker_id, Price price, Side side, MarketOrderBook *book) noexcept -> void {
+    //Record order book update information log
+    logger_.log("%:% %() % ticker:% price:% side:%\n", __FILE__, __LINE__, __FUNCTION__,
+                Common::getCurrentTimeStr(&time_str_), ticker_id, Common::priceToString(price).c_str(),
+                Common::sideToString(side).c_str());
+
+    // Get the best bid and ask price of the order book
+    auto bbo = book->getBBO();
+
+    //Update position information
+    position_keeper_.updateBBO(ticker_id, bbo);
+
+    //Update feature engine
+    feature_engine_.onOrderBookUpdate(ticker_id, price, side, book);
+
+    // Distribute order book updates to trading algorithms
+    algoOnOrderBookUpdate_(ticker_id, price, side, book);
+}
+
+// Handle transaction events
+auto TradeEngine::onTradeUpdate(const Exchange::MEMarketUpdate *market_update, MarketOrderBook *book) noexcept -> void {
+    // Record transaction event information log
+    logger_.log("%:% %() % %\n", __FILE__, __LINE__, __FUNCTION__, Common::getCurrentTimeStr(&time_str_),
+                market_update->toString().c_str());
+
+    //Update feature engine
+    feature_engine_.onTradeUpdate(market_update, book);
+
+    // Distribute trading events to trading algorithms
+    algoOnTradeUpdate_(market_update, book);
+}
+
+// Handle client response
+auto TradeEngine::onOrderUpdate(const Exchange::MEClientResponse *client_response) noexcept -> void {
+    //Record client response information log
+    logger_.log("%:% %() % %\n", __FILE__, __LINE__, __FUNCTION__, Common::getCurrentTimeStr(&time_str_),
+                client_response->toString().c_str());
+
+    // If the response type is transaction, update the position information
+    if (UNLIKELY(client_response->type_ == Exchange::ClientResponseType::FILLED)) {
+        position_keeper_.addFill(client_response);
+    }
+
+    // Distribute client response to trading algorithm
+    algoOnOrderUpdate_(client_response);
+}
+
+//Initialize the last event time
+auto TradeEngine::initLastEventTime() {
+    last_event_time_ = Common::getCurrentNanos();
+}
+
+// Get the number of silent seconds since the last event
+auto TradeEngine::silentSeconds() {
+    return (Common::getCurrentNanos() - last_event_time_) / NANOS_TO_SECS;
+}
+
+// Get client ID
+auto TradeEngine::clientId() const {
+    return client_id_;
+}
+
+//Default order book update processing method
+auto TradeEngine::defaultAlgoOnOrderBookUpdate(TickerId ticker_id, Price price, Side side, MarketOrderBook *) noexcept -> void {
+    //Record order book update information log
+    logger_.log("%:% %() % ticker:% price:% side:%\n", __FILE__, __LINE__, __FUNCTION__,
+                Common::getCurrentTimeStr(&time_str_), ticker_id, Common::priceToString(price).c_str(),
+                Common::sideToString(side).c_str());
+}
+
+//Default transaction event handling method
+auto TradeEngine::defaultAlgoOnTradeUpdate(const Exchange::MEMarketUpdate *market_update, MarketOrderBook *) noexcept -> void {
+    // Record transaction event information log
+    logger_.log("%:% %() % %\n", __FILE__, __LINE__, __FUNCTION__, Common::getCurrentTimeStr(&time_str_),
+                market_update->toString().c_str());
+}
+
+//Default client response processing method
+auto TradeEngine::defaultAlgoOnOrderUpdate(const Exchange::MEClientResponse *client_response) noexcept -> void {
+    //Record client response information log
+    logger_.log("%:% %() % %\n", __FILE__, __LINE__, __FUNCTION__, Common::getCurrentTimeStr(&time_str_),
+                client_response->toString().c_str());
+}
+```
+
+3. **Interaction and collaborative working mechanism of each functional module**
+
+**Order Processing Process**
+
++ **New Order Send**: Will be called when the trading algorithm needs to send a new order `OrderManager` of `newOrder` method.`OrderManager` A new order request will be created and passed `TradeEngine` of `sendClientRequest` method writes the request to `outgoing_ogw_requests_` Queue, waiting for the order gateway to be processed and sent to the exchange.
+
+```cpp
+// Call TradeEngine::sendClientRequest in OrderManager::newOrder
+const Exchange::MEClientRequest new_request{...};
+trade_engine_->sendClientRequest(&new_request);
+
+// TradeEngine::sendClientRequest
+auto next_write = outgoing_ogw_requests_->getNextToWriteTo();
+*next_write = std::move(*client_request);
+outgoing_ogw_requests_->updateWriteIndex();
+```
+
++ **Order Cancellation**: When you need to cancel an order,`OrderManager` call `cancelOrder` Method, create a cancellation order request, also through `TradeEngine` of `sendClientRequest` Method sends the request to the order gateway.
+
+```cpp
+// Call TradeEngine::sendClientRequest in OrderManager::cancelOrder
+const Exchange::MEClientRequest cancel_request{...};
+trade_engine_->sendClientRequest(&cancel_request);
+```
+
++ **Order Update Processing**: When `TradeEngine` in the main loop from `incoming_ogw_responses_` When the queue gets the client response, it calls `onOrderUpdate` method. This method updates position information based on the response type and distributes the response to the trading algorithm.
+
+```cpp
+// Call onOrderUpdate in TradeEngine::run
+for (auto client_response = incoming_ogw_responses_->getNextToRead(); client_response; client_response = incoming_ogw_responses_->getNextToRead()) {
+    onOrderUpdate(client_response);
+    incoming_ogw_responses_->updateReadIndex();
+    last_event_time_ = Common::getCurrentNanos();
+}
+
+// TradeEngine::onOrderUpdate
+if (UNLIKELY(client_response->type_ == Exchange::ClientResponseType::FILLED)) {
+    position_keeper_.addFill(client_response);
+}
+algoOnOrderUpdate_(client_response);
+```
+
+**Market data processing process**
+
++ **Market Data Updates Receive**:`TradeEngine` in the main loop from `incoming_md_updates_` The queue obtains market data updates and then calls the corresponding order book's `onMarketUpdate` Method handles updates.
+
+```cpp
+// Handle market data updates in TradeEngine::run
+for (auto market_update = incoming_md_updates_->getNextToRead(); market_update; market_update = incoming_md_updates_->getNextToRead()) {
+    ASSERT(market_update->ticker_id_ < ticker_order_book_.size(),
+           "Unknown ticker-id on update:" + market_update->toString());
+    ticker_order_book_[market_update->ticker_id_]->onMarketUpdate(market_update);
+    incoming_md_updates_->updateReadIndex();
+    last_event_time_ = Common::getCurrentNanos();
+}
+```
+
++ **Order Book Update Propagation**: Called when the order book is updated `TradeEngine` of `onOrderBookUpdate` method. This method updates the information of the position manager and the characteristics engine and distributes the updates to the trading algorithms.
+
+```cpp
+// Call TradeEngine::onOrderBookUpdate internally in the order book
+// TradeEngine::onOrderBookUpdate
+auto bbo = book->getBBO();
+position_keeper_.updateBBO(ticker_id, bbo);
+feature_engine_.onOrderBookUpdate(ticker_id, price, side, book);
+algoOnOrderBookUpdate_(ticker_id, price, side, book);
+```
+
++ **Trading Event Handling**: When a market data update contains a trading event,`TradeEngine` call `onTradeUpdate` method. This method updates the information of the feature engine and distributes trading events to the trading algorithm.
+
+```cpp
+//TradeEngine::onTradeUpdate
+feature_engine_.onTradeUpdate(market_update, book);
+algoOnTradeUpdate_(market_update, book);
+```
+
+**Risk Check Mechanism**
+
+exist `OrderManager` of `moveOrder` In the method, when a new order needs to be sent, it will be called `RiskManager` of `checkPreTradeRisk` Methods to conduct pre-trade risk checks. If the risk check passes, send a new order; otherwise, record the risk check result log.
+
+```cpp
+// OrderManager::moveOrder
+const auto risk_result = risk_manager_.checkPreTradeRisk(ticker_id, side, qty);
+if(LIKELY(risk_result == RiskCheckResult::ALLOWED)) {
+    newOrder(order, ticker_id, price, side, qty);
+} else
+    logger_->log("%:% %() % Ticker:% Side:% Qty:% RiskCheckResult:%\n", __FILE__, __LINE__, __FUNCTION__,
+                 Common::getCurrentTimeStr(&time_str_),
+                 tickerIdToString(ticker_id), sideToString(side), qtyToString(qty),
+                 riskCheckResultToString(risk_result));
+```
+
+**5. Summary**
+
+`TradeEngine` As a core component, it enables efficient order processing and market data processing through multi-threading and lock-free queues. it coordinates `OrderManager`、`PositionKeeper`、`FeatureEngine`、`RiskManager` The work of multiple modules ensures that the trading system can operate stably and efficiently. At the same time, order book updates, trading events and client responses are distributed to the trading algorithm through the callback function wrapper, so that the trading algorithm can make corresponding decisions based on market conditions. The existence of the risk checking mechanism ensures that transactions are carried out within a certain risk range, improving the security and stability of the system. The workflow of the entire system forms a closed loop. From the reception and processing of market data, to the generation, sending and management of orders, to the monitoring and control of risks, all links work closely together to complete transaction tasks.
+
+
+
+#### Trading strategy algorithm
+##### Market Making Trading Strategies
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1745195547893-9a57cdc1-caaa-4f75-ac37-7c7abef94b86.png)
+
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1745195568980-4ae3ba32-07fd-4970-82f0-9caa0976a2d2.png)
+
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1745195595122-62523512-fb93-45b8-91ce-b9efdac0c342.png)
+
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1745195615882-cfdb3304-4fc5-4dfb-8e1f-808e14f2a702.png)
+
+1. **Initial Market Status**
+
+The table given at the beginning presents the initial state of the market order book, that is, the price level - aggregated order book. In this order book, orders in the same direction and at the same price are grouped and aggregated into one price level. For example, at the bid price of 10.21, there are 12 orders with a total quantity of 2500. These orders are combined into one entry for display. The meanings of each column in the table are as follows (from left to right):
+
++ **Our MM strategy bid**: represents the number of buy orders of our market making (MM) strategy at this price level, which is 0 at this time.
++ **Market bid order count**: Indicates the number of market bid orders that constitute this price level.
++ **Market bid quantity**: The sum of the quantities of all buy orders at this price level.
++ **Market bid price**: This is the price of the bid level.
++ **Market ask price**: This is the price of the ask level.
++ **Market ask quantity**: The sum of the quantities of all sell orders at this price level.
++ **Market ask order count**: Indicates the number of market sell orders that constitute this price level. 
++ **Our MM strategy ask**: represents the number of sell orders of our market making (MM) strategy at this price level, which is 0 at this time.
+2. **Market making strategy places orders**
+
+Assume that our market making strategy starts running and the market is in the state described above. Assume that the strategy will send a passive buy order and a passive sell order, each order quantity is 100 shares, and the strategy decides to place the order at the best bid price of 10.21 and the best ask price of 10.22 respectively. At this time, the table status changes, "Our MM strategy bid" changes to 100 at the 10.21 price level, "Market bid order count" changes from 12 to 13, and "Market bid quantity" changes from 2500 to 2600; "Our MM strategy ask" changes to 100 at the 10.22 price level, "Market ask order count" changes from 8 to 9, and "Market ask quantity" changes from 4500 to 4600. These changes are represented by gold highlights in the corresponding images.
+
+3. **Changes in market conditions and strategic adjustments**
+
+Assume that the orders at the best bid price of 10.21 are all filled and removed due to trading events, or canceled by their respective market participants. If the volume at that price level drops enough, our market making trading strategy decides to no longer be at that price level. At this point, the price aggregation order book assumes a specific state (as shown in the corresponding image) before the strategy decides to move its optimal buy order from the 10.21 price level to the next price level 10.20. In this state, the "Market bid order count" at the 10.21 price level becomes 3, and the "Market bid quantity" becomes 600. This decision may be based on a variety of factors. From a simple and intuitive point of view, compared with the number of people willing to sell at the 10.22 price level (6,500 shares), the number of people willing to buy at the 10.21 price level is smaller (only 600 shares in total). This may make buying at 10.21 no longer wise, or you may think that the reasonable market price may be 10.21, and you want to try to buy at a lower price.  
+Finally, when the market-making strategy decided to cancel the buy order at 10.21 and relocate the buy order to 10.20, the order book status changed again (as shown in the corresponding image). "Our MM strategy bid" for the 10.20 price level changes to 100, while "Our MM strategy bid" for the 10.21 price level changes back to 0.
+
+4.**Market making strategy (naive model and advanced model)**
+
+**(1) Volatility dependent offset (dynamic adjustment of limit order price)**
+
+Calculate market volatility and dynamically adjust the offset between limit orders and market prices (number of ticks)  
+Formula: $ offset _{t}=round\left(\frac{1}{T} \sum_{\tau=t-1}^{t-T}\left(P_{\tau}-P_{\tau-1}\right)^{2}\right) $, where $ T $ is the rolling window (such as 100 ticks), $ P_{\tau} $ is the price of the $ \tau $th tick;  
+Logic: The higher the volatility, the greater $ offset_t $ (to avoid losses due to limit orders being "swept"). The code needs to update $ offset_t $ in real time and adjust the limit order price simultaneously (such as buying price = market price - $ offset_t $, selling price = market price + $ offset_t $).  
+
+**(2) Foucault reservation spread (judging order aggressiveness)**
+
+Calculate the "reservation spread" to decide whether to place a passive limit order or an active market order  
+Formula: $ j^{R}= ceiling \left[\frac{\delta}{\mu \Delta}\right] $, where:  
+
++ $ \delta $: single transaction cost (including commission, market impact);  
++ $ \mu $: counterparty order arrival rate (such as market sell order arrival rate, the code needs to count the number of market sell orders per unit time);  
++ $ \Delta $: minimum tick size (such as US stock $ 0.01 $);  
+Logic: If the current market price difference $ S &gt; j^R $, the code places a limit order ($ j^R $ ticks away); if $ S ≤ j^R $, the code places a market price order (to avoid waiting costs).
+
+
+
+##### Market making trading strategy implementation
+1. `AlgoType` enumerate
++ `AlgoType` Is an enumeration type used to represent the type of trading algorithm. The specific values and meanings are as follows:
+    - `INVALID`: The value is 0, indicating an invalid type, used to indicate an algorithm type that is not initialized correctly or does not comply with the rules.
+    - `RANDOM`: The value is 1, indicating the random algorithm type, which refers to the random selection of trading decisions and is used to test the maker and taker algorithms.
+    - `MAKER`: The value is 2, indicating the market maker algorithm type. Market makers provide buying and selling quotes in the market to increase market liquidity.
+    - `TAKER`: The value is 3, indicating the type of liquidity acquisition algorithm, which obtains liquidity from the market for trading.
+    - `MAX`: The value is 4, used to represent the maximum value of the enumeration, which may be used for operations such as bounds checking or looping.
+2. `MarketMaker` kind
++ `feature_engine_`：`const FeatureEngine*` Type, a constant pointer to the feature engine. The feature engine is used to calculate fair market prices and other features to provide data support for the market maker algorithm. The initial value is `nullptr`。
++ `order_manager_`：`OrderManager*` Type, pointer to the order manager, used to manage passive orders of the market maker algorithm, such as sending new orders, canceling orders, etc. The initial value is `nullptr`。
++ `time_str_`：`std::string` Type, a string used to store the current time, used when logging.
++ `logger_`：`Common::Logger*` type, pointer to the logger to use for logging `MarketMaker` Various information during operation.
++ `ticker_cfg_`：`const TradeEngineCfgHashMap` Type, a hash map that stores the configuration of the trading engine. It contains the transaction configuration information corresponding to each security code, such as quantity limits, thresholds, etc., which is used for the decision-making of the market maker algorithm.
+
+**Important method**
+
+```cpp
+//Constructor, initialize MarketMaker object
+MarketMaker::MarketMaker(Common::Logger *logger, TradeEngine *trade_engine, const FeatureEngine *feature_engine,
+                         OrderManager *order_manager, const TradeEngineCfgHashMap &ticker_cfg)
+    : feature_engine_(feature_engine), order_manager_(order_manager), logger_(logger),
+      ticker_cfg_(ticker_cfg) {
+    //Set the callback function for order book update
+    trade_engine->algoOnOrderBookUpdate_ = [this](auto ticker_id, auto price, auto side, auto book) {
+        onOrderBookUpdate(ticker_id, price, side, book);
+    };
+    //Set the callback function for transaction events
+    trade_engine->algoOnTradeUpdate_ = [this](auto market_update, auto book) { onTradeUpdate(market_update, book); };
+    //Set the callback function for client response
+    trade_engine->algoOnOrderUpdate_ = [this](auto client_response) { onOrderUpdate(client_response); };
+}
+
+// Handle order book updates
+auto MarketMaker::onOrderBookUpdate(TickerId ticker_id, Price price, Side side, const MarketOrderBook *book) noexcept -> void {
+    //Record order book update information log
+    logger_->log("%:% %() % ticker:% price:% side:%\n", __FILE__, __LINE__, __FUNCTION__,
+                 Common::getCurrentTimeStr(&time_str_), ticker_id, Common::priceToString(price).c_str(),
+                 Common::sideToString(side).c_str());
+
+    // Get the best bid and ask price of the order book
+    const auto bbo = book->getBBO();
+    // Get the fair market price calculated by the feature engine
+    const auto fair_price = feature_engine_->getMktPrice();
+
+    // Check if BBO price and fair market price are valid
+    if (LIKELY(bbo->bid_price_ != Price_INVALID && bbo->ask_price_ != Price_INVALID && fair_price != Feature_INVALID)) {
+        // Log BBO and fair market price information
+        logger_->log("%:% %() % % fair-price:%\n", __FILE__, __LINE__, __FUNCTION__,
+                     Common::getCurrentTimeStr(&time_str_),
+                     bbo->toString().c_str(), fair_price);
+
+        // Get the quantity limit of the current securities code
+        const auto clip = ticker_cfg_.at(ticker_id).clip_;
+        // Get the transaction threshold of the current security code
+        const auto threshold = ticker_cfg_.at(ticker_id).threshold_;
+
+        // Calculate buy price based on fair market price and threshold
+        const auto bid_price = bbo->bid_price_ - (fair_price - bbo->bid_price_ >= threshold ? 0 : 1);
+        // Calculate sell price based on fair market price and threshold
+        const auto ask_price = bbo->ask_price_ + (bbo->ask_price_ - fair_price >= threshold ? 0 : 1);
+
+        // Call the order manager to adjust the order
+        order_manager_->moveOrders(ticker_id, bid_price, ask_price, clip);
+    }
+}
+
+// Process transaction events (this method in the market maker algorithm currently only records logs)
+auto MarketMaker::onTradeUpdate(const Exchange::MEMarketUpdate *market_update, MarketOrderBook * /* book */) noexcept -> void {
+    // Record transaction event information log
+    logger_->log("%:% %() % %\n", __FILE__, __LINE__, __FUNCTION__, Common::getCurrentTimeStr(&time_str_),
+                 market_update->toString().c_str());
+}
+
+// Handle client response
+auto MarketMaker::onOrderUpdate(const Exchange::MEClientResponse *client_response) noexcept -> void {
+    //Record client response information log
+    logger_->log("%:% %() % %\n", __FILE__, __LINE__, __FUNCTION__, Common::getCurrentTimeStr(&time_str_),
+                 client_response->toString().c_str());
+
+    // Call the order manager to process order updates
+    order_manager_->onOrderUpdate(client_response);
+}
+```
+
+3. **Working mechanism and implementation details of market making strategy**
+
+**initialization**
+
+1. The constructor receives parameters such as logger pointer, trading engine pointer, feature engine pointer, order manager pointer and trading engine configuration hash map.
+2. Set the callback functions for the trading engine's order book updates, trading events, and client responses, respectively pointing to `MarketMaker` class `onOrderBookUpdate`、`onTradeUpdate` and `onOrderUpdate` method.
+
+**Order book update processing (**`onOrderBookUpdate` method)
+
+1. When the order book is updated, the trading engine calls `MarketMaker` of `onOrderBookUpdate` method.
+2. Record order book update information log.
+3. Get the Best Bid and Bid (BBO) for the order book and the fair market price calculated by the feature engine.
+4. Check that BBO's prices and fair market prices are valid.
+5. If valid, get the quantity limit and transaction threshold of the current security code.
+6. Calculate new bid and ask prices based on fair market prices and thresholds.
+7. Call the order manager `moveOrders` Method to adjust the order based on the calculated price and quantity limits.
+
+**Transaction event processing (**`onTradeUpdate`method)
+
+1. When a trading event occurs, the trading engine will call `MarketMaker` of `onTradeUpdate` method.
+2. Currently, this method only records transaction event information logs and does not perform other operations.
+
+**Client response processing (**`onOrderUpdate` method)
+
+1. When a client response is received, the trading engine calls `MarketMaker` of `onOrderUpdate` method.
+2. Record client response information log.
+3. Call the order manager `onOrderUpdate` Method to handle order updates, such as updating order status, etc.
+
+Market maker algorithms can dynamically adjust buying and selling quotes and orders based on changes in the market order book to maintain market liquidity and control trading risks to a certain extent. At the same time, by recording logs, it is convenient to monitor and debug the operation of the algorithm.
+
+
+
+##### Taker Trading Strategy
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1745195811570-f36423d1-faf4-4321-8723-ca752def6623.png)
+
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1745195825226-0e9da769-5a95-4293-a61e-292619993523.png)
+
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1745195847307-4e7ed2a4-75d5-402d-a0c5-85d20f437cab.png)
+
+1. **Initial Market Status**
+
+The initial market state is also presented in the price level - aggregated order book. The meaning of each column is the same as in the market-making strategy example, except that the columns related to market-making strategy orders are not involved because the taker strategy does not passively place orders in the order book. Initially, the "Market bid order count" at the 10.21 bid level is 12 and the "Market bid quantity" is 2500; the "Market bid order count" at the 10.20 bid level is 25 and the "Market bid quantity" is 4700; the "Market ask quantity" at the 10.22 ask level is 4500 and the "Market ask order count" is 8 ;The "Market ask quantity" of the 10.23 selling price level is 5500, and the "Market ask order count" is 18.
+
+2. **Large trading event occurs**
+
+Assume that there is a large sell transaction in the market, the quantity is 2200, and the transaction is completed at the bid level of 10.21. Prior to this, the total volume at the 10.21 bid level was 2500. After this trading event occurs, the optimal bid quantity ("Market bid quantity") at the 10.21 bid level is reduced from 2500 to $ 2500 - 2200 = 300  $, and the corresponding "Market bid order count" will also change accordingly (here it becomes 2), as shown by the golden highlighted block in the corresponding picture.
+
+3. **Taker strategy response**
+
+Assume that our taker strategy has the property of following the direction of a large trade. That is, when such a large trading event is observed, the taker strategy will take the same direction as the trade. So, after observing this large sell trade of 2200, the taker strategy decided to place an active sell order at 10.21. Assume that the active sell order quantity is 100, as shown in the blue mark in the corresponding picture. This completes the entire process in this taker strategy example, from the initial state of the market to the occurrence of a large trading event, and then to the taker strategy's response.
+
+##### Taker trading strategy implementation
+1. `AlgoType` enumerate
++ `AlgoType` Is an enumeration type used to represent the type of trading algorithm. The specific values and meanings are as follows:
+    - `INVALID`: The value is 0, indicating an invalid type, used to indicate an algorithm type that is not initialized correctly or does not comply with the rules.
+    - `RANDOM`: The value is 1, indicating the random algorithm type, which refers to the random selection of trading decisions and is used to test the maker and taker algorithms.
+    - `MAKER`: The value is 2, indicating the market maker algorithm type. Market makers provide buying and selling quotes in the market to increase market liquidity.
+    - `TAKER`: The value is 3, indicating the type of liquidity acquisition algorithm, which obtains liquidity from the market for trading.
+    - `MAX`: The value is 4, used to represent the maximum value of the enumeration, which may be used for operations such as bounds checking or looping.
+
+2.`LiquidityTaker` kind
+
++ `feature_engine_`：`const FeatureEngine*` Type, a constant pointer to the feature engine. The feature engine provides data support for the taker strategy and obtains feature values such as aggressive transaction quantity ratio. The initial value is `nullptr`。
++ `order_manager_`：`OrderManager*` Type, pointer to the order manager. Used to send aggressive orders and perform order-related operations, such as moving orders, canceling orders, etc. The initial value is `nullptr`。
++ `time_str_`：`std::string` Type, a string used to store the current time, used when logging.
++ `logger_`：`Common::Logger*` type, pointer to the logger to use for logging `LiquidityTaker` Various types of information during operation.
++ `ticker_cfg_`：`const TradeEngineCfgHashMap` Type, which stores the transaction configuration information of the taker strategy, including the transaction configuration corresponding to each security code, such as quantity limits, thresholds, etc.
+3. **Important method**
+
+```cpp
+//Constructor, initialize LiquidityTaker object
+LiquidityTaker::LiquidityTaker(Common::Logger *logger, TradeEngine *trade_engine, const FeatureEngine *feature_engine,
+                               OrderManager *order_manager,
+                               const TradeEngineCfgHashMap &ticker_cfg)
+    : feature_engine_(feature_engine), order_manager_(order_manager), logger_(logger),
+      ticker_cfg_(ticker_cfg) {
+    //Set the callback function for order book update
+    trade_engine->algoOnOrderBookUpdate_ = [this](auto ticker_id, auto price, auto side, auto book) {
+        onOrderBookUpdate(ticker_id, price, side, book);
+    };
+    //Set the callback function for transaction events
+    trade_engine->algoOnTradeUpdate_ = [this](auto market_update, auto book) { onTradeUpdate(market_update, book); };
+    //Set the callback function for client response
+    trade_engine->algoOnOrderUpdate_ = [this](auto client_response) { onOrderUpdate(client_response); };
+}
+
+// Handle order book updates
+auto LiquidityTaker::onOrderBookUpdate(TickerId ticker_id, Price price, Side side, MarketOrderBook *) noexcept -> void {
+    //Record order book update information log
+    logger_->log("%:% %() % ticker:% price:% side:%\n", __FILE__, __LINE__, __FUNCTION__,
+                 Common::getCurrentTimeStr(&time_str_), ticker_id, Common::priceToString(price).c_str(),
+                 Common::sideToString(side).c_str());
+    // Currently this method only records logs and does no other processing.
+}
+
+// Handle transaction events
+auto LiquidityTaker::onTradeUpdate(const Exchange::MEMarketUpdate *market_update, MarketOrderBook *book) noexcept -> void {
+    // Record transaction event information log
+    logger_->log("%:% %() % %\n", __FILE__, __LINE__, __FUNCTION__, Common::getCurrentTimeStr(&time_str_),
+                 market_update->toString().c_str());
+
+    // Get the best bid and ask price of the order book
+    const auto bbo = book->getBBO();
+    // Get the aggressive trading quantity ratio calculated by the feature engine
+    const auto agg_qty_ratio = feature_engine_->getAggTradeQtyRatio();
+
+    // Check if BBO's price and aggressive trade quantity ratio is valid
+    if (LIKELY(bbo->bid_price_ != Price_INVALID && bbo->ask_price_ != Price_INVALID && agg_qty_ratio != Feature_INVALID)) {
+        // Record BBO and aggressive transaction quantity ratio information log
+        logger_->log("%:% %() % % agg-qty-ratio:%\n", __FILE__, __LINE__, __FUNCTION__,
+                     Common::getCurrentTimeStr(&time_str_),
+                     bbo->toString().c_str(), agg_qty_ratio);
+
+        // Get the quantity limit of the current securities code
+        const auto clip = ticker_cfg_.at(market_update->ticker_id_).clip_;
+        // Get the transaction threshold of the current security code
+        const auto threshold = ticker_cfg_.at(market_update->ticker_id_).threshold_;
+
+        // If the aggressive transaction quantity ratio reaches the threshold
+        if (agg_qty_ratio >= threshold) {
+            if (market_update->side_ == Side::BUY)
+                // If the trading direction is buy, send the order at the selling price
+                order_manager_->moveOrders(market_update->ticker_id_, bbo->ask_price_, Price_INVALID, clip);
+            else
+                // If the trading direction is selling, send the order at the buying price
+                order_manager_->moveOrders(market_update->ticker_id_, Price_INVALID, bbo->bid_price_, clip);
+        }
+    }
+}
+
+// Handle client response
+auto LiquidityTaker::onOrderUpdate(const Exchange::MEClientResponse *client_response) noexcept -> void {
+    //Record client response information log
+    logger_->log("%:% %() % %\n", __FILE__, __LINE__, __FUNCTION__, Common::getCurrentTimeStr(&time_str_),
+                 client_response->toString().c_str());
+    // Call the order manager to process order updates
+    order_manager_->onOrderUpdate(client_response);
+}
+```
+
+4. **The working mechanism and implementation details of the taker strategy**
+
+**initialization**
+
++ Constructor receives logger pointer, trading engine pointer, feature engine pointer, order manager pointer and trading engine configuration hash map.
++ Set the callback functions of the trading engine's order book updates, trading events and client responses, pointing to `LiquidityTaker` class `onOrderBookUpdate`、`onTradeUpdate` and `onOrderUpdate` method.
+
+**Order Book Update Processing**
+
++ Called when the trading engine detects an order book update `onOrderBookUpdate` method.
++ This method only records the order book update information log and does not perform other processing.
+
+**Transaction event processing**
+
++ Called when the trading engine detects a trading event `onTradeUpdate` method.
+    1. Record transaction event information log.
+    2. Get the Best Bid and Bid (BBO) of the order book and the aggressive trade volume ratio calculated by the feature engine.
+    3. Check if BBO's price and aggressive trade volume ratios are valid.
+    4. If valid, get the quantity limit and transaction threshold of the current security code.
+    5. If the aggressive trade quantity ratio reaches the threshold, the order manager's `moveOrders` Method to send aggressive orders. If the trading direction is buying, the order is sent at the selling price; if the trading direction is selling, the order is sent at the buying price.
+
+**Client response processing**
+
++ Called when the trading engine receives the client response `onOrderUpdate` method.
++ Record client response information log.
++ Call the order manager `onOrderUpdate` Method handles order updates, such as updating order status, etc.
+
+
+
+#### Market participant main program operation implementation
+```cpp
+#include <csignal>
+
+#include "strategy/trade_engine.h"
+#include "order_gw/order_gateway.h"
+#include "market_data/market_data_consumer.h"
+
+#include "common/logging.h"
+
+/// Main components.
+//Global logger pointer, used to record log information during program running
+Common::Logger *logger = nullptr;
+//Trading engine pointer, responsible for processing trading logic and order processing
+Trading::TradeEngine *trade_engine = nullptr;
+//Market data consumer pointer, responsible for receiving and processing market data
+Trading::MarketDataConsumer *market_data_consumer = nullptr;
+// Order gateway pointer, responsible for communicating with the external trading system, sending and receiving orders
+Trading::OrderGateway *order_gateway = nullptr;
+
+/// ./trading_main CLIENT_ID ALGO_TYPE [CLIP_1 THRESH_1 MAX_ORDER_SIZE_1 MAX_POS_1 MAX_LOSS_1] [CLIP_2 THRESH_2 MAX_ORDER_SIZE_2 MAX_POS_2 MAX_LOSS_2] ...
+int main(int argc, char **argv) {
+    // Check whether the number of command line parameters is sufficient
+    if(argc < 3) {
+        // If there are insufficient parameters, output an error message and terminate the program
+        FATAL("USAGE trading_main CLIENT_ID ALGO_TYPE [CLIP_1 THRESH_1 MAX_ORDER_SIZE_1 MAX_POS_1 MAX_LOSS_1] [CLIP_2 THRESH_2 MAX_ORDER_SIZE_2 MAX_POS_2 MAX_LOSS_2] ...");
+    }
+
+    // Get the client ID from the command line parameters
+    const Common::ClientId client_id = atoi(argv[1]);
+    // Use the client ID as the random number seed to ensure that the random number sequence is different each time the program is run.
+    srand(client_id);
+
+    //Convert the algorithm type string in the command line parameter to the enumeration type
+    const auto algo_type = stringToAlgoType(argv[2]);
+
+    // Create a logger, the log file name contains the client ID
+    logger = new Common::Logger("trading_main_" + std::to_string(client_id) + ".log");
+
+    // Define the sleep time (microseconds) between each random operation
+    const int sleep_time = 20 * 1000;
+
+    //Define a lock-free queue for communication between different components
+    // Client request queue, used by the trading engine to send order requests to the order gateway
+    Exchange::ClientRequestLFQueue client_requests(ME_MAX_CLIENT_UPDATES);
+    //Client response queue, used by the order gateway to return order responses to the trading engine
+    Exchange::ClientResponseLFQueue client_responses(ME_MAX_CLIENT_UPDATES);
+    //Market data update queue, used by market data consumers to send market data updates to the trading engine
+    Exchange::MEMarketUpdateLFQueue market_updates(ME_MAX_MARKET_UPDATES);
+
+    // String used to store the current time
+    std::string time_str;
+
+    // Hash map of the trading engine configuration, which stores the trading configuration information of each security code
+    TradeEngineCfgHashMap ticker_cfg;
+
+    // Parse and initialize the TradeEngineCfgHashMap above from the command line arguments.
+    // [CLIP_1 THRESH_1 MAX_ORDER_SIZE_1 MAX_POS_1 MAX_LOSS_1] [CLIP_2 THRESH_2 MAX_ORDER_SIZE_2 MAX_POS_2 MAX_LOSS_2] ...
+    // Parse and initialize the trading engine configuration from the command line parameters
+    size_t next_ticker_id = 0;
+    for (int i = 3; i < argc; i += 5, ++next_ticker_id) {
+        // Parse the configuration information of each security code in turn
+        ticker_cfg.at(next_ticker_id) = {static_cast<Qty>(std::atoi(argv[i])), std::atof(argv[i + 1]),
+                                         {static_cast<Qty>(std::atoi(argv[i + 2])),
+                                          static_cast<Qty>(std::atoi(argv[i + 3])),
+                                          std::atof(argv[i + 4])}};
+    }
+
+    //Record the log information of starting the trading engine
+    logger->log("%:% %() % Starting Trade Engine...\n", __FILE__, __LINE__, __FUNCTION__, Common::getCurrentTimeStr(&time_str));
+    //Create trading engine object
+    trade_engine = new Trading::TradeEngine(client_id, algo_type,
+                                            ticker_cfg,
+                                            &client_requests,
+                                            &client_responses,
+                                            &market_updates);
+    // Start the trading engine
+    trade_engine->start();
+
+    // Define the IP address of the order gateway
+    const std::string order_gw_ip = "127.0.0.1";
+    //Define the network interface of the order gateway
+    const std::string order_gw_iface = "lo";
+    //Define the port number of the order gateway
+    const int order_gw_port = 12345;
+
+    //Record the log information of starting the order gateway
+    logger->log("%:% %() % Starting Order Gateway...\n", __FILE__, __LINE__, __FUNCTION__, Common::getCurrentTimeStr(&time_str));
+    //Create order gateway object
+    order_gateway = new Trading::OrderGateway(client_id, &client_requests, &client_responses, order_gw_ip, order_gw_iface, order_gw_port);
+    // Start order gateway
+    order_gateway->start();
+
+    // Define the network interface for market data
+    const std::string mkt_data_iface = "lo";
+    // Define the IP address of the market data snapshot
+    const std::string snapshot_ip = "233.252.14.1";
+    // Define the port number of the market data snapshot
+    const int snapshot_port = 20000;
+    // Define the IP address for incremental market data updates
+    const std::string incremental_ip = "233.252.14.3";
+    // Define the port number for incremental update of market data
+    const int incremental_port = 20001;
+
+    //Record the log information of starting the market data consumer
+    logger->log("%:% %() % Starting Market Data Consumer...\n", __FILE__, __LINE__, __FUNCTION__, Common::getCurrentTimeStr(&time_str));
+    //Create market data consumer object
+    market_data_consumer = new Trading::MarketDataConsumer(client_id, &market_updates, mkt_data_iface, snapshot_ip, snapshot_port, incremental_ip, incremental_port);
+    // Start market data consumer
+    market_data_consumer->start();
+
+    //The program sleeps for 10 seconds, waiting for each component to start and stabilize
+    usleep(10 * 1000 * 1000);
+
+    // Initialize the last event time of the trading engine
+    trade_engine->initLastEventTime();
+
+    // For the random trading algorithm, we simply implement it here instead of creating a new trading algorithm which is another possibility.
+    // Generate random orders with random attributes and randomly cancel some of them.
+    // If using random trading algorithm
+    if (algo_type == AlgoType::RANDOM) {
+        //Initialize the order ID. The order ID of each client starts from client_id * 1000
+        Common::OrderId order_id = client_id * 1000;
+        // Store the vector requested by the client
+        std::vector<Exchange::MEClientRequest> client_requests_vec;
+        //Storage the base price of each security symbol
+        std::array<Price, ME_MAX_TICKERS> ticker_base_price;
+        // Generate a base price for each security symbol
+        for (size_t i = 0; i < ME_MAX_TICKERS; ++i)
+            ticker_base_price[i] = (rand() % 100) + 100;
+        // Generate 10,000 random orders
+        for (size_t i = 0; i < 10000; ++i) {
+            // Randomly select a security code
+            const Common::TickerId ticker_id = rand() % Common::ME_MAX_TICKERS;
+            // Generate order price based on base price and random number
+            const Price price = ticker_base_price[ticker_id] + (rand() % 10) + 1;
+            // Randomly generate order quantity
+            const Qty qty = 1 + (rand() % 100) + 1;
+            // Randomly select order direction (buy or sell)
+            const Side side = (rand() % 2 ? Common::Side::BUY : Common::Side::SELL);
+
+            //Create a new order request
+            Exchange::MEClientRequest new_request{Exchange::ClientRequestType::NEW, client_id, ticker_id, order_id++, side,
+                                                  price, qty};
+            //Send a new order request to the trading engine
+            trade_engine->sendClientRequest(&new_request);
+            //The program sleeps for a while
+            usleep(sleep_time);
+
+            //Add new order request to vector
+            client_requests_vec.push_back(new_request);
+            // Randomly select an order to cancel
+            const auto cxl_index = rand() % client_requests_vec.size();
+            // Get the order request to be canceled
+            auto cxl_request = client_requests_vec[cxl_index];
+            //Change request type to cancel order
+            cxl_request.type_ = Exchange::ClientRequestType::CANCEL;
+            //Send order cancellation request to trading engine
+            trade_engine->sendClientRequest(&cxl_request);
+            //The program sleeps for a while
+            usleep(sleep_time);
+
+            // Check if the trading engine has been inactive for 60 seconds
+            if (trade_engine->silentSeconds() >= 60) {
+                // If there is no activity for more than 60 seconds, record the log and terminate the loop early
+                logger->log("%:% %() % Stopping early because been silent for % seconds...\n", __FILE__, __LINE__, __FUNCTION__,
+                            Common::getCurrentTimeStr(&time_str), trade_engine->silentSeconds());
+
+                break;
+            }
+        }
+    }
+
+    // Wait for 60 seconds of inactivity on the trading engine
+    while (trade_engine->silentSeconds() < 60) {
+        // Record waiting information log
+        logger->log("%:% %() % Waiting till no activity, been silent for % seconds...\n", __FILE__, __LINE__, __FUNCTION__,
+                    Common::getCurrentTimeStr(&time_str), trade_engine->silentSeconds());
+
+        using namespace std::literals::chrono_literals;
+        //The program sleeps for 30 seconds
+        std::this_thread::sleep_for(30s);
+    }
+
+    // Stop the trading engine
+    trade_engine->stop();
+    // Stop market data consumer
+    market_data_consumer->stop();
+    // Stop order gateway
+    order_gateway->stop();
+
+    using namespace std::literals::chrono_literals;
+    //The program sleeps for 10 seconds and waits for the component to stop
+    std::this_thread::sleep_for(10s);
+
+    // Release the logger's memory
+    delete logger;
+    logger = nullptr;
+    // Release the memory of the trading engine
+    delete trade_engine;
+    trade_engine = nullptr;
+    // Release the memory of the market data consumer
+    delete market_data_consumer;
+    market_data_consumer = nullptr;
+    // Release the memory of the order gateway
+    delete order_gateway;
+    order_gateway = nullptr;
+
+    //The program sleeps for 10 seconds
+    std::this_thread::sleep_for(10s);
+
+    //The program exits normally
+    exit(EXIT_SUCCESS);
+}
+```
+
+**Program execution method**
+
+The startup command format of the main program of the trading system is as follows:
+
+```shell
+./trading_main CLIENT_ID ALGO_TYPE [CLIP_1 THRESH_1 MAX_ORDER_SIZE_1 MAX_POS_1 MAX_LOSS_1] [CLIP_2 THRESH_2 MAX_ORDER_SIZE_2 MAX_POS_2 MAX_LOSS_2] ...
+```
+
++ `CLIENT_ID`: The unique identifier of the client, which is an integer.
++ `ALGO_TYPE`: Trading algorithm type, which can be`RANDOM`、`MAKER`、`TAKER` wait.
++ `[CLIP_1 THRESH_1 MAX_ORDER_SIZE_1 MAX_POS_1 MAX_LOSS_1]`: Transaction configuration information for each security code, which can be repeated multiple times and is used to configure the trading engine.
+
+After the program is started, the trading engine, order gateway and market data consumer will be started in sequence, and then the corresponding trading logic will be executed according to the selected trading algorithm. If you choose the random trading algorithm, random orders will be generated and some orders will be canceled randomly. Finally, when the trading engine has been inactive for 60 seconds, the program stops its components and frees memory, then exits normally.
+
+
+
+### 6.Performance testing system project
+#### clock cycle
+1. **Important method**
+
+```cpp
+// Read the value from the TSC (timestamp counter) register and return a uint64_t value representing the elapsed CPU clock cycle
+inline auto Common::rdtsc() noexcept {
+    // Define unsigned integers lo and hi to store the lower and upper 32 bits of the value read from the TSC register
+    unsigned int lo, hi;
+    //Use the assembly instruction "rdtsc" to read the value of the TSC register, store the lower 32 bits into lo, and the upper 32 bits into hi
+    __asm__ __volatile__ ("rdtsc" : "=a" (lo), "=d" (hi));
+    // Shift the high 32 bits to the left by 32 bits and combine them with the low 32 bits to return a 64-bit value representing the CPU clock cycle.
+    return ((uint64_t) hi << 32) | lo;
+}
+```
+
+2. **Important macro definitions**
+
+```cpp
+// Start latency measurement, use the rdtsc() function to get the current CPU clock cycle number, and create a variable named TAG to store the value
+#define START_MEASURE(TAG) const auto TAG = Common::rdtsc()
+
+//End the delay measurement, use the rdtsc() function to obtain the current CPU clock cycle number, calculate the difference from when the measurement was started, and record the log
+#define END_MEASURE(TAG, LOGGER)                                                              \
+      do {                                                                                    \
+        // Get the current number of CPU clock cycles
+        const auto end = Common::rdtsc();                                                     \
+        // Log, containing the current time string and the measured latency (the current number of CPU clock cycles minus the number of CPU clock cycles when the measurement was started)
+        LOGGER.log("% RDTSC "#TAG" %\n", Common::getCurrentTimeStr(&time_str_), (end - TAG)); \
+      } while(false)
+
+// Record the current timestamp, use the Common::getCurrentNanos() function to get the current time (in nanoseconds) and record the log
+#define TTT_MEASURE(TAG, LOGGER)                                                              \
+      do {                                                                                    \
+        // Get the current time (in nanoseconds)
+        const auto TAG = Common::getCurrentNanos();                                           \
+        // Record log, containing current time string and current time (in nanoseconds)
+        LOGGER.log("% TTT "#TAG" %\n", Common::getCurrentTimeStr(&time_str_), TAG);           \
+      } while(false)
+```
+
+3. **Working mechanism and implementation details of performance detection method**
+4. `rdtsc`**Function**: Using assembly instructions `rdtsc` Read the value from the TSC register, combining the lower 32 bits and upper 32 bits into a 64-bit `uint64_t` Type value representing elapsed CPU clock cycles. This is the basis of the entire performance instrumentation and is used to obtain the precise number of CPU clock cycles.
+5. `START_MEASURE`** Macro **: Use this macro where you need to start measuring latency, it will call `rdtsc` The function gets the current number of CPU clock cycles and creates a file with the specified name (`TAG`) to store this value in a constant variable for subsequent calculation of the delay.
+6. `END_MEASURE`** Macro **: Use this macro where you need to end the measured delay, it calls again `rdtsc` The function gets the current number of CPU clock cycles, calculates the difference from the value stored when the measurement was started, gets the number of delayed CPU clock cycles, and passes it to the logger (`LOGGER`) records the current time string and delay value.
+7. `TTT_MEASURE`**Macro**: used to record the current timestamp (in nanoseconds), by calling `Common::getCurrentNanos()` The function gets the current time and then uses a logger to log the current time string and that time value.
+8. An excellent<font style="color:rgb(31, 35, 40);">Intel Linux Invariant TSC CPU</font>High-precision timer implementation example, source[https://github.com/a858438680/TSCTimer](https://github.com/a858438680/TSCTimer)
+
+```cpp
+#pragma once
+
+#include <atomic>
+#include <bitset>
+#include <chrono>
+#include <tuple>
+#include <vector>
+
+#include <cstring>
+
+namespace TSC {
+
+    struct TimerHelper {
+    static uint64_t average(uint64_t low, uint64_t high) {
+        return low + (high - low) / 2;
+    }
+
+    static uint64_t rdtscp() {
+        unsigned int A;
+        return __builtin_ia32_rdtscp(&A);
+    }
+
+    static uint64_t rdtsc() {
+        return __builtin_ia32_rdtsc();
+    }
+
+    static std::tuple<uint64_t, std::chrono::steady_clock::time_point> get_tsc_ns_pair() {
+        constexpr int try_times = 5;
+        uint64_t tsc_arr[try_times + 1];
+        std::chrono::steady_clock::time_point ns_arr[try_times];
+
+        tsc_arr[0] = rdtsc();
+        for (int i = 0; i < try_times; ++i) {
+            ns_arr[i] = std::chrono::steady_clock::now();
+            tsc_arr[i + 1] = rdtsc();
+        }
+
+        auto min_tsc_diff = tsc_arr[1] - tsc_arr[0];
+        auto ave_tsc = average(tsc_arr[0], tsc_arr[1]);
+        auto ns = ns_arr[0];
+
+        for (int i = 1; i < try_times; ++i) {
+            auto tsc_diff = tsc_arr[i + 1] - tsc_arr[i];
+            if (tsc_diff < min_tsc_diff) {
+                min_tsc_diff = tsc_diff;
+                ave_tsc = average(tsc_arr[i], tsc_arr[i + 1]);
+                ns = ns_arr[i];
+            }
+        }
+
+        return {ave_tsc, ns};
+    }
+
+    static void calibrate() {
+        auto [end_tsc, end_time] = TimerHelper::get_tsc_ns_pair();
+        auto& [begin_tsc, begin_time] = TimerHelper::base_point;
+        std::chrono::nanoseconds duration = end_time - begin_time;
+        auto scale = static_cast<double>(duration.count()) / static_cast<double>(end_tsc - begin_tsc);
+        double expected = 0.;
+        cycle_to_ns_scale.compare_exchange_strong(expected, scale, std::memory_order_relaxed);
+    }
+
+    static std::tuple<uint64_t, std::chrono::steady_clock::time_point> base_point;
+    static std::atomic<double> cycle_to_ns_scale;
+};
+
+    inline std::tuple<uint64_t, std::chrono::steady_clock::time_point> TimerHelper::base_point = TimerHelper::get_tsc_ns_pair();
+    inline std::atomic<double> TimerHelper::cycle_to_ns_scale{0.};
+
+    struct RDTSC {};
+    struct RDTSCP {};
+
+    template <typename T>
+    struct is_ratio: std::false_type {};
+
+    template <std::intmax_t Num, std::intmax_t Denom>
+    struct is_ratio<std::ratio<Num, Denom>>: std::true_type {};
+
+    template <typename T>
+    concept Ratio = is_ratio<T>::value;
+
+    template <typename T>
+    concept Number = std::is_integral_v<T> || std::is_floating_point_v<T>;
+
+    template <typename T>
+    concept RDTBase = std::is_same_v<T, RDTSC> || std::is_same_v<T, RDTSCP>;
+
+    template <size_t N, Ratio Period = std::ratio<1>, Number Rep = double, RDTBase RDTType = RDTSC>
+    class Timer: protected TimerHelper {
+    public:
+    Timer() {
+        memset(&cycles_arr_, 0, sizeof(cycles_arr_));
+    }
+
+    struct end_tag_t {};
+
+    template <typename... Ns>
+    requires
+    ((std::is_convertible_v<Ns, size_t> || std::is_same_v<Ns, end_tag_t>) && ...) &&
+    (((std::is_same_v<end_tag_t, Ns> ? 1 : 0) + ...) <= 1) &&
+        (((std::is_constructible_v<Ns, size_t> ? 1 : 0) + ...) <= N)
+    void start(Ns... track_types) {
+        ;
+        if constexpr (std::is_same_v<RDTType, RDTSC>) {
+            auto tsc = TimerHelper::rdtsc();
+            start_impl(tsc, [](auto arg) constexpr {
+                if constexpr (std::is_same_v<end_tag_t, decltype(arg)>) {
+                    return arg;
+                }   else {
+                    return static_cast<size_t>(arg);
+                }
+            }(track_types)...);
+        } else {
+            auto tsc = TimerHelper::rdtscp();
+            start_impl(tsc, [](auto arg) constexpr {
+                if constexpr (std::is_same_v<end_tag_t, decltype(arg)>) {
+                    return arg;
+                }   else {
+                    return static_cast<size_t>(arg);
+                }
+            }(track_types)...);
+        }
+    }
+
+    template <typename... Ns>
+    requires ((std::is_convertible_v<Ns, size_t>) && ...) && (sizeof...(Ns) <= N)
+    void end(Ns... track_types) {
+        if constexpr (std::is_same_v<RDTType, RDTSC>) {
+            auto tsc = TimerHelper::rdtsc();
+            end_impl(tsc, static_cast<size_t>(track_types)...);
+        } else {
+            auto tsc = TimerHelper::rdtscp();
+            end_impl(tsc, static_cast<size_t>(track_types)...);
+        }
+    }
+
+    std::chrono::duration<Rep, Period> get(size_t i) {
+        auto scale = TimerHelper::cycle_to_ns_scale.load(std::memory_order_relaxed);
+        if (scale == 0.) {
+            TimerHelper::calibrate();
+            while ((scale = TimerHelper::cycle_to_ns_scale.load(std::memory_order_relaxed)) == 0.);
+        }
+        std::chrono::nanoseconds result{static_cast<std::chrono::nanoseconds::rep>(cycles_arr_[i] * scale)};
+        return std::chrono::duration_cast<std::chrono::duration<Rep, Period>>(result);
+    }
+
+    static size_t size() {
+        return N;
+    }
+
+    uint64_t get_cycle(size_t i) {
+        return cycles_arr_[i];
+    }
+
+    static constexpr auto stop = end_tag_t{};
+
+private:
+    uint64_t last_tsc_arr_[N];
+    uint64_t cycles_arr_[N];
+
+    template <typename... Ns>
+    void start_impl(uint64_t tsc, size_t first_start_type, Ns... start_types) {
+        last_tsc_arr_[first_start_type] = tsc;
+        start_impl(tsc, start_types...);
+    }
+
+    void start_impl(uint64_t tsc) {}
+
+    template <typename... Ns>
+    void start_impl(uint64_t tsc, end_tag_t, Ns... end_types) {
+        end_impl(tsc, end_types...);
+    }
+
+    template <typename... Ns>
+    void end_impl(uint64_t tsc, size_t first_start_type, Ns... start_types) {
+        cycles_arr_[first_start_type] += tsc - last_tsc_arr_[first_start_type];
+        end_impl(tsc, start_types...);
+    }
+
+    void end_impl(uint64_t tsc) {}
+};
+
+} // namespace TSC
+```
+
+```cpp
+#include <iostream>
+#include <thread>
+#include "timer.h"
+
+void some_work(int ms) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+}
+
+int main() {
+    // Create a timer that can track 2 intervals, and the result is returned in milliseconds (double type).
+    // We use the more precise RDTSCP instruction.
+    TSC::Timer<2, std::milli, double, TSC::RDTSCP> timer;
+
+    // --- Timing a single operation ---
+    timer.start(0);
+    some_work(50);
+    timer.end(0);
+
+    std::cout << "Operation 0 takes time: " << timer.get(0).count() << " ms\n";
+    std::cout << "Operation 0 cycle number: " << timer.get_cycle(0) << "\n\n";
+
+    // --- Use the 'stop' tag to time back-to-back operations ---
+    // Start timing for operation 1, then perform some work immediately
+    timer.start(1);
+    some_work(20);
+
+    // This single call stops timer 1 and starts timer 0 with minimal overhead
+    timer.start(0, timer.stop, 1);
+
+    some_work(30);
+    timer.end(0); // Stop timer 0
+
+    std::cout << "Operation 1 (cumulative) time consumption: " << timer.get(1).count() << " ms\n";
+    std::cout << "Operation 0 (cumulative) time consumption: " << timer.get(0).count() << " ms\n";
+
+    return 0;
+}
+```
+
+**5.rdtscp**
+
+`rdtscp` Advantages compared to rdtsc: comes with weak serialization (reducing its own previous instruction rearrangement), returns the current core APIC ID (can be verified across cores). rdtsc must depend on mfence.
+
+```cpp
+uint64_t rdtsc_stable() {
+    uint32_t not, this;
+    asm volatile (
+        "mfence\n" // Memory barrier to ensure sequential execution
+        "rdtsc\n" // Read TSC
+        : "=a"(no), "=d"(hi)
+    );
+    return ((uint64_t)hi << 32) | lo;
+}
+```
+
+```c
+uint64_t rdtscp_stable(uint32_t *aux) {
+    uint32_t not, this;
+    asm volatile (
+        "rdtscp\n" // Read TSC and wait for the previous command to complete
+        "lfence\n" // Prevent the CPU from executing subsequent instructions in advance
+        : "=a"(lo), "=d"(hi), "=c"(*aux)
+        :
+        : "memory" // reserved, constrains compiler rearrangement
+    );
+    return ((uint64_t)hi << 32) | lo;
+}
+```
+
+```c
+uint64_t rdtscp_simple() {
+    uint32_t aux;
+    return rdtscp(&aux);
+}
+```
+
+```c
+#include <cpuid.h>
+
+bool has_rdtscp_support() {
+    uint32_t eax, ebx, ecx, edx;
+    __cpuid(0x80000001, eax, ebx, ecx, edx); // Extended function query
+    return (edx & (1 << 27)) != 0; // Supported if bit 27 of EDX is 1
+}
+```
+
+**Notice**
+
++ If you need to strictly prevent subsequent instruction reordering, please`rdtscp`add later`lfence`。  
++ Use APIC ID to verify whether the timing process spans cores.
+6. Example of a timer implemented using the features of rdtscp
+
+```cpp
+#ifndef HARDWARE_TIMER_H
+#define HARDWARE_TIMER_H
+
+#include <cstdint>
+#include <chrono>
+#include <thread>
+#include <vector>
+#include <algorithm>
+
+#ifdef _WIN32
+#include <intrin.h>
+#else
+#include <x86intrin.h>
+#include <cpuid.h>
+#endif
+
+/**
+ * @brief High-precision timer based on RDTSCP instruction
+ * 
+ * Supports multiple TSC environments:
+ * 1. Invariant-TSC environment: can be used directly without calibration
+ * 2. Non-Invariant-TSC environment: calibration required for accurate time measurement
+ * 3. Handle complex situations such as core migration
+ */
+class HardwareTimer {
+public:
+    /**
+     * @brief constructor, automatically detects TSC type and performs calibration
+     * @param autoCalibrate Whether to automatically calibrate during initialization (default is true)
+     */
+    explicit HardwareTimer(bool autoCalibrate = true)
+        : frequency_(0), isInvariant_(false), isCalibrated_(false) {
+        
+        // Detect TSC support features
+        detectTSCSupport();
+        
+        if (isInvariant_) {
+            // For invariant-TSC we can use the estimated frequency
+            frequency_ = estimateFrequency();
+        }
+        
+        if (autoCalibrate || !isInvariant_) {
+            // Calibrate if automatic calibration is required or if it is not invariant-TSC
+            calibrate();
+        }
+    }
+    
+    /**
+     * @brief constructor, using known frequencies provided by the user
+     * @param knownFrequency known TSC frequency (Hz)
+     * @param isInvariantTSC Whether TSC is of invariant type
+     */
+    explicit HardwareTimer(uint64_t knownFrequency, bool isInvariantTSC = true)
+        : frequency_(knownFrequency), isInvariant_(isInvariantTSC), isCalibrated_(true) {
+        // User provided frequency, no calibration required
+        // Still detecting TSC support features for additional information
+        detectTSCSupport();
+    }
+
+    /**
+     * @brief Calibrate timer to get CPU frequency
+     * @details Use std::chrono::high_resolution_clock for calibration and handle core migration issues
+     */
+    inline void calibrate() {
+        using namespace std::chrono;
+        
+        if (!hasTSC_) {
+            // If TSC is not supported, calibration cannot be performed
+            return;
+        }
+        
+        // For systems that support RDTSCP, we can detect core migration
+        if (hasRDTSCP_) {
+            calibrateWithCoreMigrationDetection();
+        } else {
+            // For systems that do not support RDTSCP, use the basic calibration method
+            calibrateBasic();
+        }
+    }
+
+    /**
+     * @brief Calibration method with core migration detection
+     */
+    inline void calibrateWithCoreMigrationDetection() {
+        using namespace std::chrono;
+        
+        const int calibrationTimeMs = 100; // Calibration time (milliseconds)
+        const int numSamples = 5; //Number of samples
+        
+        std::vector<uint64_t> frequencies(numSamples);
+        
+        for (int i = 0; i < numSamples; ++i) {
+            // Wait for the next time slice to start to improve accuracy
+            std::this_thread::sleep_until(high_resolution_clock::now() + milliseconds(1));
+            
+            unsigned int startAux, endAux;
+            auto startChrono = high_resolution_clock::now();
+            uint64_t startTSC = rdtscp(&startAux);
+            
+            // Delay for a precise period of time
+            std::this_thread::sleep_for(milliseconds(calibrationTimeMs));
+            
+            uint64_t endTSC = rdtscp(&endAux);
+            auto endChrono = high_resolution_clock::now();
+            
+            auto durationNano = duration_cast<nanoseconds>( endChrono - startChrono ) count ( ) ;
+            
+            // Calculate frequency
+            frequencies[i] = static_cast<uint64_t>((endTSC - startTSC) * 1000000000ULL / durationNano);
+            
+            // If core migration is detected, we may need to resample
+            if (startAux != endAux) {
+                // Core migration occurs, this sample may not be accurate, we resample
+                --i; // Re-sample this time
+                continue;
+            }
+        }
+        
+        // Sort the sampling results and take the median to reduce the impact of outliers
+        std::sort(frequencies.begin(), frequencies.end());
+        frequency_ = frequencies[numSamples / 2]; // Get the median
+        isCalibrated_ = true;
+    }
+    
+    /**
+     * @brief Basic calibration method (does not detect core migration)
+     */
+    inline void calibrateBasic() {
+        using namespace std::chrono;
+        
+        // Calibrate using high_resolution_clock
+        const int calibrationTimeMs = 100; // Calibration time (milliseconds)
+        
+        // Wait for the next time slice to start to improve accuracy
+        std::this_thread::sleep_until(high_resolution_clock::now() + milliseconds(1));
+        
+        auto startChrono = high_resolution_clock::now();
+        uint64_t startTSC = rdtsc();
+        
+        // Delay for a precise period of time
+        std::this_thread::sleep_for(milliseconds(calibrationTimeMs));
+        
+        uint64_t endTSC = rdtsc();
+        auto endChrono = high_resolution_clock::now();
+        
+        auto durationNano = duration_cast<nanoseconds>( endChrono - startChrono ) count ( ) ;
+        
+        // Calculate frequency
+        frequency_ = static_cast<uint64_t>((endTSC - startTSC) * 1000000000ULL / durationNano);
+        isCalibrated_ = true;
+    }
+
+    /**
+     * @brief Get the timer frequency (Hz)
+     * @return timer frequency
+     */
+    inline uint64_t frequency() const { return frequency_; }
+
+    /**
+     * @brief Check whether TSC is invariant (constant)
+     * @return true if TSC is invariant
+     */
+    inline bool isInvariant() const { return isInvariant_; }
+    
+    /**
+     * @brief Check whether the RDTSCP instruction is supported
+     * @return true if RDTSCP instruction is supported
+     */
+    inline bool hasRDTSCP() const { return hasRDTSCP_; }
+    
+    /**
+     * @brief Check if TSC is supported (basic)
+     * @return true if TSC is supported
+     */
+    inline bool hasTSC() const { return hasTSC_; }
+    
+    /**
+     * @brief Check if calibrated
+     * @return true if calibrated
+     */
+    inline bool isCalibrated() const { return isCalibrated_; }
+
+    /**
+     * @brief Read the current TSC value and processor ID
+     * @param aux output parameter, returns processor ID information
+     * @return current TSC value
+     */
+    static inline uint64_t rdtscp(unsigned int* aux = nullptr) {
+#ifdef _WIN32
+        return __rdtscp(aux);
+#else
+        return __rdtscp(aux);
+#endif
+    }
+    
+    /**
+     * @brief Read the current TSC value (without processor ID)
+     * @return current TSC value
+     */
+    static inline uint64_t rdtsc() {
+#ifdef _WIN32
+        return __rdtsc();
+#else
+        return __rdtsc();
+#endif
+    }
+
+    /**
+     * @brief Get the time difference between two timestamps (in seconds)
+     * @param start starting timestamp
+     * @param end end timestamp
+     * @return time difference (seconds)
+     */
+    inline double secondsBetween(uint64_t start, uint64_t end) const {
+        return static_cast<double>(end - start) / frequency_;
+    }
+
+    /**
+     * @brief Get the time difference between two timestamps (in milliseconds)
+     * @param start starting timestamp
+     * @param end end timestamp
+     * @return time difference (milliseconds)
+     */
+    inline double millisecondsBetween(uint64_t start, uint64_t end) const {
+        return static_cast<double>(end - start) * 1000.0 / frequency_;
+    }
+
+    /**
+     * @brief Get the time difference between two timestamps (in microseconds)
+     * @param start starting timestamp
+     * @param end end timestamp
+     * @return time difference (microseconds)
+     */
+    inline double microsecondsBetween(uint64_t start, uint64_t end) const {
+        return static_cast<double>(end - start) * 1000000.0 / frequency_;
+    }
+
+    /**
+     * @brief Get the time difference between two timestamps (in nanoseconds)
+     * @param start starting timestamp
+     * @param end end timestamp
+     * @return time difference (nanoseconds)
+     */
+    inline double nanosecondsBetween(uint64_t start, uint64_t end) const {
+        return static_cast<double>(end - start) * 1000000000.0 / frequency_;
+    }
+
+private:
+    /**
+     * @brief Detect TSC support features
+     */
+    inline void detectTSCSupport() {
+        // Check basic TSC support (CPUID.1.EDX.TSC[bit 4])
+        bool hasBasicTSC = false;
+#ifdef _WIN32
+        int cpuInfo[4];
+        __cpuid(cpuInfo, 1);
+        hasBasicTSC = (cpuInfo[3] & (1 << 4)) != 0;
+        
+        // Check RDTSCP support (CPUID.80000001H.EDX.RDTSCP[bit 27])
+        __cpuid(cpuInfo, 0x80000001);
+        hasRDTSCP_ = (cpuInfo[3] & (1 << 27)) != 0;
+        
+        // Check Invariant TSC (CPUID.80000007H.EDX.InvariantTSC[bit 8])
+        __cpuid(cpuInfo, 0x80000007);
+        isInvariant_ = (cpuInfo[3] & (1 << 8)) != 0;
+#else
+        unsigned int eax, ebx, ecx, edx;
+        if (__get_cpuid(1, &eax, &ebx, &ecx, &edx)) {
+            hasBasicTSC = (edx & (1 << 4)) != 0;
+        }
+        
+        // Check RDTSCP support (CPUID.80000001H.EDX.RDTSCP[bit 27])
+        if (__get_cpuid(0x80000001, &eax, &ebx, &ecx, &edx)) {
+            hasRDTSCP_ = (edx & (1 << 27)) != 0;
+        }
+        
+        // Check Invariant TSC (CPUID.80000007H.EDX.InvariantTSC[bit 8])
+        if (__get_cpuid(0x80000007, &eax, &ebx, &ecx, &edx)) {
+            isInvariant_ = (edx & (1 << 8)) != 0;
+        }
+#endif
+        
+        hasTSC_ = hasBasicTSC;
+    }
+
+    /**
+     * @brief Estimate TSC frequency (without precise calibration)
+     * @return estimated TSC frequency
+     */
+    inline uint64_t estimateFrequency() {
+        // If it is an invariant TSC, we can get the basic frequency through CPUID
+#ifdef _WIN32
+        int cpuInfo[4];
+        __cpuid(cpuInfo, 0x16); //CPU frequency information
+        
+        // EAX contains base frequency in MHz
+        if (cpuInfo[0] > 0) {
+            return (static_cast<uint64_t>(cpuInfo[0] & 0xFFFF) * 1000000ULL);
+        }
+#else
+        unsigned int eax, ebx, ecx, edx;
+        if (__get_cpuid(0x16, &eax, &ebx, &ecx, &edx)) {
+            // EAX contains base frequency in MHz
+            if (eax > 0) {
+                return (static_cast<uint64_t>(eax & 0xFFFF) * 1000000ULL);
+            }
+        }
+#endif
+        
+        // If the frequency cannot be obtained by CPUID, return a reasonable default value (e.g. 3.0 GHz)
+        // In high-performance timers, this is an acceptable approximation
+        return 3000000000ULL; // 3.0 GHz
+    }
+
+    uint64_t frequency_; ///< TSC frequency (Hz)
+    bool isInvariant_; ///< Whether TSC is invariant
+    bool hasRDTSCP_; ///< Whether to support the RDTSCP instruction
+    bool hasTSC_; ///< Whether TSC is supported
+    bool isCalibrated_; ///< Whether calibration has been completed
+};
+
+#endif // HARDWARE_TIMER_H
+```
+
+
+
+#### High-precision time measurement
+1. **Important variables**
++ `Nanos`：`typedef int64_t Nanos`, is a type alias for representing a timestamp in nanoseconds, essentially `int64_t` Type used to uniformly represent nanosecond-level time in code.
++ `NANOS_TO_MICROS`：`constexpr Nanos NANOS_TO_MICROS = 1000;`, a constant used to represent the conversion coefficient from nanoseconds to microseconds, that is, 1 microsecond is equal to 1000 nanoseconds, used when converting time units.
++ `MICROS_TO_MILLIS`：`constexpr Nanos MICROS_TO_MILLIS = 1000;`, a constant used to represent the conversion coefficient from microseconds to milliseconds, that is, 1 millisecond is equal to 1000 microseconds, used for time unit conversion.
++ `MILLIS_TO_SECS`：`constexpr Nanos MILLIS_TO_SECS = 1000;`, a constant used to represent the conversion factor from milliseconds to seconds, that is, 1 second equals 1000 milliseconds, for time unit conversion.
++ `NANOS_TO_MILLIS`：`constexpr Nanos NANOS_TO_MILLIS = NANOS_TO_MICROS * MICROS_TO_MILLIS;`, a constant calculated from the nanosecond to microsecond and microsecond to millisecond conversion coefficients, is used to represent the nanosecond to millisecond conversion coefficient, that is, 1 millisecond equals 1,000,000 nanoseconds.
++ `NANOS_TO_SECS`：`constexpr Nanos NANOS_TO_SECS = NANOS_TO_MILLIS * MILLIS_TO_SECS;`, a constant calculated from the nanoseconds to milliseconds and milliseconds to seconds conversion factors, and is used to represent the nanoseconds to seconds conversion factor, that is, 1 second equals 1000000000 nanoseconds.
+2. **Important method**
+
+```cpp
+// Get the current nanosecond timestamp
+inline auto Common::getCurrentNanos() noexcept {
+    // Use the std::chrono library to obtain the time interval between the current time point and the system clock epoch (1970-01-01 00:00:00 UTC)
+    // and convert it to nanoseconds, returning the number of nanoseconds
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
+// Format the current timestamp into a human-readable string
+inline auto& Common::getCurrentTimeStr(std::string* time_str) {
+    // Get the current time point
+    const auto clock = std::chrono::system_clock::now();
+    // Convert the current time point to the std::time_t type (representing the number of seconds from 1970-01-01 00:00:00 UTC to the current time)
+    const auto time = std::chrono::system_clock::to_time_t(clock);
+
+    char nanos_str[24];
+    //Use sprintf function to format time string
+    // ctime(&time) + 11 means extracting the hours, minutes and seconds from the time string returned by the ctime function
+    // %.8s means taking the hour, minute and second part of 8 characters
+    // %.09ld means taking the nanosecond part, and adding 0 if there are less than 9 digits.
+    //Finally store the formatted string into nanos_str
+    sprintf(nanos_str, "%.8s.%09ld", ctime(&time) + 11, std::chrono::duration_cast<std::chrono::nanoseconds>(clock.time_since_epoch()).count() % NANOS_TO_SECS);
+    //Assign the formatted string to the string object pointed to by the passed std::string pointer
+    time_str->assign(nanos_str);
+
+    // Return the formatted string reference
+    return *time_str;
+}
+```
+
+3. **Working mechanism and implementation details of time measurement**
+4. **Type aliases and constant definitions**: defined `Nanos` Type alias to uniformly represent nanosecond timestamps, and also defines a series of constants (`NANOS_TO_MICROS`、`MICROS_TO_MILLIS`、`MILLIS_TO_SECS`、`NANOS_TO_MILLIS`、`NANOS_TO_SECS`) is used to convert between time units to facilitate the processing of time values in different scenarios.
+5. **Get the current nanosecond timestamp**:`getCurrentNanos` Function utilization `std::chrono` The library obtains the time interval between the current time point and the system clock epoch, converts it into nanoseconds, and returns the number of nanoseconds. It provides a unified interface for other places that need to obtain the current timestamp.
+6. **Format current timestamp**:`getCurrentTimeStr` The function first gets the current point in time and converts it to `std::time_t` type and then use `sprintf` The function formats the time, extracts the hour, minute, second and nanosecond parts and combines them into a human-readable string, and finally assigns the string to the incoming `std::string` object and returns its reference.
+
+
+
+#### Tracking component internals
+1. **Measurement method**
+    - use `START_MEASURE()` and `END_MEASURE()` Macros to measure the latency of internal component method calls, these two macros use `rdtsc()` method implementation. Although it can also be used `TTT_MEASURE()` Macros replace or supplement, but given that the tested function calls are usually faster,`rdtsc()` The method is cheaper, so use it.
+2. **Exchange side measurement object**
+    - `Common::McastSocket::send()`
+    - `Exchange::MEOrderBook::add()`
+    - `Exchange::MEOrderBook::cancel()`
+    - `Exchange::MatchingEngine::processClientRequest()`
+    - `Exchange::MEOrderBook::removeOrder()`
+    - `Exchange::MEOrderBook::match()` (mentioned multiple times)
+    - `Exchange::MEOrderBook::checkForMatch()`
+    - `Exchange::MEOrderBook::addOrder()`
+    - `Common::TCPSocket::send()`
+    - `Exchange::FIFOSequencer::addClientRequest()`
+    - `Exchange::FIFOSequencer::sequenceAndPublish()`
+3. **Market Participant Client System Measurement Object**
+    - `Trading::MarketDataConsumer::recvCallback()`
+    - `Common::TCPSocket::send()`
+    - `Trading::OrderGateway::recvCallback()`
+    - `Trading::OrderManager::moveOrders()` (mentioned multiple times)
+    - `Trading::OrderManager::onOrderUpdate()` (mentioned multiple times)
+    - `Trading::MarketOrderBook::addOrder()`
+    - `Trading::MarketOrderBook::removeOrder()`
+    - `Trading::MarketOrderBook::updateBBO()`
+    - `Trading::OrderManager::cancelOrder()`
+    - `Trading::RiskManager::checkPreTradeRisk()`
+    - `Trading::OrderManager::newOrder()`
+    - `Trading::OrderManager::moveOrder()` (mentioned multiple times)
+    - `Trading::PositionKeeper::updateBBO()`
+    - `Trading::FeatureEngine::onOrderBookUpdate()`
+    - `Trading::TradeEngine::algoOnOrderBookUpdate()`
+    - `Trading::FeatureEngine::onTradeUpdate()`
+    - `Trading::TradeEngine::algoOnTradeUpdate()`
+    - `Trading::PositionKeeper::addFill()`
+    - `Trading::TradeEngine::algoOnOrderUpdate()`
+
+The purpose is to measure the performance of these methods to understand the operating efficiency of components and provide a basis for optimizing system performance.
+
+#### Chasing the component propagation process
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1745236926113-ab7067fd-1820-42e4-a072-d0832528fbb2.png)
+
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1745292696300-3ade771e-e016-4141-b3b1-e9b40f714ba0.png)
+
+1. **Record Purpose**
+    - In addition to measuring internal component functionality, the exchange records performance data (especially timestamps) that track the propagation of customer requests through different components and subcomponents. By recording these indicators, exchanges can understand performance under different market/load conditions, track participant performance, and publish indicators to market participants to help them understand and improve their performance.
+2. **Events that need to be recorded with timestamps**
+    - **T1_OrderServer_TCP_read**: In the order server (OrderServer), the time when the customer request is first read through the TCP socket.
+    - **T2_OrderServer_LFQueue_write**: The time to write a customer request to the lock-free queue (LFQueue) connected to the matching engine (MatchingEngine).
+    - **T3_MatchingEngine_LFQueue_read**: The time for the matching engine to read the customer request from the lock-free queue.
+    - **T4_MatchingEngine_LFQueue_write**: Time to write market updates to the lock-free queue connected to the MarketDataPublisher.
+    - **T4t_MatchingEngine_LFQueue_write**: The time to write the customer response to the lock-free queue connected to the order server.
+    - **T5_MarketDataPublisher_LFQueue_read**: The time the market data publisher reads market updates from the lock-free queue.
+    - **T5t_OrderServer_LFQueue_read**: The time for the order server to read the customer response from the lock-free queue.
+    - **T6_MarketDataPublisher_UDP_write**: The time the market data publisher writes market updates to the UDP socket.
+    - **T6t_OrderServer_TCP_write**: The time the order server writes the customer response to the TCP socket.
+3. **Timestamp location**: See the figure above for the specific location (the location corresponding to each timestamp is marked with a blue circle in the figure).
+
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1745237314871-6833a4e3-4220-4a25-a239-fe5a235014de.png)
+
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1745292725686-add1004f-de60-410c-8d5d-5dbabbfbd145.png)
+
+1. **Record Purpose**  
+Market participants timestamp the flow of events through various components and subcomponents for similar reasons as exchanges. By recording and analyzing the timing of these events, participants are able to improve their systems and analyze how to increase profitability.
+2. **Events that need to be recorded with timestamps**
+    - **T7_MarketDataConsumer_UDP_read**: In the market data consumer (MarketDataConsumer), the time when market data updates are read from the UDP socket.
+    - **T7t_OrderGateway_TCP_read**: In the order gateway (OrderGateway), the time to read the customer response from the TCP socket.
+    - **T8_MarketDataConsumer_LFQueue_write**: Time to write market data updates to the lock-free queue (LFQueue) connected to the trading engine (TradeEngine). 
+    - **T8t_OrderGateway_LFQueue_write**: Time to write the client response to the lock-free queue connected to the trading engine.
+    - **T9_TradeEngine_LFQueue_read**: The time when the trading engine reads market data updates from the lock-free queue of the market data consumer.
+    - **T9t_TradeEngine_LFQueue_read**: The time for the trading engine to read the customer response from the lock-free queue of the order gateway.
+    - **T10_TradeEngine_LFQueue_write**: Time to write a customer request to the lock-free queue connected to the order gateway.
+    - **T11_OrderGateway_LFQueue_read**: The time when the order gateway reads the customer request from the lock-free queue of the trading engine.
+    - **T12_OrderGateway_TCP_write**: The time when the order gateway writes the customer request to the TCP socket.
+3. **Timestamp location**: See the figure above for the specific location (the location corresponding to each timestamp is marked with a blue circle in the figure).
+
+
+
+#### Specific measurement documents and results
+```python
+#!/usr/bin/env python3
+
+"""
+This script processes and analyzes performance log files to visualize system latency.
+It handles two types of latency data:
+1. RDTSC: Measures the duration of specific, localized operations.
+2. TTT (Time-To-Travel): Measures the latency between two different events in the system's critical path.
+
+The script generates and displays plots for each type of analysis.
+example usage:
+    python3 perf_analysis.py ../exchange*.log "../*_1.log" --cpu-freq 2.60
+"""
+
+import argparse
+import glob
+import pandas as pd
+import plotly.graph_objects as go
+import session_info
+
+# Suppress pandas' chained assignment warning
+pd.options.mode.chained_assignment = None
+
+def parse_log_files(log_patterns, cpu_freq):
+    """
+    Parses log files matching the given patterns to extract RDTSC and TTT latency data.
+
+    Args:
+        log_patterns (list): A list of file path patterns (e.g., ['../exchange*.log']).
+        cpu_freq (float): The CPU frequency in GHz for converting RDTSC cycles to nanoseconds.
+
+    Returns:
+        tuple: A tuple containing two pandas DataFrames: (rdtsc_df, ttt_df).
+    """
+    rdtsc_data = []
+    ttt_data = []
+
+    # Flatten the list of lists of files
+    all_files = [file for pattern in log_patterns for file in glob.glob(pattern)]
+
+    for filename in all_files:
+        print(f"Processing {filename}...")
+        with open(filename, "r", encoding="utf-8") as f:
+            for line in f:
+                tokens = line.strip().split(' ')
+                if len(tokens) != 4:
+                    continue
+
+                try:
+                    time, log_type, tag, latency_val = tokens
+                    latency = float(latency_val)
+                except (ValueError, IndexError):
+                    continue
+
+                if log_type == 'RDTSC':
+                    latency_ns = latency / cpu_freq
+                    rdtsc_data.append({'timestamp': time, 'tag': tag, 'latency': latency_ns})
+                elif log_type == 'TTT':
+                    ttt_data.append({'timestamp': time, 'tag': tag, 'latency': latency})
+
+    # Create and process RDTSC DataFrame
+    rdtsc_df = pd.DataFrame(rdtsc_data)
+    if not rdtsc_df.empty:
+        rdtsc_df = rdtsc_df.drop_duplicates().sort_values(by='timestamp')
+        rdtsc_df['timestamp'] = pd.to_datetime(rdtsc_df['timestamp'], format='%H:%M:%S.%f')
+
+    # Create and process TTT DataFrame
+    ttt_df = pd.DataFrame(ttt_data)
+    if not ttt_df.empty:
+        ttt_df = ttt_df.drop_duplicates().sort_values(by='timestamp')
+        ttt_df['timestamp'] = pd.to_datetime(ttt_df['timestamp'], format='%H:%M:%S.%f')
+        
+    return rdtsc_df, ttt_df
+
+def plot_rdtsc(rdtsc_df):
+    """Generates and displays latency plots for each RDTSC tag."""
+    if rdtsc_df.empty:
+        print("No RDTSC data to plot.")
+        return
+
+    for tag in rdtsc_df['tag'].unique():
+        print(f"\nAnalyzing RDTSC for tag: {tag}")
+        fig = go.Figure()
+        t_df = rdtsc_df[rdtsc_df['tag'] == tag].copy()
+        t_df = t_df[t_df['latency'] > 0]
+
+        if len(t_df) < 2:
+            print(f"Not enough data points for tag {tag} to plot.")
+            continue
+
+        # Filter out top and bottom 1% outliers
+        q_hi = t_df['latency'].quantile(0.99)
+        q_lo = t_df['latency'].quantile(0.01)
+        t_df = t_df[(t_df['latency'] < q_hi) & (t_df['latency'] > q_lo)]
+
+        mean = t_df['latency'].mean()
+        print(f"  Observations: {len(t_df)}, Mean Latency: {mean:.2f} ns")
+
+        unit = 'nanoseconds'
+        if mean >= 1000:
+            unit = 'microseconds'
+            t_df['latency'] /= 1000
+
+        rolling_window = max(1, len(t_df) // 100)
+        fig.add_trace(go.Scatter(x=t_df['timestamp'], y=t_df['latency'], mode='lines', name=tag))
+        fig.add_trace(go.Scatter(x=t_df['timestamp'], y=t_df['latency'].rolling(rolling_window).mean(), name=f'{tag} (mean)'))
+        
+        fig.update_layout(
+            title=f'RDTSC Performance: {tag} ({unit})',
+            height=750,
+            width=1000,
+            hovermode='x unified',
+            legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01)
+        )
+        fig.show()
+
+def plot_hops(ttt_df):
+    """Generates and displays hop latency plots based on predefined paths."""
+    if ttt_df.empty:
+        print("No TTT data to plot.")
+        return
+
+    HOPS = [
+        ['T1_OrderServer_TCP_read', 'T2_OrderServer_LFQueue_write'],
+        ['T2_OrderServer_LFQueue_write', 'T3_MatchingEngine_LFQueue_read'],
+        ['T3_MatchingEngine_LFQueue_read', 'T4_MatchingEngine_LFQueue_write'], ['T3_MatchingEngine_LFQueue_read', 'T4t_MatchingEngine_LFQueue_write'],
+        ['T4_MatchingEngine_LFQueue_write', 'T5_MarketDataPublisher_LFQueue_read'], ['T4t_MatchingEngine_LFQueue_write', 'T5t_OrderServer_LFQueue_read'],
+        ['T5_MarketDataPublisher_LFQueue_read', 'T6_MarketDataPublisher_UDP_write'], ['T5t_OrderServer_LFQueue_read', 'T6t_OrderServer_TCP_write'],
+        ['T7_MarketDataConsumer_UDP_read', 'T8_MarketDataConsumer_LFQueue_write'], ['T7t_OrderGateway_TCP_read', 'T8t_OrderGateway_LFQueue_write'],
+        ['T6_MarketDataPublisher_UDP_write', 'T7_MarketDataConsumer_UDP_read'], ['T6t_OrderServer_TCP_write', 'T7t_OrderGateway_TCP_read'],
+        ['T8_MarketDataConsumer_LFQueue_write', 'T9_TradeEngine_LFQueue_read'], ['T8t_OrderGateway_LFQueue_write', 'T9t_TradeEngine_LFQueue_read'],
+        ['T9_TradeEngine_LFQueue_read', 'T10_TradeEngine_LFQueue_write'], ['T9t_TradeEngine_LFQueue_read', 'T10_TradeEngine_LFQueue_write'],
+        ['T10_TradeEngine_LFQueue_write', 'T11_OrderGateway_LFQueue_read'],
+        ['T11_OrderGateway_LFQueue_read', 'T12_OrderGateway_TCP_write'],
+        # exchange <-> client
+        ['T12_OrderGateway_TCP_write', 'T1_OrderServer_TCP_read'],
+        ['Ticker_Received', 'Order_Sent'], # tick-to-trade delay path
+    ]
+
+    for tags in HOPS:
+        tag_p, tag_n = tags
+        print(f"\nAnalyzing HOP: {tag_p} -> {tag_n}")
+        
+        t_df = ttt_df[(ttt_df['tag'] == tag_n) | (ttt_df['tag'] == tag_p)].copy()
+        t_df['latency_diff'] = t_df['latency'].diff()
+        
+        # Filter for valid diffs at the destination tag
+        t_df = t_df[(t_df['latency_diff'] > 0) & (t_df['tag'] == tag_n)]
+
+        if len(t_df) < 2:
+            print(f"  Not enough data points for this hop to plot.")
+            continue
+        
+        # Filter outliers
+        q_hi = t_df['latency_diff'].quantile(0.99)
+        q_lo = t_df['latency_diff'].quantile(0.01)
+        t_df = t_df[(t_df['latency_diff'] < q_hi) & (t_df['latency_diff'] > q_lo)]
+
+        mean = t_df['latency_diff'].mean()
+        print(f"  Observations: {len(t_df)}, Mean Hop Latency: {mean:.2f} ns")
+
+        unit = 'nanoseconds'
+        if mean >= 1_000_000:
+            unit = 'milliseconds'
+            t_df['latency_diff'] /= 1_000_000
+        elif mean >= 1_000:
+            unit = 'microseconds'
+            t_df['latency_diff'] /= 1_000
+
+        fig = go.Figure()
+        tag_name = f'{tag_p} -> {tag_n}'
+        rolling_window = max(1, len(t_df) // 100)
+        fig.add_trace(go.Scatter(x=t_df['timestamp'], y=t_df['latency_diff'], mode='lines', name=tag_name))
+        fig.add_trace(go.Scatter(x=t_df['timestamp'], y=t_df['latency_diff'].rolling(rolling_window).mean(), name=f'{tag_name} (mean)'))
+
+        fig.update_layout(
+            title=f'Hop Performance: {tag_name} ({unit})',
+            height=750,
+            width=1000,
+            hovermode='x unified',
+            legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01)
+        )
+        fig.show()
+
+def main():
+    """Main function to parse arguments and run the analysis."""
+    parser = argparse.ArgumentParser(description="Analyze performance logs.")
+    parser.add_argument(
+        'log_patterns',
+        nargs='+',
+        help='One or more log file patterns to process (e.g., "../exchange*.log").'
+    )
+    parser.add_argument(
+        '--cpu-freq',
+        type=float,
+        default=2.60,
+        help='CPU frequency in GHz for RDTSC conversion (default: 2.60).'
+    )
+    args = parser.parse_args()
+
+    rdtsc_df, ttt_df = parse_log_files(args.log_patterns, args.cpu_freq)
+    
+    plot_rdtsc(rdtsc_df)
+    plot_hops(ttt_df)
+
+    print("\n--- Session Info ---")
+    session_info.show()
+
+if __name__ == "__main__":
+    main()
+```
+
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1754269226206-181f312c-08fd-4968-9fc3-2a487075cc15.png)  
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1754269226162-b2b5ccb5-73fa-4224-9d00-201924eebc75.png)  
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1754269226316-d07f0d29-4f82-4fd7-bc4b-e7686df82b24.png)  
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1754269229945-188ce364-a289-4cdd-bfe6-766d8ab84ccd.png)  
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1754269229970-5ddef1d9-7291-400b-a795-955ba5a6358f.png)  
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1754269229993-bb6dd016-3068-4a91-9324-698c17996855.png)  
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1754269230012-77b2b207-5d73-42c1-b111-cac0612761c4.png)  
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1754269229949-f1224234-626f-4738-a595-6943846fe642.png)  
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1754269230735-10bf9006-401f-4927-8ccc-4ffe2895b4b4.png)  
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1754269230737-0823ae63-0a12-44aa-b3a4-7d51997afe87.png)  
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1754269230736-052339cc-5e4b-482e-97d3-05ebdc6e6bcb.png)  
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1754269230751-8603cb1d-29a7-4313-8c48-63314c1da824.png)  
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1754269230786-218613a9-5018-4190-bce0-f6826decaa08.png)  
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1754269231438-ad311d36-4163-44e9-9bbd-76d9104ae2c3.png)  
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1754269231439-84dffac7-6f2d-40f4-bc86-c7b7246333af.png)  
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1754269231425-5efc0a5f-69df-460f-8e12-00235435f536.png)  
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1754269231485-ef915b59-0e46-4279-b004-7a2b0821b52b.png)  
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1754269231431-c304e7c6-ab13-4146-98fe-9fd12465b8d2.png)  
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1754269232265-ba70ec34-f4d2-409d-b6d7-df3e66cfbb43.png)  
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1754269232251-b5b8ae8f-3722-4f0a-9605-64dae2e3a512.png)  
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1754269232245-31dcf236-a63c-444b-91d0-57f1ed92aa6a.png)  
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1754269232245-a65576bf-fa91-4311-aa1c-3f107b35dee2.png)  
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1754269232239-851c343a-5e9e-44ba-bc98-0fe7e256aa80.png)  
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1754269233057-dfc475fc-a2b3-4f01-b114-6d52a4c4b714.png)  
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1754269233014-322b9902-b69b-4905-a82c-86160b61d7db.png)  
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1754269233008-8d99ad1d-99ff-4aaf-a2c0-d2d5d5d02dc5.png)  
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1754269233003-b96e4e57-f489-4468-8526-e5147febb9f9.png)  
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1754269233017-4973a5ef-369f-4d8e-b4e3-1673ef6a129a.png)  
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1754269233744-53eaf758-bfb0-41f3-a6ec-8761eacf6a07.png)  
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1754269233734-0bb90619-99ce-4dc4-940e-38f1898b2ea2.png)  
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1754269233699-8d5e3ded-02e0-4ff8-b78e-688fd35adc2f.png)  
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1754269233815-62f50b7f-4145-41bf-90e4-e88f4ae6b224.png)  
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1754269234552-ca62364f-12f9-40f7-814b-0e4bb312acf5.png)  
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1754269234490-e58ec85e-d128-47db-b945-f490883313d8.png)  
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1754269234525-f4990937-7246-48c7-8fb8-e21ba94799a6.png)  
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1754269234512-ba989fd8-774f-4347-a026-16ac8879045c.png)  
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1754269234425-bae0599b-c3e1-4c5b-981c-ef8f800836ad.png)  
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1754269235207-36a7ff91-5fc3-43cf-941b-3d8ee5782396.png)  
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1754269235134-b6e56fa4-4721-4274-af4b-125327ebf14f.png)
+
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1754269235114-e8444f73-eee0-40a9-bb89-2f186bec109a.png)  
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1754269235052-b8e32bce-6f69-4b27-8d75-62861cb6f81b.png)  
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1754269235136-0e4dfdd7-3163-46c1-a9d3-ee223e78012b.png)
+
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1754269224658-3ab5e01e-c982-4352-89a6-0c37496ec78e.png)
+
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1754269224683-ab0dab95-dd4d-495c-8c3d-45d7b58ea894.png)  
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1754269224761-20918052-ad51-4057-a1a2-c5ceecf4d13d.png)  
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1754269224772-8cbe84a1-c5a1-4c13-893a-6fa5241cb11f.png)  
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1754269224785-7b3bb2f7-4718-41b1-bf5d-b680200bc506.png)  
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1754269226318-f0ef6d0e-e503-462a-beab-998556d9f296.png)
+
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1754269226214-fa1a8ab3-f9ca-4f92-a66f-9ac8e4bbb153.png)
+
+<!-- 这是一张图片，ocr 内容为： -->
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1754269233793-e0f34a10-7a9b-44c7-8fbd-d1d7de016e78.png)  
+  
+
+
+#### Actual optimization of the underlying framework
+**Log section**
+
+1. **New log type**:  
+exist `LogType`**In enumeration,**`OptLogger`Added `STRING` type, used to specifically handle string type logging. 
+
+```cpp
+namespace OptCommon {
+    /// Type of LogElement message.
+    enum class LogType : int8_t {
+        CHAR = 0,
+        INTEGER = 1,
+        LONG_INTEGER = 2,
+        LONG_LONG_INTEGER = 3,
+        UNSIGNED_INTEGER = 4,
+        UNSIGNED_LONG_INTEGER = 5,
+        UNSIGNED_LONG_LONG_INTEGER = 6,
+        FLOAT = 7,
+        DOUBLE = 8,
+        STRING = 9
+    };
+}
+```
+
+2. **Extensions**`LogElement`Structure:  
+`OptLogger` of `LogElement` The structure adds a new character array to the union `s[256]`, used to store string data. 
+
+```cpp
+namespace OptCommon {
+    /// Represents a single and primitive log entry.
+    struct LogElement {
+        LogType type_ = LogType::CHAR;
+        union {
+            char c;
+            int i;
+            long l;
+            long long ll;
+            unsigned u;
+            unsigned long ul;
+            unsigned long long ull;
+            float f;
+            double d;
+            char s[256];
+        } in_;
+    };
+}
+```
+
+3. **Handling strings**`pushValue` method:  
+`OptLogger` Added new method for handling string types `pushValue` Method for storing string data into `LogElement` and pushed to the queue. 
+
+```cpp
+namespace OptCommon {
+    class OptLogger final {
+    public:
+        //...
+        auto pushValue(const char *value) noexcept {
+            LogElement l{LogType::STRING, {.s = {}}};
+            strncpy(l.u_.s, value, sizeof(l.u_.s) - 1);
+            pushValue(l);
+        }
+
+        auto pushValue(const std::string &value) noexcept {
+            pushValue(value.c_str());
+        }
+        //...
+    };
+}
+```
+
+4. `flushQueue`**Method extension****:  
+`OptLogger` of `flushQueue` Method in `switch` New pair added to the statement `STRING` type of processing, writing string data to the log file. 
+
+```cpp
+namespace OptCommon {
+    class OptLogger final {
+    public:
+        auto flushQueue() noexcept {
+            while (running_) {
+                for (auto next = queue_.getNextToRead(); queue_.size() && next; next = queue_.getNextToRead()) {
+                    switch (next->type_) {
+                        //...
+                        case LogType::STRING:
+                            file_ << next->u_.s;
+                            break;
+                        //...
+                    }
+                    queue_.updateReadIndex();
+                }
+                file_.flush();
+                using namespace std::literals::chrono_literals;
+                std::this_thread::sleep_for(10ms);
+            }
+        }
+        //...
+    };
+}
+```
+
+
+
+**Memory pool part**
+
+1. Conditional compilation of assertion statements
+
+exist `MemPool` class,`allocate`、`deallocate` and `updateNextFreeIndex` in function `ASSERT` The statement will be executed in all compilation modes. And in `OptMemPool` class, these `ASSERT` statement is placed `#if !defined(NDEBUG)` in a conditional compilation block. This means that in a release version (which defines `NDEBUG` macro), these assertion statements will not be compiled, thus reducing runtime overhead.
+
+`allocate` Function optimization part
+
+```cpp
+// allocate function in MemPool
+template<typename... Args>
+T *allocate(Args... args) noexcept {
+    auto obj_block = &(store_[next_free_index_]);
+    ASSERT(obj_block->is_free_, "Expected free ObjectBlock at index:" + std::to_string(next_free_index_));
+    // ...
+}
+
+// allocate function in OptMemPool
+template<typename... Args>
+T *allocate(Args... args) noexcept {
+    auto obj_block = &(store_[next_free_index_]);
+#if !defined(NDEBUG)
+    ASSERT(obj_block->is_free_, "Expected free ObjectBlock at index:" + std::to_string(next_free_index_));
+#endif
+    // ...
+}
+```
+
+`deallocate` Function optimization part
+
+```cpp
+// deallocate function in MemPool
+auto deallocate(const T *elem) noexcept {
+    const auto elem_index = (reinterpret_cast<const ObjectBlock *>(elem) - &store_[0]);
+    ASSERT(elem_index >= 0 && static_cast<size_t>(elem_index) < store_.size(), "Element being deallocated does not belong to this Memory pool.");
+    ASSERT(!store_[elem_index].is_free_, "Expected in-use ObjectBlock at index:" + std::to_string(elem_index));
+    // ...
+}
+
+// deallocate function in OptMemPool
+auto deallocate(const T *elem) noexcept {
+    const auto elem_index = (reinterpret_cast<const ObjectBlock *>(elem) - &store_[0]);
+#if !defined(NDEBUG)
+    ASSERT(elem_index >= 0 && static_cast<size_t>(elem_index) < store_.size(), "Element being deallocated does not belong to this Memory pool.");
+    ASSERT(!store_[elem_index].is_free_, "Expected in-use ObjectBlock at index:" + std::to_string(elem_index));
+#endif
+    // ...
+}
+```
+
+`updateNextFreeIndex` Function optimization part
+
+```cpp
+// updateNextFreeIndex function in MemPool
+auto updateNextFreeIndex() noexcept {
+    const auto initial_free_index = next_free_index_;
+    // ...
+    if (UNLIKELY(initial_free_index == next_free_index_)) {
+        ASSERT(initial_free_index != next_free_index_, "Memory Pool out of space.");
+    }
+}
+
+// updateNextFreeIndex function in OptMemPool
+auto updateNextFreeIndex() noexcept {
+    const auto initial_free_index = next_free_index_;
+    // ...
+    if (UNLIKELY(initial_free_index == next_free_index_)) {
+#if !defined(NDEBUG)
+        ASSERT(initial_free_index != next_free_index_, "Memory Pool out of space.");
+#endif
+    }
 }
 ```
 
@@ -21744,7 +26805,7 @@ ctp multi-account manual trading terminal tool
     - **Server side core class**:`ServerApp`(Multiple account scheduling),`TcpServer`(TCP monitoring and event loop),`Session`(a TCP connection),`CtpTraderAdapter` / `CtpMdAdapter`(Encapsulation of CTP transaction/market interface).
     - **Multi-account mapping relationship**:
         * `std::unordered_map<std::string, std::unique_ptr<CtpTraderAdapter>> traders_`:`user_id -> Trading channel`* `std::unordered_map<std::string, std::vector<Session*>> sessions_by_user_`:`user_id -> All TCP sessions using this account`* `std::unordered_map<std::string, std::vector<Session*>> md_subscribers_by_instrument_`:`Contract -> Subscribe to all sessions of this contract`  
-  -**One account, multiple terminal reuse**: same `user_id` Log in again and the existing one will be reused. `CtpTraderAdapter`, only add new ones `Session`.
+-**One account, multiple terminal reuse**: same `user_id` Log in again and the existing one will be reused. `CtpTraderAdapter`, only add new ones `Session`.
 + **CTP interface encapsulation and adaptation layer**
     - `CtpTraderAdapter` / `CtpMdAdapter` Encapsulated CTP `TraderApi` / `MdApi`, providing the upper layer with:
         * `init()` / `shutdown()` Life cycle management.
@@ -22108,9 +27169,10 @@ private:
 
 Message middleware is responsible for system decoupling and interaction of large-scale trading system architecture and clustered distributed trading systems, and separation of critical paths and cold paths. The following is a simple example. PMS and RMS are divided into the upstream of the architecture, and OMS and EMS are divided into the downstream of the architecture. The downstream is often a performance-sensitive critical path.
 
+### 
 ### <!-- 这是一张图片，ocr 内容为： -->
-![](https://cdn.nlark.com/yuque/0/2026/png/35485470/1768269462634-a35a10f7-8d7d-449e-91fa-8dc264f152eb.png)5. OMS, EMS, PMS, and RMS of trading systems
-  
+![](https://cdn.nlark.com/yuque/0/2026/png/35485470/1768269462634-a35a10f7-8d7d-449e-91fa-8dc264f152eb.png)5. OMS, EMS, PMS, and RMS of trading systems  
+
 **OMS - Order Management System**
 
 OMS is responsible for managing the complete life cycle of the order.
@@ -25755,7 +30817,7 @@ $ \text{VWAP slippage (bps)} = \frac{P_{\text{your avg}} - P_{\text{mkt VWAP}}}{
 
 Arrival price $ m $ is the mid (or first touch) when the commonly used mother order arrives.
 
-$ \mathrm{IS\,(bps)} = s \cdot \frac{P_{\mathrm{fill\,avg}} - m}{m} \times 10000, \qquad s = \begin{cases} +1 &amp;amp;amp;amp; \text{Buy} \\ -1 &amp;amp;amp;amp; \text{Sell} \end{cases} $
+$ \mathrm{IS\,(bps)} = s \cdot \frac{P_{\mathrm{fill\,avg}} - m}{m} \times 10000, \qquad s = \begin{cases} +1 &amp;amp;amp;amp;amp; \text{Buy} \\ -1 &amp;amp;amp;amp;amp; \text{Sell} \end{cases} $
 
 + Buyer: Transaction price is below mid → IS is negative → better.
 
@@ -25776,7 +30838,7 @@ $ \mathrm{fill\,rate} = \frac{Q_{\mathrm{filled}}}{Q_{\mathrm{requested}}} $
 
 `requested == 0` When defined as 0 or N/A, division by zero is avoided. Conditional writing:
 
-$  \mathrm{fill\,rate} = \begin{cases} Q_{\mathrm{filled}} / Q_{\mathrm{requested}} &amp;amp;amp;amp; Q_{\mathrm{requested}} &amp;amp;amp;gt; 0 \\ 0 \;\text{or N/A} &amp;amp;amp;amp; Q_{\mathrm{requested}} = 0 \end{cases} $
+$  \mathrm{fill\,rate} = \begin{cases} Q_{\mathrm{filled}} / Q_{\mathrm{requested}} &amp;amp;amp;amp;amp; Q_{\mathrm{requested}} &amp;amp;amp;amp;gt; 0 \\ 0 \;\text{or N/A} &amp;amp;amp;amp;amp; Q_{\mathrm{requested}} = 0 \end{cases} $
 
 
 
@@ -28381,7 +33443,7 @@ cleanup:
     1. **Data Standardization**: Perform "mean reduction and standard deviation" processing on input indicators (such as trends, volatility) and target variables (such as returns) (required in the book to reduce numerical errors and improve convergence speed);
     2. **Fast update of covariance**: When the number of samples (number of historical bars in the market) is much larger than the number of indicators, the covariance matrix between indicators and the cross-covariance between indicators and targets are pre-calculated, reducing the time complexity of each iteration from $ O(N*K) $ (N is the number of samples, K is the number of indicators) to $ O(K^2) $, adapting to the efficient computing requirements of "large samples, multiple indicators" of the trading system;
     3. **Soft threshold update**: The core operation of Lasso/L1 regularization, applying "threshold clipping" to the optimized coefficients to return small coefficients to zero (implementing variable selection), the formula is:  
-$ S(z,\gamma)=\begin{cases}z-\gamma &amp;amp;amp;amp; z&amp;amp;amp;gt;\gamma \\ z+\gamma &amp;amp;amp;amp; z&amp;amp;amp;lt;-\gamma \\ 0 &amp;amp;amp;amp; \text{otherwise}\end{cases} $  
+$ S(z,\gamma)=\begin{cases}z-\gamma &amp;amp;amp;amp;amp; z&amp;amp;amp;amp;gt;\gamma \\ z+\gamma &amp;amp;amp;amp;amp; z&amp;amp;amp;amp;lt;-\gamma \\ 0 &amp;amp;amp;amp;amp; \text{otherwise}\end{cases} $  
 Among them $ \gamma=\alpha*\lambda $ (the combination of regularization strength and type).
 
 **(3) Lambda Optimization: Path Descent + Cross Validation ("Optimal Regularization Strength Selection") **
@@ -34267,8 +39329,8 @@ For end users, Uniswap provides a simple and intuitive experience. Users select 
 ![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1755049700474-bae42ec7-92bd-449b-87c6-d61e758561e6.png)
 
 +**Trader** -> **Execute Swap**  
-    - **Input:** 3 Token A + 0.30% handling fee  
-    - **Output:** 1 Token B
+- **Input:** 3 Token A + 0.30% handling fee  
+- **Output:** 1 Token B
 
 + **Execute Exchange** -> **Uniswap Trading Pair (Uniswap Pair)**
     - **Information:** Transactions change the balance of reserves, resulting in new prices.
@@ -35882,8 +40944,8 @@ double findMaxProfit(const Loop& loop, const std::vector<double>& base_rates) {
 1. **Asset Pair Screening (Code Logic)**: Calculate the sum of squared price differences of candidate asset pairs $ \sum_{t=1}^{T}\left(S_{i,t}-S_{j,t}\right)^{2} $, and select the pair with the minimum value (e.g., stocks in the same industry);  
 2. **Deviation Judgment (Code Formula)**: Calculate the mean of price differences $ E[\Delta S_t]=\frac{1}{T}\sum_{t=1}^T \Delta S_t $ and standard deviation $ \sigma[\Delta S_t]=\sqrt{\frac{1}{T-1}\sum_{t=1}^T (\Delta S_t-E[\Delta S_t])^2} $;  
 3. **Trade Trigger**:  
-If $ \Delta S_\tau &amp;amp;gt; E[\Delta S_\tau] + 2\sigma[\Delta S_\tau] $, execute "sell i, buy j";  
-If $ \Delta S_\tau &amp;amp;lt; E[\Delta S_\tau] - 2\sigma[\Delta S_\tau] $, execute "buy i, sell j".
+If $ \Delta S_\tau &amp;amp;amp;gt; E[\Delta S_\tau] + 2\sigma[\Delta S_\tau] $, execute "sell i, buy j";  
+If $ \Delta S_\tau &amp;amp;amp;lt; E[\Delta S_\tau] - 2\sigma[\Delta S_\tau] $, execute "buy i, sell j".
 
 
 
