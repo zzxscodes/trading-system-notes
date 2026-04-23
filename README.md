@@ -3,10 +3,9 @@
 中文版本：[https://www.yuque.com/bluememories/lanaff/eud01pmbglsxf6gu](https://www.yuque.com/bluememories/lanaff/eud01pmbglsxf6gu)
 
 + Yuque: [https://www.yuque.com/bluememories/lanaff/lg6rl7fku813w1id](https://www.yuque.com/bluememories/lanaff/lg6rl7fku813w1id)
-+ CNBlogs: [https://www.cnblogs.com/zzxscodes/p/19695166/trading-system-notes](https://www.cnblogs.com/zzxscodes/p/19695166/trading-system-notes)
 + GitHub: [https://github.com/zzxscodes/trading-system-notes](https://github.com/zzxscodes/trading-system-notes)
 
-<font style="color:rgb(31, 35, 41);">Special thanks to Sourav Ghosh for his excellent book </font>_<font style="color:rgb(31, 35, 41);">Building Low Latency Applications with C++</font>_<font style="color:rgb(31, 35, 41);">.</font>
+**<font style="color:rgb(31, 35, 41);">Special thanks to Sourav Ghosh for his excellent book </font>**_**<font style="color:rgb(31, 35, 41);">Building Low Latency Applications with C++</font>**_**<font style="color:rgb(31, 35, 41);">.</font>**
 
 
 
