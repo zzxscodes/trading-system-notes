@@ -7,7 +7,6 @@
 
 **<font style="color:rgb(31, 35, 41);">Special thanks to Sourav Ghosh for his excellent book </font>**_**<font style="color:rgb(31, 35, 41);">Building Low Latency Applications with C++</font>**_**<font style="color:rgb(31, 35, 41);">.</font>**
 
-
 ## Table of Contents
 
 - [Low latency system development basics](#low-latency-system-development-basics)
