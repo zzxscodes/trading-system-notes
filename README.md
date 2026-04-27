@@ -8,6 +8,114 @@
 **<font style="color:rgb(31, 35, 41);">Special thanks to Sourav Ghosh for his excellent book </font>**_**<font style="color:rgb(31, 35, 41);">Building Low Latency Applications with C++</font>**_**<font style="color:rgb(31, 35, 41);">.</font>**
 
 
+## Table of Contents
+
+- [Low latency system development basics](#low-latency-system-development-basics)
+  - [1. CPU affinity and NUMA architecture](#1-cpu-affinity-and-numa-architecture)
+  - [2. Real-time thread priority](#2-real-time-thread-priority)
+  - [3. Interrupt binding and common interrupt core isolation](#3-interrupt-binding-and-common-interrupt-core-isolation)
+  - [4. Summary of system silent configuration steps](#4-summary-of-system-silent-configuration-steps)
+  - [5. Memory model, cache and pipeline](#5-memory-model-cache-and-pipeline)
+  - [6. Memory pool](#6-memory-pool)
+  - [7. Large page memory](#7-large-page-memory)
+  - [8. Inline and inline assembly](#8-inline-and-inline-assembly)
+  - [9. lock-free queue andmicro-batching](#9-lock-free-queue-andmicro-batching)
+  - [10.spmc shared memory lock-free queue application](#10spmc-shared-memory-lock-free-queue-application)
+  - [11. Memory alignment and typical memory layout optimization](#11-memory-alignment-and-typical-memory-layout-optimization)
+  - [12.Branch optimization and branch prediction](#12branch-optimization-and-branch-prediction)
+  - [13. Composition takes precedence over inheritance](#13-composition-takes-precedence-over-inheritance)
+  - [14. Compile-time polymorphism and compile-time calculation](#14-compile-time-polymorphism-and-compile-time-calculation)
+  - [15. Loop optimization](#15-loop-optimization)
+  - [16.Pointer memory access optimization](#16pointer-memory-access-optimization)
+  - [17. Regarding potential optimizations of functions](#17-regarding-potential-optimizations-of-functions)
+  - [18.Strength weakening optimization and arithmetic optimization](#18strength-weakening-optimization-and-arithmetic-optimization)
+  - [19.Direct manipulation of in-memory binary representations](#19direct-manipulation-of-in-memory-binary-representations)
+  - [20. Function call optimization that cannot be inlined](#20-function-call-optimization-that-cannot-be-inlined)
+  - [21. Cache prefetch warm-up and vectorization](#21-cache-prefetch-warm-up-and-vectorization)
+  - [22.HPC auxiliary macro](#22hpc-auxiliary-macro)
+  - [23. Double array plus atomic index to implement data update and access](#23-double-array-plus-atomic-index-to-implement-data-update-and-access)
+  - [24. Custom spin lock implementation](#24-custom-spin-lock-implementation)
+  - [25.Bit fields and bit operations](#25bit-fields-and-bit-operations)
+  - [26.C++20 coroutine scheduling framework](#26c++20-coroutine-scheduling-framework)
+  - [27. Common design patterns](#27-common-design-patterns)
+  - [28. C++ function parameter passing issues and optimization](#28-c++-function-parameter-passing-issues-and-optimization)
+  - [29.C++ bounds checking optimization technology](#29c++-bounds-checking-optimization-technology)
+  - [30.wait-free programming](#30wait-free-programming)
+  - [31.Linux kernel tuning and BIOS configuration](#31linux-kernel-tuning-and-bios-configuration)
+  - [32. Latency measurement (clock cycles)](#32-latency-measurement-clock-cycles)
+  - [33. High-quality articles on system design](#33-high-quality-articles-on-system-design)
+- [Common performance bottlenecks and optimization directions](#common-performance-bottlenecks-and-optimization-directions)
+  - [1.roofline model](#1roofline-model)
+  - [2.TMA method](#2tma-method)
+  - [3.Use compiler and other optimization programs](#3use-compiler-and-other-optimization-programs)
+  - [4.Special hardware instructions](#4special-hardware-instructions)
+  - [5. Core points of trading system performance measurement](#5-core-points-of-trading-system-performance-measurement)
+- [Simple practice](#simple-practice)
+  - [1.Implement thread-safe caching](#1implement-thread-safe-caching)
+  - [2.Implement thread-safe queues](#2implement-thread-safe-queues)
+  - [3.Custom string implementation](#3custom-string-implementation)
+  - [4.Avoid using Magic Static which has overhead](#4avoid-using-magic-static-which-has-overhead)
+  - [5.socket technology and TCP, UDP](#5socket-technology-and-tcp-udp)
+- [actual project](#actual-project)
+  - [1. Trading system architecture](#1-trading-system-architecture)
+  - [2. Exchange part](#2-exchange-part)
+  - [3. Market participants part](#3-market-participants-part)
+  - [4. Some actual projects of the exchange](#4-some-actual-projects-of-the-exchange)
+  - [5. Some actual projects of market participants](#5-some-actual-projects-of-market-participants)
+  - [6.Performance testing system project](#6performance-testing-system-project)
+- [Transaction data processing](#transaction-data-processing)
+  - [Task One (data flow merging)](#task-one-data-flow-merging)
+  - [Task Two (data dependency issues)](#task-two-data-dependency-issues)
+  - [Task Three (csvbinary)](#task-three-csvbinary)
+  - [Task Four (incremental calculation and advance calculation)](#task-four-incremental-calculation-and-advance-calculation)
+  - [Task Five (handling high-frequency data problems)](#task-five-handling-high-frequency-data-problems)
+  - [Task Six (Order Timing Competition Analysis)](#task-six-order-timing-competition-analysis)
+  - [Task Eight (Futures Daily Mark-to-Market Processing)](#task-eight-futures-daily-mark-to-market-processing)
+- [Business logic design-system](#business-logic-design-system)
+  - [1. Order management system](#1-order-management-system)
+  - [2. Order book design](#2-order-book-design)
+  - [3.message transmission Protocol Engine (FIX)](#3message-transmission-protocol-engine-fix)
+  - [4. Message middleware (zmq)](#4-message-middleware-zmq)
+  - [5. OMS, EMS, PMS, and RMS of trading systems](#5-oms-ems-pms-and-rms-of-trading-systems)
+  - [6. Order book history inquiry](#6-order-book-history-inquiry)
+  - [7.maker-only matchmaker](#7maker-only-matchmaker)
+  - [8.k line generator](#8k-line-generator)
+  - [9. Solver](#9-solver)
+  - [10. Smart Order Routing (SOR)](#10-smart-order-routing-sor)
+  - [11. Self-transaction protection mechanism](#11-self-transaction-protection-mechanism)
+  - [12. Current limiter](#12-current-limiter)
+  - [13.Reader/Tree-sitter](#13readertree-sitter)
+  - [14. Distributed trading system consensus model](#14-distributed-trading-system-consensus-model)
+  - [15. Exchange protocol layering and sequence consistency](#15-exchange-protocol-layering-and-sequence-consistency)
+  - [16. Pre-serialized orders](#16-pre-serialized-orders)
+- [Business logic design-calculation](#business-logic-design-calculation)
+  - [1.Log return (percent asymmetry)](#1log-return-percent-asymmetry)
+  - [2.Changes in state of market trends and volatility](#2changes-in-state-of-market-trends-and-volatility)
+  - [3.Indicator stability optimization based on moving window](#3indicator-stability-optimization-based-on-moving-window)
+  - [4. Information entropy for trading indicator evaluation](#4-information-entropy-for-trading-indicator-evaluation)
+  - [5. Regularized linear models: the preferred model](#5-regularized-linear-models-the-preferred-model)
+  - [6. Differential evolution optimization: nonlinear parameter optimization](#6-differential-evolution-optimization-nonlinear-parameter-optimization)
+  - [7. Cheap training bias estimation](#7-cheap-training-bias-estimation)
+  - [8. Parameter relationship analysis](#8-parameter-relationship-analysis)
+  - [9. Parameter sensitivity curve](#9-parameter-sensitivity-curve)
+  - [10. Unbiased trading simulation](#10-unbiased-trading-simulation)
+  - [11. Statistical analysis of transaction income](#11-statistical-analysis-of-transaction-income)
+  - [12.Permutation test verification strategyincome](#12permutation-test-verification-strategyincome)
+  - [13.Asset Cost Base (ACB) Calculation](#13asset-cost-base-acb-calculation)
+  - [14.Numerical calculation tools](#14numerical-calculation-tools)
+  - [15.EMA and EMASTDEV (time smoothing)](#15ema-and-emastdev-time-smoothing)
+  - [16.Avellaneda-Stoikov market making strategy](#16avellaneda-stoikov-market-making-strategy)
+  - [17. Fixed point number of trading system](#17-fixed-point-number-of-trading-system)
+- [digital currency](#digital-currency)
+  - [1.uniswap-v2](#1uniswap-v2)
+  - [2.uniswap-v3](#2uniswap-v3)
+  - [3.CEX order book solution](#3cex-order-book-solution)
+  - [4. Triangular Arbitrage](#4-triangular-arbitrage)
+  - [5.quant trading workflow](#5quant-trading-workflow)
+  - [6.Binance U-based contract multi-factor](#6binance-u-based-contract-multi-factor)
+  - [7.Gemini target BBO monitoring](#7gemini-target-bbo-monitoring)
+  - [8.polymarket market robot](#8polymarket-market-robot)
+  - [9.Monitoring of crypto trading systems](#9monitoring-of-crypto-trading-systems)
 
 ## Low latency system development basics
 ### 1. CPU affinity and NUMA architecture
@@ -10990,7 +11098,6 @@ Sources and use cases:[https://weedge.github.io/perf-book-cn/zh/chapters/6-CPU-F
 <!-- 这是一张图片，ocr 内容为： -->
 ![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1754981310810-5c4b8eb4-c1ca-4004-a742-3ecdd5498aa8.png)
 
-### 
 ### 3.Use compiler and other optimization programs  
 
 gcc documentation:[https://gcc.gnu.org/onlinedocs/](https://gcc.gnu.org/onlinedocs/)
@@ -12899,7 +13006,6 @@ namespace lfc {
 } // namespace lfc
 ```
 
-### 
 ### 2.Implement thread-safe queues
 **1.disruptor**
 
@@ -25029,7 +25135,6 @@ public:
 } // namespace lob
 ```
 
-### 
 ### 3.message transmission Protocol Engine (FIX)
 The basic building blocks of the FIX protocol are tag-value pairs. Each data field consists of three parts:
 
@@ -27182,9 +27287,9 @@ private:
 
 Message middleware is responsible for system decoupling and interaction of large-scale trading system architecture and clustered distributed trading systems, and separation of critical paths and cold paths. The following is a simple example. PMS and RMS are divided into the upstream of the architecture, and OMS and EMS are divided into the downstream of the architecture. The downstream is often a performance-sensitive critical path.
 
-### 
-### <!-- 这是一张图片，ocr 内容为： -->
-![](https://cdn.nlark.com/yuque/0/2026/png/35485470/1768269462634-a35a10f7-8d7d-449e-91fa-8dc264f152eb.png)5. OMS, EMS, PMS, and RMS of trading systems  
+![](https://cdn.nlark.com/yuque/0/2026/png/35485470/1768269462634-a35a10f7-8d7d-449e-91fa-8dc264f152eb.png)
+
+### 5. OMS, EMS, PMS, and RMS of trading systems  
 
 **OMS - Order Management System**
 
@@ -39802,7 +39907,6 @@ if(UNIX)
 endif()
 ```
 
-### 
 ### 2.uniswap-v3
 The main feature of Uniswap-v2 is **"uniform distribution of liquidity"**. As a liquidity provider (LP), the funds provided will be evenly distributed across all possible price ranges from 0 to infinity.
 
@@ -40298,7 +40402,6 @@ int main() {
 }
 ```
 
-### 
 ### 3.CEX order book solution
 **VectorOrderBook:**
 
@@ -40341,7 +40444,6 @@ int main() {
 + **Pursue high frequency performance but limited memory** → CircularArrayOrderBook  
 + **Resource Constrained Environment** → HashOrderBook
 
-### 
 ### 4. Triangular Arbitrage
 Suppose there are three trading pairs (a trading pair refers to a market where two assets are exchanged at a certain ratio).  
 The first pair is A-B with an exchange ratio of 1:10 (i.e., 1 A can be exchanged for 10 B, and 10 B can be exchanged for 1 A, the same below);  
