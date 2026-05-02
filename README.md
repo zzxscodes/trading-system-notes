@@ -1,11 +1,11 @@
-# Trading System Development - Zhixuan Zhang  
+# Trading System Development - Zhixuan Zhang
 
 中文版本：[https://www.yuque.com/bluememories/lanaff/eud01pmbglsxf6gu](https://www.yuque.com/bluememories/lanaff/eud01pmbglsxf6gu)
 
 + Yuque: [https://www.yuque.com/bluememories/lanaff/lg6rl7fku813w1id](https://www.yuque.com/bluememories/lanaff/lg6rl7fku813w1id)
 + GitHub: [https://github.com/zzxscodes/trading-system-notes](https://github.com/zzxscodes/trading-system-notes)
 
-**<font style="color:rgb(31, 35, 41);">Special thanks to Sourav Ghosh for his excellent book </font>**_**<font style="color:rgb(31, 35, 41);">Building Low Latency Applications with C++</font>**_**<font style="color:rgb(31, 35, 41);">.</font>**
+*Special thanks to Sourav Ghosh for his excellent book *Building Low Latency Applications with C++*.*
 
 ## Table of Contents
 
@@ -124,10 +124,9 @@
 ```shell
   Start the process: taskset -c 1 ./my_app (running on CPU 1)
   Modify a running process: taskset -pc 3 <PID>  (Move PID process to CPU 3)
-  Query process: tasksset -pc <PID> 
-  Bind threads under the process: ps -T -p <PID> taskset -p -c <CPU list> <TID> 
+  Query process: tasksset -pc <PID>
+  Bind threads under the process: ps -T -p <PID> taskset -p -c <CPU list> <TID>
 ```
-
 
 
 **pthread_setaffinity_np (sched_setaffinity): Thread (process) CPU binding**
@@ -189,14 +188,13 @@ namespace Common {
 ```
 
 
-
 **cpusets: CPU resource pool isolation**
 
 ```bash
 #!/usr/bin/env bash
 #
 # simple_cpuset_example.sh
-# 
+#
 # Demonstrates how to use cpuset to bind a task to a dedicated CPU core.
 
 # --- Configuration ---
@@ -285,9 +283,6 @@ lscpu -e=CPU,CORE,SOCKET
 # Bind the policy process to physical cores 8-15 (skipping hyper-threaded cores)
 taskset -c 8-15 ./strategy_engine
 ```
-
-
-
 
 
 **Turn off CPU power saving (C-States & P-States)**
@@ -448,7 +443,6 @@ cpupower frequency-info
 + `current policy` Frequency range should be narrow or fixed
 
 
-
 **Alternatives**
 
 | Method | The most radical usage | Function description |
@@ -482,8 +476,8 @@ node 1 cpus: 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 44 45 4
 node 1 size: 98304 MB
 node 1 free: 33 MB
 node distances:
-node   0   1 
-  0:  10  21 
+node   0   1
+  0:  10  21
   1:  21  10
 ```
 
@@ -495,9 +489,9 @@ node   0   1
 # numactl --show
 policy: default
 preferred node: current
-physcpubind: 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 44 45 46 47 48 49 50 51 52 53 54 55 56 57 58 59 60 61 62 63 64 65 66 67 68 69 70 71 72 73 74 75 76 77 78 79 80 81 82 83 84 85 86 87 88 89 90 91 92 93 94 95 
-cpubind: 0 1 
-nodebind: 0 1 
+physcpubind: 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 44 45 46 47 48 49 50 51 52 53 54 55 56 57 58 59 60 61 62 63 64 65 66 67 68 69 70 71 72 73 74 75 76 77 78 79 80 81 82 83 84 85 86 87 88 89 90 91 92 93 94 95
+cpubind: 0 1
+nodebind: 0 1
 binding: 0 1
 ```
 
@@ -534,7 +528,7 @@ numactl --preferred=1
 
 On a server with multiple CPU sockets, each CPU has its own local memory, and accessing local memory is much faster than accessing another CPU's memory (remote memory). Therefore, the key to optimization is to ensure that "whoever calculates has his data by his side".
 
-Advanced scenarios (high-performance networks) are CPU, memory, Consistent with PCIe devices (network cards).  
+Advanced scenarios (high-performance networks) are CPU, memory, Consistent with PCIe devices (network cards).
 
 **2. Linux memory allocation behavior**
 
@@ -570,7 +564,6 @@ Advanced scenarios (high-performance networks) are CPU, memory, Consistent with 
 + **Replace "shared memory" with "message passing"**: Use Actor model, disruptor communication and other modes, that is, CSP concurrency philosophy.
 
 
-
 NUMA optimization is an iterative process that requires continuous performance analysis and monitoring to identify bottlenecks and verify optimization effects.
 
 + `numastat`: View memory access statistics for each NUMA node in real time or historically, including local (`local_node`) and remote (`other_node`) memory access times. If the remote access ratio is high, it means there is still room for NUMA optimization.
@@ -593,7 +586,6 @@ Factors to consider:
 
 + **Over-optimization:** Not all programs require NUMA optimization. For programs that are CPU-intensive and have strong data locality, or programs with small amounts of data and random memory access patterns, NUMA optimization may have little benefit or even be counterproductive.
 + **Dynamic environment:** If your program needs to run on systems with different NUMA topologies, you may need to dynamically detect NUMA nodes and adjust policies.
-
 
 
 **Explicit NUMA-aware memory allocation**
@@ -776,7 +768,6 @@ int main() {
 **run:**`./test`
 
 
-
 **NUMA data sharding**
 
 **The core idea of data sharding is to allocate different types of data structures to the most appropriate physical memory area based on the access frequency, importance and policy logic of the data.**
@@ -845,7 +836,6 @@ int main() {
     return 0;
 }
 ```
-
 
 
 ### 2. Real-time thread priority
@@ -917,7 +907,7 @@ int main() {
 In a real-time system, when a **high-priority thread** is blocked waiting for a resource (such as a mutex) held by a **low-priority thread**, if a **medium-priority thread** seizes the CPU, it will result in:
 
 + Low-priority threads cannot release resources in time
-+ High-priority threads are "indirectly" delayed (should be the highest priority but are executed last)  
++ High-priority threads are "indirectly" delayed (should be the highest priority but are executed last)
 `L(hold lock)→ H(waiting for lock)→ M(Seize L)→ HContinuous blocking`
 
 Priority inheritance (PTHREAD_PRIO_INHERIT)
@@ -928,8 +918,7 @@ Priority inheritance (PTHREAD_PRIO_INHERIT)
 4. If there are multiple levels of waiting (such as L waiting for another lock), the system will recursively increase the priorities of all related threads.
 5. Priority ceiling (PTHREAD_PRIO_PROTECT)
 
-The ceiling priority is preset when the lock is created, which is suitable for scenarios with known resource dependencies.  
-
+The ceiling priority is preset when the lock is created, which is suitable for scenarios with known resource dependencies.
 
 
 **Command**: Use `chrt` (change real-time attributes) command, adjusts priority only for processes
@@ -989,11 +978,10 @@ Common options:
 ```
 
 
-
 ### 3. Interrupt binding and common interrupt core isolation
 **Interrupt binding** refers to allocating interrupt requests (IRQs) to specific CPU cores for processing to avoid interrupt processing from interfering with the critical path. By properly bundling interrupts, you can reduce the CPU load on the critical path and ensure deterministic latency.
 
-**Identify Bottlenecks**: Before tuning, use `top`, `htop`, `mpstat -P ALL 1` Wait for tools and observe `si` (softirq) or `%irq` Is it too high on a certain CPU core, confirm that interrupt handling is the bottleneck.  
+**Identify Bottlenecks**: Before tuning, use `top`, `htop`, `mpstat -P ALL 1` Wait for tools and observe `si` (softirq) or `%irq` Is it too high on a certain CPU core, confirm that interrupt handling is the bottleneck.
 
 + **Find the IRQ number of the device**`cat /proc/interrupts`
 + Pass the device name in the last column (e.g. `eth0-rx-0`) to find the corresponding IRQ number.
@@ -1019,7 +1007,6 @@ sudo sh -c 'echo 2 > /proc/irq/128/smp_affinity_list'
 **Usage scenario**: For the CPU core where the critical path is located, bind irrelevant interrupt requests to other cores to reduce the interrupt processing burden of the core.
 
 
-
 existAfter the CPU is bound, kernel threads (such as ksoftirqd, kworker) may still preempt the user-mode threads bound to the core, and clock interrupts and RCU callbacks will also cause overhead; and`isolcpus`,`nohz_full`,`rcu_nocbs`The combination of three parameters can solve this problem:
 
 1. `isolcpus`: Isolate the specified CPU from the kernel general scheduler, preventing most kernel threads and ordinary processes from running;
@@ -1033,7 +1020,6 @@ grub_cmdline="isolcpus=8-15 nohz_full=8-15 rcu_nocbs=8-15"
 # Effective configuration
 grub2-mkconfig -o /boot/grub2/grub.cfg
 ```
-
 
 
 ### 4. Summary of system silent configuration steps
@@ -1152,9 +1138,9 @@ public:
             if (start >= irq_part.size()) continue;
 
             char* end_ptr = nullptr;
-            errno = 0; 
+            errno = 0;
             long irq = std::strtol(std::string(irq_part.substr(start)).c_str(), &end_ptr, 10);
-            
+
             if (errno != 0 || end_ptr == std::string(irq_part.substr(start)).c_str() || irq < INT_MIN || irq > INT_MAX) {
                 continue;
             }
@@ -1242,7 +1228,6 @@ private:
 ```
 
 
-
 ### 5. Memory model, cache and pipeline
 Memory model reference:
 
@@ -1255,18 +1240,17 @@ Advanced Parallel Programming Reference:
 [https://mirrors.edge.kernel.org/pub/linux/kernel/people/paulmck/perfbook/perfbook.html](https://mirrors.edge.kernel.org/pub/linux/kernel/people/paulmck/perfbook/perfbook.html)
 
 
-
 **Solution to memory disorder and memory model**
 
 **The root cause of memory disorder**
 
 **1. Store Buffer: Hide write latency**
 
-**Principle**: CPU execution`store`instruction, if the target cache line is not in the local cache, it needs to wait for the memory to be loaded; to avoid CPU stall, the CPU will`store`The data is first stored in the "store buffer" and then written asynchronously to the cache/memory——`store`Instructions can be completed quickly, but the order in which the data is written to memory may be later than in the code.`store`order".    
+**Principle**: CPU execution`store`instruction, if the target cache line is not in the local cache, it needs to wait for the memory to be loaded; to avoid CPU stall, the CPU will`store`The data is first stored in the "store buffer" and then written asynchronously to the cache/memory——`store`Instructions can be completed quickly, but the order in which the data is written to memory may be later than in the code.`store`order".
 
 ```cpp
 // Thread A // Thread B
-a = 1;                 while (b == 0); 
+a = 1;                 while (b == 0);
 b = 1; assert(a == 1); // Possible failure?
 ```
 
@@ -1278,14 +1262,14 @@ b = 1; assert(a == 1); // Possible failure?
 
 **2. Invalidate Queue: Hide cache consistency delay**
 
-**Principle**: When a CPU modifies a shared variable, it must first send an "Invalidate" request to other CPUs through the "cache consistency protocol (such as MESI)"; in order to avoid waiting for all CPUs to confirm the invalidity, the CPU stores the "invalid request" in the "invalidation queue" and processes it asynchronously - other CPUs may delay receiving the invalid request, causing "read operations to see outdated data."   
+**Principle**: When a CPU modifies a shared variable, it must first send an "Invalidate" request to other CPUs through the "cache consistency protocol (such as MESI)"; in order to avoid waiting for all CPUs to confirm the invalidity, the CPU stores the "invalid request" in the "invalidation queue" and processes it asynchronously - other CPUs may delay receiving the invalid request, causing "read operations to see outdated data."
 
 ```cpp
 // Thread A (CPU 0) // Thread B (CPU 1)
-a = 1;                 while (a == 0); 
-                       b = 1; 
+a = 1;                 while (a == 0);
+                       b = 1;
 // Thread C (CPU 0)
-while (b == 0); 
+while (b == 0);
 assert(a == 1); // Possible failure?
 ```
 
@@ -1293,16 +1277,15 @@ assert(a == 1); // Possible failure?
 
 **3. Out-of-Order Execution: Maximize CPU resource utilization**
 
-**Principle**: In order to make full use of the pipeline and functional units (such as ALU, FPU), modern CPUs will disrupt the order of instruction execution - as long as the "logical dependencies are satisfied" (such as`c = a + b`Need to wait`a`and`b`calculation is completed), irrelevant instructions can be executed out of order.  
+**Principle**: In order to make full use of the pipeline and functional units (such as ALU, FPU), modern CPUs will disrupt the order of instruction execution - as long as the "logical dependencies are satisfied" (such as`c = a + b`Need to wait`a`and`b`calculation is completed), irrelevant instructions can be executed out of order.
 
 **Impact on memory access**: Memory access instructions (`load`/`store`) may be executed out of order when they have no dependencies on calculation instructions - for example`a = 1; b = c + d;`middle,`b = c + d`may be executed first (if`c`and`d`already in the register), but`a=1`The store is still in the store buffer, causing other threads to see it first`b`the new value, see after`a`new value.
 
 **4. Speculative Execution: Execute uncertain branches in advance**
 
-**Principle**: The CPU encounters a branch (such as`if (x > 0)`), the branch direction will be speculated and subsequent instructions will be executed in advance; if the guess is wrong, the results of the speculative execution (including memory access) will be discarded.  
+**Principle**: The CPU encounters a branch (such as`if (x > 0)`), the branch direction will be speculated and subsequent instructions will be executed in advance; if the guess is wrong, the results of the speculative execution (including memory access) will be discarded.
 
 **Implicit impact on memory ordering**: Speculatively executed memory accesses may "temporarily modify the cache state". Although they will eventually be rolled back, they may be sensed by other CPUs through "side channels" (such as the Specter vulnerability exploiting this feature); "memory order constraints" ensure that "speculatively executed memory accesses do not affect program correctness".
-
 
 
 **Memory Model**
@@ -1315,23 +1298,22 @@ Define the memory model, clarify "which memory access sequences must be guarante
 
 **(1)x86/x86-64: Strong Memory Model (Total Store Order, TSO)**
 
-**rule**:  
+**rule**:
 
-1. It is forbidden to "write → read" reordering (StoreLoad Reordering): that is, "the store executed first will not be overridden by the load executed later" - for example`a=1; b=load(c);`middle,`b=load(c)`not before`a=1`The store is submitted to memory;  
-2. It is forbidden to "write → write" reordering (StoreStore Reordering): that is, "the store that is executed first, other threads must see it first" - for example`a=1; b=1;`, other threads will not see it first`b=1`See you again`a=1`;  
-3. "Read → Write" reordering (LoadStore Reordering) is prohibited: that is, "the load executed first will not be overridden by the store executed later" - for example`a=load(c); b=1;`middle,`b=1`not before`a=load(c)`submit;  
+1. It is forbidden to "write → read" reordering (StoreLoad Reordering): that is, "the store executed first will not be overridden by the load executed later" - for example`a=1; b=load(c);`middle,`b=load(c)`not before`a=1`The store is submitted to memory;
+2. It is forbidden to "write → write" reordering (StoreStore Reordering): that is, "the store that is executed first, other threads must see it first" - for example`a=1; b=1;`, other threads will not see it first`b=1`See you again`a=1`;
+3. "Read → Write" reordering (LoadStore Reordering) is prohibited: that is, "the load executed first will not be overridden by the store executed later" - for example`a=load(c); b=1;`middle,`b=1`not before`a=load(c)`submit;
 4. **Allow "Read→Read" reordering (LoadLoad Reordering)**: that is, "execute the load first, and see the results later" - for example`a=load(c); b=load(d);`medium, if`c`cache line miss while`d`cache line hit,`b`Maybe get the value first,`a`Then get the value.
 
-**Exception**: x86`non-temporal store`(like`_mm_stream_store_si128`) and "unaligned memory access" may break TSO rules and require additional memory barriers.  
+**Exception**: x86`non-temporal store`(like`_mm_stream_store_si128`) and "unaligned memory access" may break TSO rules and require additional memory barriers.
 
 **Significance**: The strong memory model of x86 reduces software complexity. In most cases, there is no need to manually deal with the "write → read/write → write/read → write" out-of-order. However, attention should be paid to the exceptions of "read → read" out-of-order and special instructions.
 
 **(2) ARM/PowerPC: Weak memory model (Partial Store Order, PSO / Weak Order) **
 
-**Rules**: Four types of out-of-order "write → read", "write → write", "read → write" and "read → read" are allowed (only "out-of-order access to the same address" is prohibited);  
+**Rules**: Four types of out-of-order "write → read", "write → write", "read → write" and "read → read" are allowed (only "out-of-order access to the same address" is prohibited);
 
 **Significance**: The weak memory model has higher hardware performance (more freedom to optimize memory access), but the software needs to constrain out-of-order through "explicit memory barriers" or "atomic operations with memory order", otherwise correctness problems will easily occur.
-
 
 
 **2. Language memory model: unified abstraction for C11/C++11**
@@ -1439,11 +1421,10 @@ _ReadWriteBarrier(); // Compiler barrier
 
 **4. Select the "weakest enough" memory order**
 
-1. **Prioritize whether the variable is independent**: If the variable has no logical dependence (such as an independent counter), use it directly`relaxed`;  
-2. **Determine whether a "synchronization relationship" is required**: If you need "the write operation of thread A to be seen by thread B" (such as pointer release, lock), use`acquire/release`;  
-3. **Only use strong memory ordering when necessary**: Use it if you need "global consistency" (such as state synchronization of a distributed system)`seq_cst`, and the performance cost needs to be evaluated;  
+1. **Prioritize whether the variable is independent**: If the variable has no logical dependence (such as an independent counter), use it directly`relaxed`;
+2. **Determine whether a "synchronization relationship" is required**: If you need "the write operation of thread A to be seen by thread B" (such as pointer release, lock), use`acquire/release`;
+3. **Only use strong memory ordering when necessary**: Use it if you need "global consistency" (such as state synchronization of a distributed system)`seq_cst`, and the performance cost needs to be evaluated;
 4. **Avoid "use seq_cst by default"**: C++ atomic operations default`seq_cst`, but 90% of scenarios do not require this strong constraint. Manually specifying weak memory order can greatly improve performance.
-
 
 
 Cache consistency protocol explanation reference:
@@ -1451,7 +1432,6 @@ Cache consistency protocol explanation reference:
 [https://weedge.github.io/perf-book-cn/zh/chapters/13-Optimizing-Multithreaded-Applications/13-7_Cache_Coherence_Issues_cn.html](https://weedge.github.io/perf-book-cn/zh/chapters/13-Optimizing-Multithreaded-Applications/13-7_Cache_Coherence_Issues_cn.html)
 
 [https://www.scss.tcd.ie/Jeremy.Jones/VivioJS/caches/MESIHelp.htm](https://www.scss.tcd.ie/Jeremy.Jones/VivioJS/caches/MESIHelp.htm)
-
 
 
 Problems and solutions caused by cache coherence protocols: pseudo sharing, true sharing
@@ -1500,7 +1480,7 @@ int main() {
 }
 ```
 
-1. **Use alignment attributes from compiler-specific and C++ language features**:  
+1. **Use alignment attributes from compiler-specific and C++ language features**:
 In addition to manual padding, some compilers also provide specific attributes to achieve cache line alignment. In GCC and Clang, you can use`__attribute__((aligned(CACHE_LINE_SIZE)))`To specify the alignment of the structure:
 
 ```cpp
@@ -1518,7 +1498,6 @@ struct alignas(CACHE_LINE_SIZE) CacheLineAligned : public T {
 ```
 
 True sharing issues can be passed std::atomic (not performance sensitive) and thread_local solve the problem.
-
 
 
 **Cache Isolation**
@@ -1581,7 +1560,6 @@ south pqos -R
 ```
 
 
-
 cpu pipeline reference:
 
 [https://weedge.github.io/perf-book-cn/zh/chapters/3-CPU-Microarchitecture/3-2_Pipelining_cn.html](https://weedge.github.io/perf-book-cn/zh/chapters/3-CPU-Microarchitecture/3-2_Pipelining_cn.html)
@@ -1606,7 +1584,6 @@ The "three priorities" principle of CPU pipeline adaptation ensures no pauses in
 **Register Spill**: x86-64 provides 16 general-purpose registers and 16/32 SIMD registers. When the number of simultaneously live variables in a function exceeds the available registers, the compiler is forced to spill some variables to stack memory, and later reload (fill) them back into registers. Each spill/fill introduces extra store/load instructions — even L1-hitting loads cost 4-5 cycles and consume load/store ports, reducing throughput for other memory operations. Aggressive loop unrolling or using too many independent accumulators within a loop body can backfire due to excessive register pressure. Mitigation: limit the number of live variables in hot-path functions; use `__attribute__((noinline))` to isolate helper logic and relieve register pressure; inspect compiler-generated assembly for stack operations (`mov [rsp+...]` patterns) in critical loops; in SIMD code, prefer AVX-512's 32 ZMM registers to alleviate pressure ([whichisfaster.dev/register_spill](https://whichisfaster.dev/q/register_spill.html)).
 
 Optimize and split the dependency chain of complex structures and system globals using algorithms such as topological sorting to resolve dependencies.
-
 
 
 ### 6. Memory pool
@@ -1721,7 +1698,7 @@ namespace Common {
       // Pre-allocate memory using standard allocation (avoiding new/delete)
       objects_ = static_cast<T*>(std::aligned_alloc(alignof(T), sizeof(T) * capacity_));
       free_list_ = static_cast<std::size_t*>(std::aligned_alloc(alignof(std::size_t), sizeof(std::size_t) * capacity_));
-      
+
       // Initialize free list - each slot points to the next one
       for (std::size_t i = 0; i < capacity_; ++i) {
         free_list_[i] = i + 1;
@@ -1736,7 +1713,7 @@ namespace Common {
           objects_[i].~T();
         }
       }
-      
+
       // Free pre-allocated memory
       std::free(objects_);
       std::free(free_list_);
@@ -1748,14 +1725,14 @@ namespace Common {
       if (UNLIKELY(next_free_index_ == kInvalidIndex)) {
         return nullptr; // Pool exhausted
       }
-      
+
       const auto index = next_free_index_;
       next_free_index_ = free_list_[index]; // Move to next free slot
-      
+
       T *ret = &(objects_[index]);
       new (ret) T(std::forward<Args>(args)...); // placement new
       free_list_[index] = kInvalidIndex; // Mark as allocated
-      
+
       return ret;
     }
 
@@ -1763,7 +1740,7 @@ namespace Common {
     /// Destructor is not called for the object - lazy deallocation for performance.
     auto deallocate(const T *elem) noexcept {
       const auto elem_index = static_cast<std::size_t>(elem - objects_);
-      
+
       if (LIKELY(elem_index < capacity_)) {
         // Instead of calling destructor, just add back to free list
         free_list_[elem_index] = next_free_index_;
@@ -1780,7 +1757,7 @@ namespace Common {
 
   private:
     static constexpr std::size_t kInvalidIndex = static_cast<std::size_t>(-1);
-    
+
     T* objects_;              // Pre-allocated array of objects
     std::size_t* free_list_;  // Free list - each slot points to the next free slot, or kInvalidIndex if allocated
     std::size_t next_free_index_; // Head of free list
@@ -1845,7 +1822,7 @@ sudo sysctl -p
 ulimit -l
 
 # Temporarily increase limit (e.g. to 1GB)
-sudo ulimit -l 1048576 
+sudo ulimit -l 1048576
 # Note: The ulimit raised by sudo only takes effect for the program within the sudo command and needs to be run in a way that can be passed to the child process.
 # A more reliable way is to modify the configuration file or run as root
 
@@ -1855,8 +1832,8 @@ Edit the /etc/security/limits.conf file, add unlimited permissions to memlock fo
 trader   soft   memlock   unlimited
 trader   hard   memlock   unlimited
 
-# Set vm.swappiness=0 and have the application call mlockall().  
-#	Temporary settings 
+# Set vm.swappiness=0 and have the application call mlockall().
+#	Temporary settings
 sudo sysctl vm.swappiness=0
 
 #	For permanent settings, create a new configuration file in the /etc/sysctl.d/ directory.
@@ -1904,7 +1881,7 @@ free(mem);
 // A useful way to detect continuous TLB interruptions at runtime is to use the watch command while viewing this file
 // Run watch -n5 -d 'grep TLB /proc/interrupts', where the -n 5 option refreshes the view every 5 seconds, and -d highlights the differences between each refresh of the output.
 
-           CPU0 CPU1 CPU2 CPU3       
+           CPU0 CPU1 CPU2 CPU3
 ...
 NMI:          0          0          0          0   Non-maskable interrupts
 LOC:     552219    1010298    2272333    3179890   Local timer interrupts
@@ -1929,7 +1906,7 @@ TLB:       4493       6108      73789       5014   TLB shootdowns
 
 Choose appropriate data structures based on actual needs and avoid using data structures that cause frequent memory allocation and release. For example, if you need to frequently insert and delete elements, consider using`std::list`instead of`std::vector`.
 
-**Stack allocation**: For data with fixed size and short life cycle, create it directly on the stack `std::array`. The size must be determined at compile time.  
+**Stack allocation**: For data with fixed size and short life cycle, create it directly on the stack `std::array`. The size must be determined at compile time.
 
 **4.pinned_arena+allocator (STL dynamic memory container memory allocator)**
 
@@ -1988,15 +1965,15 @@ private:
         bool is_active;
         uint32_t next_block; // Use indexes instead of pointers to improve cache locality
         char padding[40]; //Padding to 64 bytes to avoid false sharing
-        
-        ALWAYS_INLINE char* data() { 
-            return reinterpret_cast<char*>(this + 1); 
+
+        ALWAYS_INLINE char* data() {
+            return reinterpret_cast<char*>(this + 1);
         }
-        
-        ALWAYS_INLINE const char* data() const { 
-            return reinterpret_cast<const char*>(this + 1); 
+
+        ALWAYS_INLINE const char* data() const {
+            return reinterpret_cast<const char*>(this + 1);
         }
-        
+
         static constexpr size_t header_size = sizeof(MemoryBlock);
         static constexpr size_t min_capacity = 4096 - header_size;
     };
@@ -2008,7 +1985,7 @@ private:
         size_t block_size;
         uint32_t num_blocks;
         bool is_locked;
-        
+
         MemoryBlock* blocks; // Continuous array of memory blocks
         char* data_start; // Continuous data area
     };
@@ -2018,13 +1995,13 @@ private:
     uint32_t active_blocks_;
     const bool allow_fallback_;
     const bool use_mlock_;
-    
+
     // Disable copying
     PinnedArena(const PinnedArena&) = delete;
     PinnedArena& operator=(const PinnedArena&) = delete;
 
 public:
-    explicit PinnedArena(size_t block_size = 64 * 1024, 
+    explicit PinnedArena(size_t block_size = 64 * 1024,
                         bool allow_fallback = false,
                         bool use_mlock = true,
                         uint32_t prealloc_blocks = 16) // Number of preallocated blocks
@@ -2032,21 +2009,21 @@ public:
         , use_mlock_(use_mlock)
         , current_block_idx_(0)
         , active_blocks_(1) {
-        
+
         //Initialize the continuous memory area
         initialize_arena_memory(block_size, prealloc_blocks);
-        
+
         // Prefetch the first memory block into the cache
         if (LIKELY(arena_mem_.blocks != nullptr)) {
-            prefetch_memory(arena_mem_.blocks[0].data(), 
+            prefetch_memory(arena_mem_.blocks[0].data(),
                           std::min(block_size, size_t(4096)));
         }
     }
-    
+
     ~PinnedArena() {
         destroy_arena_memory();
     }
-    
+
     //Move semantic support
     PinnedArena(PinnedArena&& other) noexcept
         : arena_mem_(other.arena_mem_)
@@ -2054,52 +2031,52 @@ public:
         , active_blocks_(other.active_blocks_)
         , allow_fallback_(other.allow_fallback_)
         , use_mlock_(other.use_mlock_) {
-        
+
         other.arena_mem_.raw_memory = nullptr;
         other.arena_mem_.blocks = nullptr;
         other.arena_mem_.data_start = nullptr;
     }
-    
+
     PinnedArena& operator=(PinnedArena&& other) noexcept {
         if (LIKELY(this != &other)) {
             destroy_arena_memory();
             arena_mem_ = other.arena_mem_;
             current_block_idx_ = other.current_block_idx_;
             active_blocks_ = other.active_blocks_;
-            
+
             other.arena_mem_.raw_memory = nullptr;
             other.arena_mem_.blocks = nullptr;
             other.arena_mem_.data_start = nullptr;
         }
         return *this;
     }
-    
+
     // Core allocation function - hot path optimization
     HOT_PATH ALWAYS_INLINE
     void* allocate(size_t size, size_t alignment = alignof(std::max_align_t)) {
         // Fast path: allocated in the currently active block
         MemoryBlock* current_block = &arena_mem_.blocks[current_block_idx_];
-        
+
         if (LIKELY(current_block->is_active && size <= arena_mem_.block_size / 4)) {
             char* ptr = current_block->data() + current_block->used;
             uintptr_t aligned_ptr = (reinterpret_cast<uintptr_t>(ptr) + alignment - 1) & ~(alignment - 1);
             size_t adjustment = aligned_ptr - reinterpret_cast<uintptr_t>(ptr);
             size_t total_size = size + adjustment;
-            
+
             if (LIKELY(current_block->used + total_size <= current_block->capacity)) {
                 current_block->used += total_size;
-                
+
                 // Prefetch the memory to be used
                 prefetch_memory(reinterpret_cast<void*>(aligned_ptr), size);
-                
+
                 return reinterpret_cast<void*>(aligned_ptr);
             }
         }
-        
+
         // slow path
         return allocate_slow_path(size, alignment);
     }
-    
+
     // Bulk array allocation - cache friendly
     template<typename T>
     HOT_PATH ALWAYS_INLINE
@@ -2107,56 +2084,56 @@ public:
         static_assert(std::is_trivial_v<T>, "Only trivial types supported for array allocation");
         constexpr size_t alignment = alignof(T);
         const size_t total_size = count * sizeof(T);
-        
+
         MemoryBlock* current_block = &arena_mem_.blocks[current_block_idx_];
-        
+
         if (LIKELY(current_block->is_active)) {
             char* ptr = current_block->data() + current_block->used;
             uintptr_t aligned_ptr = (reinterpret_cast<uintptr_t>(ptr) + alignment - 1) & ~(alignment - 1);
             size_t adjustment = aligned_ptr - reinterpret_cast<uintptr_t>(ptr);
             size_t total_needed = total_size + adjustment;
-            
+
             if (LIKELY(current_block->used + total_needed <= current_block->capacity)) {
                 current_block->used += total_needed;
                 T* result = reinterpret_cast<T*>(aligned_ptr);
-                
+
                 //Multi-level prefetch optimization
                 prefetch_array(result, count);
-                
+
                 return result;
             }
         }
-        
+
         return reinterpret_cast<T*>(allocate_slow_path(total_size, alignment));
     }
-    
+
     //Reset the arena
     HOT_PATH ALWAYS_INLINE
     void reset() noexcept {
         //Reset all active blocks - contiguous memory access, cache friendly
         for (uint32_t i = 0; i < active_blocks_; ++i) {
             arena_mem_.blocks[i].used = 0;
-            
+
             // Prefetch the data area for each block
             if (LIKELY(arena_mem_.blocks[i].is_active && arena_mem_.blocks[i].capacity > 0)) {
-                prefetch_memory(arena_mem_.blocks[i].data(), 
+                prefetch_memory(arena_mem_.blocks[i].data(),
                               std::min(arena_mem_.blocks[i].capacity, size_t(4096)));
             }
         }
         current_block_idx_ = 0;
     }
-    
+
     //Clear all memory blocks
     void clear() noexcept {
         reset();
         //Do not clear the pre-allocated memory area and maintain the mlock state
     }
-    
+
     // statistics
     size_t memory_usage() const noexcept {
         return arena_mem_.total_size;
     }
-    
+
     size_t block_count() const noexcept {
         return active_blocks_;
     }
@@ -2167,47 +2144,47 @@ private:
         if (UNLIKELY(num_blocks == 0)) {
             return;
         }
-        
+
         // Calculate total memory size
         size_t block_total_size = MemoryBlock::header_size + block_size;
         size_t total_memory_size = block_total_size * num_blocks;
-        
+
         // page alignment
         long page_size = sysconf(_SC_PAGESIZE);
         if (UNLIKELY(page_size == -1)) {
             page_size = 4096;
         }
-        
+
         size_t aligned_total_size = ((total_memory_size + page_size - 1) / page_size) * page_size;
-        
+
         //Allocate contiguous memory
         void* raw_memory = nullptr;
         if (UNLIKELY(posix_memalign(&raw_memory, page_size, aligned_total_size) != 0)) {
             return;
         }
-        
+
         // memory lock
         if (LIKELY(use_mlock_)) {
             if (UNLIKELY(mlock(raw_memory, aligned_total_size) == -1)) {
                 // Simplify error handling to reduce system calls
             }
         }
-        
+
         // Pre-faulting: trigger all page fault interrupts
         memset(raw_memory, 0, aligned_total_size);
-        
+
         //Set memory area information
         arena_mem_.raw_memory = raw_memory;
         arena_mem_.total_size = aligned_total_size;
         arena_mem_.block_size = block_size;
         arena_mem_.num_blocks = num_blocks;
         arena_mem_.is_locked = use_mlock_;
-        
+
         //Initialize the memory block array
         arena_mem_.blocks = static_cast<MemoryBlock*>(raw_memory);
-        arena_mem_.data_start = reinterpret_cast<char*>(arena_mem_.blocks) + 
+        arena_mem_.data_start = reinterpret_cast<char*>(arena_mem_.blocks) +
                                (MemoryBlock::header_size * num_blocks);
-        
+
         //Initialize each memory block
         for (uint32_t i = 0; i < num_blocks; ++i) {
             MemoryBlock* block = &arena_mem_.blocks[i];
@@ -2216,24 +2193,24 @@ private:
             block->is_active = (i == 0); // Only the first block is initially activated
             block->next_block = (i + 1 < num_blocks) ? (i + 1) : 0;
         }
-        
+
         active_blocks_ = 1;
     }
-    
+
     // Destroy memory area
     void destroy_arena_memory() noexcept {
         if (UNLIKELY(arena_mem_.raw_memory == nullptr)) return;
-        
+
         if (arena_mem_.is_locked) {
             munlock(arena_mem_.raw_memory, arena_mem_.total_size);
         }
-        
+
         free(arena_mem_.raw_memory);
         arena_mem_.raw_memory = nullptr;
         arena_mem_.blocks = nullptr;
         arena_mem_.data_start = nullptr;
     }
-    
+
     // slow allocation path
     COLD_PATH
     void* allocate_slow_path(size_t size, size_t alignment) {
@@ -2244,14 +2221,14 @@ private:
             uintptr_t aligned_ptr = (reinterpret_cast<uintptr_t>(ptr) + alignment - 1) & ~(alignment - 1);
             size_t adjustment = aligned_ptr - reinterpret_cast<uintptr_t>(ptr);
             size_t total_size = size + adjustment;
-            
+
             if (current_block->used + total_size <= current_block->capacity) {
                 current_block->used += total_size;
                 prefetch_memory(reinterpret_cast<void*>(aligned_ptr), size);
                 return reinterpret_cast<void*>(aligned_ptr);
             }
         }
-        
+
         //Try to activate new block
         if (LIKELY(size <= arena_mem_.block_size && active_blocks_ < arena_mem_.num_blocks)) {
             // activate next block
@@ -2262,11 +2239,11 @@ private:
                 next_block->used = 0;
                 current_block_idx_ = next_idx;
                 active_blocks_++;
-                
+
                 char* ptr = next_block->data();
                 uintptr_t aligned_ptr = (reinterpret_cast<uintptr_t>(ptr) + alignment - 1) & ~(alignment - 1);
                 size_t adjustment = aligned_ptr - reinterpret_cast<uintptr_t>(ptr);
-                
+
                 if (LIKELY(size + adjustment <= next_block->capacity)) {
                     next_block->used = size + adjustment;
                     prefetch_memory(reinterpret_cast<void*>(aligned_ptr), size);
@@ -2274,7 +2251,7 @@ private:
                 }
             }
         }
-        
+
         // Large object or fallback allocation
         if (UNLIKELY(allow_fallback_)) {
             // Use a more lightweight allocation method
@@ -2285,31 +2262,31 @@ private:
             prefetch_memory(ptr, size);
             return ptr;
         }
-        
+
         return nullptr;
     }
-    
+
     // Memory prefetch optimization
     ALWAYS_INLINE void prefetch_memory(void* addr, size_t size) const {
 #if defined(__GNUC__) || defined(__clang__)
         char* ptr = static_cast<char*>(addr);
-        
+
         // Prefetch multiple cache lines, limiting the range to avoid excessive prefetching
         for (size_t i = 0; i < size && i < 1024; i += CACHELINE_SIZE) {
             __builtin_prefetch(ptr + i, 1, 3); // pre-written, high locality
         }
 #endif
     }
-    
+
     // Array prefetch optimization
     template<typename T>
     ALWAYS_INLINE void prefetch_array(T* array, size_t count) const {
         if (UNLIKELY(count == 0)) return;
-        
+
 #if defined(__GNUC__) || defined(__clang__)
         // Prefetch the first few elements
         __builtin_prefetch(array, 1, 3);
-        
+
         // For large arrays, prefetch more elements
         if (LIKELY(count > 8)) {
             __builtin_prefetch(array + 8, 1, 2);
@@ -2336,59 +2313,59 @@ public:
     using propagate_on_container_move_assignment = std::true_type;
     using propagate_on_container_swap = std::true_type;
     using is_always_equal = std::false_type;
-    
+
     template<typename U>
     struct rebind {
         using other = LowLatencyAllocator<U>;
     };
-    
+
     explicit LowLatencyAllocator(PinnedArena& arena) noexcept : arena_(&arena) {}
-    
+
     LowLatencyAllocator(const LowLatencyAllocator& other) noexcept = default;
-    
+
     template<typename U>
-    LowLatencyAllocator(const LowLatencyAllocator<U>& other) noexcept 
+    LowLatencyAllocator(const LowLatencyAllocator<U>& other) noexcept
         : arena_(other.arena_) {}
-    
+
     // memory allocation
     HOT_PATH ALWAYS_INLINE
     pointer allocate(size_type n) {
-        
+
         // Small array fast path
         if (LIKELY(n <= 16)) {
             return arena_->allocate_array<T>(n);
         }
-        
+
         //Large array path
         void* ptr = arena_->allocate(n * sizeof(T), alignof(T));
         return static_cast<pointer>(ptr);
     }
-    
+
     // Memory release - no operation (managed uniformly by arena)
     void deallocate(pointer p, size_type n) noexcept {
         (void)p;
         (void)n;
     }
-    
+
     //Construct object
     template<typename U, typename... Args>
     void construct(U* p, Args&&... args) {
         ::new (static_cast<void*>(p)) U(std::forward<Args>(args)...);
     }
-    
+
     // Destroy object
     template<typename U>
     void destroy(U* p) {
         p->~U();
     }
-    
+
     PinnedArena* arena() const noexcept { return arena_; }
-    
+
     template<typename U>
     bool operator==(const LowLatencyAllocator<U>& other) const noexcept {
         return arena_ == other.arena_;
     }
-    
+
     template<typename U>
     bool operator!=(const LowLatencyAllocator<U>& other) const noexcept {
         return arena_ != other.arena_;
@@ -2402,7 +2379,7 @@ private:
 template<typename T, typename... Args>
 auto make_pinned_vector(PinnedArena& arena, Args&&... args) {
     return std::vector<T, LowLatencyAllocator<T>>(
-        std::forward<Args>(args)..., 
+        std::forward<Args>(args)...,
         LowLatencyAllocator<T>(arena)
     );
 }
@@ -2467,7 +2444,6 @@ int main()
 ```
 
 
-
 **5. Use polymorphic memory allocator to solve std::vector type mismatch problem**
 
 `std::vector<int>`and`std::vector<int, MyAlloc>`is a completely different type because the allocator is part of the container type. Containers in the C++ standard library take allocators as template parameters, so different allocators result in different types.
@@ -2491,18 +2467,18 @@ void process(std::pmr::vector<int>& buffer) {
 auto some_func() {
     //Create a buffer on the stack
     auto buffer = std::array<std::byte, 512>{};
-    
+
     //Create memory resources, use monotonic_buffer_resource (similar to your Arena)
     auto resource = std::pmr::monotonic_buffer_resource{
         buffer.data(), buffer.size(), std::pmr::new_delete_resource()};
-    
+
     //Create a vector that uses this memory resource
     auto vec = std::pmr::vector<int>{&resource};
-    
+
     // add element
     vec.push_back(42);
     vec.push_back(7);
-    
+
     // passed to process function (types match now)
     process(vec);
 }
@@ -2531,7 +2507,6 @@ The C++ standard library provides several built-in memory resources to meet the 
     - `unsynchronized_pool_resource`Thread-safe version of
 
 
-
 **Implement custom memory resources**
 
 ```cpp
@@ -2545,17 +2520,17 @@ private:
         std::cout << "allocate: " << bytes << '\n';
         return res_->allocate(bytes, alignment);
     }
-    
+
     void do_deallocate(void* p, std::size_t bytes,
                        std::size_t alignment) override {
         std::cout << "deallocate: " << bytes << '\n';
         res_->deallocate(p, bytes, alignment);
     }
-    
+
     bool do_is_equal(const std::pmr::memory_resource& other) const noexcept override {
         return this == &other;
     }
-    
+
     std::pmr::memory_resource* res_;
 };
 ```
@@ -2583,7 +2558,6 @@ vec.emplace_back(1); // Undefined behavior
 ```
 
 2. **Default memory resource**: can be used`std::pmr::get_default_resource()`Get the default memory resource, or pass`std::pmr::set_default_resource()`set up.
-
 
 
 ### 7. Large page memory
@@ -2825,7 +2799,7 @@ hugePageAllocator (non-STL compatible), which can directly transform the impleme
 
 /**
  * @brief A high-performance large page memory allocator
- * 
+ *
  * This allocator uses Linux's hugepages (mmap) to provide more efficient memory allocation
  */
 class HugePageAllocator
@@ -2840,7 +2814,7 @@ public:
 
     /**
      * @brief allocates large page memory
-     * 
+     *
      * @param size requested memory size (bytes)
      * @param page_size specified large page size type
      * @return pointer to allocated memory, or nullptr if allocation fails
@@ -2854,7 +2828,7 @@ public:
         }
 
         void* ptr = MAP_FAILED;
-        
+
         switch (page_size) {
             case HugePageSize::HUGETLB_1GB: {
                 const size_t aligned_size = (size + HPA_PAGE_SIZE_1GB - 1) & ~(HPA_PAGE_SIZE_1GB - 1);
@@ -2862,13 +2836,13 @@ public:
                            PROT_READ | PROT_WRITE,
                            MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB | MAP_HUGE_1GB,
                            -1, 0);
-                
+
                 if (ptr == MAP_FAILED) [[unlikely]] {
                     HPA_DEBUG_PRINT("1GB huge page allocation failed\n");
                 }
                 break;
             }
-            
+
             case HugePageSize::HUGETLB_2MB:
             case HugePageSize::DEFAULT: // Use 2MB huge page by default
             default: {
@@ -2877,25 +2851,25 @@ public:
                            PROT_READ | PROT_WRITE,
                            MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB | MAP_HUGE_2MB,
                            -1, 0);
-                
+
                 if (ptr == MAP_FAILED) [[unlikely]] {
                     HPA_DEBUG_PRINT("2MB huge page allocation failed\n");
                 }
                 break;
             }
         }
-        
+
         //If the specified large page allocation fails, fall back to the normal page
         if (ptr == MAP_FAILED) [[unlikely]] {
-            const size_t page_size_bytes = (page_size == HugePageSize::HUGETLB_1GB) ? 
+            const size_t page_size_bytes = (page_size == HugePageSize::HUGETLB_1GB) ?
                                            HPA_PAGE_SIZE_1GB : HPA_PAGE_SIZE_2MB;
             const size_t aligned_size = (size + page_size_bytes - 1) & ~(page_size_bytes - 1);
-            
+
             ptr = mmap(nullptr, aligned_size,
                        PROT_READ | PROT_WRITE,
                        MAP_PRIVATE | MAP_ANONYMOUS,
                        -1, 0);
-            
+
             if (ptr == MAP_FAILED) [[unlikely]] {
                 HPA_DEBUG_PRINT("Regular page allocation failed\n");
                 return nullptr;
@@ -2907,7 +2881,7 @@ public:
 
     /**
      * @brief releases previously allocated huge page memory
-     * 
+     *
      * @param ptr pointer to the memory to be released
      * @param size The size of the memory to be released (bytes)
      * @param page_size The large page size type used when allocating
@@ -2917,11 +2891,11 @@ public:
         if (ptr == nullptr) [[unlikely]] {
             return;
         }
-        
-        const size_t page_size_bytes = (page_size == HugePageSize::HUGETLB_1GB) ? 
+
+        const size_t page_size_bytes = (page_size == HugePageSize::HUGETLB_1GB) ?
                                        HPA_PAGE_SIZE_1GB : HPA_PAGE_SIZE_2MB;
         const size_t aligned_size = (size + page_size_bytes - 1) & ~(page_size_bytes - 1);
-        
+
         if (munmap(ptr, aligned_size) != 0) [[unlikely]] {
             HPA_DEBUG_PRINT("munmap failed\n");
         }
@@ -2929,7 +2903,7 @@ public:
 
     /**
      * @brief Get the system page size
-     * 
+     *
      * @return system page size (bytes)
      */
     static inline size_t get_page_size() noexcept
@@ -2960,7 +2934,6 @@ inline related content
     - All function templates and member functions of class templates.
 
 
-
 2. In the compiler,`inline` Considered a **Performance Optimization Suggestion**. The compiler decides whether to perform this optimization of function inlining.
 + **Core**: Replace function calls with the function body itself, eliminating the fixed overhead of function calls.
 + **Compiler decision-making authority**:
@@ -2975,7 +2948,6 @@ inline related content
     - Note: `flatten` is not a standard C++ attribute today.
 
 
-
 3. Points to note:
 
 **Lambdas are very easy to expand inline at compile time.**
@@ -2985,7 +2957,6 @@ inline related content
 **Even if an error does not occur, inline error handling code will still occupy cache space and slow down the fast path. **
 
 **Pay more attention to the use of always_inline and noline**
-
 
 
 **Inline Assembly**
@@ -3003,8 +2974,6 @@ Inline assembly is a technology that embeds assembly code directly into C++ file
 | 3. The code is fully controllable and supports all x86 instructions | 3. It is difficult for the compiler to optimize across inline assembly (such as constant propagation, register allocation) |
 | 4. The compiler automatically handles calling conventions, register saving, and name modification | 4. Microsoft 64-bit compiler does not support inline assembly |
 | 5. Supports function inlining and is portable to multiple x86 platforms (GNU/Clang/Intel) | 5. VEX and non-VEX instructions may be mistakenly mixed, resulting in Intel CPU performance penalty |
-
-
 
 
 **MASM style inline assembly (Microsoft/Intel compilers)**
@@ -3062,7 +3031,7 @@ double ipow(double x, int n) {
 + **naked**: added`__declspec(naked)`You can cancel the prologue/epilogue automatically generated by the compiler, but you need to manually handle stack alignment and register saving (such as`push ebp`/`mov ebp, esp`).
 + **Class/Structure Member Access**: Pass`this`Pointer addressing, the format is`[ecx].Member name `(like`[ecx].length`), in 32-bit Windows`this`Default in`ecx`, 64-bit needs to be adjusted to`rcx`/`rdi`.
 
-  
+
 **GNU style inline assembly (GNU/Clang/Intel Linux compiler)**
 
 **1. Applicable scenarios and compiler support**
@@ -3127,18 +3096,16 @@ double ipow(double x, int n) {
 + **Intel syntax switch**: add at the beginning of the assembly string`.intel_syntax noprefix`, add at the end`.att_syntax prefix`, to ensure that the subsequent code of the compiler is parsed normally.
 
 
-
 **Notes**
 
-1. **Compiler Compatibility**:  
+1. **Compiler Compatibility**:
     - The MASM style is only suitable for MS/Intel compilers and is not supported by 64-bit MS; the GNU style is suitable for GNU/Clang/Intel Linux and has better cross-platform performance.
-2. **Register and stack processing**:  
+2. **Register and stack processing**:
     - Modification of compiler reserved registers (such as`ebp`/`rbx`); when calling external functions, parameter passing and stack cleaning need to be handled manually (for example, 64-bit Windows reserves 32 bytes of shadow space).
-3. **Risk of mixing VEX and SSE**:  
+3. **Risk of mixing VEX and SSE**:
     - Avoid mixing VEX instructions in the same function (such as`vaddps`) and non-VEX instructions (such as`addps`), will cause Intel CPU state switching penalty (about 70 cycles).
-4. **Debug and Verify**:  
+4. **Debug and Verify**:
     - Generate assembly code through a compiler (e.g.`gcc -S`) Verify the correctness of inline assembly; use test programs to compare the output of C++ implementation and assembly implementation to ensure consistent functionality.
-
 
 
 ### 9. lock-free queue andmicro-batching
@@ -3151,7 +3118,6 @@ Lock-free operation:
 2.MESI protocol maintains multi-core data consistency
 
 3.Memory barriers ensure visibility and orderliness of operations
-
 
 
 **The simple spsc implementation version, the advanced multi-mode version can be seen in the simple practice. Because it is compatible with the initial version and consistent with the code usage in subsequent actual projects, it does not implement the interface for blocking the consumption location, and only prevents the producer from overwriting the old data. **
@@ -3179,7 +3145,7 @@ namespace Common {
     auto tryGetNextToWriteTo() noexcept -> T* {
       auto current_write = next_write_index_.load(std::memory_order_relaxed);
       auto current_read = next_read_index_.load(std::memory_order_acquire);
-      
+
       if (UNLIKELY((current_write + 1) & mask_ == current_read & mask_)) {
         return nullptr;
       }
@@ -3192,7 +3158,7 @@ namespace Common {
         if (LIKELY(slot != nullptr)) {
           return slot;
         }
-        
+
         _mm_pause();
       }
     }
@@ -3206,7 +3172,7 @@ namespace Common {
     auto getNextToRead() const noexcept -> const T * {
         auto current_read_index = next_read_index_.load(std::memory_order_relaxed);
         auto current_element_count = num_elements_.load(std::memory_order_acquire);
-    
+
         if (LIKELY(current_element_count > 0)) {
             std::size_t target_index = current_read_index & mask_;
             return &store_[target_index];
@@ -3251,7 +3217,7 @@ namespace Common {
   private:
     static std::size_t round_up_to_power_of_2(std::size_t v) {
       if (UNLIKELY(v == 0)) return 1;
-      
+
       --in;
       v |= v >> 1;
       v |= v >> 2;
@@ -3260,7 +3226,7 @@ namespace Common {
       v |= v >> 16;
       v |= v >> 32;
       ++in;
-      
+
       return v;
     }
 
@@ -3276,19 +3242,19 @@ namespace Common {
 
 ```
 
-  
+
 
 
 ```markdown
 **SPSC cache-friendly optimization (cached peer indices)**
 
-The implementation above is already lock-free / wait-free for SPSC (no RMW spin loops).  
+The implementation above is already lock-free / wait-free for SPSC (no RMW spin loops).
 The next improvement targets cache-coherency traffic:
 
 - producer `enqueue` repeatedly reading consumer-owned `head` causes cross-core cache-line state transitions;
 - consumer `dequeue` repeatedly reading producer-owned `tail` has the symmetric cost.
 
-A common V3 optimization is to keep per-thread cached copies of peer indices: `head_cached_` / `tail_cached_`.  
+A common V3 optimization is to keep per-thread cached copies of peer indices: `head_cached_` / `tail_cached_`.
 Only when the queue is *possibly full* or *possibly empty* do we refresh from atomics (`acquire`). This reduces shared cache-line reads and often improves throughput while reducing jitter.
 
 ```cpp
@@ -3329,8 +3295,8 @@ Implementation notes:
 - combine with `alignas(64)` to further reduce false sharing.
 ```
 
-  
-  
+
+
 Log service based on this
 
 ```cpp
@@ -3590,55 +3556,55 @@ private:
     static constexpr size_t MIN_BATCH_SIZE = 1;      // Single message processing
     static constexpr size_t NORMAL_BATCH_SIZE = 100; // Normal batching
     static constexpr size_t MAX_BATCH_SIZE = 1000;   // Aggressive batching
-    
+
     // Thresholds for determining queue state
     static constexpr size_t LOW_BACKLOG_THRESHOLD = 10;
     static constexpr size_t HIGH_BACKLOG_THRESHOLD = 100;
-    
+
     // Time thresholds in microseconds
     static constexpr int LOW_BACKLOG_TIMEOUT_US = 100;
     static constexpr int HIGH_BACKLOG_TIMEOUT_US = 1000;
-    
+
     std::atomic<size_t> message_queue_size{0};
     std::atomic<bool> should_stop{false};
-    
+
     // Processing function provided by user
     std::function<void(const std::vector<Message>&)> processor_func;
-    
+
     // Reference to external lock-free queue
     QueueType& message_queue;
 
 public:
     explicit MicroBatchProcessor(std::function<void(const std::vector<Message>&>) func, QueueType& queue)
         : processor_func(std::move(func)), message_queue(queue) {}
-    
+
     // Method to add messages to the processor
     void add_message(const Message& msg) {
         message_queue.enqueue(msg);
         message_queue_size.fetch_add(1, std::memory_order_relaxed);
     }
-    
+
     // Main processing loop - implements the dynamic micro-batching strategy
     void run() {
         std::vector<Message> batch_buffer;
         batch_buffer.reserve(MAX_BATCH_SIZE);
-        
+
         while (!should_stop.load(std::memory_order_relaxed)) {
             size_t current_backlog = message_queue_size.load(std::memory_order_relaxed);
-            
+
             // Determine batch size based on backlog (dynamic adjustment)
             size_t target_batch_size = determine_batch_size(current_backlog);
-            
+
             // Collect messages for batching
             collect_messages(batch_buffer, target_batch_size);
-            
+
             // Process the batch if we have messages
             if (!batch_buffer.empty()) {
                 processor_func(batch_buffer);
                 message_queue_size.fetch_sub(batch_buffer.size(), std::memory_order_relaxed);
                 batch_buffer.clear();
             }
-            
+
             // Small yield to prevent busy waiting
             if (current_backlog < LOW_BACKLOG_THRESHOLD) {
                 // Use PAUSE instruction instead of sleep to reduce spin-wait penalties
@@ -3650,7 +3616,7 @@ public:
             }
         }
     }
-    
+
     // Signal the processor to stop
     void stop() {
         should_stop.store(true, std::memory_order_relaxed);
@@ -3671,13 +3637,13 @@ private:
             return MAX_BATCH_SIZE;
         }
     }
-    
+
     // Collect messages into the batch buffer up to target size
     void collect_messages(std::vector<Message>& buffer, size_t target_size) {
         // Collect messages from the external lock-free queue
         size_t collected = 0;
         Message msg;
-        
+
         while (collected < target_size && message_queue.dequeue(msg)) {
             buffer.push_back(msg);
             collected++;
@@ -3686,10 +3652,10 @@ private:
 };
 ```
 
-  
+
 **Ring buffer wrap-boundary write optimization: double-mmap alias mapping**
 
-If boundary crossing is frequent, the usual implementation splits each write into two copies (tail then head).  
+If boundary crossing is frequent, the usual implementation splits each write into two copies (tail then head).
 With double-mmap aliasing, the same backing memory is mapped twice into adjacent virtual ranges, so the ring appears contiguous in virtual address space and wrap-boundary writes can be handled as one linear copy.
 
 Typical flow:
@@ -3717,7 +3683,6 @@ References:
 
 + [https://yukunj.github.io/blogs/double_mmap_trick](https://yukunj.github.io/blogs/double_mmap_trick)
 + [https://abhinavag.medium.com/a-fast-circular-ring-buffer-4d102ef4d4a3](https://abhinavag.medium.com/a-fast-circular-ring-buffer-4d102ef4d4a3)
-
 
 
 ### 10.spmc shared memory lock-free queue application
@@ -3844,7 +3809,7 @@ virtual void OnRtnNGTSTick(TORALEV2API::CTORATstpLev2NGTSTickField *pOrderDetail
     if (pOrderDetail->TickType == 'T'){
         // Transactions one by one
         q_trade_sh->write([=, this](Lev2Trans& msg) {
-            strcpy(msg.SecurityID, pOrderDetail->SecurityID); 
+            strcpy(msg.SecurityID, pOrderDetail->SecurityID);
             msg.TradeTime = pOrderDetail->TickTime * 10;
             msg.TickType = pOrderDetail->TickType;
             msg.Price = pOrderDetail->Price;
@@ -3906,12 +3871,12 @@ void handle_sh(){
     while (1){
         Lev2Trans* pTransDetail = reader_trans.read();
         if (pTransDetail)
-        {   
+        {
             std::string data = fmt::format(
                     "{:s},{:s},{:d},{:d},{:c},{:.3f},{:d},{:d},{:d},{:d},{:d}",
-                    pTransDetail->SecurityID, 
+                    pTransDetail->SecurityID,
                     today,
-                    pTransDetail->TradeTime, 
+                    pTransDetail->TradeTime,
                     duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count(),
                     pTransDetail->TickType,
                     pTransDetail->Price,
@@ -3938,7 +3903,6 @@ thread_sh_trans.join();
 
 //Shared memory permissions issue, you need to add the --ipc=host --pid=host flag when the container is running, and then you can use the original market to do multi-granular Level 2 market analysis
 ```
-
 
 
 ### 11. Memory alignment and typical memory layout optimization
@@ -4145,7 +4109,6 @@ bool operator!=(const AlignedAllocator<T>&, const AlignedAllocator<U>&) {
 ```
 
 
-
 **1. Flexibly choose to use Array of Structure (AoS) or Structure of Array (SoA) according to the computing scenario.**
 
 ```cpp
@@ -4188,7 +4151,6 @@ struct EmployeeData {
     }
 };
 ```
-
 
 
 **2. Denormalized data structure**
@@ -4246,11 +4208,11 @@ struct EnrichedOrder {
     uint64_t order_id;
     uint32_t quantity;
     double   price;
-    
+
     // Redundantly stored Client and Risk information
     uint32_t client_id;
-    uint32_t max_order_size;       
-    double   max_position_value;   
+    uint32_t max_order_size;
+    double   max_position_value;
 
     // ... all other data that will be used when processing the order ...
 };
@@ -4272,22 +4234,20 @@ void check_risk_denormalized(uint64_t order_id) {
 ```
 
 
-
 **3. Memory layout considering access frequency and locality**
 
 ```cpp
 // Memory layout optimization
 struct alignas(64) OptimalOrder {
-    // Sort fields by access frequency    
-    uint64_t price; // most frequently visited    
-    uint32_t quantity;    
-    uint32_t orderId;    
-    uint64_t timestamp; // less access    
-    char symbol[8]; // minimum access    
+    // Sort fields by access frequency
+    uint64_t price; // most frequently visited
+    uint32_t quantity;
+    uint32_t orderId;
+    uint64_t timestamp; // less access
+    char symbol[8]; // minimum access
     // 32 bytes total, exactly half a cache line
 };
 ```
-
 
 
 **Character array and string pointer in 4.struct**
@@ -4322,7 +4282,6 @@ typedef struct Second {
 ```
 
 
-
 **5. Group related functions**
 
 Class member functions and non-class member functions are typically allocated memory addresses in the order in which they are created, so grouping together performance-critical functions that frequently call each other or operate on the same data set can help improve code and data cache performance.
@@ -4330,7 +4289,6 @@ Class member functions and non-class member functions are typically allocated me
 When writing performance-critical functions, whenever possible, place them in the same module in which they are used.
 
 Try to place functions in sequence according to the call chain.
-
 
 
 **6.Adapt cache organization**
@@ -4356,8 +4314,7 @@ To avoid this problem, use tiling technology to divide large matrices into small
 + [https://whichisfaster.dev/q/cache_associativity.html](https://whichisfaster.dev/q/cache_associativity.html)
 
 
-
-**7.Variables** **Correspondence considerations between storage and program memory layout**
+**7.VariablesCorrespondence considerations between storage and program memory layout**
 
 | Storage Type | Features |
 | --- | --- |
@@ -4428,7 +4385,6 @@ static inline size_t calculate_padding(size_t obj_size, int channels) {
 ```
 
 
-
 ### 12.Branch optimization and branch prediction
 Branching is a key point in performance optimization, because incorrect branch prediction will clear the CPU's instruction pipeline, resulting in the waste of dozens of clock cycles. At the same time, more importantlyThe core logic of control flow idiom optimization is:**Computational operations are more efficient than control flow jumps**. When the processor needs to update the instruction pointer to a non-consecutive address, it will cause pipeline stalls, resulting in performance loss.
 
@@ -4462,7 +4418,6 @@ The main types of branching in C++ code include:
 + Function pointer (and function name).
 
 
-
 **1. **`if-else`** statement**
 
 The most basic branch structure. Performance bottlenecks mainly occur in **long **`if-else if`** chain** , because the prediction difficulty increases linearly as the number of conditions increases.
@@ -4472,7 +4427,6 @@ The most basic branch structure. Performance bottlenecks mainly occur in **long 
     - **Reorganization conditions:** Put the most likely (or fastest to calculate) conditions first.Put the code for common scenarios in`if`In the code block, place the error handling logic in`else`code block. Reduce the number of branches as much as possible,Delay or combine multiple error checking logic to ensure that only one error handling branch remains. avoidDependence on "unpredictable conditions" branch.
 
 
-
 **2. **`for / while`** cycle**
 
 A loop is essentially a branch that jumps backwards at the end of each iteration.
@@ -4480,7 +4434,6 @@ A loop is essentially a branch that jumps backwards at the end of each iteration
 + **Performance features:**
     - **Predictable:** For a fixed number of loops (e.g. `for (int i=0; i<100; ++i)`), the branch predictor is almost always correct.
     - **Difficult to predict:** For loops that rely on external data and exit early, branch prediction at the exit point can easily fail.
-
 
 
 **3. **`switch`** statement**
@@ -4493,15 +4446,13 @@ A loop is essentially a branch that jumps backwards at the end of each iteration
     - In this case, the compiler will optimize it to **Jump Table,**Essentially, it is an array that stores code addresses., jump directly to the target code through one calculation and memory addressing,Implement branch-free multiplexing, and the efficiency has nothing to do with the number of cases.
 
 
-
 **4.Ternary operator (conditional expression)**
 
- For scenarios with simple logic and difficult branch prediction (random data patterns), using the ternary operator can avoid branch prediction failures.  
+ For scenarios with simple logic and difficult branch prediction (random data patterns), using the ternary operator can avoid branch prediction failures.
 
 + **principle:**  The compiler can optimize simple ternary operators into branchless conditional move instructions (x86's`cmov`). This instruction will pre-calculate or load the results of the two branches, and then directly select one of the two results to store in the target register based on the conditional judgment result, without code jumps in the whole process.
 + **Example:**`result = (input> threshold) ? value1 : value2;`
 + **Notice:**  High compiler optimization levels (O2 and above). When the expression within the branch has**side effect**(Function calls, I/O operations) or when the calculation logic is complex, the compiler may not generate conditional move instructions.
-
 
 
 **5. Look-up table method to replace branch**
@@ -4531,10 +4482,9 @@ void process_order(const Order& order) {
 ```
 
 
+**6.branchless calculation**
 
-**6.** **branchless calculation**
-
-Use arithmetic and bit operations to replace conditional judgments and completely eliminate branches. Suitable for numerical calculations.  
+Use arithmetic and bit operations to replace conditional judgments and completely eliminate branches. Suitable for numerical calculations.
 
 **Note: branchless is not always faster**. When a branch is well-predicted (e.g., sorted data where branch direction forms long consecutive runs), the branched version allows the CPU to skip unnecessary work entirely, making it actually faster. The branchless version always computes the conditional index and does the store, which is more work per iteration. Use `perf stat -e branch-misses,branches` to confirm the branch prediction hit rate before deciding to eliminate branches.
 
@@ -4555,7 +4505,6 @@ int sign_branchless(int x) {
     return (x > 0) - (x < 0);
 }
 ```
-
 
 
 **7. Loop Unrolling**
@@ -4582,14 +4531,13 @@ a[3] = 3;
 + **Notice:** Modern compilers will automatically unroll simple loops, but for complex loop bodies, manual unrolling is sometimes better.
 
 
-
 **8. Compile time branch (if constexpr, std::enable_if, std::conditional)**
 
 **if constexpr: compile-time conditional branch statement**
 
-Introduced in C++17`if constexpr`Allow branch judgment to be completed at compile time, no branch instructions are generated at runtime, and only qualified code paths are retained.  
+Introduced in C++17`if constexpr`Allow branch judgment to be completed at compile time, no branch instructions are generated at runtime, and only qualified code paths are retained.
 
-+ **Requirement**: The condition must be a compile-time constant expression (such as the result of type extraction).  
++ **Requirement**: The condition must be a compile-time constant expression (such as the result of type extraction).
 + **Application**: In template meta-programming, different code paths are generated based on types or compile-time parameters, and used in conjunction with type extraction.
 
 ```cpp
@@ -4605,8 +4553,7 @@ void check(const T& t) {
 **Advantages**: More intuitive than traditional template specialization, reducing code redundancy.
 
 
-
-**std::enable_if and SFINAE: compile time** **Type branch selection**
+**std::enable_if and SFINAE: compile timeType branch selection**
 
 `std::enable_if`It is a tool for conditional compilation in C++ TMP, relying on the **SFINAE** principle.
 
@@ -4648,10 +4595,10 @@ int main() {
 **Syntax of std::enable_if**
 
 ```cpp
-std::enable_if<condition, return type>::type  
+std::enable_if<condition, return type>::type
 ```
 
-+ if`Condition `for`true`,but`std::enable_if<...>::type`Equivalent to the specified`return type`(As in the example`void`).  
++ if`Condition `for`true`,but`std::enable_if<...>::type`Equivalent to the specified`return type`(As in the example`void`).
 + if`condition`for`false`,but`std::enable_if<...>`No`type`member, causing the function template overload to be invalid (ignored by the compiler).
 
 Introduced in C++14`std::enable_if_t`As an alias, simplified writing:
@@ -4717,13 +4664,13 @@ int main() {
 
 ---
 
-`std::conditional`It is used to select one of two types based on conditions at compile time. The decision-making process is completely completed at compile time, with no runtime overhead.  
+`std::conditional`It is used to select one of two types based on conditions at compile time. The decision-making process is completely completed at compile time, with no runtime overhead.
 
 ```cpp
 std::conditional<condition, type A, type B>::type
 ```
 
-+ **Condition**: Must be a compile-time determinable constant expression (such as`constexpr`variable,`std::is_integral_v<T>`wait).  
++ **Condition**: Must be a compile-time determinable constant expression (such as`constexpr`variable,`std::is_integral_v<T>`wait).
 + **Logic**: If "condition" is`true`,but`std::conditional<...>::type`Equivalent to "type A"; if`false`, is equivalent to "type B".
 
 ```cpp
@@ -4766,7 +4713,7 @@ TypeSelector<float> b; // type is double
 
 **Features and Scenarios**
 
-1. **Compile-time decision**: The condition must be a compile-time constant (such as template parameters,`constexpr`value), ensuring that type selection is done at compile time.  
+1. **Compile-time decision**: The condition must be a compile-time constant (such as template parameters,`constexpr`value), ensuring that type selection is done at compile time.
 2. **Type Adaptation**: Often used to dynamically select types (such as container types, algorithm parameter types) based on type characteristics or constant tags.
 
 ```cpp
@@ -4795,7 +4742,6 @@ ConcurrentQueue<QueueMode::NonBlocking> q2; // Non-blocking queue
 ```
 
 
-
 **Concepts (C++20)** Explicitly define constraints on template parameters, replacing parts`std::enable_if`complex logic to make the code more readable.
 
 ```cpp
@@ -4813,7 +4759,6 @@ T add(T a, T b) {
     return a + b;
 }
 ```
-
 
 
 **9. Branch prediction tips**
@@ -4872,10 +4817,9 @@ Other compiler hints related to branch prediction
 + `[[assume(expression)]]`Attribute (introduced by the C++23 standard to prompt the compiler to assume that an expression is true and then optimize accordingly, which is equivalent to using __builtin_unreachable() in reverse).
 
 
-
 **10. Slow path removal**
 
-In scenarios where more forced separation is required, extract the slow path code into a separate function.  
+In scenarios where more forced separation is required, extract the slow path code into a separate function.
 
 + **principle:**  The machine code of the slow path function will be placed in the cold code area of the binary file by the linker (`.text.cold`), physically separated from the hot path code to avoid I-Cache pollution.
 
@@ -4900,8 +4844,7 @@ void process_packet_refactored(const Packet& pkt) {
 Relatively speaking, there is **attribute**((hot)) Used to mark functions as "hot functions", i.e. functions that execute more frequently or are on a performance-critical path.
 
 
-
-**11. Relying on cpu branch predictor** **Historical execution records**
+**11. Relying on cpu branch predictorHistorical execution records**
 
 Branch Predictor records branch instructions**Historical execution records**(As many times in the past`if`In the judgment, the frequency and regularity of "conditions are met" or "conditions are not met"), and based on these historical data, the direction of the current branch can be "predicted in advance" (for example, "This time`if`"High probability of meeting the conditions");
 
@@ -4958,7 +4901,7 @@ int main() {
     }
 
     // [Key difference] Sort the array so that "even/odd numbers" present a regular distribution
-    std::sort(data, data + arraySize); 
+    std::sort(data, data + arraySize);
     //Characteristics after sorting: The array is arranged in ascending order, and even numbers will be concentrated in a specific range (such as 0-198, even numbers are arranged in order from 0, 2...198)
 
     // Step 2: Exactly the same test timing logic as case1
@@ -4980,11 +4923,10 @@ int main() {
 ```
 
 
-
 ### 13. Composition takes precedence over inheritance
 ```cpp
-#include <cstdio>  
-#include <vector> 
+#include <cstdio>
+#include <vector>
 
 //Define an Order structure to represent order information
 // Each order contains an id of integer type and a price of double precision floating point type.
@@ -5014,15 +4956,14 @@ class CompositionOrderBook {
 };
 
 int main() {
-    InheritanceOrderBook i_book;  
-    CompositionOrderBook c_book;  
+    InheritanceOrderBook i_book;
+    CompositionOrderBook c_book;
 
     printf("InheritanceOrderBook::size():%lu CompositionOrderBook:%lu\n", i_book.size(), c_book.size());
 
     return 0;
 }
 ```
-
 
 
 ### 14. Compile-time polymorphism and compile-time calculation
@@ -5084,7 +5025,7 @@ int main() {
 
 ```cpp
 template <typename T>
-concept GraphBuilder = HasBuildGraph<T, 
+concept GraphBuilder = HasBuildGraph<T,
                                      typename T::DistanceSpaceTypeAlias::DataTypeAlias,
                                      typename T::DistanceSpaceTypeAlias::IDTypeAlias>;
 
@@ -5095,7 +5036,7 @@ struct BuilderA {
         using IDTypeAlias = uint32_t;
     };
     using DistanceSpaceTypeAlias = DistanceSpace;
-    
+
     auto build_graph() -> std::unique_ptr<Graph<float, uint32_t>> {
         return std::make_unique<Graph<float, uint32_t>>(...);
     }
@@ -5108,7 +5049,7 @@ struct BuilderB {
         using IDTypeAlias = uint64_t;
     };
     using DistanceSpaceTypeAlias = DistanceSpace;
-    
+
     auto build_graph() -> std::unique_ptr<Graph<uint8_t, uint64_t>> {
         return std::make_unique<Graph<uint8_t, uint64_t>>(...);
     }
@@ -5135,7 +5076,7 @@ template<OrderType Type>
 struct OrderProcessor;
 
 template<>
-struct OrderProcessor<OrderType::BUY> {    
+struct OrderProcessor<OrderType::BUY> {
     static void process(const Order& order) { /* Order logic */ }
 };
 
@@ -5154,16 +5095,15 @@ void processOrder(const Order& order) {
 **1.4**`if constexpr`**Compile-time polymorphism**
 
 ```cpp
-template <typename Animal> 
-auto speak(const Animal& a) { 
-  if constexpr (std::is_same_v<Animal, Bear>) { a.roar(); } 
+template <typename Animal>
+auto speak(const Animal& a) {
+  if constexpr (std::is_same_v<Animal, Bear>) { a.roar(); }
   else if constexpr (std::is_same_v<Animal, Duck>) { a.quack(); }
   else { static_assert(false); } // Trig compilation error
 }
 ```
 
-**1.5** **Function/operator overloading is the simplest approach to compile-time polymorphism**
-
+**1.5Function/operator overloading is the simplest approach to compile-time polymorphism**
 
 
 **2.Compile time calculation**
@@ -5185,7 +5125,6 @@ const int primes[] = {2, 3, 5, 7, 11, 13, 17}; // Array elements cannot be modif
 + **Compiler Optimization Basics**: Although `const` The initialization of variables may depend on the runtime, but the compiler will take advantage of its "unmodifiable" feature to perform optimizations such as constant propagation and redundant code deletion. For example, if `const int max_len = 100;` Subsequently, it is only used for array size or condition judgment, and the compiler can directly replace it with a constant value to avoid runtime variable access overhead.
 
 
-
 **2. Difference from "symbolic constant"**
 
 `const` Variables with `#define` The difference between symbolic constants. Although both are used to represent "immutable values", there are significant differences in type safety and flexibility:
@@ -5201,14 +5140,13 @@ const int primes[] = {2, 3, 5, 7, 11, 13, 17}; // Array elements cannot be modif
 priority use `const` variable instead of `#define`——For example, represent configuration parameters, fixed arrays and other scenarios,`const` Type safety avoids hidden errors caused by macro substitution (such as `#define PI 3.14` misused as an integer).
 
 
-
 **Other core application scenarios of const**
 
 **1. Const in function parameters: avoid accidental modification and optimize parameter passing**
 
 ```cpp
 // Example: const reference passing to avoid object copying and accidental modification
-void print_vector(const std::vector<int>& thing) { 
+void print_vector(const std::vector<int>& thing) {
     // The elements of vec cannot be modified within the function, while avoiding the copy overhead of value transfer
     for (int val : vec) std::cout << val << " ";
 }
@@ -5235,7 +5173,6 @@ cfactor.set_real(2.0); // Compilation error: const object cannot call non-const 
 ```
 
 
-
 **3. Const restrictions on non-member functions**
 
 Non-member functions (such as global functions and friend functions) cannot be `const`**Modification**——`const` Function modifications only apply to class member functions (limiting the function's permission to modify the object state). If you need to restrict non-member functions from modifying parameters, you need to use it at the parameter level. `const`,For example:
@@ -5246,7 +5183,6 @@ void process_data(const int* data, int len) {
     // The content pointed to by data cannot be modified, it can only be read.
 }
 ```
-
 
 
 **const's association with other compile-time technologies**
@@ -5270,7 +5206,6 @@ constexpr int scale = get_config("scale"); // Compilation error: get_config is a
 // Process thread_local variable
 // Call any function that is not a constexpr function itself
 ```
-
 
 
 **2.const vs constinit: compile-time initialization of static life cycle**
@@ -5300,9 +5235,8 @@ int somefunc() {
 // constinit variable: Force compile-time initialization, select 27 as the initial value
 constinit int s_myconst = somefunc(); // Initialization is completed during compilation, and there is no overhead at runtime
 // const variable: If somefunc calls the runtime path, it will be initialized at runtime and cannot be guaranteed to be completed at compile time.
-const int s_myconst_const = somefunc(); 
+const int s_myconst_const = somefunc();
 ```
-
 
 
 **3. const and templates: compile-time type adaptation and optimization**
@@ -5337,13 +5271,12 @@ float result = v1.dot(v2); // The compiler is optimized for 4-dimensional vector
 `const` Constants are used as template parameters to transfer "dimension judgment" from runtime to compile time to avoid dynamic branches (such as `if (dim == 4) { ... }`) while letting the compiler generate optimal code for each dimension.
 
 
-
 **4. std::nontype_t (C++26) and non-type template parameters**
 
-**Definition and form**  
+**Definition and form**
 C++26 introduces `std::nontype_t` and the variable template `std::nontype` in the `<utility>` header. For a `V` usable as a constant template argument, `std::nontype_t<V>` is an **empty tag type** (no data members) used in function or constructor parameter lists to carry that constant and participate in overload resolution (tag dispatch). `std::nontype<V>` has type `std::nontype_t<V>`; in context you can write `std::nontype<f>`, which serves the same purpose as `std::nontype_t<f>{}`. `V` must satisfy the standard’s requirements for a constant template argument.
 
-**Role**  
+**Role**
 A function parameter cannot be declared `constexpr`; even when the call site passes a constant, the parameter is not a constant expression inside the function, so it cannot be used in `static_assert` or as a template argument. By contrast, a non-type template parameter (NTTP) declared with `template <auto V>` is fixed by a compile-time constant at instantiation. `nontype_t` lets **value-style** APIs (constructors, ordinary functions) encode—in the parameter type—that the argument participates in overload resolution as an NTTP, so the compiler can distinguish a runtime pointer or value from a compile-time binding supplied through the template argument list.
 
 ```cpp
@@ -5355,7 +5288,7 @@ template <auto V>
 void h(std::nontype_t<V>);  // V fixed by the template argument; parameter type carries that constant for overload selection
 ```
 
-**Role in **`std::function_ref`  
+**Role in **`std::function_ref`
 `std::function_ref` provides two constructor styles: one accepts a pointer or similar handle to a callable and stores it at runtime; the other accepts `std::nontype_t<f>` and binds the callable `f` as a non-type template argument, without storing a large object such as a runtime member pointer inside the object. On several ABIs (e.g. Itanium C++ ABI), member function pointers are typically much larger than ordinary function pointers; a small, trivially copyable reference type that does not reserve storage for a member pointer then relies on the latter form for compile-time binding. See the C++26 definition of `std::function_ref` for full signatures.
 
 ```cpp
@@ -5372,7 +5305,7 @@ void sample();
 // };
 ```
 
-**Other uses**  
+**Other uses**
 In user-defined types, overloads such as `operator[](std::nontype_t<I>)` let the index `I` be a template argument so `I` can be used in `static_assert` and other compile-time checks inside the function.
 
 ```cpp
@@ -5387,9 +5320,8 @@ struct FixedArray {
 };
 ```
 
-**Relation to language evolution**  
+**Relation to language evolution**
 If the language later adds `constexpr` parameters or an equivalent mechanism, explicit `nontype_t` tagging can be needed less often; under the current rules, `nontype_t` is the standard-library facility that connects NTTPs to value-style APIs.
-
 
 
 **5.consteval: compile-time enforcement and calculation of functions**
@@ -5414,7 +5346,6 @@ int n = 4;
 const int runtime_dim = n; // runtime_dim is a runtime constant
 Vector<runtime_dim> v3; // Compilation error!
 ```
-
 
 
 **6. constexpr and consteval**
@@ -5467,7 +5398,6 @@ If a `constexpr` template function passes an argument to a `consteval` function,
 + Avoid `constexpr` that is neither reliably usable in constant evaluation nor clearly intentional; for library APIs, prefer `constexpr` when practical.
 
 
-
 **Lookup Table (LUT) and Precomputation**
 
 A lookup table (LUT) is an array structure that stores "precomputation results", and precomputation is an optimization strategy of "completing calculations in advance and storing results".
@@ -5501,7 +5431,6 @@ template for (constexpr auto i : 0..4) {
  Expansion Statements work based on the two-phase nature of C++ template metaprogramming. At compile time, the compiler instantiates the template and unrolls the loop body, converting the loop into a series of static codes. This unwinding process occurs inside the compiler without incurring any runtime overhead, while avoiding the instantiation bloat problem that can occur in traditional recursive templates.
 
 
-
 ### 15. Loop optimization
 **Serial vs Parallel Loop Optimization**
 
@@ -5512,7 +5441,6 @@ template for (constexpr auto i : 0..4) {
 + **Loop Coalescing/Collapsing**: Flatten nested loops (such as two-dimensional array traversal) into a single loop, simplify the data access mode, and adapt to the memory access requirements of parallel hardware such as GPUs;
 + **Loop Interchange**: Exchange the inner and outer order of nested loops, place loops with more intensive data access in the inner layer, and improve the cache hit rate and parallelization potential (such as changing column-first access to row-first access in matrix multiplication).
 + **Loop Rotate**: Convert the loop from for form to do-while form, and add a conditional judgment in front. This transformation mainly prepares for other cyclic transformations, such asAfter inserting a loop guard, perform loop invariant extraction.
-
 
 
 **2. Serial-specific optimization (parallelism is not directly supported)**
@@ -5528,7 +5456,6 @@ template for (constexpr auto i : 0..4) {
 + **Loop Fission**: Split a complex loop into multiple simple loops (such as splitting "subtracted mean + multiplied variance" into two independent loops). Each loop body only contains a single operation, which facilitates parallel execution of the hardware and improves cache reference locality;
 + **Loop Tiling/Blocking**: Divide large-scale data (such as 512x512 matrices) into small blocks (such as 16x16 tiles) to ensure that the data in the blocks can reside in the cache, reduce memory access latency, and adapt to the parallel processing of GPU thread blocks;
 + **Loop Distribution**: Convert conditional branches within the loop (such as `if(do_add) add else subtract`) into two independent loops to avoid branch prediction failures and make each loop independently vectorizable.
-
 
 
 **Core loop transformation technology**
@@ -5580,7 +5507,6 @@ float aussie_vecdot_unroll4(float v1[], float v2[], int n) {
 The key to partial expansion is to "match the expansion factor with the hardware SIMD width" (for example, CPU AVX-2 supports eight 32-bit floating point numbers in parallel, and the expansion factor is set to 8) to avoid wasting hardware resources.
 
 
-
 **2. Loop Tiling/Blocking: Improve cache efficiency and adapt to GPU**
 
 Loop blocking is the core technology of matrix/tensor operation vectorization. By dividing large-scale data into "cache-friendly" small blocks, it reduces memory access latency and adapts to the parallel processing mode of GPU thread blocks.
@@ -5620,7 +5546,6 @@ void clear_matrix_tiled(Matrix m) {
 **Vectorization Adaptation**: The inner loop after blocking (processing 16x16 blocks) can directly call GPU kernel functions or CPU SIMD instructions (such as AVX-512) to process multiple elements in the block at once, significantly improving throughput.
 
 
-
 **3. Loop Fission: Split complex loops and support parallelism**
 
 Loop splitting is to split a multi-operation loop into multiple single-operation loops, eliminating data dependencies and branches, so that each loop can be vectorized independently, which is especially suitable for parallel hardware such as GPUs.
@@ -5640,12 +5565,12 @@ void batchnorm_slow(float v[], int n, float mean, float var, float eps) {
 void batchnorm_fast(float v[], int n, float mean, float var, float eps) {
     float neg_mean = -mean;
     float inv_denom = 1.0f / sqrtf(var + eps);
-    
+
     // Loop 1: Subtract the mean (addition only, vectorizable)
     for (int i = 0; i < n; i++) {
         v[i] += neg_mean;
     }
-    
+
     // Loop 2: Reciprocal of multiplication variance (multiplication only, vectorizable)
     for (int i = 0; i < n; i++) {
         v[i] *= inv_denom;
@@ -5654,7 +5579,6 @@ void batchnorm_fast(float v[], int n, float mean, float var, float eps) {
 ```
 
 **Advantage Analysis**: The two loops after splitting are both "single operation + continuous data access". The GPU can process in parallel through warp threads, and the throughput is 2~4 times higher than that of a single loop.
-
 
 
 **Notes on loop vectorization and advanced optimization**
@@ -5668,14 +5592,12 @@ The core premise of vectorization is "no data dependence between loop iterations
 + **Write after dependency (WAW)**: e.g. `a[i] = 1; a[i] = 2`, repeated write operations need to be merged.
 
 
-
 **2. Adapt hardware SIMD width: Maximize parallel efficiency**
 
 Different hardware has different SIMD widths (for example, CPU AVX-2 is 256 bits, AVX-512 is 512 bits, and GPU warp is 32 bits). You need to adjust the loop unrolling factor and block size adaptation:
 
 + **CPU Example**: AVX-512 supports 16 32-bit floats in parallel with loop unrolling factor set to 16;
 + **GPU Example**: NVIDIA GPU warp supports 32-thread parallelism with tile size set to a multiple of 32.
-
 
 
 **3. Advanced Optimization: Loop Stripping and Sentinel Technology**
@@ -5700,7 +5622,6 @@ for (; i < n; i += 4) { /* Normal processing */ }
 + **Loop Sentinel**: Add a "sentinel element" at the end of the array to eliminate boundary judgment in the loop (such as when looking for a negative number, add a negative number at the end of the array to avoid `i < n` judgment), but it is necessary to ensure that the array is writable and there is no risk of going out of bounds.
 
 
-
 **Overall Process**
 
 Loop vectorization needs to follow the priority of "prepare first, then transform, then adapt" to ensure maximum parallel efficiency:
@@ -5709,7 +5630,6 @@ Loop vectorization needs to follow the priority of "prepare first, then transfor
 2. **Core transformation**: perform exchange/merge on nested loops, perform splitting on complex loops, perform chunking on large-scale data, and build loop structures adapted to parallel hardware;
 3. **Hardware Adaptation**: Adjust the expansion factor and block size according to the SIMD width of the CPU/GPU to ensure full utilization of hardware resources;
 4. **Edge processing**: Use loop stripping to process remaining data, and use sentinel technology to eliminate boundary judgments to avoid parallel efficiency being dragged down by edge logic.
-
 
 
 ### 16.Pointer memory access optimization
@@ -5739,14 +5659,13 @@ void func_restrict(int *__restrict a, int *__restrict b, int n) {
 int main() {
     int a[10];
     int b;
-    
+
     func(a, &b, 10);
     func_restrict(a, &b, 10);
 
     return 0;
 }
 ```
-
 
 
 **2. Pointer memory access optimization**
@@ -5891,7 +5810,6 @@ CompositeIndex info = decode(idx);
 + Applicable scenarios: million-level hot data (such as position index), requiring multi-dimensional query
 
 
-
 **3.Pointer compression**
 
 ```cpp
@@ -5922,7 +5840,7 @@ enum class CompressError {
 // Count the number of leading zeros (64 bits)
 inline uint32_t count_leading_zeros_64(uint64_t value) {
     if (value == 0) return 64;
-    
+
     uint32_t count = 0;
     while ((value & (1ULL << 63)) == 0) {
         value <<= 1;
@@ -5934,7 +5852,7 @@ inline uint32_t count_leading_zeros_64(uint64_t value) {
 // Count the number of trailing zeros (64 bits)
 inline uint32_t count_trailing_zeros_64(uint64_t value) {
     if (value == 0) return 64;
-    
+
     uint32_t count = 0;
     while ((value & 1) == 0) {
         value >>= 1;
@@ -5979,140 +5897,140 @@ constexpr bool can_compress_32_shift(size_t memory_length, size_t alignment) {
 // 32-bit pointer compression function
 template<typename T>
 CompressError compress_ptr_32_shift(
-    T* base_ptr, 
-    const T* const* src_table, 
-    uint32_t* dest_table, 
-    size_t count, 
+    T* base_ptr,
+    const T* const* src_table,
+    uint32_t* dest_table,
+    size_t count,
     uint8_t bit_shift
 ) {
     if (!base_ptr || !src_table || !dest_table || count == 0) {
         return CompressError::INVALID_PARAMETER; // Error: Invalid parameter
     }
-    
+
     uintptr_t base_addr = reinterpret_cast<uintptr_t>(base_ptr);
-    
+
     for (size_t i = 0; i < count; ++i) {
         if (!src_table[i]) {
             dest_table[i] = 0; // Null pointers are compressed to 0
             continue;
         }
-        
+
         uintptr_t ptr_addr = reinterpret_cast<uintptr_t>(src_table[i]);
         if (ptr_addr < base_addr) {
             return CompressError::OUT_OF_RANGE; // Error: pointer address before base address
         }
-        
+
         uintptr_t offset = ptr_addr - base_addr;
         offset >>= bit_shift; // Right shift alignment bit
-        
+
         if (offset > UINT32_MAX) {
             return CompressError::COMPRESSION_ERROR; // Error: Offset exceeds 32-bit range
         }
-        
+
         dest_table[i] = static_cast<uint32_t>(offset);
     }
-    
+
     return CompressError::SUCCESS;
 }
 
 // 32-bit pointer decompression function
 template<typename T>
 CompressError decompress_ptr_32_shift(
-    T* base_ptr, 
-    const uint32_t* src_table, 
-    T** dest_table, 
-    size_t count, 
+    T* base_ptr,
+    const uint32_t* src_table,
+    T** dest_table,
+    size_t count,
     uint8_t bit_shift
 ) {
     if (!base_ptr || !src_table || !dest_table || count == 0) {
         return CompressError::INVALID_PARAMETER; // Error: Invalid parameter
     }
-    
+
     uintptr_t base_addr = reinterpret_cast<uintptr_t>(base_ptr);
-    
+
     for (size_t i = 0; i < count; ++i) {
         if (src_table[i] == 0) {
             dest_table[i] = nullptr; // 0 decompresses into a null pointer
             continue;
         }
-        
+
         uintptr_t offset = static_cast<uintptr_t>(src_table[i]);
         offset <<= bit_shift; // Left shift to restore alignment bit
-        
+
         uintptr_t ptr_addr = base_addr + offset;
         dest_table[i] = reinterpret_cast<T*>(ptr_addr);
     }
-    
+
     return CompressError::SUCCESS;
 }
 
 // 16-bit pointer compression function
 template<typename T>
 CompressError compress_ptr_16_shift(
-    T* base_ptr, 
-    const T* const* src_table, 
-    uint16_t* dest_table, 
-    size_t count, 
+    T* base_ptr,
+    const T* const* src_table,
+    uint16_t* dest_table,
+    size_t count,
     uint8_t bit_shift
 ) {
     if (!base_ptr || !src_table || !dest_table || count == 0) {
         return CompressError::INVALID_PARAMETER; // Error: Invalid parameter
     }
-    
+
     uintptr_t base_addr = reinterpret_cast<uintptr_t>(base_ptr);
-    
+
     for (size_t i = 0; i < count; ++i) {
         if (!src_table[i]) {
             dest_table[i] = 0; // Null pointers are compressed to 0
             continue;
         }
-        
+
         uintptr_t ptr_addr = reinterpret_cast<uintptr_t>(src_table[i]);
         if (ptr_addr < base_addr) {
             return CompressError::OUT_OF_RANGE; // Error: pointer address before base address
         }
-        
+
         uintptr_t offset = ptr_addr - base_addr;
         offset >>= bit_shift; // Right shift alignment bit
-        
+
         if (offset > UINT16_MAX) {
             return CompressError::COMPRESSION_ERROR; // Error: Offset exceeds 16-bit range
         }
-        
+
         dest_table[i] = static_cast<uint16_t>(offset);
     }
-    
+
     return CompressError::SUCCESS;
 }
 
 // 16-bit pointer decompression function
 template<typename T>
 CompressError decompress_ptr_16_shift(
-    T* base_ptr, 
-    const uint16_t* src_table, 
-    T** dest_table, 
-    size_t count, 
+    T* base_ptr,
+    const uint16_t* src_table,
+    T** dest_table,
+    size_t count,
     uint8_t bit_shift
 ) {
     if (!base_ptr || !src_table || !dest_table || count == 0) {
         return CompressError::INVALID_PARAMETER; // Error: Invalid parameter
     }
-    
+
     uintptr_t base_addr = reinterpret_cast<uintptr_t>(base_ptr);
-    
+
     for (size_t i = 0; i < count; ++i) {
         if (src_table[i] == 0) {
             dest_table[i] = nullptr; // 0 decompresses into a null pointer
             continue;
         }
-        
+
         uintptr_t offset = static_cast<uintptr_t>(src_table[i]);
         offset <<= bit_shift; // Left shift to restore alignment bit
-        
+
         uintptr_t ptr_addr = base_addr + offset;
         dest_table[i] = reinterpret_cast<T*>(ptr_addr);
     }
-    
+
     return CompressError::SUCCESS;
 }
 
@@ -6127,32 +6045,32 @@ private:
     bool use_16bit_;
 
 public:
-    PtrCompressor() : base_ptr_(nullptr), memory_size_(0), 
+    PtrCompressor() : base_ptr_(nullptr), memory_size_(0),
                      alignment_(1), bit_shift_(0), use_16bit_(false) {}
-    
+
     //Initialize compressor
     CompressError initialize(T* base_ptr, size_t memory_size, size_t alignment = 1) {
         if (!base_ptr || memory_size == 0) {
             return CompressError::INVALID_PARAMETER; // Error: Invalid parameter
         }
-        
+
         base_ptr_ = base_ptr;
         memory_size_ = memory_size;
         alignment_ = alignment;
         bit_shift_ = bit_shift_from_alignment(alignment);
-        
+
         //Determine whether to use 16-bit or 32-bit compression
         use_16bit_ = can_compress_16_shift(memory_size, alignment);
-        
+
         return CompressError::SUCCESS;
     }
-    
+
     // Compressed pointer array
     CompressError compress(const T* const* src_ptrs, void* dest_buffer, size_t count) {
         if (!src_ptrs || !dest_buffer || count == 0 || !base_ptr_) {
             return CompressError::INVALID_PARAMETER; // Error: Invalid parameter
         }
-        
+
         if (use_16bit_) {
             uint16_t* dest_16 = static_cast<uint16_t*>(dest_buffer);
             return compress_ptr_16_shift(base_ptr_, src_ptrs, dest_16, count, bit_shift_);
@@ -6161,13 +6079,13 @@ public:
             return compress_ptr_32_shift(base_ptr_, src_ptrs, dest_32, count, bit_shift_);
         }
     }
-    
+
     // Decompress the pointer array
     CompressError decompress(const void* src_buffer, T** dest_ptrs, size_t count) {
         if (!src_buffer || !dest_ptrs || count == 0 || !base_ptr_) {
             return CompressError::INVALID_PARAMETER; // Error: Invalid parameter
         }
-        
+
         if (use_16bit_) {
             const uint16_t* src_16 = static_cast<const uint16_t*>(src_buffer);
             return decompress_ptr_16_shift(base_ptr_, src_16, dest_ptrs, count, bit_shift_);
@@ -6176,37 +6094,37 @@ public:
             return decompress_ptr_32_shift(base_ptr_, src_32, dest_ptrs, count, bit_shift_);
         }
     }
-    
+
     // Get the compressed byte size
     size_t get_compressed_size(size_t count) const {
         return use_16bit_ ? count * sizeof(uint16_t) : count * sizeof(uint32_t);
     }
-    
+
     // Check if 16-bit compression is used
     bool uses_16bit_compression() const {
         return use_16bit_;
     }
-    
+
     // Get the displacement value
     uint8_t get_bit_shift() const {
         return bit_shift_;
     }
-    
+
     // Get the base address
     T* get_base_ptr() const {
         return base_ptr_;
     }
-    
+
     // Get the memory size
     size_t get_memory_size() const {
         return memory_size_;
     }
-    
+
     // Get alignment value
     size_t get_alignment() const {
         return alignment_;
     }
-    
+
     // Get error information
     static const char* error_to_string(CompressError error) {
         switch (error) {
@@ -6234,7 +6152,6 @@ public:
 ```
 
 
-
 **4.Non-Temporal writes large data blocks**
 
 Use special instructions provided by the CPU instead of relying on`memset`Or a normal assignment statement.
@@ -6254,7 +6171,7 @@ for (int i = 0; i + 7 < N; i += 8) { // Process 8 ints (32 bytes) each time
 // It allows us to perform "streaming" write operations (Streaming Stores), where data is written directly to memory without disturbing the cache.
 ```
 
-**Why Non-Temporal Stores are faster (RFO elimination)**: Normal stores to a cold cache line trigger a Read-For-Ownership (RFO): the CPU reads the entire 64-byte cache line from memory, modifies it, then eventually writes it back. This doubles memory traffic — 128 bytes moved per 64 bytes written. Non-temporal (streaming) stores bypass the cache entirely and write directly to memory via write-combining buffers, eliminating the RFO read. In theory this gives 2x bandwidth. 
+**Why Non-Temporal Stores are faster (RFO elimination)**: Normal stores to a cold cache line trigger a Read-For-Ownership (RFO): the CPU reads the entire 64-byte cache line from memory, modifies it, then eventually writes it back. This doubles memory traffic — 128 bytes moved per 64 bytes written. Non-temporal (streaming) stores bypass the cache entirely and write directly to memory via write-combining buffers, eliminating the RFO read. In theory this gives 2x bandwidth.
 
 + [https://whichisfaster.dev/q/non_temporal_write.html](https://whichisfaster.dev/q/non_temporal_write.html)
 
@@ -6273,19 +6190,19 @@ public:
     Tracer(const std::string& name) : name_(name) {
         std::cout << "[" << name_ << "] Default constructor @ " << this << "\n";
     }
-    
+
     Tracer(const Tracer& other) : name_(other.name_ + "_copy") {
         std::cout << "[" << name_ << "] Copy constructor from " << &other << " to " << this << "\n";
     }
-    
+
     Tracer(Tracer&& other) noexcept : name_(std::move(other.name_) + "_moved") {
         std::cout << "[" << name_ << "] Move constructor from " << &other << " to " << this << "\n";
     }
-    
+
     ～Tracer() {
         std::cout << "[" << name_ << "] Destructor @ " << this << "\n";
     }
-    
+
     Tracer& operator=(const Tracer& other) {
         if (this != &other) {
             name_ = other.name_ + "_copy_assigned";
@@ -6293,7 +6210,7 @@ public:
         }
         return *this;
     }
-    
+
     Tracer& operator=(Tracer&& other) noexcept {
         if (this != &other) {
             name_ = std::move(other.name_) + "_move_assigned";
@@ -6301,7 +6218,7 @@ public:
         }
         return *this;
     }
-    
+
     const std::string& name() const { return name_; }
 
 private:
@@ -6314,11 +6231,11 @@ public:
     NonCopyableNonMovable(const std::string& id) : id_(id) {
         std::cout << "[NonCopyableNonMovable] Constructor: " << id_ << " @ " << this << "\n";
     }
-    
+
     ～NonCopyableNonMovable() {
         std::cout << "[NonCopyableNonMovable] Destructor: " << id_ << " @ " << this << "\n";
     }
-    
+
     // Disable copying and moving
     NonCopyableNonMovable(const NonCopyableNonMovable&) = delete;
     NonCopyableNonMovable& operator=(const NonCopyableNonMovable&) = delete;
@@ -6399,9 +6316,9 @@ public:
     Counter() { ++instance_count_; }
     Counter(const Counter&) { ++instance_count_; }
     ～Counter() { --instance_count_; }
-    
+
     static int instance_count() { return instance_count_; }
-    
+
 private:
     static int instance_count_;
 };
@@ -6414,46 +6331,46 @@ Counter createCounter() {
 int main() {
     std::cout << "====== Basic RVO example =====\n";
     LargeClass lc_obj = rvoExample(10, 'c', 3.14);
-    
+
     std::cout << "\n====== NRVO example =====\n";
     Tracer nrvo_obj = nrvoExample("nrvo_test");
-    
+
     std::cout << "\n====== Conditional return example =====\n";
     Tracer cond_obj1 = conditionalReturn(true);
     Tracer cond_obj2 = conditionalReturn(false);
-    
+
     std::cout << "\n====== Example of multiple return points =====\n";
     Tracer multi_obj1 = multipleReturns(-1);
     Tracer multi_obj2 = multipleReturns(0);
     Tracer multi_obj3 = multipleReturns(1);
-    
+
     std::cout << "\n===== C++17 forced copy elimination example =====\n";
     auto non_copyable = createNonCopyableNonMovable(); // Cannot be compiled before C++17
-    
+
     std::cout << "\n===== Case where RVO cannot be applied: return parameter =====\n";
     Tracer param_obj = returnParameter(Tracer("parameter"));
-    
+
     std::cout << "\n===== Case where RVO cannot be applied: return static object =====\n";
     Tracer& static_ref = getStaticTracer();
     std::cout << "Static object name: " << static_ref.name() << "\n";
-    
+
     std::cout << "\n====== RVO in template function =====\n";
     auto template_obj = createObject<Tracer>();
-    
+
     std::cout << "\n====== Large object return example =====\n";
     auto large_vec = createLargeVector();
     std::cout << "Vector size: " << large_vec.size() << "\n";
-    
+
     std::cout << "\n====== Dangerous example of relying on copy side effects =====\n";
     {
         Counter c1 = createCounter();
         std::cout << "Counter instances after RVO: " << Counter::instance_count() << "\n";
     }
-    
+
     // Demonstrate the case of forced copy (disable RVO)
     std::cout << "\n====== Case where RVO is disabled (if compiled with -fno-elide-constructors) =====\n";
     Tracer forced_copy = Tracer("forced_copy"); // This will produce extra copies if -fno-elide-constructors are used
-    
+
     return 0;
 }
 ```
@@ -6530,11 +6447,9 @@ double Func2(double x) {
 Compilers (e.g. GCC, MSVS) will do this when optimizations are enabled (e.g. `-O2`), some optimizations (such as constant folding, simple intensity reduction) are automatically completed, but programmers still need to actively optimize the "invisible global logic" of the compiler.
 
 
-
 **2. Operator Strength Reduction**
 
 "Operation intensity reduction" is the core technology of arithmetic optimization, which refers to replacing "strong operations with high computational complexity and long delay" (such as division and floating-point multiplication) with "weak operations with low complexity and short delay" (such as bit operations and addition).
-
 
 
 **1. "Strong operations" that need to be avoided first**
@@ -6543,7 +6458,6 @@ Compilers (e.g. GCC, MSVS) will do this when optimizations are enabled (e.g. `-O
 + **Multiplication(**`*`**)**: The latency of integer multiplication is about 4-6 times that of integer addition, and the latency of floating-point multiplication is even higher;
 + **Division(**`/`) and remainder (`%`**)**: The latency of division in the CPU is 10-20 times that of multiplication, and the latency of remainder operations (especially remainders of powers other than 2) is even higher. When the divisor is a compile-time constant, the compiler automatically converts division/modulo into multiplication + shift ([Barrett reduction](https://en.wikipedia.org/wiki/Division_algorithm)), but cannot optimize when the divisor is only known at runtime. If the same divisor will be used repeatedly, use [libdivide](https://libdivide.com/) to precompute the multiplication constant at runtime; using the divisor as a compile-time constant in a switch-case also triggers this optimization ([whichisfaster.dev/modulo](https://whichisfaster.dev/q/modulo.html));
 + **Math functions**: e.g. `sqrtf`(square root),`expf`(exponential), it needs to be optimized through hardware instructions or approximate algorithms, and the delay of directly calling the standard library function is extremely high.
-
 
 
 **2. Core optimization solution: replace strong operations with weak operations**
@@ -6566,7 +6480,6 @@ The most classic intensity reduction technique uses "left shift is equivalent to
 + Sign problem: Right shift of signed integer is "arithmetic right shift" (complement sign bit), which may lead to wrong results. You need to use `unsigned` type or ensure `x` Non-negative.
 
 
-
 **(2) Addition instead of integer multiplication (for small multipliers)**
 
 When the multiplier is a small integer (e.g. 2, 3, 5), addition latency may be lower than multiplication (especially if there is no bitwise arithmetic optimization space):
@@ -6579,7 +6492,6 @@ When the multiplier is a small integer (e.g. 2, 3, 5), addition latency may be l
 
 
 **Note**: This optimization needs to be combined with hardware characteristics - the multiplication instructions of some CPUs (such as Intel Skylake) have been optimized to a single cycle. At this time, the addition substitution may not be profitable, so you need to `perf` or `std::chrono` Benchmark verification.
-
 
 
 **(3) Floating point division → multiplication (using reciprocal)**
@@ -6639,7 +6551,6 @@ int cents = total_cents % 100;
 **Note**: Integer division/remainder is still an inefficient operation and should be avoided as much as possible - for example, in the above scenario, if you only need to output the total price, you can format it directly `total_cents` is a string (such as `sprintf(buf, "%d.%02d", total_cents/100, total_cents%100)`) to avoid performing division/remainder in the hot path.
 
 
-
 **3. Avoidance of inefficient operations: for remainder (**`%`**) with type conversion**
 
 ---
@@ -6692,7 +6603,6 @@ unsigned char rem = static_cast<unsigned char>(x); // result=255, equivalent to 
 ```
 
 
-
 **2. Avoid type conversion**
 
 **Best Practices Regarding Types**
@@ -6719,7 +6629,7 @@ unsigned char rem = static_cast<unsigned char>(x); // result=255, equivalent to 
 
 ```cpp
 // Inefficient: mixing float and double (implicit conversion)
-float scale = sqrt(2.0) * 3.14159; 
+float scale = sqrt(2.0) * 3.14159;
 // question:
 // 1. 2.0 is double, sqrt(2.0) returns double;
 // 2. 3.14159 is double;
@@ -6734,7 +6644,6 @@ float scale = sqrtf(2.0f) * 3.14159f;
 ```
 
 **Note**: The compiler will optimize "constant expressions" (such as `sqrt(2.0f)` may be calculated at compile time), but still needs to be specified explicitly `float` Type - if missing `f` suffix, the compiler may issue a "precision loss" warning and the runtime may still execute `double` Operation.
-
 
 
 **(2)Avoid **`float`** and **`int`** mix**
@@ -6767,7 +6676,6 @@ void compute_optimized(float* out, int* in, int n) {
 ```
 
 
-
 **4. Expression conversion: reducing redundant calculations and optimizing structures**
 
 ---
@@ -6788,18 +6696,17 @@ float x = temp + temp + sqrtf(temp); // Calculate i*i only once
 **Trap**: Avoid direct assignment and reuse of temporary variables in expressions (e.g. `x = (temp = i*i) + temp`) - C++ undefined `+` The order in which operators are evaluated may result in `temp` It is used without assigning a value, causing a logic error.
 
 
-
 **2. Algebraic identity optimization: reducing the number of operations**
 
 | Before optimization (redundant operations) | After optimization (reducing operations) | Changes in the number of operations |
 | --- | --- | --- |
-| a_x + a_and | a*(x + y) | 2 multiplications + 1 addition → 1 multiplication + 1 addition |
+| a\*x + a\*y | a\*(x + y) | 2 multiplications + 1 addition → 1 multiplication + 1 addition |
 | -x + -y | -(x + y) | 2 negatives + 1 addition → 1 addition + 1 negative |
-| (a && b) |  | (a && c) |
-| !a && !b | !(a |  |
+| (a && b) \|\| (a && c) | a && (b \|\| c) | 2 AND + 1 OR → 1 AND + 1 OR (also reduces evaluation of a) |
+| !a && !b | !(a \|\| b) | 2 negations + 1 AND → 1 OR + 1 negation (De Morgan's law) |
 
 
-**Example: Vector Operation Optimization in AI**  
+**Example: Vector Operation Optimization in AI**
 In AI vector dot product calculation,`sum += a[i]*w[i] + a[i]*b[i]` can be optimized as `sum += a[i]*(w[i]+b[i])`:
 
 ```cpp
@@ -6844,7 +6751,6 @@ constexpr float two_pi = pi * 2.0f; // Force calculation at compile time, no ope
 // Calculate sqrtf(2.0f) at compile time and use the result directly at runtime
 static const float sqrt2 = sqrtf(2.0f);
 ```
-
 
 
 ### 19.Direct manipulation of in-memory binary representations
@@ -6901,7 +6807,6 @@ int main() {
 ```
 
 
-
 ### 20. Function call optimization that cannot be inlined
 **(1) Recursion: stack overhead and cache invalidation**
 
@@ -6955,10 +6860,9 @@ void preorder_tail_rec(Node* root) {
 
 + **Essence of the problem**: Passing large objects (such as`std::vector`, custom matrix class), value transfer will trigger object copying (calling the copy constructor), and the cost is much higher than reference transfer;
 + **Optimization solution**:
-    1. **For large objects**`const&`**Transfer**: For parameters that do not need to be modified, use "`const Type&`" pass to avoid copying, e.g.`void process(const Matrix& mat)`;  
+    1. **For large objects**`const&`**Transfer**: For parameters that do not need to be modified, use "`const Type&`" pass to avoid copying, e.g.`void process(const Matrix& mat)`;
 2.**Small type direct value transfer**: Yes`int`,`float`For scalar types, the cost of value transfer is equivalent to that of reference transfer (or even faster, avoiding pointer indirect access), and there is no need to force the use of references;
     2. **Avoid temporary object passing**: Pass constants to reference parameters (such as`process(5)`), the compiler will automatically create a temporary object. If you need to pass constants frequently, you can overload the function to adapt constant parameters (such as`void process(int val)`).
-
 
 
 ### 21. Cache prefetch warm-up and vectorization
@@ -7026,7 +6930,6 @@ Modern processors (SSE and subsequent instruction sets) provide specific instruc
 + Usually only valid for write-back memory areas
 
 
-
 **cache prefetch**Is a hardware or software technology that loads data from slower main memory into the faster CPU cache in advance before it is officially requested by the CPU. The core idea is to predict the data that the program may need in the future and move it closer to the computing core in advance, thereby hiding the latency of memory access and preventing the CPU from being idle waiting for data.
 
 <!-- 这是一张图片，ocr 内容为： -->
@@ -7087,7 +6990,6 @@ void process_array(int *data, int n) {
 The key here is to choose the right `PREFETCH_DISTANCE`. This distance needs to be large enough to ensure that the CPU processes the current `i` arrive `i+PREFETCH_DISTANCE` between elements, the memory prefetch operation has enough time to complete.
 
 
-
 **Intel C++ Compiler (ICL/ICX)**
 
 Intel compiler also supports `__builtin_prefetch`, and provides its own set of built-in functions that directly correspond to the prefetch instructions of the x86 architecture.
@@ -7133,7 +7035,6 @@ void process_array_pragma(int *data, int n) {
 ```
 
 
-
 Common cache prefetching techniques
 
 | Technique | Line of Attack | Lookahead | Accuracy | Cost/Complexity |
@@ -7163,7 +7064,6 @@ Cost/Complexity: Minimal hardware overhead (<1 KB), simple implementation (only 
 Applicable scenarios: rules, periodic access (such as dense array calculations).
 
 
-
 **2. Simple address correlating**
 
 Solution: Associate a memory address to "one or more different cache miss addresses" (for example, if you access address A and then access address B and C with a high probability, establish a mapping of A → {B, C}).
@@ -7175,7 +7075,6 @@ Accuracy rate: >30% (the address correlation is weak, susceptible to interferenc
 Cost/Complexity: The hardware overhead is huge (MB level), a large number of address mapping relationships need to be stored, and the complexity is high.
 
 Applicable scenarios: simple one-to-many address association, but the generalization of actual scenarios is poor.
-
 
 
 **3. Linked-data correlating**
@@ -7191,7 +7090,6 @@ Cost/Complexity: Minimal hardware overhead (<1 KB), FSM structure is simple.
 Applicable scenarios: chained data structures (such as linked list traversal, tree traversal).
 
 
-
 **4. Dead-block correlating**
 
 Solution: Associate "up to two addresses + control flow" to subsequent addresses ("death event" refers to the cache block "invalidation" event. For example, after the block is replaced, it is predicted that it may be accessed again in the future).
@@ -7203,7 +7101,6 @@ Accuracy: >50% (the correlation of address + control flow is stronger than that 
 Cost/Complexity: The hardware overhead is huge (MB level), and information such as address, control flow, time window, etc. need to be recorded.
 
 Applicable scenarios: Accesses with obvious "invalidation-reuse" mode of cache blocks (such as repeated accesses with strong locality).
-
 
 
 **5. Temporal streaming**
@@ -7219,7 +7116,6 @@ Cost/Complexity: Off-chip implementation (such as using external storage or logi
 Applicable scenarios: streaming data with strong temporal continuity (such as media streaming, log collection).
 
 
-
 **6. Chained streaming**
 
 Solution: Use control flow or hierarchical address prediction to connect "multiple address flows" (for example, flows under different branches are merged into one long flow).
@@ -7231,7 +7127,6 @@ Accuracy: >50% (control flow guides flow connections to enhance predictability).
 Cost/Complexity: Off chip implementation (similar to Temporal, requiring off-chip logic to handle multi-stream connections).
 
 Applicable scenarios: continuous streaming access under multi-branch control flow (such as stream processing with nested conditional branches).
-
 
 
 **7. Irregular stream buffer**
@@ -7247,7 +7142,6 @@ Cost/Complexity: Medium (<32 KB), requires on-chip buffer to store intermediate 
 Applicable scenarios: irregular access without obvious rules but with "implicit spatial locality" (such as sparse matrix calculations).
 
 
-
 **8. Delta correlation(Delta correlation)**
 
 Solution: Record and associate the "Delta (address difference) sequence between cache miss addresses" (for example, the access address sequence is A, A+Δ1, A+Δ1+Δ2,..., predict subsequent addresses through the Δ sequence).
@@ -7259,7 +7153,6 @@ Accuracy: >30% (the regularity of the Δ sequence is weak and susceptible to ran
 Cost/Complexity: Moderate (<32 KB), requires storage of Δ sequence history.
 
 Applicable scenarios: There are implicit regular accesses in address differences (such as certain scanning algorithms).
-
 
 
 **9. Spatial streaming**
@@ -7275,7 +7168,6 @@ Cost/Complexity: High (<64 KB), needs to store the mapping relationship between 
 Applicable scenarios: spatial locality access triggered by the same instruction (such as vectorized calculations, multi-array parallel access).
 
 
-
 **10. Execution based**
 
 Solution: Use "auxiliary threads" or "speculative execution support" to load data in advance through parallel execution (for example, when the main thread is executing, the auxiliary thread predicts subsequent access data and loads it; or the hardware specifies the execution path and pulls the data in advance).
@@ -7287,7 +7179,6 @@ Accuracy: Varies, depending on execution resources (such as number of threads, g
 Cost/Complexity: Not provided (--), but implementation is highly dependent on execution resources (e.g. multi-core, speculative execution logic), cost and complexity vary by design.
 
 Applicable scenarios: calculations that can be parallelized or have speculative paths (such as task-level parallelism, conditional branch speculation).
-
 
 
 **Example:**
@@ -7395,7 +7286,7 @@ inline void mem_prefetch_l3(void *address, uint32_t lines) {
 ```
 
 ```cpp
-#include "prefetch.h" 
+#include "prefetch.h"
 
 #include <iostream>
 #include <vector>
@@ -7469,14 +7360,13 @@ int main() {
     std::cout << std::endl;
 
     std::cout << "--- All prefetch interface calls have been demonstrated ---" << std::endl;
-    
+
     // In actual application, what follows is an intensive calculation loop on data_array
-    
+
     return 0;
 }
 
 ```
-
 
 
 Optimization of cache prefetching in multi-stage pipeline tasks
@@ -7547,7 +7437,7 @@ using GenericStageFunction = std::function<PipelineError(void* input, void* outp
 class MultiStagePipeline {
 public:
     //Constructor
-    MultiStagePipeline(void* input_buffer, void* output_buffer, size_t buffer_size) 
+    MultiStagePipeline(void* input_buffer, void* output_buffer, size_t buffer_size)
         : input_buffer_(input_buffer), output_buffer_(output_buffer), buffer_size_(buffer_size) {
         if (!input_buffer || !output_buffer || buffer_size == 0) {
             error_code_ = PipelineError::INVALID_ARGUMENT;
@@ -7569,14 +7459,14 @@ public:
             if (element_size != sizeof(InputType)) {
                 return PipelineError::INVALID_ARGUMENT;
             }
-            
+
             return stage_func(
-                static_cast<InputType*>(input), 
-                static_cast<OutputType*>(output), 
+                static_cast<InputType*>(input),
+                static_cast<OutputType*>(output),
                 count
             );
         };
-        
+
         stage_functions_.push_back(func);
         stage_input_sizes_.push_back(sizeof(InputType));
         stage_output_sizes_.push_back(sizeof(OutputType));
@@ -7597,17 +7487,17 @@ public:
 
         // Continuous memory copy, optimize cache access
         memcpy(input_buffer_, data, count * sizeof(InputType));
-        
+
         // Prefetch input data
         for (size_t i = 0; i < count && i < calculate_prefetch_distance<16>(); ++i) {
             prefetch_impl<PrefetchStrategy::READ_NEAR>(
                 static_cast<char*>(input_buffer_) + i * sizeof(InputType)
             );
         }
-        
+
         input_count_ = count;
         initial_input_size_ = sizeof(InputType);
-        
+
         return PipelineError::SUCCESS;
     }
 
@@ -7624,28 +7514,28 @@ public:
         void* current_input = input_buffer_;
         void* current_output = output_buffer_;
         size_t current_input_size = initial_input_size_;
-        
+
         //Multi-stage pipeline execution
         for (size_t stage_idx = 0; stage_idx < stage_functions_.size(); ++stage_idx) {
             stage_states_[stage_idx] = StageState::PROCESSING;
-            
+
             // Prefetch the output buffer of the current stage
             prefetch_impl<PrefetchStrategy::WRITE_NEAR>(current_output);
-            
+
             //Execute current stage processing
             PipelineError stage_result = stage_functions_[stage_idx](
-                current_input, 
-                current_output, 
-                input_count_, 
+                current_input,
+                current_output,
+                input_count_,
                 current_input_size
             );
             if (stage_result != PipelineError::SUCCESS) {
                 stage_states_[stage_idx] = StageState::ERROR;
                 return stage_result;
             }
-            
+
             stage_states_[stage_idx] = StageState::COMPLETED;
-            
+
             //Exchange input and output buffer pointers to prepare for the next stage
             std::swap(current_input, current_output);
             current_input_size = stage_output_sizes_[stage_idx];
@@ -7654,7 +7544,7 @@ public:
         // If the number of stages is an odd number, the final result is in output_buffer_
         // If the number of stages is even, the final result is in input_buffer_
         final_output_ = (stage_functions_.size() % 2 == 0) ? input_buffer_ : output_buffer_;
-        
+
         return PipelineError::SUCCESS;
     }
 
@@ -7677,7 +7567,7 @@ public:
         //Copy output data to ensure continuous memory access
         memcpy(output, final_output_, input_count_ * sizeof(OutputType));
         *output_count = input_count_;
-        
+
         return PipelineError::SUCCESS;
     }
 
@@ -7725,7 +7615,7 @@ private:
     std::vector<size_t> stage_input_sizes_;
     std::vector<size_t> stage_output_sizes_;
     std::vector<StageState> stage_states_;
-    
+
     void* input_buffer_{nullptr}; // External input buffer
     void* output_buffer_{nullptr}; // Externally passed output buffer
     void* final_output_{nullptr}; // Buffer of final result
@@ -7741,7 +7631,6 @@ private:
 
 #endif // PIPELINE_PREFETCH_HPP
 ```
-
 
 
 Cache warming (D-cache & I-cache warming)
@@ -7762,7 +7651,6 @@ Make sure the critical code itself is in the CPU cache.
     - Forces the CPU to execute all branches and functions on the critical path, loading their machine instructions into cache lines.
 
 Frequently run a fake execution path to read out frequently used data and store it in the cache
-
 
 
 x86 CPU instructions related to cache
@@ -7833,7 +7721,6 @@ Add 1 to every element in an array.
 + Maximum register width depends on the available instruction set: 128 bits (XMM) for SSE2, 256 bits (YMM) for AVX, 512 bits for AVX512
 + For example: 128-bit XMM registers can be organized into 8 16-bit integers or 4 float vectors under the SSE2 instruction set
 + 64-bit MMX registers should be avoided as they cannot be mixed with x87 floating point code
-
 
 
 **Compiler automatic vectorization and directives**
@@ -7913,7 +7800,6 @@ Function and `#pragma GCC ivdep` similar.
 Asserting that the data in the loop is memory aligned helps the compiler generate more efficient aligned load/store instructions.
 
 
-
 **AVX built-in functions**
 
 [**Intel Intrinsics Guide**](https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html) · [**Intel SDM (Volume 2)**](https://www.intel.com/content/www/us/en/developer/articles/technical/intel-sdm.html)
@@ -7933,7 +7819,6 @@ AVX built-in functions are essentially C++ encapsulation of x86/x64 CPU hardware
 Low latency (local CPU execution, no GPU data transmission overhead), development threshold lower than assembly, and can be seamlessly integrated with C++ code;
 
 
-
 **2. Core components: register types and header files**
 
 AVX represents registers through specific C++ types and declares built-in functions through dedicated header files to ensure compile-time type safety and correct generation of instructions:
@@ -7946,7 +7831,6 @@ AVX represents registers through specific C++ types and declares built-in functi
     - `<intrin.h>`: General built-in function declaration (applicable to MSVS, GCC);
     - `<emmintrin.h>`: SSE/AVX basic instructions (128-bit operation);
     - `<immintrin.h>`: AVX-2/AVX-512 extended instructions (256/512-bit operation).
-
 
 
 **3. Core operations of AVX: vertical and horizontal instructions**
@@ -7998,7 +7882,6 @@ void aussie_avx512_multiply_16_floats(float v1[16], float v2[16], float result[1
 **Command naming rules**: AVX built-in function names follow "_mm[width]_operation_datatype" format, for example_mm256_mul_ps, "256" means 256-bit register, "mul" means multiplication, and "ps" means "packed single-precision" (packed 32-bit floating point number).
 
 
-
 **(2) Commonly used vertical operation instructions**
 
 | Operation type | AVX (128-bit) | AVX2 (256-bit) | AVX-512 (512-bit) | Description |
@@ -8013,7 +7896,6 @@ void aussie_avx512_multiply_16_floats(float v1[16], float v2[16], float result[1
 
 
 **AVX-512 naming**: `ps`/`pd` = packed float/double; integers often `epi32`, `epu32`, etc.; predicated forms are typically `_mm512_mask_*` (requires mask registers).
-
 
 
 **Horizontal operation: Parallel calculation of internal elements of a single vector**
@@ -8126,7 +8008,6 @@ float vector_dot_product(float* v1, float* v2, int len) {
     3. Before AVX code calls an external library function that does not support AVX
 
 
-
 7**. Typical application examples: vector dot product and element-level operations**
 
 **AVX (128-bit) 4-element vector dot product**
@@ -8137,10 +8018,10 @@ float aussie_avx_vecdot_4_floats(float v1[4], float v2[4]) {
     // 1. Load array into 128-bit register
     __m128 reg1 = _mm_loadu_ps(v1);
     __m128 reg2 = _mm_loadu_ps(v2);
-    
+
     // 2. Calculate dot product: The third parameter 0xF1 of _mm_dp_ps means "all elements participate in the dot product, and the result is stored in the low bit"
     __m128 dot_result = _mm_dp_ps(reg1, reg2, 0xF1);
-    
+
     // 3. Extract the scalar result: _mm_cvtss_f32 extracts the lower 32-bit float from the 128-bit register
     return _mm_cvtss_f32(dot_result);
 }
@@ -8154,26 +8035,25 @@ float aussie_avx_vecdot_4_floats(float v1[4], float v2[4]) {
 float aussie_avx2_vecdot_8_floats(float v1[8], float v2[8]) {
     __m256 reg1 = _mm256_load_ps(v1);
     __m256 reg2 = _mm256_loadu_ps(v2);
-    
+
     // Step 1: Calculate the 8-element dot product (split into two 4-element dot products)
     // 0xFF: All elements participate in the dot product, and the result is stored in the lower 128 bits of the register
     __m256 dot = _mm256_dp_ps(reg1, reg2, 0xFF);
-    
+
     // Step 2: Split the 256-bit register into two 128-bit registers
     __m128 dot_low = _mm256_extractf128_ps(dot, 0); // Low 128 bits (including the first 4 elements dot product result)
     __m128 dot_high = _mm256_extractf128_ps(dot, 1); // High 128 bits (including the last 4 elements dot product result)
-    
+
     // Step 3: Sum the lower 32 bits of the two 128-bit registers (dot product result)
     __m128 sum = _mm_add_ss(dot_low, dot_high);
-    
+
     // Step 4: Extract the final scalar result
     return _mm_cvtss_f32(sum);
 }
 ```
 
 
-
-**Overall example**: 
+**Overall example**:
 
 ```cpp
 /*
@@ -8326,7 +8206,7 @@ int main() {
         c[i] = static_cast<float>(i);
         d[i] = 0.0f;
     }
-    
+
     std::cout << "--- AVX built-in function demonstration ---\n" << std::endl;
 
     // 1. Vector addition
@@ -8340,7 +8220,7 @@ int main() {
     std::cout << "\n2. Fusion multiplication and addition (c = a * b + c):" << std::endl;
     vector_fma(a, b, c, n);
     std::cout << " c[0]=" << c[0] << " (Expected: 2), c[1]=" << c[1] << " (Expected: 9)" << std::endl;
-    
+
     // 3. Multiply and subtract absolute values
     for (int i = 0; i < n; ++i) c[i] = static_cast<float>(i * 3); // Reset c
     std::cout << "\n3. Multiply and subtract absolute values ​​(d = |a * b - c|):" << std::endl;
@@ -8357,7 +8237,7 @@ int main() {
     __m256 test_vec = _mm256_set1_ps(1.0f); // 8 1s
     float sum = horizontal_sum(test_vec);
     std::cout << "  sum of eight 1s = " << sum << " (Expected: 8)" << std::endl;
-    
+
     // 6. Math functions
     std::cout << "\n6. Mathematical function:" << std::endl;
     vector_math_functions(a, b, c, n);
@@ -8396,7 +8276,6 @@ In practice the best strategy is usually:
 4. **last resort**: Only consider using it for core code segments with extreme performance requirements.**built-in functions**Do a manual rewrite.
 
 
-
 **SIMD vectorization error handling: NAN/INF propagation**
 
 ```cpp
@@ -8409,12 +8288,12 @@ __m256 safe_log(__m256 x) {
     // _CMP_LT_OQ: comparison operation, returns a mask vector
     // For each element: if x[i] < 0.0, the corresponding mask bit is 1 (true), otherwise it is 0 (false)
     __m256 mask = _mm256_cmp_ps(x, _mm256_setzero_ps(), _CMP_LT_OQ);
-    
+
     // 2. Generate standard NAN payload (error code=0xDEADBEEF)
     // Using the IEEE 754-2008 specification, only store the error code in the lower 22 bits of the mantissa
     FloatPayload fp = encode_error(static_cast<ErrorCode>(0xDEADBEEF));
     __m256 nan_payload = _mm256_set1_ps(fp.f);
-    
+
     // 3. Conditional mixing
     // _mm256_max_ps(x, FLT_MIN): Protect underflow and prevent values ​​close to 0 from generating -INF
     // _mm256_log_ps(...): Calculate the logarithm of the valid input
@@ -8422,16 +8301,16 @@ __m256 safe_log(__m256 x) {
     // Implement "vectorized if-else" here: use NAN payload for negative inputs, and use normal calculation results for other inputs
     // Branchless design avoids performance traps in SIMD
     x = _mm256_blendv_ps(
-        _mm256_log_ps(_mm256_max_ps(x, _mm256_set1_ps(FLT_MIN))), 
-        in_payload, 
+        _mm256_log_ps(_mm256_max_ps(x, _mm256_set1_ps(FLT_MIN))),
+        in_payload,
         mask
     );
-    
+
     // 4. Automatically propagate to subsequent calculations
     // According to the IEEE 754 standard, NAN is propagated in any arithmetic operation
     // Example:NAN + 5 = NAN, log(NAN) = NAN, sqrt(NAN) = NAN
     // This way the error will automatically "infect" all subsequent calculations that depend on this value, without the need for intermediate checks
-    return x; 
+    return x;
 }
 
 // Only called at the end of the calculation chain, checking the entire vector for any errors (NAN/INF)
@@ -8442,10 +8321,10 @@ bool has_errors(__m256 result) {
     __m256 abs_result = _mm256_andnot_ps(
         _mm256_set1_ps(-0.0f), result
     );
-    
+
     // Create a vector with all elements being positive infinity (INF)
     __m256 inf = _mm256_set1_ps(INFINITY);
-    
+
     // Detect INF and NAN: According to IEEE 754, NAN returns false when compared with any value
     // But NAN > INF will return true, so use >= to capture both INF and NAN
     // _mm256_cmp_ps(..., _CMP_GE_OQ): Generate comparison mask, 1 when >=
@@ -8456,7 +8335,6 @@ bool has_errors(__m256 result) {
     ) != 0;
 }
 ```
-
 
 
 **Using Vector classes**
@@ -8485,7 +8363,6 @@ c.store(result); // Store the result
     - Conditional execution (mask operation)
     - Horizontal operation (reduction)
     - Seamless integration with scalar code
-
 
 
 ### 22.HPC auxiliary macro
@@ -8542,7 +8419,6 @@ namespace hpc {
 ```
 
 
-
 ### 23. Double array plus atomic index to implement data update and access
 ```cpp
 #include <atomic>
@@ -8564,13 +8440,13 @@ public:
     void update(const std::vector<T>& newData) {
         // Get the index of the next buffer
         size_t nextIndex = 1 - currentIndex.load(std::memory_order_relaxed);
-        
+
         //Update the data of the next buffer
         std::copy(newData.begin(), newData.end(), buffers[nextIndex].begin());
-        
+
         // Use a memory barrier to ensure that the index is updated only after the data is written.
         std::atomic_thread_fence(std::memory_order_release);
-        
+
         // Atomically update the current index so readers can access the new data
         currentIndex.store(nextIndex, std::memory_order_relaxed);
     }
@@ -8579,10 +8455,10 @@ public:
     std::vector<T> read() const {
         // Get the current index atomically
         size_t index = currentIndex.load(std::memory_order_relaxed);
-        
+
         // Use a memory barrier to ensure that the index read is completed before reading the data
         std::atomic_thread_fence(std::memory_order_acquire);
-        
+
         // Return a copy of the current buffer
         return buffers[index];
     }
@@ -8595,7 +8471,7 @@ private:
 // Example usage
 int main() {
     DoubleBuffer<int> buffer(10);
-    
+
     //Producer thread: update data regularly
     std::thread producer([&]() {
         for (int i = 0; i < 5; ++i) {
@@ -8603,15 +8479,15 @@ int main() {
             for (size_t j = 0; j < newData.size(); ++j) {
                 newData[j] = i * 10 + j;
             }
-            
+
             buffer.update(newData);
             std::cout << "Producer updated data: iteration " << i << std::endl;
-            
+
             // Simulate production delays
             std::this_thread::sleep_for(std::chrono::seconds(1));
         }
     });
-    
+
     //Consumer thread: read data regularly
     std::thread consumer([&]() {
         for (int i = 0; i < 8; ++i) {
@@ -8621,20 +8497,20 @@ int main() {
                 std::cout << value << " ";
             }
             std::cout << std::endl;
-            
+
             //Simulate consumption delay
             std::this_thread::sleep_for(std::chrono::milliseconds(700));
         }
     });
-    
+
     producer.join();
     consumer.join();
-    
+
     return 0;
 }
 ```
 
-**Dual arrays can be combined with dry running mode at the same time** **While lock-free ensuring data consistency, hot path latency is reduced through cache warm-up.**
+**Dual arrays can be combined with dry running mode at the same timeWhile lock-free ensuring data consistency, hot path latency is reduced through cache warm-up.**
 
 ```cpp
 #include <atomic>
@@ -8648,7 +8524,7 @@ template<typename T>
 class DoubleBufferWithDryRun {
 public:
     // Initialization: double array + atomic index, supports specified cache line size (default 64 bytes, adapted to Intel CPU)
-    DoubleBufferWithDryRun(size_t size, size_t cacheLineSize = 64) 
+    DoubleBufferWithDryRun(size_t size, size_t cacheLineSize = 64)
         : currentIndex(0), cacheLineSize(cacheLineSize) {
         buffers[0] = std::vector<T>(size);
         buffers[1] = std::vector<T>(size);
@@ -8676,21 +8552,21 @@ public:
     void dryRunWarmCache() const {
         size_t activeIndex = currentIndex.load(std::memory_order_relaxed);
         size_t standbyIndex = 1 - activeIndex;
-        
+
         size_t step = cacheLineSize / sizeof(T);
         if (step == 0) step = 1;
-        
+
         for (size_t i = 0; i < buffers[activeIndex].size(); i += step) {
             volatile T temp = buffers[activeIndex][i]; // volatile disables compiler optimization and forces cache loading
-            (void)temp; 
+            (void)temp;
         }
-        
+
         for (size_t i = 0; i < buffers[standbyIndex].size(); i += step) {
             volatile T temp = buffers[standbyIndex][i];
             (void)temp;
         }
-        
-        std::cout << "[Dry-Run] Cache warmed for both buffers (active: " << activeIndex 
+
+        std::cout << "[Dry-Run] Cache warmed for both buffers (active: " << activeIndex
                   << ", standby: " << standbyIndex << ")" << std::endl;
     }
 
@@ -8700,7 +8576,6 @@ private:
     const size_t cacheLineSize;
 };
 ```
-
 
 
 ### 24. Custom spin lock implementation
@@ -8804,12 +8679,10 @@ void unlock() {
 + `memory_order_release`: Ensure that all memory read and write operations before releasing the lock (such as `++counter`) are completed and visible to other threads. it is related to `lock()` in `acquire` Pairing constitutes a synchronous relationship.
 
 
-
 + **advantage**: The implementation is very simple.
 + **shortcoming**:
     - **unfair**: The order in which threads acquire locks is random, which may lead to "starvation" of some threads.
     - **High Cache Contention**: This is the biggest problem. All waiting threads are in the same atomic variable `locked` Spin on. On a multi-core system, when a thread releases the lock (modify`locked`) will cause the cache lines of all other spinning cores to become invalid. This will cause a large amount of cache coherence traffic (Cache Coherence Traffic), occupy the memory bus, and seriously affect performance, especially when the number of cores is large.
-
 
 
 **2. Implementation 2: MCS lock (Mellor-Crummey and Scott Lock)**
@@ -8949,14 +8822,12 @@ void unlock(lock_node* node) {
 3. if there is a successor `next`, just put it `locked` flag is set to 1, thus waking up the `next` The next thread to spin on the node.`release` The semantics ensure that modifications to the critical section are visible to the next thread.
 
 
-
 + **advantage**:
     - **fair**: Follow first-in-first-out (FIFO) order.
     - **High performance/high scalability**: Each thread spins on a different memory location, greatly reducing cache contention and thus performing very well in multi-core environments.
 + **shortcoming**:
     - Implementation is more complex than the other two.
     - `lock` and `unlock` The interface needs to pass a `lock_node` Object is a little inconvenient to use.
-
 
 
 **3. Implementation 3: Ticket Lock**
@@ -9038,14 +8909,12 @@ void unlock() {
 + `head.fetch_add(1)`: atomically place `head` Adding one is equivalent to "calling the next number".`release` The semantics ensure that modifications to the critical section are visible to the next thread that acquires the lock.
 
 
-
 + **advantage**:
     - **fair**: Strict first-in-first-out (FIFO) order.
     - **Simple to implement**: Much simpler than MCS lock.
     - `unlock` Very fast operation, just one `fetch_add`.
 + **shortcoming**:
     - **Cache contention still exists**: Like the Test-and-Set lock, all waiting threads are**same one**Atomic variables `head` Spin on. when `unlock` Revise `head` , it will also invalidate all cache lines waiting for the core, causing bus traffic. Although slightly better than implementation one (because `unlock` The operation itself is fast), but does not scale well under high contention as an MCS lock.
-
 
 
 | characteristic | Implementation 1 (Test-and-Set) | Implementation 2 (MCS Lock) | Implementation 3 (Ticket Lock) |
@@ -9086,14 +8955,12 @@ The conditional check of the while loop (... != EXPECTED_VALUE) is a conditional
 + This conflict is detected once (potentially) by the CPU's internal logic**memory ordering violation**. To correct this error and strictly adhere to the memory consistency model, the CPU triggers a deeper and more expensive pipeline flush.
 
 
-
 **PAUSE command** It is an assembly instruction used to optimize spin-wait loops. It was first introduced in the Intel Pentium 4 processor, but is backwards compatible with all IA-32 processors. In early processors, the PAUSE instruction behaved like a NOP (No Operation) instruction, while in modern processors, it has more complex functionality.
 
 1. **Optimize spin-wait loop performance** In a spin-wait loop, the processor may experience performance degradation due to detected memory order violations. The PAUSE instruction helps the processor avoid memory order violations by providing a hint to the processor that the current code is a spin-wait loop. This optimization significantly improves the performance of spin locks.
 2. **Reduce power consumption** In a spin-wait loop, the processor may execute the loop at extremely high speeds, resulting in significant power consumption. Inserting the PAUSE instruction reduces the power consumption of the processor, making it more energy efficient while waiting for resources.
 3. **Reduce pipeline refresh** In a multi-core or hyper-threaded environment, the PAUSE instruction can reduce pipeline refreshes caused by speculative execution, thereby improving resource utilization and avoiding wasting computing resources of other threads.
 4. **Delay operation** The PAUSE instruction is implemented as a pre-defined delay on some processors, and the delay time is limited or even zero. It does not change the architectural state of the processor, only performs deferred operations.
-
 
 
 ### 25.Bit fields and bit operations
@@ -9112,7 +8979,7 @@ Example of usage scenario:Order status compression, market data update marking, 
 ```cpp
 // Inefficient: assign values ​​one by one (the compiler generates 3 bit operations)
 struct Naive {
-    uint8_t a:4; 
+    uint8_t a:4;
     uint8_t b:2;
     uint8_t c:2;
 };
@@ -9148,7 +9015,7 @@ set_bits<6,2>(y.raw, C); // Set c
 
 ```cpp
 // Inefficient: reading the same byte multiple times
-uint8_t get_a(const Optimized& obj) { 
+uint8_t get_a(const Optimized& obj) {
     return obj.a; //Trigger bit extraction every time
 }
 
@@ -9165,7 +9032,7 @@ inline uint8_t fast_get_a(uint8_t raw) {
 #pragma pack(push, 1)
 struct PortableFlags {
     uint8_t flags; // Manually manage bit fields
-    
+
     bool get_feature_x() const { return flags & 0x01; }
     void set_feature_x(bool v) { flags = (flags & ~0x01) | (v ? 0x01 : 0); }
 };
@@ -9185,7 +9052,7 @@ enum class Flags : uint8_t {
 };
 
 // safe operation
-Flags operator|(Flags a, Flags b) { 
+Flags operator|(Flags a, Flags b) {
     return static_cast<Flags>(
         static_cast<uint8_t>(a) | static_cast<uint8_t>(b)
     );
@@ -9196,13 +9063,12 @@ Flags config = Flags::FeatureA | Flags::FeatureC;
 bool hasA = (static_cast<uint8_t>(config) & static_cast<uint8_t>(Flags::FeatureA)) != 0;
 ```
 
-Bitfields are only used for**Memory/Storage Critical Path**, and recommend: 
+Bitfields are only used for**Memory/Storage Critical Path**, and recommend:
 
-1. Initialize/update via batch bit operations 
-2. use`static_assert`Verify memory layout 
-3. Prioritize C++20`std::bit_cast`and enum bitmask 
+1. Initialize/update via batch bit operations
+2. use`static_assert`Verify memory layout
+3. Prioritize C++20`std::bit_cast`and enum bitmask
 4. Never use compiler-generated bitfield layouts directly in network protocols/file formats
-
 
 
 The core applications of bit operations are "using a single integer to store multiple Boolean states" (bit flags) or "representing set relationships" (bit sets), both of which can significantly reduce memory usage and execution delays in low-latency scenarios (such as HFT order status, AI reasoning switches).
@@ -9251,20 +9117,19 @@ int main() {
   unsigned order_status = 0;
   //Set "new order" status
   order_status = AUSSIE_SET_BITS(order_status, ORDER_NEW);
-  
+
   // Check if it is a new order
   if (AUSSIE_ONE_BIT_SET(order_status, ORDER_NEW)) {
     std::cout << "New order created" << std::endl;
   }
-  
+
   // Mark as "Completed" and clear "New Order"
   order_status = AUSSIE_SET_BITS(order_status, ORDER_FILLED);
   order_status = AUSSIE_CLEAR_BITS(order_status, ORDER_NEW);
-  
+
   return 0;
 }
 ```
-
 
 
 **2. Bit Sets: Use integers to represent set relationships**
@@ -9483,7 +9348,7 @@ private:
     WorkerID id_;
     CpuID cpu_id_;
     std::thread thread_;
-    
+
     moodycamel::ConcurrentQueue<CoroHandle>& task_queue_;
     std::atomic<size_t>& total_task_count_;
     std::atomic<size_t>& total_finish_count_;
@@ -9609,7 +9474,7 @@ private:
 
     std::atomic<size_t> total_task_count_{0};
     std::atomic<size_t> total_finish_count_{0};
-    
+
     SpinLock enqueue_lock_;
     std::unique_ptr<moodycamel::ConcurrentQueue<CoroHandle>> task_queue_;
 };
@@ -9699,7 +9564,6 @@ int main() {
 ```
 
 
-
 ### 27. Common design patterns
 ```cpp
 // test.cpp
@@ -9730,12 +9594,12 @@ public:
         if (current_count >= MAX_OBSERVERS) {
             return false; // Capacity exceeded
         }
-        
-        if (!count_.compare_exchange_strong(current_count, current_count + 1, 
+
+        if (!count_.compare_exchange_strong(current_count, current_count + 1,
                                            std::memory_order_acq_rel)) {
             return false; // Concurrent modification
         }
-        
+
         observers_[current_count] = observer;
         return true;
     }
@@ -9792,7 +9656,7 @@ public:
                 return nullptr;
         }
     }
-    
+
     static void destroyOrder(Order* order) {
         delete order;
     }
@@ -9850,7 +9714,7 @@ std::atomic<ConfigManager*> ConfigManager::instance_{nullptr};
 class TradingContext {
 public:
     using TradeFunction = void(*)(double);
-    
+
 private:
     TradeFunction tradeFunc_ = nullptr;
 
@@ -9900,16 +9764,16 @@ enum class OrderState : uint8_t {
 alignas(64) constexpr OrderState TRANSITION_TABLE[5][4] = {
     // NEW -> [PARTIAL_FILL, FULL_FILL, CANCEL, REJECT]
     {OrderState::PARTIALLY_FILLED, OrderState::FILLED, OrderState::CANCELLED, OrderState::REJECTED},
-    
+
     // PARTIALLY_FILLED -> [PARTIAL_FILL, FULL_FILL, CANCEL, REJECT]
     {OrderState::PARTIALLY_FILLED, OrderState::FILLED, OrderState::CANCELLED, OrderState::REJECTED},
-    
+
     // FILLED (terminal state)
     {OrderState::FILLED, OrderState::FILLED, OrderState::FILLED, OrderState::FILLED},
-    
+
     // CANCELLED (terminal state)
     {OrderState::CANCELLED, OrderState::CANCELLED, OrderState::CANCELLED, OrderState::CANCELLED},
-    
+
     // REJECTED (terminal state)
     {OrderState::REJECTED, OrderState::REJECTED, OrderState::REJECTED, OrderState::REJECTED}
 };
@@ -9926,12 +9790,12 @@ public:
     // state transitions with cache-friendly lookup
     bool processPartialFill() {
         OrderState current = state_.load(std::memory_order_acquire);
-        if (current == OrderState::FILLED || 
-            current == OrderState::CANCELLED || 
+        if (current == OrderState::FILLED ||
+            current == OrderState::CANCELLED ||
             current == OrderState::REJECTED) {
             return false;   // Terminal state, no transitions allowed
         }
-        
+
         OrderState next = TRANSITION_TABLE[static_cast<uint8_t>(current)][0];
         state_.store(next, std::memory_order_release);
         return true;
@@ -9939,12 +9803,12 @@ public:
 
     bool processFullFill() {
         OrderState current = state_.load(std::memory_order_acquire);
-        if (current == OrderState::FILLED || 
-            current == OrderState::CANCELLED || 
+        if (current == OrderState::FILLED ||
+            current == OrderState::CANCELLED ||
             current == OrderState::REJECTED) {
-            return false; 
+            return false;
         }
-        
+
         OrderState next = TRANSITION_TABLE[static_cast<uint8_t>(current)][1];
         state_.store(next, std::memory_order_release);
         return true;
@@ -9952,12 +9816,12 @@ public:
 
     bool processCancel() {
         OrderState current = state_.load(std::memory_order_acquire);
-        if (current == OrderState::FILLED || 
-            current == OrderState::CANCELLED || 
+        if (current == OrderState::FILLED ||
+            current == OrderState::CANCELLED ||
             current == OrderState::REJECTED) {
             return false;
         }
-        
+
         OrderState next = TRANSITION_TABLE[static_cast<uint8_t>(current)][2];
         state_.store(next, std::memory_order_release);
         return true;
@@ -9965,12 +9829,12 @@ public:
 
     bool processReject() {
         OrderState current = state_.load(std::memory_order_acquire);
-        if (current == OrderState::FILLED || 
-            current == OrderState::CANCELLED || 
+        if (current == OrderState::FILLED ||
+            current == OrderState::CANCELLED ||
             current == OrderState::REJECTED) {
             return false;
         }
-        
+
         OrderState next = TRANSITION_TABLE[static_cast<uint8_t>(current)][3];
         state_.store(next, std::memory_order_release);
         return true;
@@ -9979,8 +9843,8 @@ public:
     // Check if order is in a terminal state
     bool isTerminal() const {
         OrderState current = state_.load(std::memory_order_relaxed);
-        return (current == OrderState::FILLED || 
-                current == OrderState::CANCELLED || 
+        return (current == OrderState::FILLED ||
+                current == OrderState::CANCELLED ||
                 current == OrderState::REJECTED);
     }
 };
@@ -9988,7 +9852,7 @@ public:
 int main() {
     // Observer Pattern Example
     LockFreeMarketDataPublisher<> publisher;
-    
+
     class FixedObserver : public MarketDataObserver {
     public:
         void onUpdate(double price, int volume) override {
@@ -9996,7 +9860,7 @@ int main() {
             // In real system, this would contain actual processing logic
         }
     };
-    
+
     FixedObserver observer;
     publisher.subscribe(&observer);
     publisher.notify(100.5, 50);
@@ -10025,7 +9889,6 @@ int main() {
 ```
 
 
-
 ### 28. C++ function parameter passing issues and optimization
 **1. Temporary object**
 
@@ -10040,14 +9903,12 @@ An unnamed object temporarily created during expression evaluation. The default 
 **Life cycle extension**: by`const T&`or`T&&`After binding, the life cycle is consistent with the reference.
 
 
-
 **2. **`const T&`**Function**
 
 Safely "borrow" objects, avoiding copy overhead while ensuring read-only availability.
 
 + can bind lvalues and rvalues.
 + Extend the life cycle of the bound rvalue, allowing safe access but not modification.
-
 
 
 **3. **`T&&`**Function**
@@ -10061,7 +9922,6 @@ Safely "borrow" objects, avoiding copy overhead while ensuring read-only availab
 **Perfect Forward**: Combine`std::forward`and reference folding, which preserves the lvalue/rvalue attributes of parameters in the template and ensures that overloaded functions with copy or move semantics are called correctly.
 
 **Explicit Semantics**: specifically bind rvalues (or`std::move`Marked lvalue), clearly expressing the semantics of "resources can be safely transferred".
-
 
 
 **4. Correlation and comparison**
@@ -10157,7 +10017,7 @@ some_func("A string literal");
 Array decay (losing the array's size information) occurs when passing built-in arrays to functions:
 
 ```cpp
-// buffer looks like an array, but is in fact a pointer 
+// buffer looks like an array, but is in fact a pointer
 auto f1(float buffer[]) {
   const auto n = std::size(buffer);   // Does not compile!
   for (auto i = 0u; i < n; ++i) {     // Size is lost!
@@ -10174,7 +10034,7 @@ auto f3(std::span<float> buffer) {  // Pass by value
     // ...
   }
 }
-float a[256]; 
+float a[256];
 f3(a);          // OK! Array is passed as a span with size
 auto v = std::vector{1.f, 2.f, 3.f, 4.f};
 f3(v);          // OK!
@@ -10183,7 +10043,6 @@ f3(v);          // OK!
 Compared to built-in arrays, span is more convenient to use because it acts more like a regular container with iterator support.
 
 In terms of data members (pointers and sizes) and member functions,`std::string_view`and`std::span`Very similar. But there are differences:`std::span`The memory pointed to is mutable, while`std::string_view`Always points to constant memory.`std::string_view`Also contains string-specific functions such as`hash()`and`substr()`. Finally, in`std::span`None`compare()`function, so it is not possible to directly`std::span`Use comparison operators on objects.
-
 
 
 ### 29.C++ bounds checking optimization technology
@@ -10202,7 +10061,6 @@ else {
 + Intuitive but less efficient
 
 
-
 **2. Unsigned integer conversion optimization**
 
 ```cpp
@@ -10217,7 +10075,6 @@ else {
 + Only one comparison is required
 + After a negative value is converted to an unsigned integer, it will become a very large positive number, which will naturally exceed the range.
 + Type conversion does not generate additional code at the assembly level and executes faster
-
 
 
 **3. Interval check optimization**
@@ -10237,7 +10094,6 @@ if ((unsigned int)i - (unsigned int)min <= (unsigned int)(max - min)) { ...
 + Combine two comparisons into one
 
 
-
 **4. Optimization of bit operations for power of 2 arrays**
 
 ```cpp
@@ -10248,7 +10104,6 @@ list[i & 15] += 1.0f; // Suitable for arrays of size 16
 + equivalent to `i % 16` but more efficient
 + only works with array sizes that are powers of 2 (2, 4, 8, 16, 32...)
 + pass `i & (2^n - 1)` Ensures that the value is within the range [0, 2^n-1]
-
 
 
 ### 30.wait-free programming
@@ -10301,7 +10156,6 @@ struct WaitFreeCounter {
 ```
 
 Tip: Use high bit stealing to carry the state, and the read operation also participates in assistance; there is no loop, and the spin jitter is eliminated.
-
 
 
 ### 31.Linux kernel tuning and BIOS configuration
@@ -10461,7 +10315,7 @@ inline auto Common::rdtsc() noexcept {
 5. `START_MEASURE`** Macro **: Use this macro where you need to start measuring latency, it will call `rdtsc` The function gets the current number of CPU clock cycles and creates a file with the specified name (`TAG`) to store this value in a constant variable for subsequent calculation of the delay.
 6. `END_MEASURE`** Macro **: Use this macro where you need to end the measured delay, it calls again `rdtsc` The function gets the current number of CPU clock cycles, calculates the difference from the value stored when the measurement was started, gets the number of delayed CPU clock cycles, and passes it to the logger (`LOGGER`) records the current time string and delay value.
 7. `TTT_MEASURE`**Macro**: used to record the current timestamp (in nanoseconds), by calling `Common::getCurrentNanos()` The function gets the current time and then uses a logger to log the current time string and that time value.
-8. An excellent<font style="color:rgb(31, 35, 40);">Intel Linux Invariant TSC CPU</font>High-precision timer implementation example, source[https://github.com/a858438680/TSCTimer](https://github.com/a858438680/TSCTimer)
+8. An excellentIntel Linux Invariant TSC CPUHigh-precision timer implementation example, source[https://github.com/a858438680/TSCTimer](https://github.com/a858438680/TSCTimer)
 
 ```cpp
 #pragma once
@@ -10738,7 +10592,7 @@ bool has_rdtscp_support() {
 
 **Notice**
 
-+ If you need to strictly prevent subsequent instruction reordering, please`rdtscp`add later`lfence`。  
++ If you need to strictly prevent subsequent instruction reordering, please`rdtscp`add later`lfence`。
 + Use APIC ID to verify whether the timing process spans cores.
 6. Example of a timer implemented using the features of rdtscp
 
@@ -10761,7 +10615,7 @@ bool has_rdtscp_support() {
 
 /**
  * @brief High-precision timer based on RDTSCP instruction
- * 
+ *
  * Supports multiple TSC environments:
  * 1. Invariant-TSC environment: can be used directly without calibration
  * 2. Non-Invariant-TSC environment: calibration required for accurate time measurement
@@ -10775,21 +10629,21 @@ public:
      */
     explicit HardwareTimer(bool autoCalibrate = true)
         : frequency_(0), isInvariant_(false), isCalibrated_(false) {
-        
+
         // Detect TSC support features
         detectTSCSupport();
-        
+
         if (isInvariant_) {
             // For invariant-TSC we can use the estimated frequency
             frequency_ = estimateFrequency();
         }
-        
+
         if (autoCalibrate || !isInvariant_) {
             // Calibrate if automatic calibration is required or if it is not invariant-TSC
             calibrate();
         }
     }
-    
+
     /**
      * @brief constructor, using known frequencies provided by the user
      * @param knownFrequency known TSC frequency (Hz)
@@ -10808,12 +10662,12 @@ public:
      */
     inline void calibrate() {
         using namespace std::chrono;
-        
+
         if (!hasTSC_) {
             // If TSC is not supported, calibration cannot be performed
             return;
         }
-        
+
         // For systems that support RDTSCP, we can detect core migration
         if (hasRDTSCP_) {
             calibrateWithCoreMigrationDetection();
@@ -10828,31 +10682,31 @@ public:
      */
     inline void calibrateWithCoreMigrationDetection() {
         using namespace std::chrono;
-        
+
         const int calibrationTimeMs = 100; // Calibration time (milliseconds)
         const int numSamples = 5; //Number of samples
-        
+
         std::vector<uint64_t> frequencies(numSamples);
-        
+
         for (int i = 0; i < numSamples; ++i) {
             // Wait for the next time slice to start to improve accuracy
             std::this_thread::sleep_until(high_resolution_clock::now() + milliseconds(1));
-            
+
             unsigned int startAux, endAux;
             auto startChrono = high_resolution_clock::now();
             uint64_t startTSC = rdtscp(&startAux);
-            
+
             // Delay for a precise period of time
             std::this_thread::sleep_for(milliseconds(calibrationTimeMs));
-            
+
             uint64_t endTSC = rdtscp(&endAux);
             auto endChrono = high_resolution_clock::now();
-            
+
             auto durationNano = duration_cast<nanoseconds>( endChrono - startChrono ) count ( ) ;
-            
+
             // Calculate frequency
             frequencies[i] = static_cast<uint64_t>((endTSC - startTSC) * 1000000000ULL / durationNano);
-            
+
             // If core migration is detected, we may need to resample
             if (startAux != endAux) {
                 // Core migration occurs, this sample may not be accurate, we resample
@@ -10860,36 +10714,36 @@ public:
                 continue;
             }
         }
-        
+
         // Sort the sampling results and take the median to reduce the impact of outliers
         std::sort(frequencies.begin(), frequencies.end());
         frequency_ = frequencies[numSamples / 2]; // Get the median
         isCalibrated_ = true;
     }
-    
+
     /**
      * @brief Basic calibration method (does not detect core migration)
      */
     inline void calibrateBasic() {
         using namespace std::chrono;
-        
+
         // Calibrate using high_resolution_clock
         const int calibrationTimeMs = 100; // Calibration time (milliseconds)
-        
+
         // Wait for the next time slice to start to improve accuracy
         std::this_thread::sleep_until(high_resolution_clock::now() + milliseconds(1));
-        
+
         auto startChrono = high_resolution_clock::now();
         uint64_t startTSC = rdtsc();
-        
+
         // Delay for a precise period of time
         std::this_thread::sleep_for(milliseconds(calibrationTimeMs));
-        
+
         uint64_t endTSC = rdtsc();
         auto endChrono = high_resolution_clock::now();
-        
+
         auto durationNano = duration_cast<nanoseconds>( endChrono - startChrono ) count ( ) ;
-        
+
         // Calculate frequency
         frequency_ = static_cast<uint64_t>((endTSC - startTSC) * 1000000000ULL / durationNano);
         isCalibrated_ = true;
@@ -10906,19 +10760,19 @@ public:
      * @return true if TSC is invariant
      */
     inline bool isInvariant() const { return isInvariant_; }
-    
+
     /**
      * @brief Check whether the RDTSCP instruction is supported
      * @return true if RDTSCP instruction is supported
      */
     inline bool hasRDTSCP() const { return hasRDTSCP_; }
-    
+
     /**
      * @brief Check if TSC is supported (basic)
      * @return true if TSC is supported
      */
     inline bool hasTSC() const { return hasTSC_; }
-    
+
     /**
      * @brief Check if calibrated
      * @return true if calibrated
@@ -10937,7 +10791,7 @@ public:
         return __rdtscp(aux);
 #endif
     }
-    
+
     /**
      * @brief Read the current TSC value (without processor ID)
      * @return current TSC value
@@ -11001,11 +10855,11 @@ private:
         int cpuInfo[4];
         __cpuid(cpuInfo, 1);
         hasBasicTSC = (cpuInfo[3] & (1 << 4)) != 0;
-        
+
         // Check RDTSCP support (CPUID.80000001H.EDX.RDTSCP[bit 27])
         __cpuid(cpuInfo, 0x80000001);
         hasRDTSCP_ = (cpuInfo[3] & (1 << 27)) != 0;
-        
+
         // Check Invariant TSC (CPUID.80000007H.EDX.InvariantTSC[bit 8])
         __cpuid(cpuInfo, 0x80000007);
         isInvariant_ = (cpuInfo[3] & (1 << 8)) != 0;
@@ -11014,18 +10868,18 @@ private:
         if (__get_cpuid(1, &eax, &ebx, &ecx, &edx)) {
             hasBasicTSC = (edx & (1 << 4)) != 0;
         }
-        
+
         // Check RDTSCP support (CPUID.80000001H.EDX.RDTSCP[bit 27])
         if (__get_cpuid(0x80000001, &eax, &ebx, &ecx, &edx)) {
             hasRDTSCP_ = (edx & (1 << 27)) != 0;
         }
-        
+
         // Check Invariant TSC (CPUID.80000007H.EDX.InvariantTSC[bit 8])
         if (__get_cpuid(0x80000007, &eax, &ebx, &ecx, &edx)) {
             isInvariant_ = (edx & (1 << 8)) != 0;
         }
 #endif
-        
+
         hasTSC_ = hasBasicTSC;
     }
 
@@ -11038,7 +10892,7 @@ private:
 #ifdef _WIN32
         int cpuInfo[4];
         __cpuid(cpuInfo, 0x16); //CPU frequency information
-        
+
         // EAX contains base frequency in MHz
         if (cpuInfo[0] > 0) {
             return (static_cast<uint64_t>(cpuInfo[0] & 0xFFFF) * 1000000ULL);
@@ -11052,7 +10906,7 @@ private:
             }
         }
 #endif
-        
+
         // If the frequency cannot be obtained by CPUID, return a reasonable default value (e.g. 3.0 GHz)
         // In high-performance timers, this is an acceptable approximation
         return 3000000000ULL; // 3.0 GHz
@@ -11072,8 +10926,7 @@ private:
 ### 33. High-quality articles on system design
 [https://mp.weixin.qq.com/s/9OH1RA8POFidgQnvape6fQ](https://mp.weixin.qq.com/s/9OH1RA8POFidgQnvape6fQ)
 
-[https://mp.weixin.qq.com/s/PuG4ZFVZ-7hijS4Db8Z5jQ](https://mp.weixin.qq.com/s/PuG4ZFVZ-7hijS4Db8Z5jQ)  
-
+[https://mp.weixin.qq.com/s/PuG4ZFVZ-7hijS4Db8Z5jQ](https://mp.weixin.qq.com/s/PuG4ZFVZ-7hijS4Db8Z5jQ)
 
 
 ## Common performance bottlenecks and optimization directions
@@ -11085,7 +10938,6 @@ private:
 ![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1751353463643-384c934a-436c-47f9-9170-79b93729710f.png)
 
 
-
 + Two indicators of computing platform: computing power and bandwidth.
 + Two indicators of the model: calculation amount and memory access amount.
 + Use the Roof-line Model to analyze the theoretical computing performance that the model can achieve on the computing platform, and analyze the two mutually exclusive states of the model on the computing platform: computing-limited state and bandwidth-limited state.
@@ -11094,9 +10946,7 @@ private:
 + The distance of a data point from the ceiling indicates the potential for performance improvement. A larger distance represents an opportunity to optimize the program to better utilize the capabilities of the hardware.
 
 
-
 Roofline model talks about procedures**Under the constraints of the two indicators of computing power and bandwidth of the computing platform, the upper bound of the theoretical performance that can be achieved**, rather than the actual achieved performance, because during the actual calculation**There are other important factors besides computing power and bandwidth**, they will also affect the actual performance of the model, which is not taken into account by the Roofline Model.
-
 
 
 For the Intel Core i5-8259U processor, the maximum number of FLOPs (single precision floating point) using AVX2 and 2 Fused Multiply Add (FMA) units can be calculated as follows:
@@ -11107,8 +10957,8 @@ For the Intel Core i5-8259U processor, the maximum number of FLOPs (single preci
 The maximum memory bandwidth for the Intel NUC Kit NUC8i5BEH can be calculated as follows. DDR technology allows 64 bits or 8 bytes to be transferred per memory access.
 
 #### <!-- 这是一张图片，ocr 内容为： -->
-![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1754980565223-ac825286-acb6-4e51-80b2-6d3f98602e70.png)  
-  
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1754980565223-ac825286-acb6-4e51-80b2-6d3f98602e70.png)
+
 Memory Bound optimization
 + **Cache-friendly data structure:** When designing data structures, consider how to maximize the use of cache locality principles.
     - **Sequential access:** Use hardware prefetcher to access data in the order in memory to improve spatial locality.
@@ -11131,7 +10981,6 @@ Memory Bound optimization
         3. **Explicit vectorization:** When the compiler cannot automatically vectorize or the vectorization is not ideal, manually write SIMD code using compiler intrinsics (intrinsics) or specialized libraries (such as Google Highway) to achieve finer control and higher performance.
 
 
-
 ### 2.TMA method
 After understanding the CPU performance bottlenecks in the program through the roofline model method, the TMA method is used to further find lower-level performance bottlenecks until we reach a very specific classification of the performance bottleneck. The first step in TMA is to identify performance bottlenecks in the program. After completing this step, you need to know where exactly the problem occurs in the code. The second step of TMA is to locate the source of the problem to the exact line of code and assembly instruction. This analysis method provides the exact performance events that should be used for each category of performance issues. Then, sample on this event to find the source code line where the performance bottleneck identified in the first stage lies. It is not recommended to use TMA on code with significant performance flaws, as it may introduce errors in the wrong direction. Likewise, make sure the environment does not impede analysis.
 
@@ -11140,10 +10989,9 @@ Sources and use cases:[https://weedge.github.io/perf-book-cn/zh/chapters/6-CPU-F
 <!-- 这是一张图片，ocr 内容为： -->
 ![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1754981310810-5c4b8eb4-c1ca-4004-a742-3ecdd5498aa8.png)
 
-### 3.Use compiler and other optimization programs  
+### 3.Use compiler and other optimization programs
 
 gcc documentation:[https://gcc.gnu.org/onlinedocs/](https://gcc.gnu.org/onlinedocs/)
-
 
 
 **Comparison of optimization capabilities of different C++ compilers**
@@ -11301,14 +11149,13 @@ gcc documentation:[https://gcc.gnu.org/onlinedocs/](https://gcc.gnu.org/onlinedo
 "x" indicates that the optimization is supported, "-" indicates that the optimization is not supported, and "excessive" indicates excessive optimization (such as excessive loop unrolling).
 
 
-
 #### Adjust compiler options
 1. The most basic and important step is to enable the compiler's optimization flags. Usually, the following are necessary:
 + `-O3`**:** Enable machine-independent aggressive optimization. This is one of the highest levels of optimization provided by most compilers and does a lot of code transformations such as loop unrolling, function inlining, dead code elimination, etc.
 + `-march=native`** or `-march=<CPU_ARCH>`:** Enables optimizations for specific CPU architectures. This instructs the compiler to generate files specific to the current machine or to a specific architecture such as `core-avx2`,`arm64`)'s instruction set optimizes code to take advantage of CPU-specific high-performance instructions (such as AVX, AVX2, AVX-512, NEON).
 + `-flto`** (Link Time Optimization) / `-fipo` (Inter-Procedural Optimization): ** Enables link-time optimization (LTO), also known as inter-procedural optimization (IPO). Typically, compilers can only optimize one compilation unit (source file) at a time. LTO allows the compiler to globally analyze and optimize the entire program during the link phase, uncovering optimization opportunities across file boundaries such as more aggressive function inlining, dead code elimination, and data flow optimizations.
 + `-fwhole-program` The option Enable WPO enables inter-procedural optimization, treating the entire codebase as a monolithic program, similar to the LTO feature.
-+ `-fprofile-generate`: Insert performance probes during compilation to record the execution frequency of the program when it is running (such as the number of function calls, the number of branch jumps, etc.).\n++ `-fprofile-use`: The compiler uses the hotspot data collected by program execution with probes to perform more aggressive optimizations on frequently executed code paths, and may reduce optimization overhead on cold paths.  
++ `-fprofile-generate`: Insert performance probes during compilation to record the execution frequency of the program when it is running (such as the number of function calls, the number of branch jumps, etc.).\n++ `-fprofile-use`: The compiler uses the hotspot data collected by program execution with probes to perform more aggressive optimizations on frequently executed code paths, and may reduce optimization overhead on cold paths.
     1. **Other Important Options:** There are many other options that affect performance, such as:
     - `-ffast-math`**:** Allows the compiler to rewire floating-point operations, possibly changing the order of operations, thereby enabling more optimizations (such as vectorization of floating-point operations). Use with caution, however, as it can lead to minor inaccuracies in the results and involves special behavior such as NaNs, infinities, etc. In databases, this is typically used only in analytical queries where numerical precision is less critical.
     - `-mprefer-vector-width=###`**:** If you don't want to use certain heavy AVX instructions (like AVX-512, which can cause throttling on some older CPUs), you can set this to 128 or 256 to fix the maximum vector width.
@@ -11318,7 +11165,7 @@ gcc documentation:[https://gcc.gnu.org/onlinedocs/](https://gcc.gnu.org/onlinedo
 | Compilation directives | Description |
 | --- | --- |
 | -Wall -Wextra –Wpedantic | Add warning message |
-| <u>-O3</u> | The highest level of general optimization, enabling radical strategies such as loop unrolling, vectorization, and function inlining. |
+| -O3 | The highest level of general optimization, enabling radical strategies such as loop unrolling, vectorization, and function inlining. |
 | -g | Preserve debugging information |
 | -std=c++20 | Use C++20 standard |
 | -march=native | Let the compiler generate instructions according to the CPU characteristics of the "current compilation machine" (AVX2, SSE4.2, BMI...) |
@@ -11385,7 +11232,7 @@ gcc documentation:[https://gcc.gnu.org/onlinedocs/](https://gcc.gnu.org/onlinedo
 
 | Optimization flag | Function description |
 | --- | --- |
-| -falign-functions, -falign-labels, -falign-loops | Align the starting addresses of functions, jump 
+| -falign-functions, -falign-labels, -falign-loops | Align the starting addresses of functions, jump
 targets, and loop locations to allow the processor to access memory efficiently，the Loop Buffer caches decoded uops and replays them directly, bypassing the entire fetch-decode pipeline for latency and power savings |
 | -fdelete-null-pointer-checks | Assume dereferencing a null pointer is unsafe, remove redundant null pointer checks |
 | -fdevirtualize and -fdevirtualize-speculatively | Convert virtual function calls to direct calls whenever possible to increase inlining possibilities |
@@ -11464,7 +11311,6 @@ These optimization flags are not automatically enabled in any of the standard op
 2. It is recommended to enable it via a sub-flag instead of enabling it globally with -ffast-math
 
 
-
 **Compilation options that are useful for low-latency optimization supported by newer versions of GCC**
 
 **Compilation options that are useful for low-latency optimization supported by newer versions of GCC**
@@ -11515,7 +11361,6 @@ gcc (g++) provides many types of built-in functions, which are generally well-op
 + `__builtin_parity(x)`**(GCC)**: Count the parity of the number of 1's in x (odd numbers return 1, even numbers return 0), used for error detection (such as checksum);
 
 
-
 #### Check the code generated by the compiler
 **1. Compiler options**
 
@@ -11540,7 +11385,6 @@ Optimized release builds may be missing line number information
 Use a disassembler (such as objconv) when the compiler does not provide assembly output
 
 Disassembly analysis of target files
-
 
 
 #### Other optimization-related content
@@ -11627,7 +11471,7 @@ Disassembly analysis of target files
 
 /**
  * @brief Linux platform dynamic library loading auxiliary class
- * 
+ *
  * Encapsulated interface for dynamic library loading, symbol resolution and release functions.
  */
 class library_helper
@@ -11635,17 +11479,17 @@ class library_helper
 public:
     /// Dynamic library handle type definition
     using dll_handle = void*;
-    
+
     /// Symbol handle type definition
     using process_handle = void*;
 
     /**
      * @brief Load dynamic library
-     * 
+     *
      * @param filename dynamic library file path
      * @param debug_suffix debug version suffix (only used in debug mode)
      * @return dll_handle The handle of the loading library, returns nullptr on failure
-     * 
+     *
      * @note In debug mode (NDEBUG is not defined), the debug_suffix suffix is ​​automatically added to the file name.
      * @note Use RTLD_NOW mode to load and resolve all undefined symbols immediately to facilitate early detection of errors
      * @note For performance reasons, error information is not printed inside the function, and error handling is the responsibility of the caller.
@@ -11659,7 +11503,7 @@ public:
 #endif
         // Use RTLD_NOW to resolve all undefined symbols immediately to facilitate early detection of errors
         dll_handle ret = ::dlopen(dll_name.c_str(), RTLD_NOW);
-        
+
         // In performance-critical code, avoid printing to stdout to reduce I/O overhead
         // If error logging is required, it should be handled at the application level
         return ret;
@@ -11667,9 +11511,9 @@ public:
 
     /**
      * @brief releases the loaded dynamic library
-     * 
+     *
      * @param handle The library handle to be released
-     * 
+     *
      * @note The function will check whether the handle is empty to avoid invalid release
      * @note Use the likely attribute to prompt the compiler to optimize branch prediction
      */
@@ -11682,11 +11526,11 @@ public:
 
     /**
      * @brief Get symbols from loaded libraries
-     * 
+     *
      * @param handle library handle
      * @param name symbol name
      * @return process_handle symbol pointer, returns nullptr if not found
-     * 
+     *
      * @note The function will check whether the handle is empty to avoid invalid operations
      * @note Use the likely attribute to prompt the compiler to optimize branch prediction
      */
@@ -11721,7 +11565,6 @@ Compiler dynamic link option optimization
 + **Avoid**:`-mcmodel=large`(Using 64-bit address, low efficiency)
 
 
-
 ### 4.Special hardware instructions
 **1. **`_mm_CRC32_uXX`** series function**: Used as a high-performance hash function
 
@@ -11743,7 +11586,6 @@ unsigned int _mm_CRC32_u8(unsigned int crc, unsigned char data);
 + Return value: updated CRC32 value.
 
 
-
 ### 5. Core points of trading system performance measurement
 **Key Latency Metrics**
 
@@ -11761,7 +11603,6 @@ unsigned int _mm_CRC32_u8(unsigned int crc, unsigned char data);
 + **Median latency (P50)**: It better reflects the latency performance of typical scenarios and excludes the influence of outliers.
 + **Tail delay (P99/P999)**: The maximum delay that 99%/99.9% of operations can complete. It is crucial for systems with extremely high stability requirements (such as market maker systems) and needs to be controlled at the microsecond level or even nanosecond level.
 + **Delay Variance**: Measures the degree of delay fluctuation. Low variance means that the system performance is more stable and avoids strategy failure due to delay jitter.
-
 
 
 **Common delay table**
@@ -12022,7 +11863,6 @@ class lru_cache {
 ```
 
 
-
 ```cpp
 #pragma once
 
@@ -12098,7 +11938,7 @@ private:
 
     std::array<Entry, TableSize> table;
     Hasher hasher;
-    
+
     static size_t probe_next(size_t index) {
         return (index + 1) & (TableSize - 1);
     }
@@ -12128,7 +11968,7 @@ public:
                         entry->tag.store(VALID_BIT | partial_hash, std::memory_order_release);
                         return true;
                     }
-                    continue; 
+                    continue;
                 }
 
                 if (current_tag & WRITING_BIT) { // Case 2: Writing
@@ -12151,7 +11991,7 @@ public:
                         continue;
                     }
                 }
-                
+
                 break;
             }
             index = probe_next(index);
@@ -12178,7 +12018,7 @@ public:
                     current_tag = entry->tag.load(std::memory_order_acquire);
                     continue;
                 }
-                
+
                 if ((current_tag & HASH_MASK) == partial_hash) {
                     if (entry->key == key) {
                         return entry->value;
@@ -12196,7 +12036,7 @@ public:
 ```
 
 ```cpp
-#include "lockfree_cache.hpp" 
+#include "lockfree_cache.hpp"
 
 #include <iostream>
 #include <vector>
@@ -12292,15 +12132,15 @@ int main() {
 
     std::cout << "Start in 3 seconds..." << std::endl;
     std::this_thread::sleep_for(std::chrono::seconds(3));
-    
+
     auto test_start_time = std::chrono::high_resolution_clock::now();
     start_flag.store(true);
-    
+
     for (auto& t : threads) {
         t.join();
     }
     auto test_end_time = std::chrono::high_resolution_clock::now();
-    
+
     // Main thread does final verification
     int final_check_found = 0;
     const int total_keys = NUM_WRITERS * KEYS_PER_WRITER;
@@ -12310,7 +12150,7 @@ int main() {
             final_check_found++;
         }
     }
-    
+
     std::chrono::duration<double, std::milli> test_duration = test_end_time - test_start_time;
 
     std::cout << "--- Test result ---" << std::endl;
@@ -12342,7 +12182,6 @@ Test successful: all keys written were found correctly.
 ```
 
 
-
 ```cpp
 #pragma once
 
@@ -12353,7 +12192,7 @@ Test successful: all keys written were found correctly.
 #include <optional>
 #include <type_traits>
 #include <thread>
-#include <limits> 
+#include <limits>
 
 #if defined(__i386__) || defined(__x86_64__)
 #include <immintrin.h>
@@ -12480,7 +12319,7 @@ public:
                     }
                 }
             }
-            
+
             Entry* victim_entry = &table_[victim_index];
             uint64_t expected_tag = victim_entry->tag.load(std::memory_order_relaxed);
 
@@ -12501,7 +12340,7 @@ public:
                 victim_entry->tag.store(VALID_BIT | partial_hash, std::memory_order_release);
                 return true; // Exit the function
             }
-            
+
             // CAS failed. This means another thread (writer or remover) changed the tag.
             // The outer while(true) loop will cause us to retry the entire eviction process.
         }
@@ -12521,13 +12360,13 @@ public:
                 if (current_tag == 0) {
                     return std::nullopt;
                 }
-                
+
                 if (current_tag & WRITING_BIT) {
                     LFC_CPU_RELAX();
                     current_tag = entry->tag.load(std::memory_order_acquire);
                     continue;
                 }
-                
+
                 if ((current_tag & HASH_MASK) == partial_hash) {
                     if (entry->key == key) {
                         uint64_t new_time = access_timer_.fetch_add(1, std::memory_order_relaxed);
@@ -12815,9 +12654,8 @@ zhixuan@gpu04:~/Cache$ ./cache_test
 --- Concurrent reading and writing and stress test passed ---
 
 All tests completed successfully!
-zhixuan@gpu04:~/Cache$ 
+zhixuan@gpu04:~/Cache$
 ```
-
 
 
 ```cpp
@@ -12940,7 +12778,7 @@ namespace lfc {
                         entry->tag.store(VALID_BIT | USED_BIT | partial_hash, std::memory_order_release);
                         return true;
                     }
-                    continue; 
+                    continue;
                 }
 
                 if (current_tag & WRITING_BIT) { // Case 2: Writing
@@ -12964,7 +12802,7 @@ namespace lfc {
                         continue;
                     }
                 }
-                
+
                 // Hash conflict or non-empty slot, detect next
                 break;
             }
@@ -13028,7 +12866,7 @@ namespace lfc {
                     current_tag = entry->tag.load(std::memory_order_acquire);
                     continue;
                 }
-                
+
                 if ((current_tag & HASH_MASK) == partial_hash) {
                     if (entry->key == key) {
                         // Hit! Set USED_BIT atomically
@@ -13397,7 +13235,7 @@ public:
             try {
                 const long long availableSequence = waitStrategy_.waitFor(nextSequence, sequencer_.getCursorSequence(), dependentSequences_, running_);
                 if (!running_.load()) break;
-                
+
                 if (nextSequence <= availableSequence) {
                     while (nextSequence <= availableSequence) {
                         eventHandler_.onEvent(ringBuffer_.get(nextSequence), nextSequence, nextSequence == availableSequence);
@@ -13518,7 +13356,7 @@ private:
 
 public:
     //Constructor: add a boolean parameter with a default value
-    explicit PrintEventHandler(int id, bool silent = false) 
+    explicit PrintEventHandler(int id, bool silent = false)
         : handlerId_(id), silent_(silent) {}
 
     void onEvent(TestEvent& event, long long sequence, bool endOfBatch) override {
@@ -13588,7 +13426,7 @@ void run_spsc_scenario() {
 void run_spmc_scenario() {
     std::cout << "\n--- SCENARIO 2: Single Producer, Multiple Consumers (SPMC Broadcast) ---\n";
     disruptor::Disruptor<TestEvent> disruptor(1024, disruptor::ProducerType::SINGLE);
-    
+
     PrintEventHandler handler1(1);
     PrintEventHandler handler2(2);
     auto* processor1 = disruptor.handleEventsWith(handler1);
@@ -13614,14 +13452,14 @@ void run_spmc_scenario() {
 void run_mpmc_scenario() {
     std::cout << "\n--- SCENARIO 3: Multiple Producers, Multiple Consumers (MPMC) ---\n";
     disruptor::Disruptor<TestEvent> disruptor(1024, disruptor::ProducerType::MULTI);
-    
+
     PrintEventHandler handler1(1);
     PrintEventHandler handler2(2);
     auto* processor1 = disruptor.handleEventsWith(handler1);
     auto* processor2 = disruptor.handleEventsWith(handler2);
-    
+
     disruptor.start();
-    
+
     const int events_per_producer = 5;
     auto producer_task = [&](int producer_id) {
         for (int i = 0; i < events_per_producer; ++i) {
@@ -13631,11 +13469,11 @@ void run_mpmc_scenario() {
             });
         }
     };
-    
+
     std::cout << "Two producers starting, each sending " << events_per_producer << " events...\n";
     std::thread p1(producer_task, 1);
     std::thread p2(producer_task, 2);
-    
+
     p1.join();
     p2.join();
 
@@ -13680,22 +13518,22 @@ void run_dependency_graph_scenario() {
 void run_wait_strategy_comparison() {
     std::cout << "\n--- PERFORMANCE TEST: Comparing Wait Strategies ---" << std::endl;
     std::cout << "Each test will run a SPSC scenario with 5,000,000 events.\n";
-    
+
     const long long event_count = 5000000;
     const size_t buffer_size = 2048;
 
     auto run_test = [&](const std::string& name, disruptor::WaitStrategy* strategy) {
         std::cout << std::left << std::setw(25) << name << ": " << std::flush;
-        
+
         disruptor::Disruptor<TestEvent> disruptor(buffer_size, disruptor::ProducerType::SINGLE, strategy);
-        
-        PrintEventHandler silent_handler(1, true); 
+
+        PrintEventHandler silent_handler(1, true);
         auto* processor = disruptor.handleEventsWith(silent_handler);
-        
+
         disruptor.start();
-        
+
         auto start_time = std::chrono::high_resolution_clock::now();
-        
+
         // Events that far exceed the buffer size cannot be published at once. Release in batches instead.
         const int batch_size = 1024; // Set a reasonable batch size
         for (long long i = 0; i < event_count; i += batch_size) {
@@ -13709,9 +13547,9 @@ void run_wait_strategy_comparison() {
 
         auto end_time = std::chrono::high_resolution_clock::now();
         std::chrono::duration<double, std::milli> duration = end_time - start_time;
-        
+
         disruptor.shutdown();
-        
+
         std::cout << std::fixed << std::setprecision(2) << duration.count() << " ms\n";
     };
 
@@ -13843,7 +13681,7 @@ public:
     enum class ProducerType { SINGLE, MULTI };
     enum class ConsumerType { SINGLE, MULTI };
 
-    RingBuffer(size_t capacity, ProducerType prod_type = ProducerType::SINGLE, 
+    RingBuffer(size_t capacity, ProducerType prod_type = ProducerType::SINGLE,
                               ConsumerType cons_type = ConsumerType::SINGLE)
         : prod_type_(prod_type), cons_type_(cons_type) {
         // Ensure capacity is power of 2
@@ -13854,7 +13692,7 @@ public:
         capacity_ = actual_capacity;
         mask_ = capacity_ - 1;
         buffer_.resize(capacity_);
-        
+
         prod_head_.store(0, std::memory_order_relaxed);
         prod_tail_.store(0, std::memory_order_relaxed);
         cons_head_.store(0, std::memory_order_relaxed);
@@ -13864,33 +13702,33 @@ public:
     bool enqueue(T item) {
         return enqueue(&item, 1) == 1;
     }
-    
+
     size_t enqueue(T* items, size_t count) {
         if (count == 0 || count > capacity_) return 0;
-        
+
         uint32_t prod_head, prod_next, free_entries;
         const uint32_t mask = mask_;
-        
+
         if (prod_type_ == ProducerType::SINGLE) {
             prod_head = prod_head_.load(std::memory_order_relaxed);
-            
+
             do {
                 uint32_t cons_tail = cons_tail_.load(std::memory_order_acquire);
                 free_entries = (capacity_ + cons_tail - prod_head) & mask_;
-                
+
                 if (free_entries < count)
                     return 0;
-                
+
                 prod_next = (prod_head + count) & mask_;
             } while (false); // Single producer doesn't need retry
-            
+
             prod_head_.store(prod_next, std::memory_order_release);
-            
+
             for (size_t i = 0; i < count; i++) {
                 uint32_t idx = (prod_head + i) & mask;
                 buffer_[idx] = items[i];
             }
-            
+
             prod_tail_.store(prod_next, std::memory_order_release);
             return count;
         } else {
@@ -13899,27 +13737,27 @@ public:
                 prod_head = prod_head_.load(std::memory_order_relaxed);
                 initial_prod_head = prod_head;
                 uint32_t cons_tail = cons_tail_.load(std::memory_order_acquire);
-                
+
                 free_entries = (capacity_ + cons_tail - prod_head) & mask_;
                 if (free_entries < count)
                     return 0;
-                
+
                 prod_next = (prod_head + count) & mask_;
-                
+
             } while (!prod_head_.compare_exchange_weak(prod_head, prod_next,
                                                        std::memory_order_release,
                                                        std::memory_order_relaxed));
-            
+
             for (size_t i = 0; i < count; i++) {
                 uint32_t idx = (prod_head + i) & mask;
                 buffer_[idx] = items[i];
             }
-            
+
             // Wait for predecessor producers to update tail
             while (prod_tail_.load(std::memory_order_relaxed) != initial_prod_head) {
                 _mm_pause(); // Reduce CPU consumption during busy wait
             }
-            
+
             prod_tail_.store(prod_next, std::memory_order_release);
             return count;
         }
@@ -13928,75 +13766,75 @@ public:
     bool dequeue(T& item) {
         return dequeue(&item, 1) == 1;
     }
-    
+
     size_t dequeue(T* items, size_t count) {
         if (count == 0 || count > capacity_) return 0;
-        
+
         uint32_t cons_head, cons_next, entries;
         const uint32_t mask = mask_;
-        
+
         if (cons_type_ == ConsumerType::SINGLE) {
             cons_head = cons_head_.load(std::memory_order_relaxed);
-            
+
             do {
                 uint32_t prod_tail = prod_tail_.load(std::memory_order_acquire);
                 entries = (prod_tail - cons_head) & mask_;
-                
+
                 if (entries < count)
                     return 0;
-                
+
                 cons_next = (cons_head + count) & mask_;
             } while (false); // Single consumer doesn't need retry
-            
+
             cons_head_.store(cons_next, std::memory_order_release);
-            
+
             for (size_t i = 0; i < count; i++) {
                 uint32_t idx = (cons_head + i) & mask;
                 items[i] = std::move(buffer_[idx]);
             }
-            
+
             cons_tail_.store(cons_next, std::memory_order_release);
             return count;
         } else {
             uint32_t initial_cons_head;
-            
+
             // 1. Acquire consumption range via CAS on cons_head
             do {
                 cons_head = cons_head_.load(std::memory_order_relaxed);
                 initial_cons_head = cons_head;
-                
+
                 uint32_t prod_tail = prod_tail_.load(std::memory_order_acquire);
-                
+
                 entries = (prod_tail - cons_head) & mask_;
                 if (entries < count)
                     return 0;
-                
+
                 cons_next = (cons_head + count) & mask_;
-                
+
             } while (!cons_head_.compare_exchange_weak(cons_head, cons_next,
                                                        std::memory_order_release,
                                                        std::memory_order_relaxed));
-            
+
             // 2. Copy data from buffer
             for (size_t i = 0; i < count; i++) {
                 uint32_t idx = (initial_cons_head + i) & mask;
                 items[i] = std::move(buffer_[idx]);
             }
-            
+
             // 3. Lazy update cons_tail - only update if we're next in line
             uint32_t current_cons_tail;
             do {
                 current_cons_tail = cons_tail_.load(std::memory_order_relaxed);
-                
+
                 if (current_cons_tail != initial_cons_head) {
                     _mm_pause(); // Reduce CPU consumption during busy wait
                     continue;
                 }
-                
+
             } while (!cons_tail_.compare_exchange_weak(current_cons_tail, cons_next,
                                                        std::memory_order_release,
                                                        std::memory_order_relaxed));
-            
+
             return count;
         }
     }
@@ -14022,19 +13860,18 @@ public:
 private:
     ProducerType prod_type_;
     ConsumerType cons_type_;
-    
+
     size_t capacity_;
     size_t mask_;
-    
+
     std::vector<T> buffer_;
-    
+
     alignas(64) std::atomic<uint32_t> prod_head_;
     alignas(64) std::atomic<uint32_t> prod_tail_;
     alignas(64) std::atomic<uint32_t> cons_head_;
     alignas(64) std::atomic<uint32_t> cons_tail_;
 };
 ```
-
 
 
 ### 3.Custom string implementation
@@ -14053,7 +13890,7 @@ private:
 // using FastString = MyString<23, LowLatencyAllocator<char>>;
 // FastString str(alloc);
 
-template<size_t SSO_CAPACITY = 23, typename Allocator = void>  
+template<size_t SSO_CAPACITY = 23, typename Allocator = void>
 class MyString {
 private:
     struct LongString {
@@ -14124,7 +13961,7 @@ public:
         other.data_.s[0] = '\0';
         other.set_short_size(0);
     }
-    
+
     MyString& operator=(const MyString& other) {
         if (this == &other) return *this;
 
@@ -14142,7 +13979,7 @@ public:
         }
         return *this;
     }
-    
+
     MyString& operator=(MyString&& other) noexcept {
         if (this == &other) return *this;
 
@@ -14157,7 +13994,7 @@ public:
     const char* c_str() const noexcept {
         return LIKELY(is_short()) ? data_.s : data_.l.ptr;
     }
-    
+
     size_t size() const noexcept {
         return LIKELY(is_short()) ? get_short_size() : data_.l.size;
     }
@@ -14199,7 +14036,6 @@ sizeof(s2): 24 bytes
 ```
 
 
-
 `std::function` Is a type-erased universal callable object wrapper. one `std::function<void(int)>` It can store either an ordinary function pointer, a function object (Functor), or a Lambda expression. In order to achieve universality,`std::function` A technology called **Small Buffer Optimization (SBO)** is used internally, and `SSO String` The principle is similar.
 
 1. **Internal buffer**: `std::function` The object has a small amount of reserved memory inside it (such as 16 or 32 bytes).
@@ -14210,7 +14046,6 @@ sizeof(s2): 24 bytes
 Alternative implementation:[https://github.com/WG21-SG14/SG14/blob/master/SG14/inplace_function.h](https://github.com/WG21-SG14/SG14/blob/master/SG14/inplace_function.h)
 
 **Note: std::function will bring dynamic polymorphism, causing performance overhead and uncertainty. You still need to consider using compile-time polymorphism instead. **
-
 
 
 ### 4.Avoid using Magic Static which has overhead
@@ -14259,7 +14094,6 @@ int main() {
 ```
 
 
-
 **Method 2: Global instance (Hungry Chinese style), C++ runtime guarantee**
 
 **Usage scenarios:** It is suitable for scenarios where there is no dependency between singletons, or the dependency is simple, and the code is expected to be the simplest.
@@ -14289,7 +14123,6 @@ int main() {
     return 0;
 }
 ```
-
 
 
 ### 5.socket technology and TCP, UDP
@@ -14549,7 +14382,6 @@ namespace Common {
 ```
 
 
-
 ## Transaction data processing
 ### Task One (data flow merging)
 ```markdown
@@ -14612,7 +14444,7 @@ struct DataRecord {
     std::string time;
     double price;
     char type;
-    
+
     // Comparison operator, used for sorting
     bool operator<(const DataRecord& other) const {
         if (time != other.time) {
@@ -14630,15 +14462,15 @@ void readCSV(const std::string& filename, char type, std::vector<DataRecord>& da
         std::cerr << "Cannot open file: " << filename << std::endl;
         return;
     }
-    
+
     std::string line;
     // skip header
     std::getline(file, line);
-    
+
     while (std::getline(file, line)) {
         std::istringstream iss(line);
         std::string timeStr, priceStr;
-        
+
         // Parse CSV rows
         if (std::getline(iss, timeStr, ',') && std::getline(iss, priceStr, ',')) {
             DataRecord record;
@@ -14652,36 +14484,35 @@ void readCSV(const std::string& filename, char type, std::vector<DataRecord>& da
 
 int main() {
     std::vector<DataRecord> allData;
-    
+
     readCSV("order.csv", 'o', allData);
     readCSV("snap.csv", 's', allData);
     readCSV("trans.csv", 't', allData);
-    
+
     auto start = std::chrono::high_resolution_clock::now();
-    
+
     std::sort(allData.begin(), allData.end());
-    
+
     auto end = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double, std::micro> elapsed = end - start;
     std::cerr << "Data processing time: " << elapsed.count() << " Microseconds" << std::endl;
-    
+
     std::ofstream outFile("result.csv");
     if (!outFile.is_open()) {
         std::cerr << "Unable to create output file" << std::endl;
         return 1;
     }
-    
+
     //Write header
     outFile << "time,price,type" << std::endl;
-    
+
     // write data
     for (const auto& record : allData) {
         outFile << record.time << "," << record.price << "," << record.type << std::endl;
     }
-    
+
     return 0;
 }
-
 
 
 // For scenarios with more than 5000 stocks and more data sources, the following optimizations can be considered:
@@ -14691,7 +14522,6 @@ int main() {
 // Data filtering: Filter out unnecessary stock data during the reading stage to reduce processing volume. You can use a hash table to quickly find a subset of stocks selected by the user.
 //Data format: Consider using binary format instead of CSV to reduce parsing overhead
 ```
-
 
 
 ### Task Two (data dependency issues)
@@ -14818,12 +14648,12 @@ vector<string> processDependencies(const unordered_map<string, vector<string>>& 
     //Construct the reverse dependency graph and in-degree table
     unordered_map<string, vector<string>> reverse_graph;
     unordered_map<string, int> in_degree;
-    
+
     //Initialize the in-degree of all nodes to 0
     for (const auto& pair : deps) {
         in_degree[pair.first] = 0;
     }
-    
+
     //Construct the reverse graph and calculate in-degree
     for (const auto& pair : deps) {
         const string& node = pair.first;
@@ -14832,12 +14662,12 @@ vector<string> processDependencies(const unordered_map<string, vector<string>>& 
             if (deps.find(dep) == deps.end()) {
                 throw runtime_error("Dependency error: " + node + " Depends on non-existent node " + dep);
             }
-            
+
             reverse_graph[dep].push_back(node);
             in_degree[node]++;
         }
     }
-    
+
     // Kahn's algorithm performs topological sorting
     queue<string> q;
     for (const auto& pair : in_degree) {
@@ -14845,22 +14675,22 @@ vector<string> processDependencies(const unordered_map<string, vector<string>>& 
             q.push(pair.first);
         }
     }
-    
+
     vector<string> result;
     result.reserve(deps.size());
-    
+
     while (!q.empty()) {
         string node = q.front();
         q.pop();
         result.push_back(node);
-        
+
         for (const string& neighbor : reverse_graph[node]) {
             if (--in_degree[neighbor] == 0) {
                 q.push(neighbor);
             }
         }
     }
-    
+
     // Check if there are circular dependencies
     if (result.size() != deps.size()) {
         unordered_set<string> processed(result.begin(), result.end());
@@ -14873,7 +14703,7 @@ vector<string> processDependencies(const unordered_map<string, vector<string>>& 
         }
         throw runtime_error("There is a cyclic dependency: " + cycle_nodes);
     }
-    
+
     return result;
 }
 
@@ -14882,31 +14712,31 @@ int main(int argc, char* argv[]) {
         cerr << "Usage: " << argv[0] << " <dependency_file.json>" << endl;
         return 1;
     }
-    
+
     try {
         auto deps = readDependencies(argv[1]);
-        
+
         auto start = chrono::high_resolution_clock::now();
-        
+
         auto order = processDependencies(deps);
-        
+
         auto end = chrono::high_resolution_clock::now();
         chrono::duration<double, micro> elapsed = end - start;
-        
+
         cout << "Recommended update order:" << endl;
         for (const string& node : order) {
             cout << node << endl;
         }
-        
+
         cerr << "Dependency processing time: " << elapsed.count() << " Microseconds" << endl;
     } catch (const exception& e) {
         cerr << "Error: " << e.what() << endl;
         return 1;
     }
-    
+
     return 0;
 }
-    
+
 
 
 //Performance
@@ -14916,7 +14746,6 @@ int main(int argc, char* argv[]) {
 // Hierarchical architecture: Divide the data dependency graph into different levels. Each level only depends on the data of the previous layer, simplifying dependency relationships.
 // Monitoring and logging: Track the status and performance indicators of data updates in real time to detect and solve problems in a timely manner.
 ```
-
 
 
 ### Task Three (csv<->binary)
@@ -15007,13 +14836,13 @@ void query_time_range(const std::string& td_path, const std::string& start_str, 
         td_file.read(reinterpret_cast<char*>(&index[i].first), sizeof(int64_t));
         td_file.read(reinterpret_cast<char*>(&index[i].second), sizeof(int64_t));
     }
-    
+
     // Find the starting position using the index and a custom lambda for comparison
-    auto it = std::lower_bound(index.begin(), index.end(), start_time, 
+    auto it = std::lower_bound(index.begin(), index.end(), start_time,
         [](const std::pair<int64_t, int64_t>& entry, int64_t time_value) {
             return entry.first < time_value;
     });
-    
+
     int64_t seek_pos = 0;
     if (it != index.begin()) {
        // Move to the entry just before the one found by lower_bound
@@ -15330,7 +15159,6 @@ install(TARGETS tdb DESTINATION bin)
 ```
 
 
-
 ### Task Four (incremental calculation and advance calculation)
 **Incremental calculation and advance calculation**
 
@@ -15339,7 +15167,6 @@ Incremental calculation means that only the changed parts of the data are proces
 Ahead calculation (also known as precomputation) is to precompute and store the results before runtime requirements occur to avoid real-time calculations on the critical path. Precomputation in compiled languages like C++ is also called compile-time calculation. It can be realized through the characteristics of the const faction and TMP technology. There are multiple methods mentioned in the basic part.
 
 These two computing modes are often used in combination: static or semi-static data are calculated in advance, and dynamically changing data is calculated incrementally.
-
 
 
 **The most common scenario for incremental calculation is the calculation of moving average, median, maximum value, minimum value and other indicators. **
@@ -15357,60 +15184,60 @@ private:
     std::deque<int> window;
     int maxSize;
     long long sum;
-    
+
     std::deque<int> maxDeque; // Maximum value for sliding window
     std::deque<int> minDeque; // Minimum value for sliding window
-    
+
     // Used for median calculation - use multiset to maintain ordered state
     std::multiset<int> lowerHalf; // Maximum heap (using reverse iterator)
     std::multiset<int> upperHalf; // minimum heap
-    
+
 public:
     DataStatistics(int size) : maxSize(size), sum(0) {}
-    
+
     void addData(int value) {
         if (maxSize == 0) {
             return;
         }
-        
+
         if (window.size() >= maxSize) {
             removeOldest();
         }
-        
+
         window.push_back(value);
         sum += value;
-        
+
         while (!maxDeque.empty() && maxDeque.back() < value) {
             maxDeque.pop_back();
         }
         maxDeque.push_back(value);
-        
+
         while (!minDeque.empty() && minDeque.back() > value) {
             minDeque.pop_back();
         }
         minDeque.push_back(value);
-        
+
         addToMedianStructure(value);
     }
-    
+
     double getMovingAverage() {
         if (window.empty()) return 0.0;
         return static_cast<double>(sum) / window.size();
     }
-    
+
     int getMax() {
         if (window.empty()) return 0;
         return maxDeque.front();
     }
-    
+
     int getMin() {
         if (window.empty()) return 0;
         return minDeque.front();
     }
-    
+
     double getMedian() {
         if (window.empty()) return 0.0;
-        
+
         if (lowerHalf.size() == upperHalf.size()) {
             if (lowerHalf.empty()) return 0.0;
             return (*lowerHalf.rbegin() + *upperHalf.begin()) / 2.0;
@@ -15418,7 +15245,7 @@ public:
             return *lowerHalf.rbegin();
         }
     }
-    
+
     int getCurrentSize() {
         return window.size();
     }
@@ -15430,31 +15257,31 @@ public:
 private:
     void removeOldest() {
         if (window.empty()) return;
-        
+
         int oldestValue = window.front();
         sum -= oldestValue;
         window.pop_front();
-        
+
         if (!maxDeque.empty() && maxDeque.front() == oldestValue) {
             maxDeque.pop_front();
         }
         if (!minDeque.empty() && minDeque.front() == oldestValue) {
             minDeque.pop_front();
         }
-        
+
         removeFromMedianStructure(oldestValue);
     }
-    
+
     void addToMedianStructure(int value) {
         if (lowerHalf.empty() || value <= *lowerHalf.rbegin()) {
             lowerHalf.insert(value);
         } else {
             upperHalf.insert(value);
         }
-        
+
         balanceHeaps();
     }
-    
+
     void removeFromMedianStructure(int value) {
         auto it_lower = lowerHalf.find(value);
         if (it_lower != lowerHalf.end()) {
@@ -15465,10 +15292,10 @@ private:
                 upperHalf.erase(it_upper);
             }
         }
-        
+
         balanceHeaps();
     }
-    
+
     void balanceHeaps() {
         // Make sure lowerHalf is either the same size as upperHalf or one more than it
         if (lowerHalf.size() > upperHalf.size() + 1) {
@@ -15485,29 +15312,27 @@ private:
 ```
 
 
-
 ### Task Five (handling high-frequency data problems)
 **1. Data sampling (solve the problem of "irregular time")**
 
-+ Closing price sampling: take the last valid quote in the time period, the code logic is "traverse the data in the time period, record the last non-empty quote" (applicable to low-frequency backtesting, assuming that the price does not change when there is no new data);  
-+ Linear interpolation sampling: handle uneven data intervals, the code implements the formula $ \hat{q}_{t}=q_{t, last }+\left(q_{t, next }-q_{t, last }\right) \frac{t-t_{last }}{t_{next }-t_{last }} $ ($ t $ is the target sampling time, $ q_{t, last } $ is the pre-order quotation, $ q_{t, next } $ is the subsequent quote), which is suitable for scenarios with high requirements for high-frequency data continuity;  
++ Closing price sampling: take the last valid quote in the time period, the code logic is "traverse the data in the time period, record the last non-empty quote" (applicable to low-frequency backtesting, assuming that the price does not change when there is no new data);
++ Linear interpolation sampling: handle uneven data intervals, the code implements the formula $ \hat{q}_{t}=q_{t, last }+\left(q_{t, next }-q_{t, last }\right) \frac{t-t_{last }}{t_{next }-t_{last }} $ ($ t $ is the target sampling time, $ q_{t, last } $ is the pre-order quotation, $ q_{t, next } $ is the subsequent quote), which is suitable for scenarios with high requirements for high-frequency data continuity;
 + Trading volume sampling: Divide "time units" according to fixed trading volume (for example, every 50 contracts is one unit). The code needs to accumulate the trading volume and record the data when the threshold is reached (to reduce the impact of time deviation on the strategy).
 
 **2. Judgment of buying and selling direction (solve the problem of "no buying and selling mark")**
 
-+ Tick Rule (based on previous and later transaction prices):  
-Code logic: If the current transaction price > the previous transaction price → the buyer initiates (uptick); if the current < previous → the seller initiates (downtick); if equal → inherit the last non-zero direction (if the last time it was an uptick, it will be recorded as zero-uptick);  
-+ Lee-Ready Rule (combine quotes and ticks):  
-Code logic: first determine whether the transaction price deviates from the midpoint of the bid-ask spread (transaction price > midpoint → buyer, < midpoint → seller); if it is at the midpoint, use the Tick Rule to supplement the judgment;  
-+ Bulk Volume Classification (batch volume probability judgment):  
++ Tick Rule (based on previous and later transaction prices):
+Code logic: If the current transaction price > the previous transaction price → the buyer initiates (uptick); if the current < previous → the seller initiates (downtick); if equal → inherit the last non-zero direction (if the last time it was an uptick, it will be recorded as zero-uptick);
++ Lee-Ready Rule (combine quotes and ticks):
+Code logic: first determine whether the transaction price deviates from the midpoint of the bid-ask spread (transaction price > midpoint → buyer, < midpoint → seller); if it is at the midpoint, use the Tick Rule to supplement the judgment;
++ Bulk Volume Classification (batch volume probability judgment):
 The code implements the formula $ Pr\left(V_{\tau}=B\right)=Z\left(\frac{p_{\tau}-p_{\tau-1}}{\sigma \Delta P}\right) $ ($ Z $ is the standard normal distribution PDF, $ p_{\tau}-p_{\tau-1} $ is the price difference, $ \sigma \Delta P $ is the standard deviation of the price difference), and then calculate the transaction volume initiated by the buyer $ V_{\tau}^{B}=V_{\tau}×Pr\left(V_{\tau}=B\right) $.
 
 **3. Data noise processing (correction of "ask-ask spread fluctuation")**
 
-Implement the "middle price calculation" logic to eliminate the interference of bid-ask bounce on data  
-Code formula: $ \hat{q}_{t_{m}}^{m}=\frac{1}{2}\left(q_{t_{a}}^{a}+q_{t_{b}}^{b}\right) $, where $ t_{m} $ takes the "time stamp of the latest bid/ask price (whoever updates it)" to ensure that the middle price synchronizes market changes in real time;  
-Advanced: If you need to consider the weight of order volume, the code implements size-weighted middle price $ \tilde{q}_{t}^{s}=\frac{q_{t_{b}}^{b} s_{t_{a}}^{a}+q_{t_{a}}^{a} s_{t_{b}}^{b}}{s_{t_{a}}^{a}+s_{t_{b}}^{b}} $ ($ s $ is the order volume corresponding to the buying/selling price).    
-
+Implement the "middle price calculation" logic to eliminate the interference of bid-ask bounce on data
+Code formula: $ \hat{q}_{t_{m}}^{m}=\frac{1}{2}\left(q_{t_{a}}^{a}+q_{t_{b}}^{b}\right) $, where $ t_{m} $ takes the "time stamp of the latest bid/ask price (whoever updates it)" to ensure that the middle price synchronizes market changes in real time;
+Advanced: If you need to consider the weight of order volume, the code implements size-weighted middle price $ \tilde{q}_{t}^{s}=\frac{q_{t_{b}}^{b} s_{t_{a}}^{a}+q_{t_{a}}^{a} s_{t_{b}}^{b}}{s_{t_{a}}^{a}+s_{t_{b}}^{b}} $ ($ s $ is the order volume corresponding to the buying/selling price).
 
 
 ### Task Six (Order Timing Competition Analysis)
@@ -15515,11 +15340,11 @@ In transactions, requests (orders) issued by programs on different servers arriv
 
 Yi is very sensitive to this sequence. According to log files, statistics on different servers at the same time
 
-The proportion of orders with the same contract (stock code) arriving at the exchange at the same time point.  
+The proportion of orders with the same contract (stock code) arriving at the exchange at the same time point.
 
 (1) Each server may have multiple log files. The file name of each log file consists of PID, MachineID and date.
 
-into, for example "5169_MachineE_2025-01-10.log". MachineID is used to distinguish different servers. 
+into, for example "5169_MachineE_2025-01-10.log". MachineID is used to distinguish different servers.
 
 (2) For each transaction, the program will first send a request (order) to the exchange, and then receive a response (order return) from the exchange.
 
@@ -15527,17 +15352,17 @@ So there are two types of logs in each log file, "vendorSendOrderImpl" and "noti
 
 "vendorSendOrderImpl" is the order sending log, and "notifyOrder" is the order reporting log. Of the two types of logs
 
-Both contain the OrderRef field used to identify the same order. 
+Both contain the OrderRef field used to identify the same order.
 
 Note that OrderRef on different servers may be duplicated, but they have nothing to do with each other, only those on the same machine
 
-Only the same OrderRef represents the same order. 
+Only the same OrderRef represents the same order.
 
 (3) Use the log time of "vendorSendOrderImpl" as the order issuance time, and the InstrumentID field represents the order
 
 The traded contract; arrives at the exchange with the ExchangeTimestamp field in the "notifyOrder" log as an order
 
-time (this time is similar to UnixTime), the contract with a smaller ExchangeTimestamp value arrives at the exchange first. 
+time (this time is similar to UnixTime), the contract with a smaller ExchangeTimestamp value arrives at the exchange first.
 
 (4) Orders for the same contract whose order issuance time differences on different servers are within 200ms can be considered to be at the same time.
 
@@ -15545,20 +15370,18 @@ Click on the same contract order.
 
 Note: At the same point in time, the program on the same server may place orders continuously on the same contract, that is, multiple orders may be placed at the same time.
 
-A report. It is meaningless to compare orders for the same contract on the same server at the same point in time. 
+A report. It is meaningless to compare orders for the same contract on the same server at the same point in time.
 
 (5) There will be various special circumstances during the actual real offer, and more data information can be mined by expansion.
 
 
+Example:
 
-Example: 
-
-Input: multiple log files 
+Input: multiple log files
 
 Output: The number of orders placed by the server (a complete request and return is recorded as the number of orders placed once), the number of orders placed at the same time point
 
 Quantity, the sequence ratio between different servers
-
 
 
 Example log file name
@@ -15568,13 +15391,11 @@ Example log file name
 21963_MachineA_2025-01-10.log
 
 
-
 Sample log file data entries
 
 [01/10 09:30:00.525277035] [  info  ] [  3394/3601  ] [notifyOrder]  InstrumentID:A  Direction:0 OffsetFlag:0 HedgeFlag:1 ConnectionSelectionType:1 OrderRef:2 OrderType:0 ConnectionID:1 RealConnectionID:1 ErrorNo:0 ExchangeRef:0 ExchangeTimestamp:22372 OrderStatus:1 OrderLocalID:5
 
-[01/10 09:30:00.525277421] [  info  ] [  3394/3601  ] [notifyOrder]  InstrumentID:A  Direction:0 OffsetFlag:0 HedgeFlag:1 ConnectionSelectionType:1 OrderRef:2 OrderType:0 ConnectionID:1 RealConnectionID:1 ErrorNo:0 ExchangeRef:0 ExchangeTimestamp:22372 OrderStatus:2 OrderLocalID:5  
-
+[01/10 09:30:00.525277421] [  info  ] [  3394/3601  ] [notifyOrder]  InstrumentID:A  Direction:0 OffsetFlag:0 HedgeFlag:1 ConnectionSelectionType:1 OrderRef:2 OrderType:0 ConnectionID:1 RealConnectionID:1 ErrorNo:0 ExchangeRef:0 ExchangeTimestamp:22372 OrderStatus:2 OrderLocalID:5
 
 
 ```cpp
@@ -15622,7 +15443,7 @@ vector<string> getLogFilesFromDir(const string& dirPath) {
             for (const auto& entry : fs::directory_iterator(dirPath)) {
                 if (entry.is_regular_file()) {
                     string filename = entry.path().filename().string();
-                    if (filename.length() >= 4 && 
+                    if (filename.length() >= 4 &&
                         filename.substr(filename.length() - 4) == ".log") {
                         string fullPath = entry.path().string();
                         logFiles.push_back(fullPath);
@@ -15670,10 +15491,10 @@ public:
         // Expected format: PID_MachineID_Date.log
         size_t lastSlash = filename.find_last_of("/\\");
         string fname = (lastSlash != string::npos) ? filename.substr(lastSlash + 1) : filename;
-        
+
         size_t firstUnderscore = fname.find('_');
         size_t secondUnderscore = fname.find('_', firstUnderscore + 1);
-        
+
         if (firstUnderscore != string::npos && secondUnderscore != string::npos) {
             return fname.substr(firstUnderscore + 1, secondUnderscore - firstUnderscore - 1);
         }
@@ -15683,7 +15504,7 @@ public:
     // Parse a single line of log
     void parseLogLine(const string& line, const string& machineID) {
         // Format: [MM/DD HH:MM:SS.nnnnnnnnn] [  info  ] [  PID/TID  ] [logType]  fields...
-        
+
         if (line.find("[vendorSendOrderImpl]") != string::npos) {
             parseSendOrder(line, machineID);
         } else if (line.find("[notifyOrder]") != string::npos) {
@@ -15695,11 +15516,11 @@ public:
     void parseSendOrder(const string& line, const string& machineID) {
         // Extract time
         long long timeMs = extractTimeMs(line);
-        
+
         // Extract OrderRef and InstrumentID
         int orderRef = extractIntField(line, "OrderRef:");
         string instrumentID = extractStringField(line, "InstrumentID:");
-        
+
         if (orderRef != -1 && !instrumentID.empty()) {
             auto key = make_pair(machineID, orderRef);
             if (orders.find(key) == orders.end()) {
@@ -15724,7 +15545,7 @@ public:
         int orderRef = extractIntField(line, "OrderRef:");
         long long exchangeTs = extractLongField(line, "ExchangeTimestamp:");
         string instrumentID = extractStringField(line, "InstrumentID:");
-        
+
         if (orderRef != -1 && exchangeTs != -1) {
             auto key = make_pair(machineID, orderRef);
             if (orders.find(key) == orders.end()) {
@@ -15747,19 +15568,19 @@ public:
     long long extractTimeMs(const string& line) {
         size_t startPos = line.find('[');
         if (startPos == string::npos) return -1;
-        
+
         startPos = line.find('[', startPos + 1);
         if (startPos == string::npos) return -1;
-        
+
         size_t endPos = line.find(']', startPos);
         if (endPos == string::npos) return -1;
-        
+
         string timeStr = line.substr(startPos + 1, endPos - startPos - 1);
         // Format: MM/DD HH:MM:SS.nnnnnnnnn
-        
+
         int month, day, hour, minute, second, nanos;
         sscanf(timeStr.c_str(), "%d/%d %d:%d:%d.%d", &month, &day, &hour, &minute, &second, &nanos);
-        
+
         long long ms = (hour * 3600 + minute * 60 + second) * 1000 + nanos / 1000000;
         return ms;
     }
@@ -15768,11 +15589,11 @@ public:
     int extractIntField(const string& line, const string& fieldName) {
         size_t pos = line.find(fieldName);
         if (pos == string::npos) return -1;
-        
+
         pos += fieldName.length();
         size_t endPos = line.find(' ', pos);
         if (endPos == string::npos) endPos = line.length();
-        
+
         string value = line.substr(pos, endPos - pos);
         try {
             return stoi(value);
@@ -15785,11 +15606,11 @@ public:
     long long extractLongField(const string& line, const string& fieldName) {
         size_t pos = line.find(fieldName);
         if (pos == string::npos) return -1;
-        
+
         pos += fieldName.length();
         size_t endPos = line.find(' ', pos);
         if (endPos == string::npos) endPos = line.length();
-        
+
         string value = line.substr(pos, endPos - pos);
         try {
             return stoll(value);
@@ -15802,11 +15623,11 @@ public:
     string extractStringField(const string& line, const string& fieldName) {
         size_t pos = line.find(fieldName);
         if (pos == string::npos) return "";
-        
+
         pos += fieldName.length();
         size_t endPos = line.find(' ', pos);
         if (endPos == string::npos) endPos = line.length();
-        
+
         return line.substr(pos, endPos - pos);
     }
 
@@ -15815,7 +15636,7 @@ public:
         // Count complete orders per machine
         map<string, int> completeOrdersPerMachine;
         vector<Order> completeOrders;
-        
+
         for (auto& orderPair : orders) {
             Order& order = orderPair.second;
             if (order.hasNotify && order.sendTimeMs > 0) {
@@ -15823,37 +15644,37 @@ public:
                 completeOrders.push_back(order);
             }
         }
-        
+
         // Output 1: Order count per server
         cout << "=== Server Order Count ===" << endl;
         for (auto& machPair : completeOrdersPerMachine) {
             cout << machPair.first << ": " << machPair.second << " orders" << endl;
         }
         cout << endl;
-        
+
         // Group orders by instrument first
         map<string, vector<Order>> ordersByInstrument;
         for (auto& order : completeOrders) {
             ordersByInstrument[order.instrumentID].push_back(order);
         }
-        
+
         // Find orders at the same time point (within 200ms, different servers)
         vector<vector<Order>> sameTimePointGroups;
-        
+
         for (auto& instPair : ordersByInstrument) {
             vector<Order>& instOrders = instPair.second;
-            
+
             // Sort by sendTimeMs
             sort(instOrders.begin(), instOrders.end(),
                  [](const Order& a, const Order& b) {
                      return a.sendTimeMs < b.sendTimeMs;
                  });
-            
+
             // Use sliding window to find orders within 200ms
             for (size_t i = 0; i < instOrders.size(); ++i) {
                 vector<Order> timeGroup;
                 timeGroup.push_back(instOrders[i]);
-                
+
                 // Find all orders within 200ms window
                 for (size_t j = i + 1; j < instOrders.size(); ++j) {
                     if (instOrders[j].sendTimeMs - instOrders[i].sendTimeMs <= 200) {
@@ -15862,14 +15683,14 @@ public:
                         break;
                     }
                 }
-                
+
                 // Check if there are orders from different machines
                 if (timeGroup.size() > 1) {
                     set<string> machines;
                     for (auto& order : timeGroup) {
                         machines.insert(order.machineID);
                     }
-                    
+
                     // Only keep groups with orders from different machines
                     if (machines.size() > 1) {
                         sameTimePointGroups.push_back(timeGroup);
@@ -15877,11 +15698,11 @@ public:
                 }
             }
         }
-        
+
         // Count unique orders in same time point groups (avoid duplicate counting)
         set<pair<string, int>> countedOrders;  // (machineID, orderRef)
         int sameTimePointCount = 0;
-        
+
         for (auto& group : sameTimePointGroups) {
             for (auto& order : group) {
                 auto key = make_pair(order.machineID, order.orderRef);
@@ -15891,13 +15712,13 @@ public:
                 }
             }
         }
-        
+
         // Output 2: Same time point orders count
         cout << "=== Same Time Point Orders ===" << endl;
-        cout << "Same time point (within 200ms, same instrument, different servers) order count: " 
+        cout << "Same time point (within 200ms, same instrument, different servers) order count: "
              << sameTimePointCount << endl;
         cout << endl;
-        
+
         // Output 3: Order arrival ratio between servers
         cout << "=== Order Arrival Ratio Between Servers ===" << endl;
         outputArrivalRatio(sameTimePointGroups);
@@ -15907,36 +15728,36 @@ public:
     void outputArrivalRatio(const vector<vector<Order>>& groups) {
         // (machine1, machine2) -> (machine1_first_count, machine2_first_count)
         map<pair<string, string>, pair<int, int>> ratios;
-        
+
         for (auto& group : groups) {
             if (group.size() < 2) continue;
-            
+
             set<string> machines;
             for (auto& order : group) {
                 machines.insert(order.machineID);
             }
-            
+
             if (machines.size() < 2) continue;
-            
+
             // Sort by exchange timestamp to find arrival order
             vector<Order> sortedOrders = group;
-            sort(sortedOrders.begin(), sortedOrders.end(), 
+            sort(sortedOrders.begin(), sortedOrders.end(),
                  [](const Order& a, const Order& b) {
                      return a.exchangeTimestamp < b.exchangeTimestamp;
                  });
-            
+
             // For each pair of orders from different machines, count precedence
             for (size_t i = 0; i < sortedOrders.size(); ++i) {
                 for (size_t j = i + 1; j < sortedOrders.size(); ++j) {
                     string m1 = sortedOrders[i].machineID;
                     string m2 = sortedOrders[j].machineID;
-                    
+
                     if (m1 != m2) {
                         // sortedOrders[i] arrives first (smaller ExchangeTimestamp)
                         // Normalize machine order (lexicographically smaller first)
                         string machineA = (m1 < m2) ? m1 : m2;
                         string machineB = (m1 < m2) ? m2 : m1;
-                        
+
                         auto key = make_pair(machineA, machineB);
                         // Check which machine actually arrived first
                         if (sortedOrders[i].machineID == machineA) {
@@ -15948,7 +15769,7 @@ public:
                 }
             }
         }
-        
+
         // Output ratios
         if (ratios.empty()) {
             cout << "No orders from different servers at same time point." << endl;
@@ -15959,7 +15780,7 @@ public:
                     double ratio1 = (double)ratio.second.first / total * 100.0;
                     double ratio2 = (double)ratio.second.second / total * 100.0;
                     cout << ratio.first.first << " vs " << ratio.first.second << ": "
-                         << ratio.first.first << " " << fixed << setprecision(2) << ratio1 
+                         << ratio.first.first << " " << fixed << setprecision(2) << ratio1
                          << "%, " << ratio.first.second << " " << ratio2 << "%" << endl;
                 }
             }
@@ -15970,9 +15791,9 @@ public:
 int main(int argc, char* argv[]) {
     LogAnalyzer analyzer;
     namespace fs = std::filesystem;
-    
+
     vector<string> logFiles;
-    
+
     // If no arguments provided, use default "LogFile" directory
     if (argc < 2) {
         string defaultDir = "LogFile";
@@ -15990,7 +15811,7 @@ int main(int argc, char* argv[]) {
         // Process command line arguments
         for (int i = 1; i < argc; i++) {
             string path = argv[i];
-            
+
             if (fs::exists(path)) {
                 if (fs::is_directory(path)) {
                     // It's a directory, scan for .log files
@@ -16010,35 +15831,34 @@ int main(int argc, char* argv[]) {
             }
         }
     }
-    
+
     if (logFiles.empty()) {
         cerr << "Error: No log files found!" << endl;
         cerr << "Usage: " << argv[0] << " [directory_or_file1] [directory_or_file2] ..." << endl;
         cerr << "If no arguments provided, will search in 'LogFile' directory or current directory." << endl;
         return 1;
     }
-    
+
     cout << "Found " << logFiles.size() << " log file(s) to process." << endl;
     cout << endl;
-    
+
     // Parse all log files
     for (const auto& logFile : logFiles) {
         analyzer.parseLogFile(logFile);
     }
-    
+
     // Analyze and output results
     analyzer.analyzeAndOutput();
-    
+
     return 0;
 }
 
 ```
 
 
-
 ### <!-- 这是一张图片，ocr 内容为： -->
-![](https://cdn.nlark.com/yuque/0/2026/png/35485470/1767619685321-d70ca01e-e867-4a84-b4bb-0ee03a8ea80c.png)  
-  
+![](https://cdn.nlark.com/yuque/0/2026/png/35485470/1767619685321-d70ca01e-e867-4a84-b4bb-0ee03a8ea80c.png)
+
 Task Seven (Service Access Log Analysis)
 | service_id | access_time | response_time | flow_bytes | status_code |
 | --- | --- | --- | --- | --- |
@@ -16073,7 +15893,7 @@ Task Seven (Service Access Log Analysis)
 # 10. Output the filtered service statistics results
 
 import pandas as pd
-import numpy as np 
+import numpy as np
 
 file_path = 'source.csv'
 df = pd.read_csv(file_path)
@@ -16116,7 +15936,6 @@ print(df)
 # 11. Output the filtered service statistics results
 print(df_filtered)
 ```
-
 
 
 ### Task Eight (Futures Daily Mark-to-Market Processing)
@@ -16527,7 +16346,6 @@ if __name__ == "__main__":
 ```
 
 
-
 After the main program runs, 3 core tables are generated, with unified and standardized fields, as follows:
 
 1. `output/trades.csv` (per-trade table): `trade_id, contract, open_ts, open_px, open_qty, multiplier, fee_open, close_ts, close_px, close_qty, fee_close, pnl_ticks`
@@ -16550,7 +16368,6 @@ biz_date,carry_pnl,realized_pnl,txn_cost,daily_pnl,exposure,cum_pnl_amt,equity,d
 2023-04-07,62.5,1275.0,124.7,1212.8,74512.5,1212.8,1001212.8,0.00121,1.001213
 2023-04-10,-475.0,1250.0,60.2,714.8,74037.5,1927.6,1001927.6,0.00071,1.001928
 ```
-
 
 
 A new post-processing script is added. Without changing the original calculation logic in `main.py`, it reads `trades.csv` and `balance.csv` generated by the main program, completes standardized field mapping and risk/performance aggregation. Timing only covers metric computation, excluding CSV read/write, and it can be run directly in the project directory.
@@ -16656,7 +16473,6 @@ if __name__ == "__main__":
 ```
 
 
-
 During script execution, the main program output is mapped into standardized input tables for unified statistics:
 
 (1) `output/equity_curve.csv` (mapped from `output/balance.csv`): `biz_date, carry_pnl, realized_pnl, txn_cost, daily_pnl, exposure, cum_pnl_amt, equity, daily_ret, nav`
@@ -16678,7 +16494,6 @@ contract,open_ts,open_px,open_qty,size,fee_open,close_ts,close_px,close_qty,fee_
 cf2309,2023-04-06 21:00:00,14685.0,1.0,5.0,4.3,2023-04-06 21:25:00,14770.0,-1.0,4.3
 cf2309,2023-04-06 21:00:00,14695.0,1.0,5.0,4.3,2023-04-06 21:25:00,14775.0,-1.0,4.3
 ```
-
 
 
 The script finally generates 2 risk/performance summary tables that can be used directly in reports:
@@ -16726,7 +16541,6 @@ python task_assets/build_risk_report.py
 ```
 
 
-
 2. Actual runtime output
 
 After the main program runs, it outputs write notifications for the 3 core tables. After the post-processing script runs, it outputs processing time, number of risk metrics, and number of contract-stat rows. Actual output:
@@ -16738,7 +16552,6 @@ symbol_rows=1
 ```
 
 
-
 Based on the current end-to-end processing results, further optimization can improve report completeness and interpretability:
 
 1. Aggregate risk metrics by week/month to form a layered attribution report and clearly present performance across different horizons;
@@ -16747,12 +16560,11 @@ Based on the current end-to-end processing results, further optimization can imp
 4. For multi-contract backtests, use a three-layer structure of "strategy-contract-direction" for performance contribution analysis to identify each dimension's impact on total returns.
 
 
-
 ## Business logic design-system
 ### 1. Order management system
 1.1 Order management finite state machine
 
-Mealy state machine and Moore state machine are two classic finite state machine (FSM) models. Trading systems are usually Mealy state machines. Compared to Moore, Mealy also includes input. 
+Mealy state machine and Moore state machine are two classic finite state machine (FSM) models. Trading systems are usually Mealy state machines. Compared to Moore, Mealy also includes input.
 
 The core elements of finite state machines:
 
@@ -16763,9 +16575,8 @@ The core elements of finite state machines:
 5. **Guard**Conditions for state transition (optional). Events trigger state transitions only when conditions are met. For example, order cancellation is only allowed if the order cancellation interval exceeds 5 seconds.
 
 
-
-1.2 Branchless state table  
-Branchless state table is a state machine design pattern that uses a table-driven approach to replace traditional conditional branch statements (if-else/switch-case) to implement state transitions.  
+1.2 Branchless state table
+Branchless state table is a state machine design pattern that uses a table-driven approach to replace traditional conditional branch statements (if-else/switch-case) to implement state transitions.
 In the Boost MSM (Meta State Machine) framework, the branchless state table is implemented through compile-time metaprogramming. The conversion logic is determined at compile time and no conditional judgment is required at runtime.
 
 The following code implements the order state machine for TWAP algorithmic trading, using the Boost MSM library. The core class is`OrderStateMachineImpl`, which defines all states, events, transition rules and business logic, source:[https://github.com/byrnexu/betterquant2](https://github.com/byrnexu/betterquant2)
@@ -17139,31 +16950,31 @@ class OrderStateMachineImpl
   // clang-format off
   struct transition_table
       : public boost::mpl::vector<
-        // ------+------------------------+-----------------------------+--------------------------+--------------------+-------------------+ 
+        // ------+------------------------+-----------------------------+--------------------------+--------------------+-------------------+
         //       + Start                  + Event                       + Target                   + Action             + Guard             +
-        // ------+------------------------+-----------------------------+--------------------------+--------------------+-------------------+ 
+        // ------+------------------------+-----------------------------+--------------------------+--------------------+-------------------+
         msmf::Row<StateOfNewOrder         , EventOfOrderSuccess         , StateOfOrderInProc      >,
         msmf::Row<StateOfNewOrder         , EventOfOrderFailed          , StateOfError            >,
-        // ------+------------------------+-----------------------------+--------------------------+--------------------+-------------------+ 
+        // ------+------------------------+-----------------------------+--------------------------+--------------------+-------------------+
         msmf::Row<StateOfOrderInProc      , EventOfCheckIfCancelOrder   , StateOfCancelOrderInProc , ActionOfCancelOrder, GuardOfCancelOrder>,
         msmf::Row<StateOfOrderInProc      , EventOfCancelOrderFailed    , StateOfOrderInProc      >,
         msmf::Row<StateOfOrderInProc      , EventOfOrderRetFilled       , StateOfSuccess          >,
         msmf::Row<StateOfOrderInProc      , EventOfOrderRetFailed       , StateOfError            >,
-        // ------+------------------------+-----------------------------+--------------------------+--------------------+-------------------+ 
+        // ------+------------------------+-----------------------------+--------------------------+--------------------+-------------------+
         msmf::Row<StateOfCancelOrderInProc, EventOfCancelOrderRetFailed , StateOfOrderInProc      >,
         msmf::Row<StateOfCancelOrderInProc, EventOfOrderRetFilled       , StateOfSuccess          >,
         msmf::Row<StateOfCancelOrderInProc, EventOfOrderRetFailed       , StateOfError            >,
         msmf::Row<StateOfCancelOrderInProc, EventOfOrderRetCanceled, StateOfRetryOrder >, // Manual order cancellation will trigger this event and cause StateOfOrderInProc => StateOfRetryOrder
         msmf::Row<StateOfCancelOrderInProc, EventOfOrderSizeLTTickerSize, StateOfSuccess >, // Manual order cancellation will trigger this event and cause StateOfOrderInProc => StateOfSuccess
-        // ------+------------------------+-----------------------------+--------------------------+--------------------+-------------------+ 
+        // ------+------------------------+-----------------------------+--------------------------+--------------------+-------------------+
         msmf::Row<StateOfRetryOrder       , EventOfOrderSuccess         , StateOfOrderInProc      >,
         msmf::Row<StateOfRetryOrder       , EventOfOrderFailed          , StateOfError            >,
-        // ------+------------------------+-----------------------------+--------------------------+--------------------+-------------------+ 
+        // ------+------------------------+-----------------------------+--------------------------+--------------------+-------------------+
         msmf::Row<StateOfError            , EventOfCheckIfRestoreOrder  , StateOfRestoreOrder     , ActionOfRestoreOrder, GuardOfRestoreOrder>,
-        // ------+------------------------+-----------------------------+--------------------------+--------------------+-------------------+ 
+        // ------+------------------------+-----------------------------+--------------------------+--------------------+-------------------+
         msmf::Row<StateOfRestoreOrder     , EventOfOrderSuccess         , StateOfOrderInProc      >,
-        msmf::Row<StateOfRestoreOrder     , EventOfOrderFailed          , StateOfError            > 
-        // ------+------------------------+-----------------------------+--------------------------+--------------------+-------------------+ 
+        msmf::Row<StateOfRestoreOrder     , EventOfOrderFailed          , StateOfError            >
+        // ------+------------------------+-----------------------------+--------------------------+--------------------+-------------------+
         > {};
   // clang-format on
 
@@ -17464,7 +17275,6 @@ using OrderStateMachineGroup = std::deque<OrderStateMachineSPtr>;
 ```
 
 
-
 1.3 Hierarchical state machine
 
 The hierarchical state machine effectively solves the maintenance problem of conversion relationships under complex state structures by introducing state nesting and inheritance mechanisms.
@@ -17523,23 +17333,20 @@ When risk indicators exceed the standard, the entire system switches to risk con
 During maintenance, data or policies can be updated individually without disrupting the entire system
 
 
-
 1.4 Separation of session state machine and order state machine
 
 1. Separation model: Session state machine: connection, login, heartbeat, disconnection and reconnection, sequence recovery. Order status machine: order placement, confirmation, partial transaction, order cancellation, order rejection, and completion.
 2. Reconnection recovery strategy: Restore the session and sequence first, then restore the in-transit order status. Within the recovery window, the policy only allows downgrade actions (for example, only withdraw but not suspend).
 
 
+1.5 Idempotent and out-of-order return processing of order state machine
 
-1.5 Idempotent and out-of-order return processing of order state machine  
-
-1. Idempotent processing principle  
-The same execution return arrives repeatedly, and the final state cannot be advanced twice.  
-Use stable primary keys (such as order key + exchange return serial number) to remove duplication.  
-2. Principle of out-of-order processing  
-`ACK/TRADE/CANCEL/REJECT` Arrival order is not guaranteed and the state machine must allow "delayed completion".  
+1. Idempotent processing principle
+The same execution return arrives repeatedly, and the final state cannot be advanced twice.
+Use stable primary keys (such as order key + exchange return serial number) to remove duplication.
+2. Principle of out-of-order processing
+`ACK/TRADE/CANCEL/REJECT` Arrival order is not guaranteed and the state machine must allow "delayed completion".
 through intermediate states (e.g. `CANCEL_PENDING`) to express timing competition and avoid illegal transitions.
-
 
 
 1.6 Other order management system interface design
@@ -17645,21 +17452,21 @@ int main(){
     assert(checkAndSaveOrder(order2));
     OrderRequest order3 = {"3", "U1", "A", "SELL", 99, 5};
     assert(checkAndSaveOrder(order3));
-    
+
     // Test status flow: PENDING -> CONFIRMED -> COMPLETED
     OrderUpdate update_pending_to_completed = {"1", COMPLETED};
     assert(!updateOrderStatus(update_pending_to_completed)); // Cannot go directly from PENDING to COMPLETED
-    
+
     OrderUpdate update_pending_to_confirmed = {"1", CONFIRMED};
     assert(updateOrderStatus(update_pending_to_confirmed)); // First from PENDING to CONFIRMED
-    
+
     OrderUpdate update_confirmed_to_completed = {"1", COMPLETED};
     assert(updateOrderStatus(update_confirmed_to_completed)); // Then from CONFIRMED to COMPLETED
-    
+
     // Test that rejected orders can no longer be processed
     OrderUpdate update_rejected_order = {"1", REJECTED};
     assert(!updateOrderStatus(update_rejected_order)); // Completed orders can no longer be rejected
-    
+
     OrderRequest order4 = {"4", "U1", "A", "SELL", 98, 5};
     assert(checkAndSaveOrder(order4));
     return 0;
@@ -17667,13 +17474,12 @@ int main(){
 ```
 
 
-
 1.5 Event Sourcing and CQRS
 
 Event Sourcing: The system does not directly store the current state, but persists all business events that cause state changes, and reconstructs the state at any point in time by replaying these immutable event streams.
 
-1.**State is driven by events**: Do not directly save the current state of the system, but persist all state changes (such as order creation, matching, cancellation) in the form of "immutable events" in a complete and orderly manner.  
-2. **State can be reconstructed**: By "replaying" the historical event sequence, the state of the system at any moment can be accurately restored.  
+1.**State is driven by events**: Do not directly save the current state of the system, but persist all state changes (such as order creation, matching, cancellation) in the form of "immutable events" in a complete and orderly manner.
+2. **State can be reconstructed**: By "replaying" the historical event sequence, the state of the system at any moment can be accurately restored.
 3. **Naturally auditable**: The event log completely records all operation history, which facilitates troubleshooting, compliance auditing and backtesting.
 
 In the trading system, Event Sourcing is particularly suitable for processing core processes such as order life cycle, capital flow, and position changes, and can solve the historical tracing problems in the traditional "status coverage" model.
@@ -17704,7 +17510,7 @@ public:
 
     EventType type() const override { return EventType::ORDER_CREATED; }
     void print() const override {
-        std::cout << "[OrderCreated] ID: " << order_id_ << " | " << symbol_ 
+        std::cout << "[OrderCreated] ID: " << order_id_ << " | " << symbol_
                   << " @ " << price_ << " x " << qty_ << "\n";
     }
 
@@ -17763,7 +17569,7 @@ public:
     void print() const {
         std::cout << "\n=== Current Active Orders ===\n";
         for (const auto& [id, info] : active_orders_) {
-            std::cout << "ID: " << id << " | " << info.symbol 
+            std::cout << "ID: " << id << " | " << info.symbol
                       << " @ " << info.price << " x " << info.qty << "\n";
         }
     }
@@ -17830,8 +17636,7 @@ ID: 1002 | GOOGL @ 140.2 x 150
 + On the right is**Current status reconstructed from logs**(Documenting "what it's like now").
 
 
-
-**CQRS (Command Query Responsibility Separation)**: Split the system into two independent models - the command side focuses on processing write operations and business rules (optimizing transaction processing), and the query side specializes in reading operations (optimizing data retrieval). The two can use different technology stacks and expand independently. When combined with event sourcing, they can achieve performance isolation between high-frequency transactions and complex analysis.  
+**CQRS (Command Query Responsibility Separation)**: Split the system into two independent models - the command side focuses on processing write operations and business rules (optimizing transaction processing), and the query side specializes in reading operations (optimizing data retrieval). The two can use different technology stacks and expand independently. When combined with event sourcing, they can achieve performance isolation between high-frequency transactions and complex analysis.
 The cooperation between CQRS and Event Sourcing is as follows:
 
 | Role | Responsibilities | Working with Event Sourcing |
@@ -17867,7 +17672,7 @@ public:
         : order_id_(order_id), symbol_(std::move(symbol)), price_(price), qty_(qty) {}
     EventType type() const override { return EventType::ORDER_CREATED; }
     void print() const override {
-        std::cout << "[Event] OrderCreated: ID=" << order_id_ << ", " << symbol_ 
+        std::cout << "[Event] OrderCreated: ID=" << order_id_ << ", " << symbol_
                   << " @ " << price_ << " x " << qty_ << "\n";
     }
     const uint64_t order_id_;
@@ -18113,7 +17918,6 @@ int main() {
 ```
 
 
-
 ### 2. Order book design
 **Option 1: Vector-based LOB**
 
@@ -18204,7 +18008,7 @@ public:
     friend bool operator<(const Quantity& lhs, const Quantity& rhs) {
         return lhs.raw_value_ < rhs.raw_value_;
     }
-    
+
     friend bool operator<=(const Quantity& lhs, const Quantity& rhs) {
         return lhs.raw_value_ <= rhs.raw_value_;
     }
@@ -18231,7 +18035,7 @@ struct PricePoint {
     bool empty() const {
         return !first_order_idx.has_value();
     }
-    
+
     void clear() {
         first_order_idx = std::nullopt;
         last_order_idx = std::nullopt;
@@ -18298,7 +18102,7 @@ private:
         }
         return side == Side::Buy ? &bids_[idx] : &asks_[idx];
     }
-    
+
     PricePoint* get_price_point_by_index(size_t idx, Side side) {
         if (idx >= MAX_TICKS) {
             return nullptr;
@@ -18312,7 +18116,7 @@ private:
             if (!best_bid_.has_value() || price > best_bid_.value()) {
                 best_bid_ = price;
             }
-            
+
             // If this is the best price that was removed, you need to find the new best price
             if (best_bid_.has_value() && best_bid_.value() == price) {
                 size_t idx = price_to_index(price);
@@ -18322,7 +18126,7 @@ private:
                         return; // There are still orders at the current price
                     }
                 }
-                
+
                 //Need to find the new best bid price from the current price downwards
                 for (size_t i = idx; i > 0; --i) {
                     auto pp = get_price_point_by_index(i, Side::Buy);
@@ -18337,7 +18141,7 @@ private:
             if (!best_ask_.has_value() || price < best_ask_.value()) {
                 best_ask_ = price;
             }
-            
+
             // If this is the best price that was removed, you need to find the new best price
             if (best_ask_.has_value() && best_ask_.value() == price) {
                 size_t idx = price_to_index(price);
@@ -18347,7 +18151,7 @@ private:
                         return; // There are still orders at the current price
                     }
                 }
-                
+
                 //Need to find the new best selling price from the current price upwards
                 for (size_t i = idx; i < MAX_TICKS; ++i) {
                     auto pp = get_price_point_by_index(i, Side::Sell);
@@ -18377,31 +18181,31 @@ private:
             price_point->last_order_idx = order_idx;
         }
     }
-    
+
     //Rebuild the order list of price points
     void rebuild_price_level(const Price& price, Side side) {
         auto price_point = get_price_point(price, side);
         if (!price_point || price_point->empty()) return;
-        
+
         size_t current_idx = price_point->first_order_idx.value();
         std::vector<size_t> valid_indices;
-        
+
         while (current_idx < orders_.size() && orders_[current_idx].has_value()) {
             valid_indices.push_back(current_idx);
             current_idx = orders_[current_idx]->next_idx.value_or(orders_.size());
         }
-        
+
         if (valid_indices.empty()) {
             price_point->clear();
             return;
         }
-        
+
         //Rebuild the linked list
         for (size_t i = 0; i < valid_indices.size() - 1; ++i) {
             orders_[valid_indices[i]]->next_idx = valid_indices[i + 1];
         }
         orders_[valid_indices.back()]->next_idx = std::nullopt;
-        
+
         price_point->first_order_idx = valid_indices[0];
         price_point->last_order_idx = valid_indices.back();
     }
@@ -18451,7 +18255,7 @@ public:
 
         size_t idx = it->second;
         if (idx >= orders_.size() || !orders_[idx].has_value()) return false;
-        
+
         //Save price and direction for subsequent updates
         const auto& order = orders_[idx]->order;
         Price price = order.price;
@@ -18464,10 +18268,10 @@ public:
         //Rebuild the linked list of this price level
         rebuild_price_level(price, side);
         update_best_price(price, side);
-        
+
         return true;
     }
-    
+
     //Modify order quantity
     bool modify_order(OrderId order_id, Quantity new_quantity) {
         auto it = order_index_.find(order_id);
@@ -18475,14 +18279,14 @@ public:
 
         size_t idx = it->second;
         if (idx >= orders_.size() || !orders_[idx].has_value()) return false;
-        
+
         auto& order = orders_[idx]->order;
         order.quantity = new_quantity;
-        
+
         if (new_quantity.is_zero()) {
             return remove_order(order_id);
         }
-        
+
         return true;
     }
 
@@ -18526,7 +18330,7 @@ public:
                         Quantity fill_qty = (remaining < order.quantity) ? remaining : order.quantity;
                         remaining -= fill_qty;
                         matched_orders.push_back(&order);
-                        
+
                         //Update order quantity
                         Quantity new_qty = order.quantity - fill_qty;
                         if (new_qty.is_zero()) {
@@ -18541,7 +18345,7 @@ public:
                     //Move to the next order in the linked list (if it exists)
                     current_idx = node.next_idx.value_or(orders_.size());
                 }
-                
+
                 //Rebuild the linked list of this price level
                 if (!remaining.is_zero()) {
                     rebuild_price_level(Price::from_raw(static_cast<int64_t>(tick) * tick_size_.raw()), Side::Sell);
@@ -18570,7 +18374,7 @@ public:
                         Quantity fill_qty = (remaining < order.quantity) ? remaining : order.quantity;
                         remaining -= fill_qty;
                         matched_orders.push_back(&order);
-                        
+
                         //Update order quantity
                         Quantity new_qty = order.quantity - fill_qty;
                         if (new_qty.is_zero()) {
@@ -18584,16 +18388,16 @@ public:
 
                     current_idx = node.next_idx.value_or(orders_.size());
                 }
-                
+
                 //Rebuild the linked list of this price level
                 if (!remaining.is_zero()) {
                     rebuild_price_level(Price::from_raw(static_cast<int64_t>(tick) * tick_size_.raw()), Side::Buy);
                 }
-                
+
                 if (tick == 0) break; // Prevent unsigned integer underflow
             }
         }
-        
+
         // Update best price
         update_best_price(best_bid_.value_or(Price::from_raw(0)), Side::Buy);
         update_best_price(best_ask_.value_or(Price::from_raw(0)), Side::Sell);
@@ -18604,59 +18408,59 @@ public:
     // Get the best bid/ask price
     std::optional<Price> best_bid() const { return best_bid_; }
     std::optional<Price> best_ask() const { return best_ask_; }
-    
+
     // Get market depth
-    std::pair<std::vector<std::pair<Price, Quantity>>, 
+    std::pair<std::vector<std::pair<Price, Quantity>>,
               std::vector<std::pair<Price, Quantity>>> market_depth(size_t levels) {
         std::vector<std::pair<Price, Quantity>> bid_depth;
         std::vector<std::pair<Price, Quantity>> ask_depth;
         bid_depth.reserve(levels);
         ask_depth.reserve(levels);
-        
+
         // Get buyer depth
         if (best_bid_.has_value()) {
             size_t start_tick = price_to_index(best_bid_.value());
             for (size_t tick = start_tick; tick > 0 && bid_depth.size() < levels; --tick) {
                 if (tick >= MAX_TICKS) continue;
-                
+
                 auto& price_point = bids_[tick];
                 if (price_point.empty()) continue;
-                
+
                 Quantity total_qty;
                 size_t current_idx = price_point.first_order_idx.value();
                 while (current_idx < orders_.size() && orders_[current_idx].has_value()) {
                     total_qty += orders_[current_idx]->order.quantity;
                     current_idx = orders_[current_idx]->next_idx.value_or(orders_.size());
                 }
-                
+
                 bid_depth.emplace_back(
                     Price::from_raw(static_cast<int64_t>(tick) * tick_size_.raw()),
                     total_qty
                 );
             }
         }
-        
+
         // Get seller depth
         if (best_ask_.has_value()) {
             size_t start_tick = price_to_index(best_ask_.value());
             for (size_t tick = start_tick; tick < MAX_TICKS && ask_depth.size() < levels; ++tick) {
                 auto& price_point = asks_[tick];
                 if (price_point.empty()) continue;
-                
+
                 Quantity total_qty;
                 size_t current_idx = price_point.first_order_idx.value();
                 while (current_idx < orders_.size() && orders_[current_idx].has_value()) {
                     total_qty += orders_[current_idx]->order.quantity;
                     current_idx = orders_[current_idx]->next_idx.value_or(orders_.size());
                 }
-                
+
                 ask_depth.emplace_back(
                     Price::from_raw(static_cast<int64_t>(tick) * tick_size_.raw()),
                     total_qty
                 );
             }
         }
-        
+
         return {bid_depth, ask_depth};
     }
 };
@@ -18719,7 +18523,7 @@ private:
     size_t price_to_index(const Price& price) const {
         return static_cast<size_t>(price.raw() / tick_size_.raw());
     }
-    
+
     Price index_to_price(size_t idx) const {
         return Price::from_raw(static_cast<int64_t>(idx) * tick_size_.raw());
     }
@@ -18737,7 +18541,7 @@ private:
             return &new_it->second;
         }
     }
-    
+
     // Get the price point - returns nullptr if it does not exist
     PricePoint* get_price_point(const Price& price, Side side) {
         size_t idx = price_to_index(price);
@@ -18756,7 +18560,7 @@ private:
             if (!best_bid_.has_value() || price > best_bid_.value()) {
                 best_bid_ = price;
             }
-            
+
             // Check if there are still orders at the current best price
             if (best_bid_.has_value()) {
                 auto pp = get_price_point(best_bid_.value(), Side::Buy);
@@ -18780,7 +18584,7 @@ private:
             if (!best_ask_.has_value() || price < best_ask_.value()) {
                 best_ask_ = price;
             }
-            
+
             // Check if there are still orders at the current best price
             if (best_ask_.has_value()) {
                 auto pp = get_price_point(best_ask_.value(), Side::Sell);
@@ -18816,20 +18620,20 @@ private:
             price_point->last_order_idx = order_idx;
         }
     }
-    
+
     //Rebuild the order list of price points
     void rebuild_price_level(const Price& price, Side side) {
         auto price_point = get_price_point(price, side);
         if (!price_point || price_point->empty()) return;
-        
+
         size_t current_idx = price_point->first_order_idx.value();
         std::vector<size_t> valid_indices;
-        
+
         while (current_idx < orders_.size() && orders_[current_idx].has_value()) {
             valid_indices.push_back(current_idx);
             current_idx = orders_[current_idx]->next_idx.value_or(orders_.size());
         }
-        
+
         if (valid_indices.empty()) {
             size_t idx = price_to_index(price);
             if (side == Side::Buy) {
@@ -18839,13 +18643,13 @@ private:
             }
             return;
         }
-        
+
         //Rebuild the linked list
         for (size_t i = 0; i < valid_indices.size() - 1; ++i) {
             orders_[valid_indices[i]]->next_idx = valid_indices[i + 1];
         }
         orders_[valid_indices.back()]->next_idx = std::nullopt;
-        
+
         price_point->first_order_idx = valid_indices[0];
         price_point->last_order_idx = valid_indices.back();
     }
@@ -18873,14 +18677,14 @@ public:
         next_slot_++;
         return true;
     }
-    
+
     bool remove_order(OrderId order_id) {
         auto it = order_index_.find(order_id);
         if (it == order_index_.end()) return false;
 
         size_t idx = it->second;
         if (idx >= orders_.size() || !orders_[idx].has_value()) return false;
-        
+
         //Save price and direction for subsequent updates
         const auto& order = orders_[idx]->order;
         Price price = order.price;
@@ -18893,24 +18697,24 @@ public:
         //Rebuild the linked list of this price level
         rebuild_price_level(price, side);
         update_best_price(price, side);
-        
+
         return true;
     }
-    
+
     bool modify_order(OrderId order_id, Quantity new_quantity) {
         auto it = order_index_.find(order_id);
         if (it == order_index_.end()) return false;
 
         size_t idx = it->second;
         if (idx >= orders_.size() || !orders_[idx].has_value()) return false;
-        
+
         auto& order = orders_[idx]->order;
         order.quantity = new_quantity;
-        
+
         if (new_quantity.is_zero()) {
             return remove_order(order_id);
         }
-        
+
         return true;
     }
 
@@ -18959,7 +18763,7 @@ public:
                         Quantity fill_qty = (remaining < order.quantity) ? remaining : order.quantity;
                         remaining -= fill_qty;
                         matched_orders.push_back(&order);
-                        
+
                         //Update order quantity
                         Quantity new_qty = order.quantity - fill_qty;
                         if (new_qty.is_zero()) {
@@ -18973,7 +18777,7 @@ public:
 
                     current_idx = node.next_idx.value_or(orders_.size());
                 }
-                
+
                 //Rebuild the linked list of this price level
                 if (!remaining.is_zero()) {
                     rebuild_price_level(index_to_price(tick), Side::Sell);
@@ -19008,7 +18812,7 @@ public:
                         Quantity fill_qty = (remaining < order.quantity) ? remaining : order.quantity;
                         remaining -= fill_qty;
                         matched_orders.push_back(&order);
-                        
+
                         //Update order quantity
                         Quantity new_qty = order.quantity - fill_qty;
                         if (new_qty.is_zero()) {
@@ -19022,14 +18826,14 @@ public:
 
                     current_idx = node.next_idx.value_or(orders_.size());
                 }
-                
+
                 //Rebuild the linked list of this price level
                 if (!remaining.is_zero()) {
                     rebuild_price_level(index_to_price(tick), Side::Buy);
                 }
             }
         }
-        
+
         // Update best price
         update_best_price(best_bid_.value_or(Price::from_raw(0)), Side::Buy);
         update_best_price(best_ask_.value_or(Price::from_raw(0)), Side::Sell);
@@ -19039,15 +18843,15 @@ public:
 
     std::optional<Price> best_bid() const { return best_bid_; }
     std::optional<Price> best_ask() const { return best_ask_; }
-    
+
     // Get market depth
-    std::pair<std::vector<std::pair<Price, Quantity>>, 
+    std::pair<std::vector<std::pair<Price, Quantity>>,
               std::vector<std::pair<Price, Quantity>>> market_depth(size_t levels) {
         std::vector<std::pair<Price, Quantity>> bid_depth;
         std::vector<std::pair<Price, Quantity>> ask_depth;
         bid_depth.reserve(levels);
         ask_depth.reserve(levels);
-        
+
         // Get buyer depth
         if (best_bid_.has_value() && !bids_.empty()) {
             std::vector<size_t> sorted_bids;
@@ -19056,27 +18860,27 @@ public:
                 sorted_bids.push_back(idx);
             }
             std::sort(sorted_bids.rbegin(), sorted_bids.rend()); // Sort from large to small
-            
+
             for (size_t tick : sorted_bids) {
                 if (bid_depth.size() >= levels) break;
-                
+
                 auto it = bids_.find(tick);
                 if (it == bids_.end()) continue;
-                
+
                 auto& price_point = it->second;
                 if (price_point.empty()) continue;
-                
+
                 Quantity total_qty;
                 size_t current_idx = price_point.first_order_idx.value();
                 while (current_idx < orders_.size() && orders_[current_idx].has_value()) {
                     total_qty += orders_[current_idx]->order.quantity;
                     current_idx = orders_[current_idx]->next_idx.value_or(orders_.size());
                 }
-                
+
                 bid_depth.emplace_back(index_to_price(tick), total_qty);
             }
         }
-        
+
         // Get seller depth
         if (best_ask_.has_value() && !asks_.empty()) {
             std::vector<size_t> sorted_asks;
@@ -19085,34 +18889,33 @@ public:
                 sorted_asks.push_back(idx);
             }
             std::sort(sorted_asks.begin(), sorted_asks.end()); // Sort from small to large
-            
+
             for (size_t tick : sorted_asks) {
                 if (ask_depth.size() >= levels) break;
-                
+
                 auto it = asks_.find(tick);
                 if (it == asks_.end()) continue;
-                
+
                 auto& price_point = it->second;
                 if (price_point.empty()) continue;
-                
+
                 Quantity total_qty;
                 size_t current_idx = price_point.first_order_idx.value();
                 while (current_idx < orders_.size() && orders_[current_idx].has_value()) {
                     total_qty += orders_[current_idx]->order.quantity;
                     current_idx = orders_[current_idx]->next_idx.value_or(orders_.size());
                 }
-                
+
                 ask_depth.emplace_back(index_to_price(tick), total_qty);
             }
         }
-        
+
         return {bid_depth, ask_depth};
     }
 };
 
 } // namespace lob
 ```
-
 
 
 **Option 3: Tree-based LOB - Recommended Solution**
@@ -19168,7 +18971,7 @@ private:
     size_t price_to_index(const Price& price) const {
         return static_cast<size_t>(price.raw() / tick_size_.raw());
     }
-    
+
     Price index_to_price(size_t idx) const {
         return Price::from_raw(static_cast<int64_t>(idx) * tick_size_.raw());
     }
@@ -19185,7 +18988,7 @@ private:
             return &new_it->second;
         }
     }
-    
+
     PricePoint* get_price_point(const Price& price, Side side) {
         size_t idx = price_to_index(price);
         auto& container = (side == Side::Buy) ? bids_ : asks_;
@@ -19203,7 +19006,7 @@ private:
             if (!best_bid_.has_value() || price > best_bid_.value()) {
                 best_bid_ = price;
             }
-            
+
             // Check if there are still orders at the current best price
             if (best_bid_.has_value() && !bids_.empty()) {
                 auto it = bids_.find(price_to_index(best_bid_.value()));
@@ -19229,7 +19032,7 @@ private:
             if (!best_ask_.has_value() || price < best_ask_.value()) {
                 best_ask_ = price;
             }
-            
+
             // Check if there are still orders at the current best price
             if (best_ask_.has_value() && !asks_.empty()) {
                 auto it = asks_.find(price_to_index(best_ask_.value()));
@@ -19266,20 +19069,20 @@ private:
             price_point->last_order_idx = order_idx;
         }
     }
-    
+
     //Rebuild the order list of price points
     void rebuild_price_level(const Price& price, Side side) {
         auto price_point = get_price_point(price, side);
         if (!price_point || price_point->empty()) return;
-        
+
         size_t current_idx = price_point->first_order_idx.value();
         std::vector<size_t> valid_indices;
-        
+
         while (current_idx < orders_.size() && orders_[current_idx].has_value()) {
             valid_indices.push_back(current_idx);
             current_idx = orders_[current_idx]->next_idx.value_or(orders_.size());
         }
-        
+
         if (valid_indices.empty()) {
             size_t idx = price_to_index(price);
             if (side == Side::Buy) {
@@ -19289,13 +19092,13 @@ private:
             }
             return;
         }
-        
+
         //Rebuild the linked list
         for (size_t i = 0; i < valid_indices.size() - 1; ++i) {
             orders_[valid_indices[i]]->next_idx = valid_indices[i + 1];
         }
         orders_[valid_indices.back()]->next_idx = std::nullopt;
-        
+
         price_point->first_order_idx = valid_indices[0];
         price_point->last_order_idx = valid_indices.back();
     }
@@ -19323,14 +19126,14 @@ public:
         next_slot_++;
         return true;
     }
-    
+
     bool remove_order(OrderId order_id) {
         auto it = order_index_.find(order_id);
         if (it == order_index_.end()) return false;
 
         size_t idx = it->second;
         if (idx >= orders_.size() || !orders_[idx].has_value()) return false;
-        
+
         //Save price and direction for subsequent updates
         const auto& order = orders_[idx]->order;
         Price price = order.price;
@@ -19343,24 +19146,24 @@ public:
         //Rebuild the linked list of this price level
         rebuild_price_level(price, side);
         update_best_price(price, side);
-        
+
         return true;
     }
-    
+
     bool modify_order(OrderId order_id, Quantity new_quantity) {
         auto it = order_index_.find(order_id);
         if (it == order_index_.end()) return false;
 
         size_t idx = it->second;
         if (idx >= orders_.size() || !orders_[idx].has_value()) return false;
-        
+
         auto& order = orders_[idx]->order;
         order.quantity = new_quantity;
-        
+
         if (new_quantity.is_zero()) {
             return remove_order(order_id);
         }
-        
+
         return true;
     }
 
@@ -19400,7 +19203,7 @@ public:
                         Quantity fill_qty = (remaining < order.quantity) ? remaining : order.quantity;
                         remaining -= fill_qty;
                         matched_orders.push_back(&order);
-                        
+
                         //Update order quantity
                         Quantity new_qty = order.quantity - fill_qty;
                         if (new_qty.is_zero()) {
@@ -19417,12 +19220,12 @@ public:
 
                 // Save the current iterator position, because rebuild may modify the container
                 auto current_it = it++;
-                
+
                 //Rebuild the linked list of this price level
                 if (orders_.size() > current_idx && orders_[current_idx]) {
                     rebuild_price_level(index_to_price(current_it->first), Side::Sell);
                 }
-                
+
                 // Check if empty price points need to be deleted
                 if (current_it->second.empty()) {
                     asks_.erase(current_it);
@@ -19450,7 +19253,7 @@ public:
                         Quantity fill_qty = (remaining < order.quantity) ? remaining : order.quantity;
                         remaining -= fill_qty;
                         matched_orders.push_back(&order);
-                        
+
                         //Update order quantity
                         Quantity new_qty = order.quantity - fill_qty;
                         if (new_qty.is_zero()) {
@@ -19472,19 +19275,19 @@ public:
                     // handle edge cases
                     it = bids_.end();
                 }
-                
+
                 //Rebuild the linked list of this price level
                 if (orders_.size() > current_idx && orders_[current_idx]) {
                     rebuild_price_level(index_to_price(current_it->first), Side::Buy);
                 }
-                
+
                 // Check if empty price points need to be deleted
                 if (current_it->second.empty()) {
                     bids_.erase(current_it);
                 }
             }
         }
-        
+
         // Update best price
         update_best_price(best_bid_.value_or(Price::from_raw(0)), Side::Buy);
         update_best_price(best_ask_.value_or(Price::from_raw(0)), Side::Sell);
@@ -19494,9 +19297,9 @@ public:
 
     std::optional<Price> best_bid() const { return best_bid_; }
     std::optional<Price> best_ask() const { return best_ask_; }
-    
+
     // Market depth query - unique advantages of tree structure
-    std::pair<std::vector<std::pair<Price, Quantity>>, 
+    std::pair<std::vector<std::pair<Price, Quantity>>,
               std::vector<std::pair<Price, Quantity>>> market_depth(size_t levels) {
         std::vector<std::pair<Price, Quantity>> bid_levels;
         std::vector<std::pair<Price, Quantity>> ask_levels;
@@ -19514,7 +19317,7 @@ public:
                 total_qty += orders_[current_idx]->order.quantity;
                 current_idx = orders_[current_idx]->next_idx.value_or(orders_.size());
             }
-            
+
             if (!total_qty.is_zero()) {
                 Price price = index_to_price(bid_it->first);
                 bid_levels.emplace_back(price, total_qty);
@@ -19534,7 +19337,7 @@ public:
                 total_qty += orders_[current_idx]->order.quantity;
                 current_idx = orders_[current_idx]->next_idx.value_or(orders_.size());
             }
-            
+
             if (!total_qty.is_zero()) {
                 Price price = index_to_price(ask_it->first);
                 ask_levels.emplace_back(price, total_qty);
@@ -19549,7 +19352,6 @@ public:
 
 } // namespace lob
 ```
-
 
 
 **Option 4: Circular array order book (Circular array)**
@@ -19572,7 +19374,6 @@ public:
     2. reset `start`/`end` pointer;
     3. **Key**: Batch update `OrderIndex` Index mapping in (changed by order/price level index).
 + **Trade-off**: Avoid frequent triggering and balance "traversal hole overhead" and "compression + index update overhead".
-
 
 
 | Operation | Time complexity | Core optimization points |
@@ -19861,15 +19662,15 @@ private:
         while (current != insert_pos) {
             // Calculate the previous position (move one position to the left in the loop array)
             size_t prev = circular_mod(current - 1, PRICE_LEVEL_ARRAY_SIZE);
-        
+
             //Move elements: prev → current
             side.price_levels[current] = std::move(side.price_levels[prev]);
-        
+
             // Update the price_to_idx mapping of the moved price
             const Price& moved_price = side.price_levels[current].price;
             if (moved_price.raw() != 0) { // Skip invalid price levels
                 side.price_to_idx[moved_price] = current;
-            
+
                 // Batch update order_index_ of all orders under this price (high 8-digit price level index change)
                 PriceLevel& moved_level = side.price_levels[current];
                 size_t order_current = moved_level.start;
@@ -20033,7 +19834,7 @@ public:
         if (!opposite_side.best_price.has_value()) return matched_orders;
 
         // Check whether the price can be matched (buy order price >= opponent's best selling price, sell order price <= opponent's best buying price)
-        bool can_match = (side == Side::Buy) 
+        bool can_match = (side == Side::Buy)
             ? (price >= opposite_side.best_price.value())
             : (price <= opposite_side.best_price.value());
         if (!can_match) return matched_orders;
@@ -20042,7 +19843,7 @@ public:
         size_t current_price_idx = opposite_side.start;
         while (current_price_idx != opposite_side.end && !remaining.is_zero()) {
             PriceLevel& level = opposite_side.price_levels[current_price_idx];
-            
+
             // Skip invalid price tiers
             if (level.price.raw() == 0) {
                 current_price_idx = circular_mod(current_price_idx + 1, PRICE_LEVEL_ARRAY_SIZE);
@@ -20059,7 +19860,7 @@ public:
             size_t current_order_idx = level.start;
             while (current_order_idx != level.end && !remaining.is_zero()) {
                 auto& [order_id, qty] = level.orders[current_order_idx];
-                
+
                 // Automatically skip invalid items
                 if (order_id == INVALID_ORDER_ID || qty.is_zero()) {
                     current_order_idx = circular_mod(current_order_idx + 1, ORDER_ARRAY_SIZE);
@@ -20117,7 +19918,7 @@ public:
     std::optional<Price> best_bid() const { return bids_.best_price; }
     std::optional<Price> best_ask() const { return asks_.best_price; }
 
-    std::pair<std::vector<std::pair<Price, Quantity>>, 
+    std::pair<std::vector<std::pair<Price, Quantity>>,
               std::vector<std::pair<Price, Quantity>>> market_depth(size_t levels) {
         std::vector<std::pair<Price, Quantity>> bid_depth;
         std::vector<std::pair<Price, Quantity>> ask_depth;
@@ -20185,7 +19986,6 @@ The basic building blocks of the FIX protocol are tag-value pairs. Each data fie
 3. **Separator**: An ASCII character, usually **SOH (Start of Header, ASCII value 0x01)**, often displayed as in logs and examples `|` or `^`.
 
 **Format:** `Tag=Value<SOH>`
-
 
 
 **Structure of FIX message**
@@ -20305,7 +20105,7 @@ template <typename OrderBookType>
 class MyFIXApplication : public Application, public MessageCracker
 {
 public:
-explicit MyFIXApplication(OrderBookType& order_book) 
+explicit MyFIXApplication(OrderBookType& order_book)
 : order_book_(order_book) {}
 
 void onCreate(const FIX::SessionID&) override {}
@@ -20399,7 +20199,7 @@ bool extract_order_fields(const FIX44::MarketDataIncrementalRefresh::NoMDEntries
         switch (update_action.getValue()) {
             case FIX::MDUpdateAction_NEW:
                 order_book_.add_order(order, is_bid);
-                std::cout << "Add Order: ID=" << order.id << ", Price=" << order.price << ", Qty=" << order.quantity 
+                std::cout << "Add Order: ID=" << order.id << ", Price=" << order.price << ", Qty=" << order.quantity
                           << ", Type=" << (is_bid ? "Bid" : "Offer") << std::endl;
                 break;
 
@@ -20461,7 +20261,6 @@ int main(int argc, char** argv) {
     }
 }
 ```
-
 
 
 CTP learning:[https://github.com/zzxscodes/ctp-learning/blob/main/README.md](https://github.com/zzxscodes/ctp-learning/blob/main/README.md)
@@ -20714,7 +20513,7 @@ class CtpGateway:
     """
     CTP Gateway implementation using openctp library
     """
-    
+
     default_setting = {
         "username": "",
         "password": "",
@@ -20724,16 +20523,16 @@ class CtpGateway:
         "Product Name": "",
         "Authorization code": ""
     }
-    
+
     exchanges = list(Exchange)
-    
+
     def __init__(self, event_engine=None):
         """Constructor"""
         self.event_engine = event_engine
         self.td_api = None
         self.md_api = None
         self.connected = False
-        
+
     def connect(self, setting: dict) -> None:
         """Connect to CTP server"""
         userid = setting["username"]
@@ -20743,107 +20542,107 @@ class CtpGateway:
         md_address = setting["Quote Server"]
         appid = setting["product name"]
         auth_code = setting["Authorization code"]
-        
+
         # Format addresses
         if not td_address.startswith("tcp://") and not td_address.startswith("ssl://"):
             td_address = "tcp://" + td_address
-            
+
         if not md_address.startswith("tcp://") and not md_address.startswith("ssl://"):
             md_address = "tcp://" + md_address
-            
+
         # Create APIs
         self.td_api = CtpTdApi(self, td_address, userid, password, brokerid, auth_code, appid)
         self.md_api = CtpMdApi(self, md_address, userid, password, brokerid)
-        
+
         self.connected = True
         print("CTP gateway initialization completed")
-        
+
     def subscribe(self, req: "SubscribeRequest") -> None:
         """Subscribe market data"""
         if self.md_api and self.connected:
             self.md_api.subscribe(req)
-            
+
     def unsubscribe(self, req: "SubscribeRequest") -> None:
         """Unsubscribe market data"""
         if self.md_api and self.connected:
             self.md_api.unsubscribe(req)
-            
+
     def send_order(self, req: "OrderRequest") -> str:
         """Send order"""
         if self.td_api and self.connected:
             return self.td_api.send_order(req)
         return ""
-        
+
     def cancel_order(self, req: "CancelRequest") -> None:
         """Cancel order"""
         if self.td_api and self.connected:
             self.td_api.cancel_order(req)
-            
+
     def close(self) -> None:
         """Close connection"""
         if self.td_api:
             self.td_api.close()
         if self.md_api:
             self.md_api.close()
-            
+
     def write_log(self, msg: str) -> None:
         """Write log message"""
         print(f"[{datetime.now()}] {msg}")
-        
+
     def on_tick(self, tick) -> None:
         """Callback when receiving tick data"""
         print(f"Tick: {tick.symbol} {tick.last_price} Volume: {tick.volume}")
-        
+
     def on_order(self, order) -> None:
         """Callback when receiving order update"""
         print(f"Order: {order.symbol} {order.direction} {order.offset} "
               f"Price: {order.price} Volume: {order.volume} Status: {order.status}")
-        
+
     def on_trade(self, trade) -> None:
         """Callback when receiving trade"""
         print(f"Trade: {trade.symbol} {trade.direction} {trade.offset} "
               f"Price: {trade.price} Volume: {trade.volume}")
-        
+
     def on_position(self, position) -> None:
         """Callback when receiving position"""
         print(f"Position: {position.symbol} {position.direction} "
               f"Volume: {position.volume} YD Volume: {position.yd_volume}")
-        
+
     def on_account(self, account) -> None:
         """Callback when receiving account"""
         print(f"Account: {account.accountid} Balance: {account.balance} "
               f"Available: {account.available}")
-        
+
     def on_contract(self, contract) -> None:
         """Callback when receiving contract data"""
         # This method can be overridden in subclasses to handle contract data
         pass
-        
+
     def on_instrument_query_finished(self) -> None:
         """Callback when instrument query is finished"""
         # This method can be overridden in subclasses to handle query completion
         pass
-        
+
     def query_order(self) -> None:
         """Query orders"""
         if self.td_api and self.connected:
             self.td_api.query_order()
-            
+
     def query_trade(self) -> None:
         """Query trades"""
         if self.td_api and self.connected:
             self.td_api.query_trade()
-            
+
     def query_instrument(self) -> None:
         """Query instruments"""
         if self.td_api and self.connected:
             self.td_api.query_instrument()
-            
+
     def query_account(self) -> None:
         """Query account"""
         if self.td_api and self.connected:
             self.td_api.query_account()
-            
+
     def query_position(self) -> None:
         """Query positions"""
         if self.td_api and self.connected:
@@ -20881,51 +20680,51 @@ class CancelRequest:
 
 class CtpMdApi(mdapi.CThostFtdcMdSpi):
     """CTP Market Data API"""
-    
+
     def __init__(self, gateway: CtpGateway, address: str, userid: str, password: str, brokerid: str):
         """Constructor"""
         super(CtpMdApi, self).__init__()
-        
+
         self.gateway = gateway
         self.address = address
         self.userid = userid
         self.password = password
         self.brokerid = brokerid
-        
+
         self.reqid = 0
         self.connect_status = False
         self.login_status = False
         self.subscribed = set()
-        
+
         # Create API
         flow_path = os.path.join(os.getcwd(), "flow", userid, "md")
         if not os.path.exists(flow_path):
             os.makedirs(flow_path)
-            
+
         self.md_api = mdapi.CThostFtdcMdApi.CreateFtdcMdApi(flow_path)
         self.md_api.RegisterSpi(self)
         self.md_api.RegisterFront(address)
         self.md_api.Init()
-        
+
         self.connect_status = True
         print(f"Quotes API initialization completed, prefix address: {address}")
-        
+
     def OnFrontConnected(self) -> None:
         """Callback when connected to server"""
         self.gateway.write_log("Quotes server connection successful")
         self.login()
-        
+
     def OnFrontDisconnected(self, reason: int) -> None:
         """Callback when disconnected from server"""
         self.login_status = False
         self.gateway.write_log(f"Quotes server connection disconnected, reason {reason}")
-        
+
     def OnRspUserLogin(self, data, error, reqid: int, last: bool) -> None:
         """Callback when login response"""
         if error and error.ErrorID == 0:
             self.login_status = True
             self.gateway.write_log("Quotes server login successful")
-            
+
             # After successful login, subscribe to the added contract
             for symbol in self.subscribed:
                 result = self.md_api.SubscribeMarketData([symbol.encode('utf-8')], 1)
@@ -20940,13 +20739,13 @@ class CtpMdApi(mdapi.CThostFtdcMdSpi):
             # Handle the case where error is None
             self.login_status = True
             self.gateway.write_log("Quotes server login successful")
-            
+
             # After successful login, subscribe to the added contract
             for symbol in self.subscribed:
                 result = self.md_api.SubscribeMarketData([symbol.encode('utf-8')], 1)
                 if result != 0:
                     self.gateway.write_log(f"Subscription to quotations failed, error code: {result}")
-            
+
     def OnRspSubMarketData(self, data, error, reqid: int, last: bool) -> None:
         """Callback when subscribe market data response"""
         if error and error.ErrorID != 0:
@@ -20959,16 +20758,16 @@ class CtpMdApi(mdapi.CThostFtdcMdSpi):
         else:
             # Handle the case where error is None
             self.gateway.write_log(f"Quote subscription successful: {data.InstrumentID}")
-            
+
     def OnRtnDepthMarketData(self, data) -> None:
         """Callback when receiving market data"""
         try:
             # Skip if no update time
             if not hasattr(data, 'UpdateTime') or not data.UpdateTime:
                 return
-                
+
             symbol = data.InstrumentID
-            
+
             # Create tick data
             class TickData:
                 def __init__(self):
@@ -20990,10 +20789,10 @@ class CtpMdApi(mdapi.CThostFtdcMdSpi):
                     self.ask_price_1 = 0
                     self.bid_volume_1 = 0
                     self.ask_volume_1 = 0
-                    
+
             tick = TickData()
             tick.symbol = symbol
-            
+
             # Set the price field safely and handle possible outliers
             tick.last_price = getattr(data, 'LastPrice', 0)
             tick.volume = getattr(data, 'Volume', 0)
@@ -21005,32 +20804,32 @@ class CtpMdApi(mdapi.CThostFtdcMdSpi):
             tick.pre_close = getattr(data, 'PreClosePrice', 0)
             tick.limit_up = getattr(data, 'UpperLimitPrice', 0)
             tick.limit_down = getattr(data, 'LowerLimitPrice', 0)
-            
+
             # Process buying and selling quotes and filter invalid values
             import sys
             MAX_FLOAT = sys.float_info.max
-            
+
             bid_price = getattr(data, 'BidPrice1', 0)
             ask_price = getattr(data, 'AskPrice1', 0)
-            
+
             if bid_price and bid_price != MAX_FLOAT:
                 tick.bid_price_1 = bid_price
             else:
                 tick.bid_price_1 = 0
-                
+
             if ask_price and ask_price != MAX_FLOAT:
                 tick.ask_price_1 = ask_price
             else:
                 tick.ask_price_1 = 0
-                
+
             tick.bid_volume_1 = getattr(data, 'BidVolume1', 0)
             tick.ask_volume_1 = getattr(data, 'AskVolume1', 0)
-            
+
             # Process time information
             from datetime import datetime
             # Use the current time as the tick time
             tick.datetime = datetime.now()
-            
+
             # Call the on_tick method of the gateway
             self.gateway.on_tick(tick)
         except Exception as e:
@@ -21038,18 +20837,18 @@ class CtpMdApi(mdapi.CThostFtdcMdSpi):
             print(f"An exception occurred while processing market data: {e}")
             import traceback
             traceback.print_exc()
-        
+
     def connect(self, address: str, userid: str, password: str, brokerid: str) -> None:
         """Connect to server"""
         self.userid = userid
         self.password = password
         self.brokerid = brokerid
-        
+
         # Create API with absolute path
         flow_path = os.path.abspath(os.path.join("flow", userid, "md"))
         if not os.path.exists(flow_path):
             os.makedirs(flow_path)
-            
+
         self.md_api = mdapi.CThostFtdcMdApi.CreateFtdcMdApi(flow_path)
         self.md_api.RegisterSpi(self)
         self.md_api.RegisterFront(address)
@@ -21059,20 +20858,20 @@ class CtpMdApi(mdapi.CThostFtdcMdSpi):
         self.md_api.SubscribePublicTopic(tdapi.THOST_TERT_RESTART)
 
         self.md_api.Init()
-        
+
         self.connect_status = True
         print(f"Quotes API initialization completed, prefix address: {address}")
-        
+
     def login(self) -> None:
         """User login"""
         req = mdapi.CThostFtdcReqUserLoginField()
         req.UserID = self.userid
         req.Password = self.password
         req.BrokerID = self.brokerid
-        
+
         self.reqid += 1
         self.md_api.ReqUserLogin(req, self.reqid)
-        
+
     def subscribe(self, req: SubscribeRequest) -> None:
         """Subscribe market data"""
         if self.login_status:
@@ -21085,7 +20884,7 @@ class CtpMdApi(mdapi.CThostFtdcMdSpi):
         else:
             # If you are not logged in yet, add it to the subscription collection first, and then subscribe after logging in.
             self.subscribed.add(req.symbol)
-        
+
     def unsubscribe(self, req: SubscribeRequest) -> None:
         """Unsubscribe market data"""
         if self.login_status:
@@ -21096,7 +20895,7 @@ class CtpMdApi(mdapi.CThostFtdcMdSpi):
                 self.gateway.write_log(f"Failed to send unsubscribe quotation request, error code: {result}")
         if req.symbol in self.subscribed:
             self.subscribed.remove(req.symbol)
-        
+
     def close(self) -> None:
         """Close connection"""
         if self.connect_status:
@@ -21107,12 +20906,12 @@ class CtpMdApi(mdapi.CThostFtdcMdSpi):
 
 class CtpTdApi(tdapi.CThostFtdcTraderSpi):
     """CTP Trading API"""
-    
-    def __init__(self, gateway: CtpGateway, address: str, userid: str, password: str, 
+
+    def __init__(self, gateway: CtpGateway, address: str, userid: str, password: str,
                  brokerid: str, auth_code: str, appid: str):
         """Constructor"""
         super(CtpTdApi, self).__init__()
-        
+
         self.gateway = gateway
         self.address = address
         self.userid = userid
@@ -21120,57 +20919,57 @@ class CtpTdApi(tdapi.CThostFtdcTraderSpi):
         self.brokerid = brokerid
         self.auth_code = auth_code
         self.appid = appid
-        
+
         self.reqid = 0
         self.order_ref = 0
-        
+
         self.connect_status = False
         self.login_status = False
         self.auth_status = False
         self.login_failed = False
-        
+
         self.frontid = 0
         self.sessionid = 0
-        
+
         self.order_data = []
         self.trade_data = []
-        
+
         self.positions = {}
         self.sysid_orderid_map = {}
         self.contracts = []  # Store available contracts
-        
+
         # Create API
         flow_path = os.path.join(os.getcwd(), "flow", userid, "td")
         if not os.path.exists(flow_path):
             os.makedirs(flow_path)
-            
+
         self.td_api = tdapi.CThostFtdcTraderApi.CreateFtdcTraderApi(flow_path)
         self.td_api.RegisterSpi(self)
-        
+
         # Subscribe private and public topics
         self.td_api.SubscribePrivateTopic(tdapi.THOST_TERT_RESTART)
         self.td_api.SubscribePublicTopic(tdapi.THOST_TERT_RESTART)
-        
+
         self.td_api.RegisterFront(address)
         self.td_api.Init()
-        
+
         self.connect_status = True
         print(f"Transaction API initialization completed, prefix address: {address}")
-        
+
     def OnFrontConnected(self) -> None:
         """Callback when connected to server"""
         self.gateway.write_log("Trading server connection successful")
-        
+
         if self.auth_code:
             self.authenticate()
         else:
             self.login()
-            
+
     def OnFrontDisconnected(self, reason: int) -> None:
         """Callback when disconnected from server"""
         self.login_status = False
         self.gateway.write_log(f"The transaction server connection was disconnected, reason {reason}")
-        
+
     def OnRspAuthenticate(self, data, error, reqid: int, last: bool) -> None:
         """Callback when authenticate response"""
         if error and error.ErrorID == 0:
@@ -21184,7 +20983,7 @@ class CtpTdApi(tdapi.CThostFtdcTraderSpi):
             self.auth_status = True
             self.gateway.write_log("Trading server authorization verification successful")
             self.login()
-            
+
     def OnRspUserLogin(self, data, error, reqid: int, last: bool) -> None:
         """Callback when login response"""
         if error and error.ErrorID == 0:
@@ -21192,12 +20991,12 @@ class CtpTdApi(tdapi.CThostFtdcTraderSpi):
             self.sessionid = data.SessionID
             self.login_status = True
             self.gateway.write_log("Trading server login successful")
-            
+
             # Confirm settlement
             req = tdapi.CThostFtdcSettlementInfoConfirmField()
             req.BrokerID = self.brokerid
             req.InvestorID = self.userid
-            
+
             self.reqid += 1
             self.td_api.ReqSettlementInfoConfirm(req, self.reqid)
         elif error:
@@ -21209,26 +21008,26 @@ class CtpTdApi(tdapi.CThostFtdcTraderSpi):
             self.sessionid = data.SessionID
             self.login_status = True
             self.gateway.write_log("Trading server login successful")
-            
+
             # Confirm settlement
             req = tdapi.CThostFtdcSettlementInfoConfirmField()
             req.BrokerID = self.brokerid
             req.InvestorID = self.userid
-            
+
             self.reqid += 1
             self.td_api.ReqSettlementInfoConfirm(req, self.reqid)
-            
+
     def OnRspSettlementInfoConfirm(self, data, error, reqid: int, last: bool) -> None:
         """Callback when settlement info confirm response"""
         if error and error.ErrorID != 0:
             self.gateway.write_log(f"Settlement information confirmation failed, error code: {error.ErrorID}, error message: {error.ErrorMsg.decode('gbk')}")
         else:
             self.gateway.write_log("Settlement information confirmed successfully")
-        
+
         # Query contracts
         self.reqid += 1
         self.td_api.ReqQryInstrument(tdapi.CThostFtdcQryInstrumentField(), self.reqid)
-        
+
     def OnRspQryInstrument(self, data, error, reqid: int, last: bool) -> None:
         """Callback when query instrument response"""
         if error and error.ErrorID != 0:
@@ -21238,10 +21037,10 @@ class CtpTdApi(tdapi.CThostFtdcTraderSpi):
                 error_msg = error_msg.decode('gbk')
             self.gateway.write_log(f"Failed to query contract, error code: {error.ErrorID}, error message: {error_msg}")
             return
-            
+
         if not data:
             return
-            
+
         # Create contract data
         class ContractData:
             def __init__(self):
@@ -21255,7 +21054,7 @@ class CtpTdApi(tdapi.CThostFtdcTraderSpi):
                 self.stop_supported = False
                 self.net_position = False
                 self.history_data = True
-                
+
         contract = ContractData()
         contract.symbol = data.InstrumentID
         contract.exchange = data.ExchangeID
@@ -21268,14 +21067,14 @@ class CtpTdApi(tdapi.CThostFtdcTraderSpi):
         contract.size = data.VolumeMultiple
         contract.pricetick = data.PriceTick
         contract.min_volume = data.MinLimitOrderVolume
-        
+
         self.gateway.on_contract(contract)
-        
+
         if last:
             self.gateway.write_log("Query contract completed")
             #Call the gateway.on_instrument_query_finished method to notify the query of completion
             self.gateway.on_instrument_query_finished()
-            
+
     def OnRspOrderInsert(self, data, error, reqid: int, last: bool) -> None:
         """Callback when order insert response"""
         if error and error.ErrorID != 0:
@@ -21288,7 +21087,7 @@ class CtpTdApi(tdapi.CThostFtdcTraderSpi):
             self.gateway.write_log(f"Transaction order successful, error code: {error.ErrorID}")
         else:
             self.gateway.write_log("Transaction order successful")
-            
+
     def OnErrRtnOrderInsert(self, data, error) -> None:
         """Callback when error occurs in order insert"""
         if error and error.ErrorID != 0:
@@ -21296,7 +21095,7 @@ class CtpTdApi(tdapi.CThostFtdcTraderSpi):
             if isinstance(error_msg, bytes):
                 error_msg = error_msg.decode('gbk')
             self.gateway.write_log(f"Delegation error report, error code: {error.ErrorID}, error message: {error_msg}")
-            
+
     def OnRspOrderAction(self, data, error, reqid: int, last: bool) -> None:
         """Callback when order action response"""
         if error and error.ErrorID != 0:
@@ -21309,7 +21108,7 @@ class CtpTdApi(tdapi.CThostFtdcTraderSpi):
             self.gateway.write_log(f"Transaction canceled successfully, error code: {error.ErrorID}")
         else:
             self.gateway.write_log("Transaction canceled successfully")
-        
+
     def OnRspOrderAction(self, data, error, reqid: int, last: bool) -> None:
         """Callback when order action response"""
         if error and error.ErrorID != 0:
@@ -21322,7 +21121,7 @@ class CtpTdApi(tdapi.CThostFtdcTraderSpi):
             self.gateway.write_log(f"Transaction canceled successfully, error code: {error.ErrorID}")
         else:
             self.gateway.write_log("Transaction canceled successfully")
-            
+
     def OnRspQryTradingAccount(self, data, error, reqid: int, last: bool) -> None:
         """Callback when query trading account response"""
         if error and error.ErrorID != 0:
@@ -21332,10 +21131,10 @@ class CtpTdApi(tdapi.CThostFtdcTraderSpi):
                 error_msg = error_msg.decode('gbk')
             self.gateway.write_log(f"Account query failed, error code: {error.ErrorID}, error message: {error_msg}")
             return
-            
+
         if not data:
             return
-            
+
         # Create account data
         class AccountData:
             def __init__(self):
@@ -21343,18 +21142,18 @@ class CtpTdApi(tdapi.CThostFtdcTraderSpi):
                 self.balance = 0
                 self.frozen = 0
                 self.available = 0
-                
+
         account = AccountData()
         account.accountid = data.AccountID
         account.balance = data.Balance
         account.frozen = data.FrozenMargin + data.FrozenCash
         account.available = data.Available
-        
+
         self.gateway.on_account(account)
-        
+
         if last:
             self.gateway.write_log("Account query completed")
-            
+
     def OnRspQryInvestorPosition(self, data, error, reqid: int, last: bool) -> None:
         """Callback when query investor position response"""
         if error and error.ErrorID != 0:
@@ -21364,10 +21163,10 @@ class CtpTdApi(tdapi.CThostFtdcTraderSpi):
                 error_msg = error_msg.decode('gbk')
             self.gateway.write_log(f"Failed to query position, error code: {error.ErrorID}, error message: {error_msg}")
             return
-            
+
         if not data:
             return
-            
+
         # Create position data
         class PositionData:
             def __init__(self):
@@ -21379,7 +21178,7 @@ class CtpTdApi(tdapi.CThostFtdcTraderSpi):
                 self.frozen = 0
                 self.price = 0
                 self.pnl = 0
-                
+
         position = PositionData()
         position.symbol = data.InstrumentID
         position.direction = Direction.LONG.value if data.PosiDirection == tdapi.THOST_FTDC_PD_Long else Direction.SHORT.value
@@ -21387,12 +21186,12 @@ class CtpTdApi(tdapi.CThostFtdcTraderSpi):
         position.yd_volume = data.YdPosition
         position.frozen = data.ShortFrozen if data.PosiDirection == tdapi.THOST_FTDC_PD_Short else data.LongFrozen
         position.price = data.PositionCost / data.Position if data.Position else 0
-        
+
         self.gateway.on_position(position)
-        
+
         if last:
             self.gateway.write_log("Query position completed")
-            
+
     def OnRtnOrder(self, data) -> None:
         """Callback when receiving order"""
         # Create order data
@@ -21408,7 +21207,7 @@ class CtpTdApi(tdapi.CThostFtdcTraderSpi):
                 self.traded = 0
                 self.status = ""
                 self.datetime = None
-                
+
         order = OrderData()
         order.symbol = data.InstrumentID
         order.exchange = data.ExchangeID
@@ -21428,7 +21227,7 @@ class CtpTdApi(tdapi.CThostFtdcTraderSpi):
         order.price = data.LimitPrice
         order.volume = data.VolumeTotalOriginal
         order.traded = data.VolumeTraded
-        
+
         # Map order status
         if data.OrderStatus == tdapi.THOST_FTDC_OST_AllTraded:
             order.status = Status.ALLTRADED.value
@@ -21442,10 +21241,10 @@ class CtpTdApi(tdapi.CThostFtdcTraderSpi):
             order.status = Status.REJECTED.value
         else:
             order.status = Status.SUBMITTING.value
-        
+
         self.gateway.on_order(order)
         self.sysid_orderid_map[data.OrderSysID] = order.orderid
-        
+
     def OnRtnTrade(self, data) -> None:
         """Callback when receiving trade"""
         # Create trade data
@@ -21460,7 +21259,7 @@ class CtpTdApi(tdapi.CThostFtdcTraderSpi):
                 self.price = 0
                 self.volume = 0
                 self.datetime = None
-                
+
         trade = TradeData()
         trade.symbol = data.InstrumentID
         trade.exchange = data.ExchangeID
@@ -21480,9 +21279,9 @@ class CtpTdApi(tdapi.CThostFtdcTraderSpi):
         trade.price = data.Price
         trade.volume = data.Volume
         trade.orderid = self.sysid_orderid_map.get(data.OrderSysID, "")
-        
+
         self.gateway.on_trade(trade)
-        
+
     def OnErrRtnOrderAction(self, data, error) -> None:
         """Callback when error occurs in order action"""
         if error and error.ErrorID != 0:
@@ -21490,16 +21289,16 @@ class CtpTdApi(tdapi.CThostFtdcTraderSpi):
             if isinstance(error_msg, bytes):
                 error_msg = error_msg.decode('gbk')
             self.gateway.write_log(f"Order cancellation error report, error code: {error.ErrorID}, error message: {error_msg}")
-            
+
     def OnRspQryOrder(self, data, error, reqid: int, last: bool) -> None:
         """Callback when query order response"""
         if error and error.ErrorID != 0:
             self.gateway.write_log(f"Query delegation failed, error code: {error.ErrorID}, error message: {error.ErrorMsg.decode('gbk')}")
             return
-            
+
         if not data:
             return
-            
+
         # Create order data
         class OrderData:
             def __init__(self):
@@ -21513,7 +21312,7 @@ class CtpTdApi(tdapi.CThostFtdcTraderSpi):
                 self.traded = 0
                 self.status = ""
                 self.datetime = None
-                
+
         order = OrderData()
         order.symbol = data.InstrumentID
         order.exchange = data.ExchangeID
@@ -21533,7 +21332,7 @@ class CtpTdApi(tdapi.CThostFtdcTraderSpi):
         order.price = data.LimitPrice
         order.volume = data.VolumeTotalOriginal
         order.traded = data.VolumeTraded
-        
+
         # Map order status
         if data.OrderStatus == tdapi.THOST_FTDC_OST_AllTraded:
             order.status = Status.ALLTRADED.value
@@ -21547,13 +21346,13 @@ class CtpTdApi(tdapi.CThostFtdcTraderSpi):
             order.status = Status.REJECTED.value
         else:
             order.status = Status.SUBMITTING.value
-            
+
         self.gateway.on_order(order)
         self.sysid_orderid_map[data.OrderSysID] = order.orderid
-        
+
         if last:
             self.gateway.write_log("Query delegation completed")
-            
+
     def OnRspQryTrade(self, data, error, reqid: int, last: bool) -> None:
         """Callback when query trade response"""
         if error and error.ErrorID != 0:
@@ -21563,10 +21362,10 @@ class CtpTdApi(tdapi.CThostFtdcTraderSpi):
                 error_msg = error_msg.decode('gbk')
             self.gateway.write_log(f"Query transaction failed, error code: {error.ErrorID}, error message: {error_msg}")
             return
-            
+
         if not data:
             return
-            
+
         # Create trade data
         class TradeData:
             def __init__(self):
@@ -21579,7 +21378,7 @@ class CtpTdApi(tdapi.CThostFtdcTraderSpi):
                 self.price = 0
                 self.volume = 0
                 self.datetime = None
-                
+
         trade = TradeData()
         trade.symbol = data.InstrumentID
         trade.exchange = data.ExchangeID
@@ -21599,12 +21398,12 @@ class CtpTdApi(tdapi.CThostFtdcTraderSpi):
         trade.price = data.Price
         trade.volume = data.Volume
         trade.orderid = self.sysid_orderid_map.get(data.OrderSysID, "")
-        
+
         self.gateway.on_trade(trade)
-        
+
         if last:
             self.gateway.write_log("Query transaction completed")
-            
+
     def OnRspQryInvestor(self, data, error, reqid: int, last: bool) -> None:
         """Callback when query investor response"""
         if error and error.ErrorID != 0:
@@ -21613,10 +21412,10 @@ class CtpTdApi(tdapi.CThostFtdcTraderSpi):
                 error_msg = error_msg.decode('gbk')
             self.gateway.write_log(f"Failed to query investors, error code: {error.ErrorID}, error message: {error_msg}")
             return
-            
+
         if not data:
             return
-            
+
         # Create investor data
         class InvestorData:
             def __init__(self):
@@ -21627,7 +21426,7 @@ class CtpTdApi(tdapi.CThostFtdcTraderSpi):
                 self.identified_card_type = ""
                 self.identified_card_no = ""
                 self.is_active = False
-                
+
         investor = InvestorData()
         investor.investor_id = data.InvestorID
         investor.broker_id = data.BrokerID
@@ -21636,12 +21435,12 @@ class CtpTdApi(tdapi.CThostFtdcTraderSpi):
         investor.identified_card_type = data.IdentifiedCardType
         investor.identified_card_no = data.IdentifiedCardNo
         investor.is_active = bool(data.IsActive)
-        
+
         self.gateway.write_log(f"Investor query completed: {investor.investor_name}")
-        
+
         if last:
             self.gateway.write_log("Investor query completed")
-            
+
     def OnRspQryTradingCode(self, data, error, reqid: int, last: bool) -> None:
         """Callback when query trading code response"""
         if error and error.ErrorID != 0:
@@ -21650,10 +21449,10 @@ class CtpTdApi(tdapi.CThostFtdcTraderSpi):
                 error_msg = error_msg.decode('gbk')
             self.gateway.write_log(f"Failed to query transaction code, error code: {error.ErrorID}, error message: {error_msg}")
             return
-            
+
         if not data:
             return
-            
+
         # Create trading code data
         class TradingCodeData:
             def __init__(self):
@@ -21663,7 +21462,7 @@ class CtpTdApi(tdapi.CThostFtdcTraderSpi):
                 self.client_id = ""
                 self.is_active = False
                 self.client_id_type = 0
-                
+
         code = TradingCodeData()
         code.investor_id = data.InvestorID
         code.broker_id = data.BrokerID
@@ -21671,13 +21470,13 @@ class CtpTdApi(tdapi.CThostFtdcTraderSpi):
         code.client_id = data.ClientID
         code.is_active = bool(data.IsActive)
         code.client_id_type = data.ClientIDType
-        
+
         self.gateway.write_log(f"Query transaction code completed: {code.client_id}")
-        
+
         if last:
             self.gateway.write_log("Query transaction encoding completed")
-        
-    def connect(self, address: str, userid: str, password: str, brokerid: str, 
+
+    def connect(self, address: str, userid: str, password: str, brokerid: str,
                 auth_code: str, appid: str) -> None:
         """Connect to server"""
         self.userid = userid
@@ -21685,25 +21484,25 @@ class CtpTdApi(tdapi.CThostFtdcTraderSpi):
         self.brokerid = brokerid
         self.auth_code = auth_code
         self.appid = appid
-        
+
         # Create API with absolute path
         flow_path = os.path.abspath(os.path.join("flow", userid, "td"))
         if not os.path.exists(flow_path):
             os.makedirs(flow_path)
-            
+
         self.td_api = tdapi.CThostFtdcTraderApi.CreateFtdcTraderApi(flow_path)
         self.td_api.RegisterSpi(self)
-        
+
         # Subscribe private and public topics
         self.td_api.SubscribePrivateTopic(tdapi.THOST_TERT_RESTART)
         self.td_api.SubscribePublicTopic(tdapi.THOST_TERT_RESTART)
-        
+
         self.td_api.RegisterFront(address)
         self.td_api.Init()
-        
+
         self.connect_status = True
         print(f"Transaction API initialization completed, prefix address: {address}")
-        
+
     def authenticate(self) -> None:
         """Authenticate with CTP server"""
         req = tdapi.CThostFtdcReqAuthenticateField()
@@ -21711,10 +21510,10 @@ class CtpTdApi(tdapi.CThostFtdcTraderSpi):
         req.UserID = self.userid
         req.AppID = self.appid
         req.AuthCode = self.auth_code
-        
+
         self.reqid += 1
         self.td_api.ReqAuthenticate(req, self.reqid)
-        
+
     def login(self) -> None:
         """User login"""
         req = tdapi.CThostFtdcReqUserLoginField()
@@ -21722,11 +21521,11 @@ class CtpTdApi(tdapi.CThostFtdcTraderSpi):
         req.UserID = self.userid
         req.Password = self.password
         req.UserProductInfo = "openctp" #Limited to 11 characters, the original "openctp_client" exceeds the length limit
-        
+
         self.reqid += 1
         self.td_api.ReqUserLogin(req, self.reqid)
-        
-    def send_order(self, req: OrderRequest, 
+
+    def send_order(self, req: OrderRequest,
                    time_condition: TimeCondition = TimeCondition.GFD,
                    volume_condition: VolumeCondition = VolumeCondition.AV,
                    contingent_condition: ContingentCondition = ContingentCondition.IMMEDIATELY,
@@ -21736,7 +21535,7 @@ class CtpTdApi(tdapi.CThostFtdcTraderSpi):
         Send order with optional advanced parameters
         """
         self.order_ref += 1
-        
+
         ctp_req = tdapi.CThostFtdcInputOrderField()
         ctp_req.BrokerID = self.brokerid
         ctp_req.InvestorID = self.userid
@@ -21744,13 +21543,13 @@ class CtpTdApi(tdapi.CThostFtdcTraderSpi):
         ctp_req.InstrumentID = req.symbol
         ctp_req.OrderRef = str(self.order_ref)
         ctp_req.UserID = self.userid
-        
+
         # Set direction
         if req.direction == Direction.LONG.value:
             ctp_req.Direction = tdapi.THOST_FTDC_D_Buy
         else:
             ctp_req.Direction = tdapi.THOST_FTDC_D_Sell
-            
+
         # Set open and close positions
         if req.offset == Offset.OPEN.value:
             ctp_req.CombOffsetFlag = tdapi.THOST_FTDC_OF_Open
@@ -21762,11 +21561,11 @@ class CtpTdApi(tdapi.CThostFtdcTraderSpi):
             ctp_req.CombOffsetFlag = tdapi.THOST_FTDC_OF_CloseYesterday
         else:
             ctp_req.CombOffsetFlag = tdapi.THOST_FTDC_OF_Open
-            
+
         ctp_req.CombHedgeFlag = tdapi.THOST_FTDC_HF_Speculation
         ctp_req.LimitPrice = req.price
         ctp_req.VolumeTotalOriginal = int(req.volume)
-        
+
         #Set price type
         if req.type == OrderType.LIMIT.value or req.type == "LIMIT":
             ctp_req.OrderPriceType = tdapi.THOST_FTDC_OPT_LimitPrice
@@ -21782,7 +21581,7 @@ class CtpTdApi(tdapi.CThostFtdcTraderSpi):
             ctp_req.OrderPriceType = tdapi.THOST_FTDC_OPT_FiveLevelPrice
         else:
             ctp_req.OrderPriceType = tdapi.THOST_FTDC_OPT_LimitPrice
-            
+
         # Set time conditions
         if time_condition == TimeCondition.IOC:
             ctp_req.TimeCondition = tdapi.THOST_FTDC_TC_IOC
@@ -21798,7 +21597,7 @@ class CtpTdApi(tdapi.CThostFtdcTraderSpi):
             ctp_req.TimeCondition = tdapi.THOST_FTDC_TC_GFA
         else:
             ctp_req.TimeCondition = tdapi.THOST_FTDC_TC_GFD
-            
+
         # Set quantity conditions
         if volume_condition == VolumeCondition.AV:
             ctp_req.VolumeCondition = tdapi.THOST_FTDC_VC_AV
@@ -21808,7 +21607,7 @@ class CtpTdApi(tdapi.CThostFtdcTraderSpi):
             ctp_req.VolumeCondition = tdapi.THOST_FTDC_VC_CV
         else:
             ctp_req.VolumeCondition = tdapi.THOST_FTDC_VC_AV
-            
+
         # Set trigger conditions
         if contingent_condition == ContingentCondition.IMMEDIATELY:
             ctp_req.ContingentCondition = tdapi.THOST_FTDC_CC_Immediately
@@ -21832,29 +21631,29 @@ class CtpTdApi(tdapi.CThostFtdcTraderSpi):
             ctp_req.ContingentCondition = tdapi.THOST_FTDC_CC_BidPriceLesserThanStopPrice
         else:
             ctp_req.ContingentCondition = tdapi.THOST_FTDC_CC_Immediately
-            
+
         ctp_req.MinVolume = min_volume
         ctp_req.StopPrice = stop_price
         ctp_req.ForceCloseReason = tdapi.THOST_FTDC_FCC_NotForceClose
         ctp_req.IsAutoSuspend = 0
         ctp_req.UserForceClose = 0
-        
+
         self.reqid += 1
         ret = self.td_api.ReqOrderInsert(ctp_req, self.reqid)
-        
+
         if ret != 0:
             self.gateway.write_log(f"Failed to send delegation request, error code: {ret}")
             return ""
-            
+
         orderid = f"{self.frontid}_{self.sessionid}_{self.order_ref}"
         self.gateway.write_log(f"Send commission successfully, order number: {orderid}")
         return orderid
-        
+
     def cancel_order(self, req: CancelRequest) -> None:
         """Cancel order"""
         self.reqid += 1
         ctp_req = tdapi.CThostFtdcInputOrderActionField()
-        
+
         ctp_req.BrokerID = self.brokerid
         ctp_req.InvestorID = self.userid
         # Fix order ID parsing
@@ -21865,31 +21664,31 @@ class CtpTdApi(tdapi.CThostFtdcTraderSpi):
             ctp_req.SessionID = int(order_id_parts[1])
         ctp_req.ExchangeID = req.exchange
         ctp_req.InstrumentID = req.symbol
-        
+
         #Set the operation flag to cancel the order
         ctp_req.ActionFlag = tdapi.THOST_FTDC_AF_Delete
-        
+
         self.td_api.ReqOrderAction(ctp_req, self.reqid)
-        
+
     def query_position(self) -> None:
         """Query position"""
         req = tdapi.CThostFtdcQryInvestorPositionField()
         req.BrokerID = self.brokerid
         req.InvestorID = self.userid
         req.InstrumentID = ""
-        
+
         self.reqid += 1
         self.td_api.ReqQryInvestorPosition(req, self.reqid)
-        
+
     def query_account(self) -> None:
         """Query account"""
         req = tdapi.CThostFtdcQryTradingAccountField()
         req.BrokerID = self.brokerid
         req.InvestorID = self.userid
-        
+
         self.reqid += 1
         self.td_api.ReqQryTradingAccount(req, self.reqid)
-        
+
     def query_order(self) -> None:
         """Query orders"""
         req = tdapi.CThostFtdcQryOrderField()
@@ -21897,10 +21696,10 @@ class CtpTdApi(tdapi.CThostFtdcTraderSpi):
         req.InvestorID = self.userid
         req.InstrumentID = ""
         req.ExchangeID = ""
-        
+
         self.reqid += 1
         self.td_api.ReqQryOrder(req, self.reqid)
-        
+
     def query_trade(self) -> None:
         """Query trades"""
         req = tdapi.CThostFtdcQryTradeField()
@@ -21908,36 +21707,36 @@ class CtpTdApi(tdapi.CThostFtdcTraderSpi):
         req.InvestorID = self.userid
         req.InstrumentID = ""
         req.ExchangeID = ""
-        
+
         self.reqid += 1
         self.td_api.ReqQryTrade(req, self.reqid)
-        
+
     def query_instrument(self) -> None:
         """Query instruments"""
         req = tdapi.CThostFtdcQryInstrumentField()
         req.InstrumentID = ""
-        
+
         self.reqid += 1
         self.td_api.ReqQryInstrument(req, self.reqid)
-        
+
     def query_investor(self) -> None:
         """Query investor"""
         req = tdapi.CThostFtdcQryInvestorField()
         req.BrokerID = self.brokerid
         req.InvestorID = self.userid
-        
+
         self.reqid += 1
         self.td_api.ReqQryInvestor(req, self.reqid)
-        
+
     def query_trading_code(self) -> None:
         """Query trading code"""
         req = tdapi.CThostFtdcQryTradingCodeField()
         req.BrokerID = self.brokerid
         req.InvestorID = self.userid
-        
+
         self.reqid += 1
         self.td_api.ReqQryTradingCode(req, self.reqid)
-        
+
     def close(self) -> None:
         """Close connection"""
         if self.connect_status:
@@ -21947,8 +21746,7 @@ class CtpTdApi(tdapi.CThostFtdcTraderSpi):
 ```
 
 
-
-ctp multi-account manual trading terminal tool  
+ctp multi-account manual trading terminal tool
 [**https://github.com/zzxscodes/ctp-multi-account**](https://github.com/zzxscodes/ctp-multi-account)
 
 <!-- 这是一张图片，ocr 内容为： -->
@@ -21964,7 +21762,7 @@ ctp multi-account manual trading terminal tool
 + **Multi-account management structure**
     - **Server side core class**:`ServerApp`(Multiple account scheduling),`TcpServer`(TCP monitoring and event loop),`Session`(a TCP connection),`CtpTraderAdapter` / `CtpMdAdapter`(Encapsulation of CTP transaction/market interface).
     - **Multi-account mapping relationship**:
-        * `std::unordered_map<std::string, std::unique_ptr<CtpTraderAdapter>> traders_`:`user_id -> Trading channel`* `std::unordered_map<std::string, std::vector<Session*>> sessions_by_user_`:`user_id -> All TCP sessions using this account`* `std::unordered_map<std::string, std::vector<Session*>> md_subscribers_by_instrument_`:`Contract -> Subscribe to all sessions of this contract`  
+        * `std::unordered_map<std::string, std::unique_ptr<CtpTraderAdapter>> traders_`:`user_id -> Trading channel`* `std::unordered_map<std::string, std::vector<Session*>> sessions_by_user_`:`user_id -> All TCP sessions using this account`* `std::unordered_map<std::string, std::vector<Session*>> md_subscribers_by_instrument_`:`Contract -> Subscribe to all sessions of this contract`
 -**One account, multiple terminal reuse**: same `user_id` Log in again and the existing one will be reused. `CtpTraderAdapter`, only add new ones `Session`.
 + **CTP interface encapsulation and adaptation layer**
     - `CtpTraderAdapter` / `CtpMdAdapter` Encapsulated CTP `TraderApi` / `MdApi`, providing the upper layer with:
@@ -22000,7 +21798,6 @@ ctp multi-account manual trading terminal tool
 + **Session/Connection Management**
 
 
-
     - `TcpServer` Responsible for listening on the port, accessing new connections, and creating them using factory mode `Session`.
     - `Session` Responsible:
         * Send and receive binary protocol packets.
@@ -22014,7 +21811,6 @@ ctp multi-account manual trading terminal tool
 + **Stub vs real SDK**: Use stub for logic joint debugging, and use CMake switch to seamlessly switch to real market conditions/trading.
 + **Configuration and Account Management**: YAML configuration + Parameter-free login + Centralized configuration of prefix address.
 + **Log & Debug**: use `spdlog` Structured records of server/client, orders, queries, and market events.
-
 
 
 [**https://github.com/zzxscodes/ctp-mysql**](https://github.com/zzxscodes/ctp-mysql)
@@ -22032,18 +21828,18 @@ ctp multi-account manual trading terminal tool
         * Corresponding response callback:`OnRspQryTradingAccount`,`OnRspQryInstrumentCommissionRate`,`OnRspQryInstrumentMarginRate`,`OnRspQryInstrument`.
         * In the response callback, put `pData` Pass it directly to the database insertion function, for example `insert_account(pData)`.
         * use `std::vector<std::string> instruments`,`underlying_instruments` Collect the target and basic product codes and only process `OptionsType == 0` futures contracts.
-+ **SPI callback driver + request queue model**  
++ **SPI callback driver + request queue model**
     - use `std::queue<std::function<void()>> requestQueue` Store pending requests via `processNextRequest` Implement chain calls of "after the last response of a request comes back, then send the next request" to ensure order and reduce throttling pressure.
     - Callback based on `bIsLast` Determine whether this query has ended, and then call `processNextRequest()`.
-+ **Main process control (**`main.cpp`**)**  
++ **Main process control (**`main.cpp`**)**
     - `quote()`: Initialize MdApi, register `SimpleQSpi`, connect to the market leader and wait for login completion/disconnection, and then release.
     - `trade()`: initialize TraderApi, register `SimpleTSpi`, connect the transaction frontend and keep running until disconnected.
     - `main()`: call first `create_table()` Initialize the MySQL table and then call `trade()`,at last `close_connection()`.
-+ **MySQL connection management (**`mysql_utils.hpp`**)**  
++ **MySQL connection management (**`mysql_utils.hpp`**)**
     - Turn off SSL and set the character set to `utf8mb4`, and execute `SET NAMES utf8mb4` To avoid garbled Chinese comments.
     - overall situation `inline MYSQL *conn` reuse connections,`create_connection()` + `close_connection()` Management life cycle.
     - pass `SHOW VARIABLES LIKE 'character_set_client'` Verify whether the character set setting takes effect.
-+ **Table creation statements for four core tables (**`mysql_utils.hpp`**)**  
++ **Table creation statements for four core tables (**`mysql_utils.hpp`**)**
 `markdown/api_struct.md` Field descriptions in:
     - `ctp_account` **↔** `CThostFtdcTradingAccountField`
         * 50 fields, completely mapping capital account information (last settlement reserve, currently available funds, margin, deposits and withdrawals, interest, special product fields, etc.).
@@ -22058,16 +21854,14 @@ ctp multi-account manual trading terminal tool
         * Basic information of the contract: contract code, exchange, product code/type, delivery year and month, minimum price change, maximum and minimum order volume, life cycle status, whether it is tradable, etc.
         * Contains options related fields:`UnderlyingInstrID`,`StrikePrice`,`OptionsType`,`UnderlyingMultiple`,`CombinationType`.
         * `UNIQUE KEY (InstrumentID, TradingDay)`, and to `EndDelivDate` Provide clarification when something is missing (fill in `29990101`).
-+ **Structure to SQL mapping**  
++ **Structure to SQL mapping**
     - `insert_account` / `insert_commission` / `insert_margin` / `insert_instrument` in, use `snprintf` Use SQL to fill in the CTP fields into the corresponding columns one by one.
     - For certain enum/char fields, use `std::to_string(pData->XXX).c_str()` Convert to string and insert.
     - use `mysql_errno == 1062` Determine the primary key/unique key conflict and treat it as idempotent: duplicate data is ignored directly and is not regarded as an error.
     - pass `output_sql` Synchronously output the generated SQL to the project path `markdown/*.sql` File for easy auditing/backup.
 
 
-
-Nasdaq ITCH/OUCH protocol (binary): The code needs to be parsed according to a fixed byte length (such as ITCH message fixed length, no text escaping required), ITCH is used to receive quotation/transaction data (needs to parse the "order new-transaction-cancellation" identification), OUCH is used to send orders (needs to encapsulate the "order type-quantity-price" binary package);  
-
+Nasdaq ITCH/OUCH protocol (binary): The code needs to be parsed according to a fixed byte length (such as ITCH message fixed length, no text escaping required), ITCH is used to receive quotation/transaction data (needs to parse the "order new-transaction-cancellation" identification), OUCH is used to send orders (needs to encapsulate the "order type-quantity-price" binary package);
 
 
 ### 4. Message middleware (zmq)
@@ -22151,19 +21945,19 @@ namespace json {
     template <typename OrderBookType>
     std::string serialize_full_book(const OrderBookType& order_book) {
         // Get the core parameters of the order book
-        int depth = order_book.get_depth();  
-        int precision = order_book.get_precision(); 
+        int depth = order_book.get_depth();
+        int precision = order_book.get_precision();
         auto timestamp = std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::system_clock::now().time_since_epoch()
         ).count();
 
         std::stringstream ss;
         ss << "{"
-           << "\"timestamp\":" << timestamp << ","  
-           << "\"precision\":" << precision << ","  
-           << "\"depth\":" << depth << ","  
-           << "\"bids\":" << serialize_side(order_book.get_bids(), depth) << "," 
-           << "\"offers\":" << serialize_side(order_book.get_offers(), depth)  
+           << "\"timestamp\":" << timestamp << ","
+           << "\"precision\":" << precision << ","
+           << "\"depth\":" << depth << ","
+           << "\"bids\":" << serialize_side(order_book.get_bids(), depth) << ","
+           << "\"offers\":" << serialize_side(order_book.get_offers(), depth)
            << "}";
 
         return ss.str();
@@ -22200,15 +21994,15 @@ private:
     std::chrono::microseconds last_snapshot_time; // Last full snapshot release time
 
 public:
-    
-    MessagingHub(OrderBookType& lob, 
-                 const std::string& bind_addr = "tcp://*:5556", 
+
+    MessagingHub(OrderBookType& lob,
+                 const std::string& bind_addr = "tcp://*:5556",
                  int core = 0,
                  int snapshot_interval_us = 100000)
-        : context(1), 
-          publisher(context, ZMQ_PUB), 
-          order_book(lob), 
-          running(false), 
+        : context(1),
+          publisher(context, ZMQ_PUB),
+          order_book(lob),
+          running(false),
           cpu_core(core),
           snapshot_interval_us(snapshot_interval_us),
           last_snapshot_time(std::chrono::microseconds(0)) {
@@ -22331,7 +22125,7 @@ Message middleware is responsible for system decoupling and interaction of large
 
 ![](https://cdn.nlark.com/yuque/0/2026/png/35485470/1768269462634-a35a10f7-8d7d-449e-91fa-8dc264f152eb.png)
 
-### 5. OMS, EMS, PMS, and RMS of trading systems  
+### 5. OMS, EMS, PMS, and RMS of trading systems
 
 **OMS - Order Management System**
 
@@ -22342,7 +22136,6 @@ OMS is responsible for managing the complete life cycle of the order.
 3. **Order Book Maintenance**: Maintain the history and current status of all orders
 4. **Order Query**: Provides an efficient order query interface, supporting query by order ID or client order ID
 5. **Order life cycle management**: handle the creation, modification, cancellation and other operations of orders
-
 
 
 **Core Data Structure**
@@ -22371,14 +22164,14 @@ struct Order {
     Timestamp updated_at; // Update time
     std::string symbol; // Trading pair name
     std::string client_order_id;//Client order ID
-    
+
     bool is_filled() const {
-        return status == OrderStatus::FILLED || 
+        return status == OrderStatus::FILLED ||
                filled_quantity >= quantity;
     }
-    
+
     bool is_active() const {
-        return status == OrderStatus::NEW || 
+        return status == OrderStatus::NEW ||
                status == OrderStatus::PARTIALLY_FILLED;
     }
 };
@@ -22397,10 +22190,10 @@ public:
     OrderId add_order(std::unique_ptr<Order> order) {
         OrderId id = next_order_id_.fetch_add(1);
         if (id >= MAX_ORDERS) return 0;
-        
+
         Order* order_ptr = order.release();
         Order* expected = nullptr;
-        
+
         if (!orders_[id].order.compare_exchange_weak(
             expected, order_ptr,
             std::memory_order_release,
@@ -22408,50 +22201,50 @@ public:
             delete order_ptr;
             return 0;
         }
-        
+
         return id;
     }
-    
+
     // Get the order based on the order ID
     Order* get_order(OrderId order_id) const {
         if (order_id >= MAX_ORDERS) return nullptr;
         return orders_[id].order.load(std::memory_order_acquire);
     }
-    
+
     //Update the transaction quantity of the order
     bool update_filled_quantity(OrderId order_id, Quantity filled_qty) {
         if (order_id >= MAX_ORDERS) return false;
-        
+
         Order* order = orders_[order_id].order.load(std::memory_order_acquire);
         if (!order) return false;
-        
+
         order->filled_quantity = filled_qty;
         order->updated_at = now_ns();
-        
+
         if (filled_qty >= order->quantity) {
             order->status = OrderStatus::FILLED;
         } else if (filled_qty > 0) {
             order->status = OrderStatus::PARTIALLY_FILLED;
         }
-        
+
         return true;
     }
-    
+
     // Cancel order
     bool cancel_order(OrderId order_id) {
         if (order_id >= MAX_ORDERS) return false;
-        
+
         Order* order = orders_[order_id].order.load(std::memory_order_acquire);
         if (!order) return false;
-        
+
         if (!order->is_active()) return false;
-        
+
         order->status = OrderStatus::CANCELLED;
         order->updated_at = now_ns();
-        
+
         return true;
     }
-    
+
 private:
     std::vector<OrderSlot> orders_; // Order storage array
     std::atomic<OrderId> next_order_id_;
@@ -22472,10 +22265,10 @@ public:
             symbol_id, side, order_type, quantity, limit_price
         );
         order->symbol = symbol;
-        
+
         //Add to order book
         OrderId order_id = order_book_.add_order(std::move(order));
-        
+
         //Trigger status callback notification
         if (status_callback_) {
             auto* order_ptr = order_book_.get_order(order_id);
@@ -22483,10 +22276,10 @@ public:
                 status_callback_(order_id, OrderStatus::NEW, order_ptr);
             }
         }
-        
+
         return order_id;
     }
-    
+
     // Cancel order
     bool cancel_order(OrderId order_id) {
         bool cancelled = order_book_.cancel_order(order_id);
@@ -22498,28 +22291,28 @@ public:
         }
         return cancelled;
     }
-    
+
     // Process the transaction (called by EMS)
     void on_fill(const Fill& fill) {
         auto* order = order_book_.get_order(fill.order_id);
         if (!order) return;
-        
+
         //Update the transaction quantity of the order
         Quantity new_filled = order->filled_quantity + fill.quantity;
         order_book_.update_filled_quantity(fill.order_id, new_filled);
-        
+
         // Trigger transaction callback
         if (fill_callback_) {
             fill_callback_(fill.order_id, fill);
         }
-        
+
         // If the order has been completed, trigger the status callback
         order = order_book_.get_order(fill.order_id);
         if (order && order->is_filled() && status_callback_) {
             status_callback_(fill.order_id, OrderStatus::FILLED, order);
         }
     }
-    
+
 private:
     OrderBook order_book_;
     OrderStatusCallback status_callback_;
@@ -22536,7 +22329,6 @@ private:
 3. **Transaction processing**: When EMS notifies the order to be completed, OMS updates the transaction quantity of the order and updates the order status.
 4. **Order Query**: Provides an order query interface to support real-time query of order status and transaction status.
 5. **Order Cancellation**: Process the order cancellation request and update the order status to CANCELLED
-
 
 
 **EMS - Execution Management System**
@@ -22568,7 +22360,7 @@ public:
         , portfolio_manager_(portfolio_manager)
         , running_(false)
     {}
-    
+
     // Execute the order (non-blocking, put into the execution queue)
     void execute_order(OrderId order_id) {
         {
@@ -22577,23 +22369,23 @@ public:
         }
         cv_.notify_one();
     }
-    
+
     // Intelligent routing: select the optimal execution strategy based on market depth
     bool smart_route_order(const Order& order) {
         if (order.order_type != OrderType::LIMIT) {
             //Market orders are executed directly
             return execute_order_immediate(order.order_id);
         }
-        
+
         // Limit orders need to check market depth
         Price best_bid, best_ask;
         Quantity bid_size, ask_size;
-        
-        if (!exchange_->get_order_book(order.symbol_id, best_bid, best_ask, 
+
+        if (!exchange_->get_order_book(order.symbol_id, best_bid, best_ask,
                                        bid_size, ask_size)) {
             return false;
         }
-        
+
         // Check whether the limit order can be executed immediately
         if (order.side == Side::BUY) {
             //Buy limit order: If the limit price >= sell price, the transaction can be completed immediately
@@ -22606,11 +22398,11 @@ public:
                 return execute_order_immediate(order.order_id);
             }
         }
-        
+
         //The limit order is entered into the order book and submitted to the exchange
         return exchange_->submit_order(order);
     }
-    
+
     // Update market prices (called by market data subscribers)
     void update_market_price(SymbolId symbol_id, Price price) {
         if (portfolio_manager_) {
@@ -22623,69 +22415,69 @@ private:
     void worker_loop() {
         while (running_.load()) {
             std::unique_lock<std::mutex> lock(queue_mutex_);
-            
+
             cv_.wait(lock, [this] {
                 return !execution_queue_.empty() || !running_.load();
             });
-            
+
             while (!execution_queue_.empty() && running_.load()) {
                 OrderId order_id = execution_queue_.front();
                 execution_queue_.pop();
                 lock.unlock();
-                
+
                 process_order_by_id(order_id);
                 lock.lock();
             }
         }
     }
-    
+
     // Process a single order
     bool process_order(const Order& order) {
         if (!order.is_active()) {
             return false;
         }
-        
+
         //Submit order to exchange
         bool submitted = exchange_->submit_order(order);
         if (!submitted) {
             order_manager_->on_order_rejected(order.order_id, "Exchange rejected");
             return false;
         }
-        
+
         // For market orders, simulate immediate execution (called back by the exchange in actual scenarios)
         if (order.order_type == OrderType::MARKET) {
             simulate_market_fill(order);
         }
-        
+
         return true;
     }
-    
+
     // Simulate market order transaction
     void simulate_market_fill(const Order& order) {
         // Get market price
         Price market_price = exchange_->get_market_price(order.symbol_id);
-        
+
         // Generate transaction records
         Fill fill(order.order_id, order.symbol_id, order.side,
                   order.quantity, market_price, now_ns());
         fill.symbol = order.symbol;
-        
+
         // Notify OMS to update order status
         if (order_manager_) {
             order_manager_->on_fill(fill);
         }
-        
+
         // Notify PMS to update positions
         if (portfolio_manager_) {
             portfolio_manager_->on_fill(fill);
         }
     }
-    
+
 private:
     std::unique_ptr<ExchangeInterface> exchange_; //Exchange interface
     OrderManager* order_manager_; // Order manager
     PortfolioManager* portfolio_manager_; // Portfolio Manager
-    
+
     std::atomic<bool> running_;
     std::thread worker_thread_;
     std::queue<OrderId> execution_queue_; // execution queue
@@ -22711,7 +22503,6 @@ private:
 + **Intelligent Routing**: Select the optimal execution strategy based on market depth to balance transaction speed and price
 
 
-
 **PMS - Portfolio Management System**
 
 The PMS is responsible for managing the status and risk of the investment portfolio.
@@ -22731,19 +22522,19 @@ The PMS is responsible for managing the status and risk of the investment portfo
 struct Position {
     SymbolId symbol_id; // Trading pair ID
     std::string symbol; // Trading pair name
-    
+
     Quantity quantity; // Position quantity (positive number is long, negative number is short)
     Price avg_cost_price; // average cost price
     Price current_price; // current market price
     Price unrealized_pnl; // Unrealized profit and loss
     Price realized_pnl; // Realized profit and loss
     Timestamp updated_at; // Last updated time
-    
+
     // Get market value
     Price market_value() const {
         return multiply_price_quantity(current_price, quantity);
     }
-    
+
     // Get the total profit and loss
     Price total_pnl() const {
         return realized_pnl + unrealized_pnl;
@@ -22761,23 +22552,23 @@ struct Position {
 struct Position {
     SymbolId symbol_id;
     std::string symbol;
-    
+
     Quantity quantity; // Position quantity
     Price avg_cost_price; // average cost price
     Price current_price; // current price
     Price unrealized_pnl; // Unrealized profit and loss
     Price realized_pnl; // Realized profit and loss
-    
+
     //Update positions (called after transaction)
     void update_on_fill(Quantity fill_qty, Price fill_price, Side side) {
         bool is_buy = (side == Side::BUY);
         Quantity signed_qty = is_buy ? fill_qty : -fill_qty;
-        
+
         if (quantity == 0) {
             // New position opening
             quantity = signed_qty;
             avg_cost_price = fill_price;
-        } else if ((quantity > 0 && signed_qty > 0) || 
+        } else if ((quantity > 0 && signed_qty > 0) ||
                    (quantity < 0 && signed_qty < 0)) {
             // Add position: Recalculate the average cost price
             Price old_cost = quantity * avg_cost_price;
@@ -22787,7 +22578,7 @@ struct Position {
             // Reduce a position or open a reverse position: Calculate the realized profit and loss
             Quantity old_qty = quantity;
             quantity += signed_qty;
-            
+
             if (quantity == 0) {
                 //Close position: calculate realized profit and loss
                 Quantity closed_qty = std::abs(old_qty);
@@ -22801,22 +22592,22 @@ struct Position {
                 realized_pnl += (old_qty > 0) ? pnl : -pnl;
             }
         }
-        
+
         update_unrealized_pnl();
     }
-    
+
     // Update unrealized profit and loss
     void update_unrealized_pnl() {
         if (quantity == 0 || current_price == 0) {
             unrealized_pnl = 0;
             return;
         }
-        
+
         Price current_value = multiply_price_quantity(current_price, quantity);
         Price cost_value = multiply_price_quantity(avg_cost_price, quantity);
         unrealized_pnl = current_value - cost_value;
     }
-    
+
     // Update market price
     void update_market_price(Price price) {
         current_price = price;
@@ -22831,31 +22622,31 @@ struct Position {
 ```cpp
 class PortfolioManager {
 public:
-    PortfolioManager(Quantity initial_capital = 0) 
+    PortfolioManager(Quantity initial_capital = 0)
         : initial_capital_(initial_capital)
         , total_equity_(initial_capital)
         , cash_(initial_capital)
     {}
-    
+
     //Update transaction (from EMS)
     void on_fill(const Fill& fill) {
         // Get or create a position
         Position& pos = get_or_create_position(fill.symbol_id, fill.symbol);
-        
+
         // Update positions
         pos.update_on_fill(fill.quantity, fill.price, fill.side);
-        
+
         //Update cash (buy minus cash, sell to increase cash)
         Price cash_value = multiply_price_quantity(fill.price, fill.quantity);
         Price cash_change = (fill.side == Side::BUY) ? -cash_value : cash_value;
-        
+
         Quantity old_cash = cash_.load(std::memory_order_relaxed);
         cash_.store(old_cash + cash_change, std::memory_order_relaxed);
-        
+
         // Recalculate total equity
         recalculate_equity();
     }
-    
+
     // Update market price
     void update_market_price(SymbolId symbol_id, Price price) {
         auto it = positions_.find(symbol_id);
@@ -22864,36 +22655,36 @@ public:
             recalculate_equity();
         }
     }
-    
+
     // Get positions
     Position* get_position(SymbolId symbol_id) {
         auto it = positions_.find(symbol_id);
         return (it != positions_.end()) ? &it->second : nullptr;
     }
-    
+
     // Get total equity
     Quantity total_equity() const {
         return total_equity_.load(std::memory_order_acquire);
     }
-    
+
     // Get cash
     Quantity cash() const {
         return cash_.load(std::memory_order_acquire);
     }
-    
+
     // Get the total profit and loss
     Price total_pnl() const {
         return total_equity_.load(std::memory_order_acquire) - initial_capital_;
     }
-    
+
     // Get the rate of return
     double return_rate() const {
         if (initial_capital_ == 0) return 0.0;
         Quantity equity = total_equity_.load(std::memory_order_acquire);
-        return static_cast<double>(equity - initial_capital_) / 
+        return static_cast<double>(equity - initial_capital_) /
                static_cast<double>(initial_capital_);
     }
-    
+
     // Risk control check: Check whether the order can be executed
     bool can_execute_order(const Order& order) const {
         if (order.side == Side::BUY) {
@@ -22920,18 +22711,18 @@ private:
         }
         return it->second;
     }
-    
+
     // Recalculate total equity
     void recalculate_equity() {
         Price positions_value = 0;
         for (auto& [id, pos] : positions_) {
             positions_value += pos.market_value();
         }
-        
+
         Quantity current_cash = cash_.load(std::memory_order_relaxed);
         total_equity_.store(current_cash + positions_value, std::memory_order_relaxed);
     }
-    
+
 private:
     std::unordered_map<SymbolId, Position> positions_; // Position mapping table
     Quantity initial_capital_; // Initial capital
@@ -22960,7 +22751,6 @@ private:
 + **Total Profit and Loss**: Total Profit and Loss = Total Equity - Initial Capital = Realized Profit and Loss + Unrealized Profit and Loss
 
 
-
 **RMS - Risk Management System**
 
 RMS is responsible for monitoring and managing trading risks.
@@ -22971,7 +22761,6 @@ RMS is responsible for monitoring and managing trading risks.
 4. **Order Verification**: Verify whether the order complies with risk limits (position limits, exposure limits, price slippage, etc.) before order submission
 5. **Risk Alarm**: When the risk indicator exceeds the preset threshold, an alarm notification is sent
 6. **Risk Report**: Generate a risk report to show the current risk status
-
 
 
 **Core Data Structure**
@@ -22990,17 +22779,17 @@ struct MarketData {
     std::vector<LevelInfo> bid_levels; // Bid levels
     std::vector<LevelInfo> ask_levels; // sell order levels
     Timestamp timestamp;
-    
+
     // Get the purchase price
     Price best_bid() const {
         return bid_levels.empty() ? 0 : bid_levels[0].price;
     }
-    
+
     // Get the selling price
     Price best_ask() const {
         return ask_levels.empty() ? 0 : ask_levels[0].price;
     }
-    
+
     // Get the middle price
     Price mid_price() const {
         Price bid = best_bid();
@@ -23041,11 +22830,11 @@ public:
     struct ValidationResult {
         bool valid;
         std::string reason;
-        
-        ValidationResult(bool v = true, const std::string& r = "") 
+
+        ValidationResult(bool v = true, const std::string& r = "")
             : valid(v), reason(r) {}
     };
-    
+
 public:
     RiskManager(RiskParams params = RiskParams())
         : risk_params_(params)
@@ -23054,12 +22843,12 @@ public:
         , total_pnl_(0)
         , max_drawdown_(0)
     {}
-    
+
     //Set risk parameters
     void set_risk_params(const RiskParams& params) {
         risk_params_ = params;
     }
-    
+
     //Update market data
     void update_market_data(const MarketData& market_data) {
         market_data_[market_data.symbol_id] = market_data;
@@ -23067,24 +22856,24 @@ public:
         calculate_instrument_risk(market_data.symbol_id);
         calculate_portfolio_risk();
     }
-    
+
     // Update positions (synchronized from PMS)
     void update_position(SymbolId symbol_id, const std::string& symbol,
                         Quantity quantity, Price avg_cost_price, Price current_price) {
         // Calculate risk exposure
         Price exposure = calculate_exposure(quantity, current_price);
         Price margin = static_cast<Price>(static_cast<double>(exposure) * risk_params_.margin_rate);
-        
+
         InstrumentRisk& risk = instrument_risks_[symbol_id];
         risk.exposure = exposure;
         risk.margin = margin;
         risk.current_position = std::abs(quantity);
         risk.delta = quantity; // Simplification: Delta equals position quantity
-        
+
         // Recalculate total risk
         calculate_portfolio_risk();
     }
-    
+
     // Verify order (called before order submission)
     ValidationResult validate_order(const Order& order) {
         // Check if market data exists
@@ -23093,130 +22882,130 @@ public:
             return ValidationResult(false, "Market data not found for symbol");
         }
         const MarketData& md = md_it->second;
-        
+
         // Check if the price is reasonable (slippage check)
-        Price ref_price = (order.side == Side::BUY) ? 
+        Price ref_price = (order.side == Side::BUY) ?
             md.best_ask() : md.best_bid();
-        
+
         if (ref_price == 0) {
             ref_price = md.mid_price();
         }
-        
+
         if (order.order_type == OrderType::LIMIT && ref_price > 0) {
             Price price_diff = std::abs(order.limit_price - ref_price);
-            Price tolerance = static_cast<Price>(static_cast<double>(ref_price) * 
+            Price tolerance = static_cast<Price>(static_cast<double>(ref_price) *
                                                  risk_params_.price_slide_tolerance);
-            
+
             if (price_diff > tolerance) {
                 return ValidationResult(false, "Order price exceeds slide tolerance");
             }
         }
-        
+
         // Check position limits
         auto risk_it = instrument_risks_.find(order.symbol_id);
-        Quantity current_pos = (risk_it != instrument_risks_.end()) ? 
+        Quantity current_pos = (risk_it != instrument_risks_.end()) ?
             risk_it->second.current_position : 0;
         Quantity new_pos = current_pos + order.quantity;
-        
+
         if (new_pos > risk_params_.max_position_per_instr) {
             return ValidationResult(false, "Position limit would be exceeded");
         }
-        
+
         // Check exposure limits for individual trading pairs
         Price new_exposure = calculate_exposure(new_pos, ref_price);
         if (new_exposure > risk_params_.max_single_exposure) {
             return ValidationResult(false, "Single instrument exposure limit would be exceeded");
         }
-        
+
         // Check the total exposure limit (estimate)
-        Price estimated_total = total_exposure_.load(std::memory_order_acquire) + 
+        Price estimated_total = total_exposure_.load(std::memory_order_acquire) +
                                (new_exposure - calculate_exposure(current_pos, ref_price));
         if (estimated_total > risk_params_.max_total_exposure) {
             return ValidationResult(false, "Total exposure limit would be exceeded");
         }
-        
+
         return ValidationResult(true);
     }
-    
+
     // Evaluate the impact of the order on the portfolio
     Price assess_order_impact(const Order& order) {
         auto md_it = market_data_.find(order.symbol_id);
         if (md_it == market_data_.end()) {
             return 0;
         }
-        
+
         const MarketData& md = md_it->second;
         Price market_price = md.mid_price();
         if (market_price == 0) {
-            market_price = (order.side == Side::BUY) ? 
+            market_price = (order.side == Side::BUY) ?
                 md.best_ask() : md.best_bid();
         }
-        
+
         if (market_price == 0) return 0;
-        
+
         // Calculate exposure change
         return multiply_price_quantity(market_price, order.quantity);
     }
-    
+
     // Get risk indicators
     InstrumentRisk* get_instrument_risk(SymbolId symbol_id) {
         auto it = instrument_risks_.find(symbol_id);
         return (it != instrument_risks_.end()) ? &it->second : nullptr;
     }
-    
+
     // Get total exposure
     Price total_exposure() const {
         return total_exposure_.load(std::memory_order_acquire);
     }
-    
+
     // Get the total margin
     Price total_margin() const {
         return total_margin_.load(std::memory_order_acquire);
     }
-    
+
     // Get 99% VaR
     Price var_99() const {
         return var_99_.load(std::memory_order_acquire);
     }
-    
+
     // Generate risk report
     void generate_risk_report() {
         Price exposure = total_exposure_.load(std::memory_order_acquire);
         Price margin = total_margin_.load(std::memory_order_acquire);
         Price var = var_99_.load(std::memory_order_acquire);
-        
+
         std::cout << "\n=== Risk Report ===" << std::endl;
         std::cout << "Total Exposure: " << price_to_double(exposure) << std::endl;
         std::cout << "Total Margin: " << price_to_double(margin) << std::endl;
         std::cout << "99% VaR: " << price_to_double(var) << std::endl;
         std::cout << "===================\n" << std::endl;
     }
-    
+
     // Check risk limits and send alerts
     void check_risk_limits() {
         Price exposure = total_exposure_.load(std::memory_order_acquire);
-        
+
         if (exposure > risk_params_.max_total_exposure) {
-            send_alert("Total exposure exceeds limit: " + 
+            send_alert("Total exposure exceeds limit: " +
                       std::to_string(price_to_double(exposure)) +
                       " > " + std::to_string(price_to_double(risk_params_.max_total_exposure)));
         }
-        
+
         Price var = var_99_.load(std::memory_order_acquire);
         Price var_threshold = static_cast<Price>(static_cast<double>(risk_params_.max_total_exposure) * 0.1);
-        
+
         if (var > var_threshold) {
-            send_alert("VaR exceeds threshold: " + 
+            send_alert("VaR exceeds threshold: " +
                       std::to_string(price_to_double(var)));
         }
-        
+
         // Check the position limit of each trading pair
         for (const auto& [symbol_id, risk] : instrument_risks_) {
             if (risk.current_position > risk_params_.max_position_per_instr) {
                 auto md_it = market_data_.find(symbol_id);
-                std::string symbol = (md_it != market_data_.end()) ? 
+                std::string symbol = (md_it != market_data_.end()) ?
                     md_it->second.symbol : std::to_string(symbol_id);
-                
+
                 send_alert("Position limit exceeded for " + symbol +
                           ": " + std::to_string(quantity_to_double(risk.current_position)) +
                           " > " + std::to_string(quantity_to_double(risk_params_.max_position_per_instr)));
@@ -23231,51 +23020,51 @@ private:
         Quantity abs_quantity = std::abs(quantity);
         return multiply_price_quantity(price, abs_quantity);
     }
-    
+
     // Calculate the risk of a single trading pair
     void calculate_instrument_risk(SymbolId symbol_id) {
         auto md_it = market_data_.find(symbol_id);
         if (md_it == market_data_.end()) {
             return;
         }
-        
+
         const MarketData& md = md_it->second;
         Price market_price = md.mid_price();
         if (market_price == 0) return;
-        
+
         auto risk_it = instrument_risks_.find(symbol_id);
         if (risk_it == instrument_risks_.end()) {
             return;
         }
-        
+
         InstrumentRisk& risk = risk_it->second;
         Quantity quantity = risk.current_position;
-        
+
         // Recalculate exposure and margin
         risk.exposure = calculate_exposure(quantity, market_price);
         risk.margin = static_cast<Price>(static_cast<double>(risk.exposure) * risk_params_.margin_rate);
-        
+
         // Calculate VaR (simplified: use 5% of exposure as VaR)
         risk.var_99 = static_cast<Price>(static_cast<double>(risk.exposure) * 0.05);
     }
-    
+
     // Calculate total portfolio risk
     void calculate_portfolio_risk() {
         Price total_exp = 0;
         Price total_marg = 0;
         Price total_var = 0;
-        
+
         for (auto& [symbol_id, risk] : instrument_risks_) {
             total_exp += risk.exposure;
             total_marg += risk.margin;
             total_var += risk.var_99;
         }
-        
+
         total_exposure_.store(total_exp, std::memory_order_release);
         total_margin_.store(total_marg, std::memory_order_release);
         var_99_.store(total_var, std::memory_order_release);
     }
-    
+
     //Send alert
     void send_alert(const std::string& message) {
         if (alert_callback_) {
@@ -23289,13 +23078,13 @@ private:
     RiskParams risk_params_;
     std::unordered_map<SymbolId, MarketData> market_data_;
     std::unordered_map<SymbolId, InstrumentRisk> instrument_risks_;
-    
+
     alignas(64) std::atomic<Price> total_exposure_;
     alignas(64) std::atomic<Price> total_margin_;
     alignas(64) std::atomic<Price> total_pnl_;
     alignas(64) std::atomic<Price> max_drawdown_;
     alignas(64) std::atomic<Price> was_99_;
-    
+
     RiskAlertCallback alert_callback_;
 };
 ```
@@ -23325,7 +23114,6 @@ private:
 1. **Price slippage check**: The price of a limit order cannot deviate from the market price by more than the tolerance
 2. **Position limit check**: The position after executing the order cannot exceed the maximum position limit of a single trading pair
 3. **Exposure limit check**: Exposure after order execution cannot exceed the limits for individual trading pairs and total exposure
-
 
 
 **System collaboration**
@@ -23395,7 +23183,6 @@ Trading strategies/users
     - Trading strategies can query risk indicators and risk reports from RMS
 
 
-
 **Auxiliary function-fixed point multiplication**
 
 Since both price and quantity are expressed using fixed-point numbers (1e8 precision), direct multiplication will produce secondary amplification, requiring the use of a special function:
@@ -23409,7 +23196,6 @@ inline int64_t multiply_price_quantity(int64_t price, int64_t quantity) {
 ```
 
 This function is used in scenarios such as calculating the market value of positions and changes in cash.
-
 
 
 ### 6. Order book history inquiry
@@ -23448,20 +23234,20 @@ constexpr size_t SNAPSHOT_BUFFER_SIZE = 1024;
 // Order structure
 struct Order {
     order_id_t id;
-    price_t price;          
-    quantity_t quantity;          
-    bool is_bid;           
+    price_t price;
+    quantity_t quantity;
+    bool is_bid;
     timestamp_t timestamp;
     checksum_t checksum;
-    
+
     // Constructors
     Order() : id(0), price(0.0), quantity(0), is_bid(true), timestamp(0), checksum(0) {}
-    
+
     Order(order_id_t id, price_t price, quantity_t quantity, bool is_bid, timestamp_t ts)
         : id(id), price(price), quantity(quantity), is_bid(is_bid), timestamp(ts) {
         checksum = calculate_checksum();
     }
-    
+
     // Calculate checksum for data integrity
     checksum_t calculate_checksum() const {
         checksum_t sum = 0;
@@ -23472,7 +23258,7 @@ struct Order {
         sum += static_cast<checksum_t>(timestamp);
         return sum;
     }
-    
+
     // Verify checksum
     bool verify_checksum() const {
         return checksum == calculate_checksum();
@@ -23483,7 +23269,7 @@ struct Order {
 struct LevelData {
     price_t price;
     quantity_t total_quantity;
-    
+
     LevelData() : price(0.0), total_quantity(0) {}
     LevelData(price_t p, quantity_t q) : price(p), total_quantity(q) {}
 };
@@ -23498,15 +23284,15 @@ struct OrderLog {
     timestamp_t timestamp;
     int price_level_idx;
     checksum_t checksum;
-    
+
     OrderLog() = default;
-    
+
     OrderLog(Action a, const Order& o, int idx)
         : action(a), order_id(o.id), price(o.price), quantity(o.quantity),
           is_bid(o.is_bid), timestamp(o.timestamp), price_level_idx(idx) {
         calculate_checksum();
     }
-    
+
     void calculate_checksum() {
         checksum = 0;
         checksum += static_cast<checksum_t>(action);
@@ -23517,7 +23303,7 @@ struct OrderLog {
         checksum += static_cast<checksum_t>(timestamp);
         checksum += static_cast<checksum_t>(price_level_idx);
     }
-    
+
     bool verify_checksum() const {
         checksum_t sum = 0;
         sum += static_cast<checksum_t>(action);
@@ -23538,23 +23324,23 @@ struct PriceLevel {
     price_t price;
     quantity_t total_quantity;
     checksum_t checksum;
-    
+
     PriceLevel() : price(0.0), total_quantity(0), checksum(0) {}
-    
+
     void reset() {
         orders.clear();
         price = 0.0;
         total_quantity = 0;
         checksum = 0;
     }
-    
+
     void add_order(const Order& order) {
         orders.push_back(order);
         total_quantity += order.quantity;
         price = order.price;
         calculate_checksum();
     }
-    
+
     bool update_order(const Order& new_order) {
         for (auto& order : orders) {
             if (order.id == new_order.id) {
@@ -23568,43 +23354,43 @@ struct PriceLevel {
         }
         return false;
     }
-    
+
     bool delete_order(order_id_t order_id) {
         auto it = std::remove_if(orders.begin(), orders.end(),
             [order_id](const Order& o) { return o.id == order_id; });
         if (it == orders.end()) return false;
-        
+
         total_quantity -= it->quantity;
         orders.erase(it, orders.end());
         calculate_checksum();
         return true;
     }
-    
+
     void calculate_checksum() {
         checksum = 0;
         checksum += static_cast<checksum_t>(*reinterpret_cast<const uint64_t*>(&price));
         checksum += static_cast<checksum_t>(total_quantity);
         checksum += static_cast<checksum_t>(orders.size());
-        
+
         size_t count = 0;
         for (const auto& order : orders) {
             checksum += order.checksum;
             if (++count >= 5) break;
         }
     }
-    
+
     bool verify_checksum() const {
         checksum_t sum = 0;
         sum += static_cast<checksum_t>(*reinterpret_cast<const uint64_t*>(&price));
         sum += static_cast<checksum_t>(total_quantity);
         sum += static_cast<checksum_t>(orders.size());
-        
+
         size_t count = 0;
         for (const auto& order : orders) {
             sum += order.checksum;
             if (++count >= 5) break;
         }
-        
+
         return sum == checksum;
     }
 };
@@ -23615,23 +23401,23 @@ struct PriceLevelSnapshot {
     quantity_t total_quantity;
     int order_count;
     checksum_t checksum;
-    
+
     PriceLevelSnapshot() : price(0.0), total_quantity(0), order_count(0), checksum(0) {}
-    
+
     template <typename OrderContainer>
     PriceLevelSnapshot(const PriceLevel<OrderContainer>& level)
         : price(level.price), total_quantity(level.total_quantity),
           order_count(static_cast<int>(level.orders.size())) {
         calculate_checksum();
     }
-    
+
     void calculate_checksum() {
         checksum = 0;
         checksum += static_cast<checksum_t>(*reinterpret_cast<const uint64_t*>(&price));
         checksum += static_cast<checksum_t>(total_quantity);
         checksum += static_cast<checksum_t>(order_count);
     }
-    
+
     bool verify_checksum() const {
         checksum_t sum = 0;
         sum += static_cast<checksum_t>(*reinterpret_cast<const uint64_t*>(&price));
@@ -23655,15 +23441,15 @@ struct BookSnapshotHeader {
     size_t total_order_count;
     size_t data_size;
     checksum_t checksum;
-    
+
     BookSnapshotHeader() : magic_number(BOOK_MAGIC_NUMBER), version(BOOK_VERSION),
         timestamp(0), ptr_bid_ini_idx(-1), ptr_bid_end_idx(-1),
         ptr_offer_ini_idx(-1), ptr_offer_end_idx(-1),
         bid_level_count(0), offer_level_count(0),
         total_order_count(0), data_size(0), checksum(0) {}
-    
+
     template <typename Container>
-    BookSnapshotHeader(const struct BookSnapshot<Container>& snapshot) 
+    BookSnapshotHeader(const struct BookSnapshot<Container>& snapshot)
         : magic_number(BOOK_MAGIC_NUMBER), version(BOOK_VERSION),
           timestamp(snapshot.timestamp),
           ptr_bid_ini_idx(snapshot.ptr_bid_ini_idx),
@@ -23673,13 +23459,13 @@ struct BookSnapshotHeader {
           bid_level_count(snapshot.bids.size()),
           offer_level_count(snapshot.offers.size()),
           total_order_count(snapshot.total_order_count) {
-        data_size = sizeof(BookSnapshotHeader) + 
+        data_size = sizeof(BookSnapshotHeader) +
                    (bid_level_count * sizeof(PriceLevelSnapshot)) +
                    (offer_level_count * sizeof(PriceLevelSnapshot)) +
                    (total_order_count * sizeof(OrderLog));
         calculate_checksum();
     }
-    
+
     void calculate_checksum() {
         checksum = 0;
         checksum += magic_number;
@@ -23694,11 +23480,11 @@ struct BookSnapshotHeader {
         checksum += static_cast<checksum_t>(total_order_count);
         checksum += static_cast<checksum_t>(data_size);
     }
-    
+
     bool verify() const {
         if (magic_number != BOOK_MAGIC_NUMBER) return false;
         if (version != BOOK_VERSION) return false;
-        
+
         checksum_t sum = 0;
         sum += magic_number;
         sum += static_cast<checksum_t>(version);
@@ -23711,7 +23497,7 @@ struct BookSnapshotHeader {
         sum += static_cast<checksum_t>(offer_level_count);
         sum += static_cast<checksum_t>(total_order_count);
         sum += static_cast<checksum_t>(data_size);
-        
+
         return sum == checksum;
     }
 };
@@ -23723,16 +23509,16 @@ struct BookSnapshot {
     std::vector<PriceLevelSnapshot> bids;
     std::vector<PriceLevelSnapshot> offers;
     size_t total_order_count;
-    
+
     int ptr_bid_ini_idx;
     int ptr_bid_end_idx;
     int ptr_offer_ini_idx;
     int ptr_offer_end_idx;
-    
+
     BookSnapshot() : timestamp(0), total_order_count(0),
         ptr_bid_ini_idx(-1), ptr_bid_end_idx(-1),
         ptr_offer_ini_idx(-1), ptr_offer_end_idx(-1) {}
-    
+
     template <typename T>
     BookSnapshot(timestamp_t ts, const class LimitOrderBook<T>& book);
 };
@@ -23743,11 +23529,11 @@ class LimitOrderBook {
 protected:
     Container bids;
     Container offers;
-    
+
     int precision;
     int depth;
     double step_value;
-    
+
     std::atomic<PriceLevel<typename Container::value_type::OrderContainer>*> ptr_bid_this;
     std::atomic<PriceLevel<typename Container::value_type::OrderContainer>*> ptr_bid_end;
     std::atomic<PriceLevel<typename Container::value_type::OrderContainer>*> ptr_offer_this;
@@ -23789,9 +23575,9 @@ protected:
                     LevelType* new_this = &target[0];
                     new_this->reset();
                     new_this->price = price;
-                    
-                    while (!ptr_ini.compare_exchange_weak(current_ini, new_ini, 
-                                                        std::memory_order_release, 
+
+                    while (!ptr_ini.compare_exchange_weak(current_ini, new_ini,
+                                                        std::memory_order_release,
                                                         std::memory_order_acquire)) {
                     }
                     ptr_end.store(new_ini, std::memory_order_release);
@@ -23830,7 +23616,7 @@ protected:
     }
 
 public:
-    LimitOrderBook(int precision, int depth) 
+    LimitOrderBook(int precision, int depth)
         : precision(precision), depth(depth) {
         step_value = std::pow(10, precision);
         bids.resize(depth);
@@ -23841,17 +23627,17 @@ public:
         ptr_offer_end.store(nullptr, std::memory_order_relaxed);
     }
 
-    LimitOrderBook(const LimitOrderBook& other) 
+    LimitOrderBook(const LimitOrderBook& other)
         : precision(other.precision), depth(other.depth),
           step_value(other.step_value),
           bids(other.bids), offers(other.offers) {
-        ptr_bid_ini.store(other.ptr_bid_ini.load() ? &bids[other.ptr_bid_ini.load() - &other.bids[0]] : nullptr, 
+        ptr_bid_ini.store(other.ptr_bid_ini.load() ? &bids[other.ptr_bid_ini.load() - &other.bids[0]] : nullptr,
                          std::memory_order_relaxed);
-        ptr_bid_end.store(other.ptr_bid_end.load() ? &bids[other.ptr_bid_end.load() - &other.bids[0]] : nullptr, 
+        ptr_bid_end.store(other.ptr_bid_end.load() ? &bids[other.ptr_bid_end.load() - &other.bids[0]] : nullptr,
                          std::memory_order_relaxed);
-        ptr_offer_ini.store(other.ptr_offer_ini.load() ? &offers[other.ptr_offer_ini.load() - &other.offers[0]] : nullptr, 
+        ptr_offer_ini.store(other.ptr_offer_ini.load() ? &offers[other.ptr_offer_ini.load() - &other.offers[0]] : nullptr,
                           std::memory_order_relaxed);
-        ptr_offer_end.store(other.ptr_offer_end.load() ? &offers[other.ptr_offer_end.load() - &other.offers[0]] : nullptr, 
+        ptr_offer_end.store(other.ptr_offer_end.load() ? &offers[other.ptr_offer_end.load() - &other.offers[0]] : nullptr,
                           std::memory_order_relaxed);
     }
 
@@ -23862,14 +23648,14 @@ public:
             step_value = other.step_value;
             bids = other.bids;
             offers = other.offers;
-            
-            ptr_bid_ini.store(other.ptr_bid_ini.load() ? &bids[other.ptr_bid_ini.load() - &other.bids[0]] : nullptr, 
+
+            ptr_bid_ini.store(other.ptr_bid_ini.load() ? &bids[other.ptr_bid_ini.load() - &other.bids[0]] : nullptr,
                              std::memory_order_relaxed);
-            ptr_bid_end.store(other.ptr_bid_end.load() ? &bids[other.ptr_bid_end.load() - &other.bids[0]] : nullptr, 
+            ptr_bid_end.store(other.ptr_bid_end.load() ? &bids[other.ptr_bid_end.load() - &other.bids[0]] : nullptr,
                              std::memory_order_relaxed);
-            ptr_offer_ini.store(other.ptr_offer_ini.load() ? &offers[other.ptr_offer_ini.load() - &other.offers[0]] : nullptr, 
+            ptr_offer_ini.store(other.ptr_offer_ini.load() ? &offers[other.ptr_offer_ini.load() - &other.offers[0]] : nullptr,
                               std::memory_order_relaxed);
-            ptr_offer_end.store(other.ptr_offer_end.load() ? &offers[other.ptr_offer_end.load() - &other.offers[0]] : nullptr, 
+            ptr_offer_end.store(other.ptr_offer_end.load() ? &offers[other.ptr_offer_end.load() - &other.offers[0]] : nullptr,
                               std::memory_order_relaxed);
         }
         return *this;
@@ -23954,7 +23740,7 @@ public:
 
     template <typename C>
     friend struct BookSnapshot;
-    
+
     template <typename C>
     friend class HistoricalLimitOrderBook;
 };
@@ -23975,7 +23761,7 @@ BookSnapshot<Container>::BookSnapshot(timestamp_t ts, const LimitOrderBook<T>& b
             total_order_count += level.orders.size();
         }
     }
-    
+
     offers.reserve(book.offers.size());
     for (const auto& level : book.offers) {
         if (level.total_quantity > 0) {
@@ -23994,14 +23780,14 @@ private:
     std::string file_path_;
     std::atomic<size_t> write_pos_ = {0};
     std::atomic<bool> is_valid_ = {false};
-    
+
     void initialize_mmap() {
         fd_ = open(file_path_.c_str(), O_CREAT | O_RDWR, S_IRUSR | S_IWUSR);
         if (UNLIKELY(fd_ == -1)) {
             is_valid_.store(false, std::memory_order_release);
             return;
         }
-        
+
         struct stat file_stat;
         if (fstat(fd_, &file_stat) == 0) {
             if (UNLIKELY(static_cast<size_t>(file_stat.st_size) != file_size_)) {
@@ -24018,23 +23804,23 @@ private:
                 return;
             }
         }
-        
+
         mapped_addr_ = mmap(nullptr, file_size_, PROT_READ | PROT_WRITE, MAP_SHARED, fd_, 0);
         if (UNLIKELY(mapped_addr_ == MAP_FAILED)) {
             close(fd_);
             is_valid_.store(false, std::memory_order_release);
             return;
         }
-        
+
         is_valid_.store(true, std::memory_order_release);
     }
-    
+
 public:
-    LockFreeMmapFileManager(const std::string& path, size_t initial_size) 
+    LockFreeMmapFileManager(const std::string& path, size_t initial_size)
         : file_path_(path), file_size_(initial_size) {
         initialize_mmap();
     }
-    
+
     ~LockFreeMmapFileManager() {
         if (is_valid_.load(std::memory_order_acquire)) {
             if (mapped_addr_ != MAP_FAILED) {
@@ -24047,70 +23833,70 @@ public:
             is_valid_.store(false, std::memory_order_release);
         }
     }
-    
+
     bool write_data(const void* data, size_t size, size_t& written_pos) {
         if (UNLIKELY(!is_valid_.load(std::memory_order_acquire))) {
             written_pos = 0;
             return false;
         }
-        
+
         size_t current_pos = write_pos_.fetch_add(size, std::memory_order_relaxed);
-        
+
         if (UNLIKELY(current_pos + size > file_size_)) {
             write_pos_.fetch_sub(size, std::memory_order_relaxed);
             written_pos = 0;
             return false;
         }
-        
+
         memcpy(static_cast<char*>(mapped_addr_) + current_pos, data, size);
-        
+
         std::atomic_thread_fence(std::memory_order_release);
-        
+
         written_pos = current_pos;
         return true;
     }
-    
+
     bool read_data(void* dest, size_t offset, size_t size) const {
         if (UNLIKELY(!is_valid_.load(std::memory_order_acquire) || offset + size > file_size_)) {
             return false;
         }
-        
+
         std::atomic_thread_fence(std::memory_order_acquire);
-        
+
         memcpy(dest, static_cast<char*>(mapped_addr_) + offset, size);
         return true;
     }
-    
+
     size_t get_write_position() const {
         return write_pos_.load(std::memory_order_acquire);
     }
-    
+
     bool set_write_position(size_t pos) {
         if (UNLIKELY(!is_valid_.load(std::memory_order_acquire) || pos > file_size_)) {
             return false;
         }
-        
+
         write_pos_.store(pos, std::memory_order_release);
         return true;
     }
-    
+
     size_t get_file_size() const {
         return file_size_;
     }
-    
+
     bool sync() {
         if (UNLIKELY(!is_valid_.load(std::memory_order_acquire))) return false;
         return msync(mapped_addr_, file_size_, MS_SYNC) == 0;
     }
-    
+
     void reset() {
         write_pos_.store(0, std::memory_order_release);
     }
-    
+
     const void* get_mapped_address() const {
         return mapped_addr_;
     }
-    
+
     const std::string& get_file_path() const {
         return file_path_;
     }
@@ -24124,27 +23910,27 @@ private:
     std::array<OrderLog, LOG_BUFFER_SIZE> log_buffer;
     std::atomic<size_t> log_write_pos{0};
     std::atomic<size_t> log_read_pos{0};
-    
+
     std::array<BookSnapshot<Container>, SNAPSHOT_BUFFER_SIZE> snapshot_buffer;
     std::atomic<size_t> snapshot_write_pos{0};
     std::atomic<size_t> last_snapshot_idx{0};
-    
+
     timestamp_t snapshot_interval;
     std::atomic<timestamp_t> last_snapshot_time{0};
-    
+
     LockFreeMmapFileManager mmap_manager_;
     std::thread persistence_thread_;
     std::atomic<bool> running_ = {true};
     std::atomic<timestamp_t> last_persisted_timestamp_ = {0};
     timestamp_t persistence_interval_;
     std::atomic<bool> trigger_flag_ = {false};
-    
+
     struct SnapshotLocation {
         timestamp_t timestamp;
         size_t file_offset;
         size_t size;
     };
-    
+
     std::array<SnapshotLocation, SNAPSHOT_BUFFER_SIZE> snapshot_locations_;
     std::atomic<size_t> snapshot_location_write_pos{0};
 
@@ -24155,31 +23941,31 @@ private:
         return std::chrono::duration_cast<std::chrono::nanoseconds>(
             now.time_since_epoch()).count();
     }
-    
+
     void add_log(const OrderLog& log) {
         size_t pos = log_write_pos.fetch_add(1, std::memory_order_relaxed);
         log_buffer[pos % LOG_BUFFER_SIZE] = log;
         std::atomic_thread_fence(std::memory_order_release);
     }
-    
+
     void create_snapshot() {
         timestamp_t now = get_timestamp();
         size_t pos = snapshot_write_pos.fetch_add(1, std::memory_order_relaxed);
         size_t idx = pos % SNAPSHOT_BUFFER_SIZE;
-        
+
         snapshot_buffer[idx].~BookSnapshot<Container>();
         new (&snapshot_buffer[idx]) BookSnapshot<Container>(now, *this);
-        
+
         std::atomic_thread_fence(std::memory_order_release);
-        
+
         last_snapshot_time.store(now, std::memory_order_relaxed);
         last_snapshot_idx.store(pos, std::memory_order_relaxed);
     }
-    
+
     void create_snapshot_if_needed() {
         timestamp_t now = get_timestamp();
         timestamp_t last_time = last_snapshot_time.load(std::memory_order_acquire);
-        
+
         if (now - last_time >= snapshot_interval) {
             if (last_snapshot_time.compare_exchange_weak(last_time, now,
                                                        std::memory_order_release,
@@ -24188,7 +23974,7 @@ private:
             }
         }
     }
-    
+
     void persistence_worker() {
         while (running_.load(std::memory_order_acquire)) {
             timestamp_t start = get_timestamp();
@@ -24197,24 +23983,24 @@ private:
                    running_.load(std::memory_order_acquire)) {
                 std::this_thread::sleep_for(std::chrono::nanoseconds(100));
             }
-            
+
             if (!running_.load(std::memory_order_acquire)) break;
-            
+
             persist_data();
             trigger_flag_.store(false, std::memory_order_release);
         }
     }
-    
+
     void persist_data() {
         this->create_snapshot();
-        
+
         size_t last_snapshot_idx = this->last_snapshot_idx.load(std::memory_order_acquire);
-        const BookSnapshot<Container>& latest_snapshot = 
+        const BookSnapshot<Container>& latest_snapshot =
             this->snapshot_buffer[last_snapshot_idx % SNAPSHOT_BUFFER_SIZE];
-        
+
         size_t snapshot_offset = 0;
         size_t snapshot_size = 0;
-        
+
         if (serialize_and_write_snapshot(latest_snapshot, snapshot_size, snapshot_offset)) {
             size_t loc_pos = snapshot_location_write_pos.fetch_add(1, std::memory_order_relaxed);
             size_t loc_idx = loc_pos % SNAPSHOT_BUFFER_SIZE;
@@ -24224,57 +24010,57 @@ private:
         } else {
             return;
         }
-        
+
         size_t start_pos = last_persisted_log_pos_.load(std::memory_order_acquire);
         size_t end_pos = this->log_write_pos.load(std::memory_order_acquire);
-        
+
         if (start_pos < end_pos) {
             size_t count = 0;
             for (size_t pos = start_pos; pos < end_pos; ++pos) {
                 std::atomic_thread_fence(std::memory_order_acquire);
                 const OrderLog& log = this->log_buffer[pos % LOG_BUFFER_SIZE];
-                
+
                 if (UNLIKELY(!log.verify_checksum())) {
                     continue;
                 }
-                
+
                 size_t written_pos;
                 if (!mmap_manager_.write_data(&log, sizeof(OrderLog), written_pos)) {
                     break;
                 }
                 count++;
             }
-            
+
             if (count > 0) {
                 last_persisted_log_pos_.store(start_pos + count, std::memory_order_release);
                 last_persisted_timestamp_.store(get_timestamp(), std::memory_order_release);
             }
         }
-        
+
         mmap_manager_.sync();
     }
-    
+
     bool serialize_and_write_snapshot(const BookSnapshot<Container>& snapshot, size_t& out_size, size_t& out_offset) {
         BookSnapshotHeader header(snapshot);
         out_size = header.data_size;
-        
+
         size_t header_offset;
         if (!mmap_manager_.write_data(&header, sizeof(BookSnapshotHeader), header_offset)) {
             return false;
         }
         out_offset = header_offset;
-        
+
         for (const auto& level : snapshot.bids) {
             if (UNLIKELY(!level.verify_checksum())) {
                 continue;
             }
-            
+
             size_t written_pos;
             if (!mmap_manager_.write_data(&level, sizeof(PriceLevelSnapshot), written_pos)) {
                 return false;
             }
         }
-        
+
         for (const auto& level : snapshot.offers) {
             if (UNLIKELY(!level.verify_checksum())) {
                 continue;
@@ -24285,12 +24071,12 @@ private:
                 return false;
             }
         }
-        
+
         return true;
     }
 
 public:
-    PersistentHistoricalOrderBook(int precision, int depth, 
+    PersistentHistoricalOrderBook(int precision, int depth,
                                  const std::string& mmap_file_path,
                                  size_t mmap_file_size,
                                  timestamp_t snapshot_interval_ns = 1000000,
@@ -24300,29 +24086,29 @@ public:
           persistence_interval_(persistence_interval_ns) {
         persistence_thread_ = std::thread(&PersistentHistoricalOrderBook::persistence_worker, this);
     }
-    
+
     ~PersistentHistoricalOrderBook() {
         running_.store(false, std::memory_order_release);
         trigger_flag_.store(true, std::memory_order_release);
-        
+
         if (persistence_thread_.joinable()) {
             persistence_thread_.join();
         }
     }
-    
+
     void add_order(const Order& order, bool is_bid) {
         timestamp_t ts = get_timestamp();
         Order timed_order = order;
         timed_order.timestamp = ts;
         timed_order.checksum = timed_order.calculate_checksum();
-        
+
         int index = this->price_to_index(timed_order.price, is_bid);
         if (index >= 0 && index < this->depth) {
             Container& target = is_bid ? this->bids : this->offers;
             target[index].add_order(timed_order);
             add_log(OrderLog(OrderLog::ADD, timed_order, index));
         }
-        
+
         create_snapshot_if_needed();
     }
 
@@ -24331,7 +24117,7 @@ public:
         Order timed_order = new_order;
         timed_order.timestamp = ts;
         timed_order.checksum = timed_order.calculate_checksum();
-        
+
         int index = this->price_to_index(timed_order.price, is_bid, false);
         if (index >= 0 && index < this->depth) {
             Container& target = is_bid ? this->bids : this->offers;
@@ -24339,7 +24125,7 @@ public:
                 add_log(OrderLog(OrderLog::UPDATE, timed_order, index));
             }
         }
-        
+
         create_snapshot_if_needed();
     }
 
@@ -24347,7 +24133,7 @@ public:
         timestamp_t ts = get_timestamp();
         Order dummy_order(order_id, price, 0, is_bid, ts);
         dummy_order.checksum = dummy_order.calculate_checksum();
-        
+
         int index = this->price_to_index(price, is_bid, false);
         if (index >= 0 && index < this->depth) {
             Container& target = is_bid ? this->bids : this->offers;
@@ -24355,16 +24141,16 @@ public:
                 add_log(OrderLog(OrderLog::DELETE, dummy_order, index));
             }
         }
-        
+
         create_snapshot_if_needed();
     }
-    
+
     void get_persistence_stats(timestamp_t& last_persisted_ts, size_t& file_pos, size_t& file_size) const {
         last_persisted_ts = last_persisted_timestamp_.load(std::memory_order_acquire);
         file_pos = mmap_manager_.get_write_position();
         file_size = mmap_manager_.get_file_size();
     }
-    
+
     void trigger_persistence() {
         trigger_flag_.store(true, std::memory_order_release);
     }
@@ -24378,7 +24164,6 @@ using LFPersistentOrderBook = PersistentHistoricalOrderBook<std::vector<PriceLev
 
 } // namespace Common
 ```
-
 
 
 ### 7.maker-only matchmaker
@@ -24459,7 +24244,6 @@ Orders go through the following states:
 5. REJECTED - rejected on submission (e.g. taker order)
 
 
-
 ```cpp
 #ifndef MAKER_SIMULATOR_H
 #define MAKER_SIMULATOR_H
@@ -24530,42 +24314,42 @@ struct Trade {
 class MakerSimulator {
 public:
     MakerSimulator();
-    
+
     //Submit new order
-    bool post_order(const std::string& order_id, Leg leg, OrderSide side, 
+    bool post_order(const std::string& order_id, Leg leg, OrderSide side,
                    double price, double size);
-    
+
     // Process market data
     void on_tick(Leg leg, const TickData& tick);
-    
+
     // Cancel order
     bool cancel_order(const std::string& order_id);
-    
+
     //Cancel the order based on the timeout period
     void cancel_timeout_orders(std::chrono::milliseconds timeout);
-    
+
     // Cancel order based on price deviation
     void cancel_deviation_orders(double threshold_percent);
-    
+
     // Get the current order
     const std::map<std::string, Order>& get_orders() const;
-    
+
     // Get transaction records
     const std::vector<Trade>& get_trades() const;
-    
+
     // Calculate current equity
     double calculate_equity() const;
-    
+
     // Get cash balance
     double get_cash() const;
-    
+
 private:
     std::map<std::string, Order> orders_; // Order mapping table
     std::vector<Trade> trades_; // Transaction records
     std::map<Leg, double> last_prices_; // latest prices
     double equity_; // total equity
     double cash_; // cash
-    
+
     // Helper method
     bool is_taker_order(Leg leg, OrderSide side, double price) const;
     void match_order(Order& order, const TickData& tick);
@@ -24587,11 +24371,11 @@ MakerSimulator::MakerSimulator() : equity_(0.0), cash_(100000.0) {
 }
 
 //Submit order
-bool MakerSimulator::post_order(const std::string& order_id, Leg leg, OrderSide side, 
+bool MakerSimulator::post_order(const std::string& order_id, Leg leg, OrderSide side,
 double price, double size) {
     // Check if it will become a taker
     if (is_taker_order(leg, side, price)) {
-        std::cerr << "Attempt to take order detected, order" << order_id 
+        std::cerr << "Attempt to take order detected, order" << order_id
             << "Rejected." << std::endl;
         return false;
     }
@@ -24600,7 +24384,7 @@ double price, double size) {
     if (side == OrderSide::BUY) {
         double cost = price * size;
         if (cost > cash_) {
-            std::cerr << "Insufficient funds, order" << order_id 
+            std::cerr << "Insufficient funds, order" << order_id
                 << "Rejected." << std::endl;
             return false;
         }
@@ -24632,7 +24416,7 @@ void MakerSimulator::on_tick(Leg leg, const TickData& tick) {
     std::vector<std::string> orders_to_update;
     for (const auto& pair : orders_) {
         const Order& order = pair.second;
-        if (order.leg == leg && order.status != OrderStatus::CANCELLED && 
+        if (order.leg == leg && order.status != OrderStatus::CANCELLED &&
             order.status != OrderStatus::FILLED) {
             orders_to_update.push_back(order.order_id);
         }
@@ -24662,7 +24446,7 @@ void MakerSimulator::cancel_timeout_orders(std::chrono::milliseconds timeout) {
     auto now = std::chrono::steady_clock::now();
     for (auto& pair : orders_) {
         Order& order = pair.second;
-        if (order.status != OrderStatus::CANCELLED && 
+        if (order.status != OrderStatus::CANCELLED &&
             order.status != OrderStatus::FILLED) {
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
             now - order.timestamp);
@@ -24677,7 +24461,7 @@ void MakerSimulator::cancel_timeout_orders(std::chrono::milliseconds timeout) {
 void MakerSimulator::cancel_deviation_orders(double threshold_percent) {
     for (auto& pair : orders_) {
         Order& order = pair.second;
-        if (order.status != OrderStatus::CANCELLED && 
+        if (order.status != OrderStatus::CANCELLED &&
             order.status != OrderStatus::FILLED) {
             auto it = last_prices_.find(order.leg);
             if (it != last_prices_.end()) {
@@ -24707,15 +24491,15 @@ const std::vector<Trade>& MakerSimulator::get_trades() const {
 double MakerSimulator::calculate_equity() const {
     // Calculate current equity = cash + position value
     double total_equity = cash_;
-    
+
     // Calculate position value
     std::map<std::pair<Leg, OrderSide>, double> positions; // Number of positions
     std::map<std::pair<Leg, OrderSide>, double> avg_prices; // average position price
-    
+
     // Calculate positions based on transaction records
     for (const auto& trade : trades_) {
         std::pair<Leg, OrderSide> key = std::make_pair(trade.leg, trade.side);
-        
+
         if (trade.side == OrderSide::BUY) {
             // Buy to increase long position
             if (positions.find(key) == positions.end()) {
@@ -24740,18 +24524,18 @@ double MakerSimulator::calculate_equity() const {
             }
         }
     }
-    
+
     // Calculate the position value based on the latest market price
     for (const auto& position : positions) {
         Leg leg = position.first.first;
         OrderSide side = position.first.second;
         double quantity = position.second;
         double avg_price = avg_prices.at(position.first);
-        
+
         auto it = last_prices_.find(leg);
         if (it != last_prices_.end()) {
             double current_price = it->second;
-            
+
             if (side == OrderSide::BUY) {
                 // Long position profit and loss = position quantity * (current price - average position price)
                 total_equity += quantity * (current_price - avg_price);
@@ -24761,7 +24545,7 @@ double MakerSimulator::calculate_equity() const {
             }
         }
     }
-    
+
     return total_equity;
 }
 
@@ -24788,7 +24572,7 @@ bool MakerSimulator::is_taker_order(Leg leg, OrderSide side, double price) const
 // Match orders
 void MakerSimulator::match_order(Order& order, const TickData& tick) {
     bool matched = false;
-    
+
     // Buy order, matched when the transaction price is less than or equal to our price
     if (order.side == OrderSide::BUY && tick.last_price <= order.price) {
         matched = true;
@@ -24797,12 +24581,12 @@ void MakerSimulator::match_order(Order& order, const TickData& tick) {
     else if (order.side == OrderSide::SELL && tick.last_price >= order.price) {
         matched = true;
     }
-    
+
     if (matched) {
         // Calculate the order transaction quantity (this time we try to complete the transaction)
         double remaining_size = order.size - order.filled_size;
         double fill_size = remaining_size; // Remaining quantity of fully completed transaction
-        
+
         //Create transaction record
         Trade trade;
         trade.order_id = order.order_id;
@@ -24812,20 +24596,20 @@ void MakerSimulator::match_order(Order& order, const TickData& tick) {
         trade.size = fill_size;
         trade.timestamp = tick.timestamp;
         trade.matched_by = tick.trade_id;
-        
+
         trades_.push_back(trade);
-        
+
         // Update funds
         if (order.side == OrderSide::BUY) {
             cash_ -= trade.price * trade.size; // Purchase minus cash
         } else {
             cash_ += trade.price * trade.size; // Selling increases cash
         }
-        
+
         //Update order
         order.filled_size += fill_size;
         order.last_update = std::chrono::steady_clock::now();
-        
+
         if (order.filled_size >= order.size) {
             order.status = OrderStatus::FILLED;
         } else {
@@ -24955,19 +24739,19 @@ void test_scenario_c() {
 
     // Leg A should be fully traded
     assert(orders.at("order3a").status == OrderStatus::FILLED);
-    
+
     // Leg B should be untraded
     assert(orders.at("order3b").status == OrderStatus::NEW);
-    
+
     std::cout << "Scenario C passes: one leg is filled, the other leg is not filled" << std::endl;
 }
 
 // Test scenario D: The order-taking attempt is rejected
 void test_scenario_d() {
     std::cout << "=== Test scenario D: Take attempt rejected ===" << std::endl;
-    
+
     MakerSimulator simulator;
-    
+
     //Set the latest price
     TickData initial_tick;
     initial_tick.bid_price = 99.0;
@@ -24975,40 +24759,40 @@ void test_scenario_d() {
     initial_tick.last_price = 100.0;
     initial_tick.timestamp = std::chrono::steady_clock::now();
     initial_tick.trade_id = "initial";
-    
+
     simulator.on_tick(Leg::A, initial_tick);
-    
+
     // Try to submit a taker order (the buying price is higher than the latest price)
     bool result = simulator.post_order("order4", Leg::A, OrderSide::BUY, 101.5, 10.0);
-    
+
     // should be rejected
     assert(!result);
-    
+
     // Check that the order has not been added
     const auto& orders = simulator.get_orders();
     assert(orders.find("order4") == orders.end());
-    
+
     std::cout << "Scenario D passes: take attempt is correctly rejected" << std::endl;
 }
 
 //Test Scenario E: Repeat Order Processing
 void test_scenario_e() {
     std::cout << "=== Test scenario E: Duplicate order processing ===" << std::endl;
-    
+
     MakerSimulator simulator;
-    
+
     //Submit order
     bool result1 = simulator.post_order("order5", Leg::A, OrderSide::BUY, 100.0, 10.0);
     assert(result1);
-    
+
     // Get original order information
     const auto& orders_before = simulator.get_orders();
     double original_size = orders_before.at("order5").size;
-    
+
     // Submit the order with the same ID again (the original order should be replaced)
     bool result2 = simulator.post_order("order5", Leg::A, OrderSide::SELL, 95.0, 5.0);
     // This should replace the existing order
-    
+
     // Check that we still only have one order, but the properties have changed
     const auto& orders = simulator.get_orders();
     assert(orders.size() == 1);
@@ -25016,26 +24800,25 @@ void test_scenario_e() {
     assert(orders.at("order5").side == OrderSide::SELL);
     assert(orders.at("order5").price == 95.0);
     assert(orders.at("order5").size == 5.0);
-    
+
     std::cout << "Scenario E passed: duplicate orders are handled correctly" << std::endl;
 }
 
 // main function
 int main() {
     std::cout << "Run Maker Simulator test scenario" << std::endl;
-    
+
     test_scenario_a();
     test_scenario_b();
     test_scenario_c();
     test_scenario_d();
     test_scenario_e();
-    
+
     std::cout << "\nAll test scenarios passed!" << std::endl;
-    
+
     return 0;
 }
 ```
-
 
 
 ### 8.k line generator
@@ -25076,7 +24859,7 @@ enum class BarType {
 
 /**
  * @brief High-performance K-line generator
- * 
+ *
  * This class is used to receive market tick data and generate K-line data of the corresponding period.
  */
 class BarGenerator {
@@ -25089,7 +24872,7 @@ public:
     BarGenerator(BarType type, std::function<void(const BarData&)> callback) noexcept
         : type_(type), callback_(std::move(callback)) {
     }
-    
+
     /**
      * @brief updates the latest tick data
      * @param timestamp timestamp (milliseconds)
@@ -25100,22 +24883,22 @@ public:
     void update(int64_t timestamp, double price, double volume, double turnover) noexcept {
         // Calculate which K-line cycle the current tick should belong to
         int64_t bar_start_time = calculateBarStartTime(timestamp);
-        
+
         // If it is a new K-line cycle
         if (!has_current_bar_ || bar_start_time > current_bar_start_time_) {
             // If the previous K line exists, complete it
             if (has_current_bar_) {
                 finishCurrentBar();
             }
-            
+
             //Create a new K line
             createNewBar(bar_start_time);
         }
-        
+
         //Update current K-line data
         updateCurrentBar(price, volume, turnover);
     }
-    
+
     /**
      * @brief Forces completion of the current K line
      */
@@ -25126,7 +24909,7 @@ public:
             has_current_bar_ = false;
         }
     }
-    
+
     /**
      * @brief Get the K line currently being constructed
      * @return the pointer of the current K-line data, if it does not exist, return nullptr
@@ -25137,13 +24920,13 @@ public:
         }
         return nullptr;
     }
-    
+
     /**
      * @brief Get the K-line cycle type
      * @return K line cycle type
      */
-    BarType getType() const noexcept { 
-        return type_; 
+    BarType getType() const noexcept {
+        return type_;
     }
 
 private:
@@ -25155,7 +24938,7 @@ private:
     int64_t calculateBarStartTime(int64_t timestamp) const noexcept {
         // Convert millisecond timestamp to minutes
         int64_t minutes = timestamp / 60000;
-        
+
         // Calculate the start time based on K-line type
         int64_t bar_minutes = 0;
         switch (type_) {
@@ -25178,11 +24961,11 @@ private:
                 bar_minutes = (minutes / 1440) * 1440;
                 break;
         }
-        
+
         //Convert back to millisecond timestamp
         return bar_minutes * 60000;
     }
-    
+
     /**
      * @brief Create a new K line
      * @param timestamp timestamp (milliseconds)
@@ -25193,7 +24976,7 @@ private:
         // Other fields will be updated in updateCurrentBar
         has_current_bar_ = true;
     }
-    
+
     /**
      * @brief updates current K-line data
      * @param price latest transaction price
@@ -25204,7 +24987,7 @@ private:
         if (volume == 0 && turnover == 0) {
             return; // No actual transaction, no update
         }
-        
+
         if (current_bar_.volume == 0) {
             //First transaction, initialize OHLC
             current_bar_.open = price;
@@ -25217,7 +25000,7 @@ private:
             current_bar_.low = std::min(current_bar_.low, price);
             current_bar_.close = price;
         }
-        
+
         // Accumulated trading volume and trading value
         current_bar_.volume += volume;
         current_bar_.turnover += turnover;
@@ -25233,7 +25016,6 @@ private:
 
 #endif // BAR_GENERATOR_H
 ```
-
 
 
 ### 9. Solver
@@ -25269,10 +25051,10 @@ This solver handles the problem of how to optimally allocate a single target pos
 + Rebalancing of long and short portfolios
 
 ```cpp
-#include 
-#include 
-#include 
-#include 
+#include
+#include
+#include
+#include
 
 class OrderAllocationSolver {
 private:
@@ -25296,32 +25078,32 @@ public:
         int num_active_exchanges;
     };
 
-    AllocationResult solve(const std::vector& exchanges, 
-                          double target_quantity, 
+    AllocationResult solve(const std::vector& exchanges,
+                          double target_quantity,
                           bool is_buy) {
         AllocationResult result = {};
-        
+
         // Precompute effective exchanges
         std::array valid_indices;
         int valid_count = 0;
-        
+
         for (int i = 0; i < exchanges.size() && i < MAX_EXCHANGES; ++i) {
             if (exchanges[i].fill_ratio > EPSILON) {
                 valid_indices[valid_count++] = i;
             }
         }
-        
+
         if (valid_count == 0) {
             return result;
         }
-        
+
         // Sort by best price (buy in ascending order by ask, sell in descending order by bid)
         std::array sorted_indices;
         for (int i = 0; i < valid_count; ++i) {
             sorted_indices[i] = valid_indices[i];
         }
-        
-        std::sort(sorted_indices, sorted_indices + valid_count, 
+
+        std::sort(sorted_indices, sorted_indices + valid_count,
                  [&](int a, int b) {
                      if (is_buy) {
                          return exchanges[a].best_ask < exchanges[b].best_ask;
@@ -25329,28 +25111,28 @@ public:
                          return exchanges[a].best_bid > exchanges[b].best_bid;
                      }
                  });
-        
+
         // Greedy allocation algorithm
         double remaining_quantity = target_quantity;
         double total_cost = 0.0;
         int active_exchanges = 0;
-        
+
         for (int i = 0; i < valid_count && remaining_quantity > EPSILON; ++i) {
             int idx = sorted_indices[i];
             const auto& exch = exchanges[idx];
-            
+
             double available_volume = is_buy ? exch.ask_volume : exch.bid_volume;
             double price = is_buy ? exch.best_ask : exch.best_bid;
-            
+
             double allocation = std::min(remaining_quantity, available_volume);
             double weight = allocation / target_quantity;
-            
+
             result.weights[idx] = weight;
             total_cost += allocation * price * (1.0 + exch.fee_rate);
             remaining_quantity -= allocation;
             active_exchanges++;
         }
-        
+
         result.total_cost = total_cost;
         result.num_active_exchanges = active_exchanges;
         return result;
@@ -25385,9 +25167,9 @@ This solver focuses on the time dimension allocation strategy of orders and dete
 + Execution timing control of position opening/closing
 
 ```cpp
-#include 
-#include 
-#include 
+#include
+#include
+#include
 
 class OptimalExecutionSolver {
 private:
@@ -25420,60 +25202,60 @@ public:
                        double execution_time,
                        double risk_aversion) {
         ExecutionPlan plan = {};
-        
+
         //Almgren-Chriss model implementation
         double gamma = market_state.market_impact_factor;
         double sigma = market_state.volatility;
         double spread = market_state.bid_ask_spread;
-        
+
         // Calculate the optimal time split
         int slices = std::min(static_cast(execution_time * 1000), MAX_SLICES);
         slices = std::max(slices, 1);
-        
+
         double dt = execution_time / slices;
         double sqrt_dt = std::sqrt(dt);
-        
+
         // Use dynamic programming to calculate the optimal execution strategy
         double remaining_quantity = total_quantity;
         double total_cost = 0.0;
-        
+
         for (int i = 0; i < slices; ++i) {
             // Calculate the optimal execution amount of the current slice
             double time_remaining = execution_time - i * dt;
             double optimal_rate = remaining_quantity / time_remaining;
-            
+
             // Consider risk aversion adjustments
             double adjustment = risk_aversion * sigma * sqrt_dt;
             double execution_rate = optimal_rate - adjustment;
-            
+
             execution_rate = std::max(execution_rate, remaining_quantity / (slices - i));
             execution_rate = std::min(execution_rate, remaining_quantity);
-            
+
             double slice_quantity = execution_rate * dt;
-            
+
             // Calculate execution costs (including market impact)
             double market_impact = gamma * std::abs(slice_quantity) / time_remaining;
-            double execution_cost = slice_quantity * market_state.current_price * 
+            double execution_cost = slice_quantity * market_state.current_price *
                                   (1.0 + market_impact + spread / 2.0);
-            
+
             plan.slices[i].time_to_execute = (i + 1) * dt;
             plan.slices[i].quantity = slice_quantity;
             plan.slices[i].expected_cost = execution_cost;
-            
+
             remaining_quantity -= slice_quantity;
             total_cost += execution_cost;
-            
+
             if (remaining_quantity < EPSILON) {
                 plan.slice_count = i + 1;
                 break;
             }
         }
-        
+
         plan.total_cost = total_cost;
         if (plan.slice_count == 0) {
             plan.slice_count = slices;
         }
-        
+
         return plan;
     }
 };
@@ -25505,10 +25287,10 @@ The solver finds the best feasible solution under multiple constraints and handl
 + Real-time capital constraints for spot hedging and arbitrage
 
 ```cpp
-#include 
-#include 
-#include 
-#include 
+#include
+#include
+#include
+#include
 
 class RiskConstraintSolver {
 private:
@@ -25535,18 +25317,18 @@ public:
                          double total_capital,
                          double max_portfolio_risk) {
         PortfolioResult result = {};
-        
+
         //Initialize allocation
         std::array temp_allocations = {};
         int strategy_count = std::min(static_cast(strategies.size()), MAX_STRATEGIES);
-        
+
         // First meet the minimum allocation requirements
         double remaining_capital = total_capital;
         for (int i = 0; i < strategy_count; ++i) {
             temp_allocations[i] = strategies[i].min_allocation;
             remaining_capital -= strategies[i].min_allocation;
         }
-        
+
         if (remaining_capital < 0) {
             // If the minimum allocation exceeds the total capital, reduce it proportionally
             double scale_factor = total_capital / (total_capital - remaining_capital);
@@ -25555,18 +25337,18 @@ public:
             }
             remaining_capital = 0;
         }
-        
+
         // Sort by expected return, giving priority to high-yield strategies
         std::array sorted_indices;
         for (int i = 0; i < strategy_count; ++i) {
             sorted_indices[i] = i;
         }
-        
+
         std::sort(sorted_indices, sorted_indices + strategy_count,
                  [&](int a, int b) {
                      return strategies[a].expected_return > strategies[b].expected_return;
                  });
-        
+
         // Allocate remaining capital
         for (int i = 0; i < strategy_count && remaining_capital > EPSILON; ++i) {
             int idx = sorted_indices[i];
@@ -25574,14 +25356,14 @@ public:
                 remaining_capital,
                 strategies[idx].max_allocation - temp_allocations[idx]
             );
-            
+
             temp_allocations[idx] += additional_allocation;
             remaining_capital -= additional_allocation;
         }
-        
+
         // Risk constraint checks and adjustments
         double portfolio_risk = calculate_portfolio_risk(strategies, temp_allocations, strategy_count);
-        
+
         if (portfolio_risk > max_portfolio_risk) {
             // Reduce allocation according to risk contribution ratio
             double risk_reduction_factor = max_portfolio_risk / portfolio_risk;
@@ -25589,12 +25371,12 @@ public:
                 temp_allocations[i] *= risk_reduction_factor;
             }
         }
-        
+
         // Copy the results and calculate statistics
         int active_count = 0;
         double total_risk = 0.0;
         double total_return = 0.0;
-        
+
         for (int i = 0; i < strategy_count; ++i) {
             result.allocations[i] = temp_allocations[i];
             if (temp_allocations[i] > EPSILON) {
@@ -25603,11 +25385,11 @@ public:
             }
             total_risk += temp_allocations[i] * strategies[i].risk_limit;
         }
-        
+
         result.total_risk = total_risk;
         result.expected_return = total_return;
         result.active_strategies = active_count;
-        
+
         return result;
     }
 
@@ -25658,9 +25440,9 @@ The core component of the market-making strategy requires calculating the optima
 + Find the optimal quotation point
 
 ```cpp
-#include 
-#include 
-#include 
+#include
+#include
+#include
 
 class MarketMakingQuoteSolver {
 private:
@@ -25693,42 +25475,42 @@ public:
 
     QuoteResult solve(const MarketData& market_data) {
         QuoteResult result = {};
-        
+
         double current_price = market_data.fair_price;
         double inventory = market_data.inventory;
         double time_left = market_data.time_to_close;
         double max_inv = market_data.max_inventory;
-        
+
         // Avellaneda-Stoikov model calculation
         // Calculate inventory adjustments
         double inventory_factor = GAMMA * SIGMA * SIGMA * time_left * inventory;
-        
+
         // Calculate the optimal spread
         double optimal_spread = (2.0 / GAMMA) * std::log(1.0 + GAMMA / K);
-        
+
         //Apply inventory penalty adjustments
         double inventory_adjustment = inventory_factor;
         if (std::abs(inventory) > max_inv * 0.8) {
             // Increase penalties when inventory is too high
             inventory_adjustment *= 2.0;
         }
-        
+
         // Calculate the final quote
         double half_spread = optimal_spread / 2.0;
         result.bid_price = current_price - half_spread - inventory_adjustment;
         result.ask_price = current_price + half_spread + inventory_adjustment;
-        
+
         result.spread = result.ask_price - result.bid_price;
         result.inventory_risk = std::abs(inventory) / max_inv;
-        
+
         // Calculate pending order quantity (adjusted based on inventory status)
         double base_size = 1.0; //Basic pending order amount
         double inventory_penalty = 1.0 - std::abs(inventory) / max_inv;
         inventory_penalty = std::max(inventory_penalty, 0.1);
-        
+
         result.bid_size = base_size * inventory_penalty;
         result.ask_size = base_size * inventory_penalty;
-        
+
         // If the inventory is biased toward buying, reduce the amount of buy orders and increase the amount of sell orders.
         if (inventory > 0) {
             result.bid_size *= 0.8;
@@ -25737,10 +25519,10 @@ public:
             result.bid_size *= 1.2;
             result.ask_size *= 0.8;
         }
-        
+
         return result;
     }
-    
+
     // Update fair price estimates in real time
     double update_fair_price(double current_price,
                            const std::array& recent_trades,
@@ -25748,22 +25530,21 @@ public:
         if (trade_count == 0) {
             return current_price;
         }
-        
+
         // Simple moving average update
         double sum = 0.0;
         int count = std::min(trade_count, 10);
-        
+
         for (int i = 0; i < count; ++i) {
             sum += recent_trades[i];
         }
-        
+
         double ma_price = sum / count;
         // Combine current price and historical average, using exponential smoothing
         return 0.3 * ma_price + 0.7 * current_price;
     }
 };
 ```
-
 
 
 ### 10. Smart Order Routing (SOR)
@@ -25786,14 +25567,12 @@ In practice, the life cycle of the parent order is often roughly divided into tw
 Two-phase is not the only paradigm: there are also pure TWAP/VWAP, pure opportunistic, etc.; SOR is often combined with the scheduler (when to be aggressive, when to be passive, whether to cancel the order and then hang it).
 
 
-
 The following stipulations: a positive rate indicates a disadvantage (cost) to oneself; the specific system needs to have unified symbols with the clearing/contract terms.
-
 
 
 **Taker**
 
-+ **Buy**: Buy at seller's best ask, nominal cost rising.  
++ **Buy**: Buy at seller's best ask, nominal cost rising.
 Effective Bid Price (for sorting: smaller is better):
 
 $ P^{\mathrm{buy,eff}}_{\mathrm{taker}} = P_{\mathrm{ask}} \left( 1 + \frac{f_{\mathrm{taker}}}{10^4} \right) $
@@ -25802,7 +25581,7 @@ $ P^{\mathrm{buy,eff}}_{\mathrm{taker}} = P_{\mathrm{ask}} \left( 1 + \frac{f_{\
 
 $ P^{\mathrm{buy,eff}}_{\mathrm{taker}} = P_{\mathrm{ask}} \left( 1 + \frac{\text{taker\_fee\_bps}}{10000} \right) $
 
-+ **SELLER**: Sell at buyer's best bid, nominal income decreases.  
++ **SELLER**: Sell at buyer's best bid, nominal income decreases.
 Effective Ask Price (for sorting: bigger is better):
 
 $ P^{\mathrm{sell,eff}}_{\mathrm{taker}} = P_{\mathrm{bid}} \left( 1 - \frac{f_{\mathrm{taker}}}{10^4} \right) $
@@ -25812,7 +25591,6 @@ $ P^{\mathrm{sell,eff}}_{\mathrm{taker}} = P_{\mathrm{bid}} \left( 1 - \frac{f_{
 $ P^{\mathrm{sell,eff}}_{\mathrm{taker}} = P_{\mathrm{bid}} \left( 1 - \frac{\text{taker\_fee\_bps}}{10000} \right) $
 
 Equivalent implementation:`ask * (1 + fee) / bid * (1 - fee)`,in `fee = taker_fee_bps / 10000`.
-
 
 
 **Maker (pending order)**
@@ -25825,11 +25603,9 @@ $ w_i \propto \max(0,\,\rho_i) \cdot \left( 1 + \frac{r_i}{10000} \right) $
 + where $ \rho_i $ = passive_fill_rate, $ r_i $ = maker_rebate_bps. The higher the rebate and the better the historical passive transactions, the more willing you are to list more volume at that venue.
 
 
-
 **Dark Pool/LP**
 
 There may be no public top of book, use indicative quotes or historical transaction price + slippage model to estimate the effective price, and then incorporate it into the same set of sorting or filtering (for example, only route when the estimated effective price is better than a certain threshold).
-
 
 
 **Input data structure**
@@ -25857,7 +25633,6 @@ inline double effective_buy_cost(double ask_px, double fee_bps) {
 Seller symmetry structure:`bid_px`,`bid_qty`,use `effective_sell_proceeds(bid_px, fee_bps)`.
 
 
-
 **Passive: Order statistics for each venue**
 
 ```cpp
@@ -25869,10 +25644,9 @@ struct VenuePassiveStat {
 ```
 
 
-
 **Aggressive routing (buyer scans orders)**
 
-Logic: Press `effective_buy_cost` Traverse venues in ascending order and take  
+Logic: Press `effective_buy_cost` Traverse venues in ascending order and take
 $ \min(\text{Remaining demand}, \text{Ask_qty for this file}, \text{The upper limit of quota for this venue}) $, until the demand is 0 or there is no liquidity.
 
 Amount of orders taken at venue $ i $ (without lot constraint):
@@ -25907,7 +25681,6 @@ aggressive_route_buy(std::vector<VenueTopBuy> came,
 **Extension**: Maximum purchase amount per venue `venue_limit`, minimum order unit `lot_size` time, cope with `take` Do `floor(take, lot)` and dealing with odd lot rules.
 
 
-
 **Passive allocation (split the remaining amount according to weight)**
 
 **Weight**
@@ -25915,7 +25688,6 @@ aggressive_route_buy(std::vector<VenueTopBuy> came,
 $ w_i = \max(0,\,\rho_i) \cdot \left( 1 + \frac{r_i}{10000} \right) $
 
 Where $ \rho_i $ = passive_fill_rate, $ r_i $ = maker_rebate_bps (0 if no rebate).
-
 
 
 **Integer allocation and dust (recommended: maximum remainder method)**
@@ -25951,7 +25723,6 @@ In descending order of (ideal[i] - alloc[i]), give +1 to each of the first dust 
 If a venue does not allow passive, let $ w_i=0 $.
 
 
-
 **Constraints and cross-points**
 
 | Dimensions | Description |
@@ -25972,12 +25743,11 @@ $ \text{VWAP slippage (bps)} = \frac{P_{\text{your avg}} - P_{\text{mkt VWAP}}}{
 + Buyer: Average Transaction Price **Below** Market VWAP → Indicator is **Negative** → Generally considered better.
 
 
-
 **Implementation Shortfall (IS, relative arrival price mid)**
 
 Arrival price $ m $ is the mid (or first touch) when the commonly used mother order arrives.
 
-$ \mathrm{IS\,(bps)} = s \cdot \frac{P_{\mathrm{fill\,avg}} - m}{m} \times 10000, \qquad s = \begin{cases} +1 &amp;amp;amp;amp;amp; \text{Buy} \\ -1 &amp;amp;amp;amp;amp; \text{Sell} \end{cases} $
+$ \mathrm{IS\,(bps)} = s \cdot \frac{P_{\mathrm{fill\,avg}} - m}{m} \times 10000, \qquad s = \begin{cases} +1 \& \text{Buy} \\ -1 \& \text{Sell} \end{cases} $
 
 + Buyer: Transaction price is below mid → IS is negative → better.
 
@@ -25991,15 +25761,13 @@ inline double is_bps(bool is_buy, double arrival_mid,
 ```
 
 
-
 **Fill Rate**
 
 $ \mathrm{fill\,rate} = \frac{Q_{\mathrm{filled}}}{Q_{\mathrm{requested}}} $
 
 `requested == 0` When defined as 0 or N/A, division by zero is avoided. Conditional writing:
 
-$  \mathrm{fill\,rate} = \begin{cases} Q_{\mathrm{filled}} / Q_{\mathrm{requested}} &amp;amp;amp;amp;amp; Q_{\mathrm{requested}} &amp;amp;amp;amp;gt; 0 \\ 0 \;\text{or N/A} &amp;amp;amp;amp;amp; Q_{\mathrm{requested}} = 0 \end{cases} $
-
+$  \mathrm{fill\,rate} = \begin{cases} Q_{\mathrm{filled}} / Q_{\mathrm{requested}} \& Q_{\mathrm{requested}} > 0 \\ 0 \;\text{or N/A} \& Q_{\mathrm{requested}} = 0 \end{cases} $
 
 
 **Other (optional)**
@@ -26007,7 +25775,6 @@ $  \mathrm{fill\,rate} = \begin{cases} Q_{\mathrm{filled}} / Q_{\mathrm{requeste
 + Participation rate (relative range trading volume)
 + Realized spread / effective spread
 + Contribution of each venue (proportion of transaction volume, price contribution)
-
 
 
 **summary**
@@ -26019,13 +25786,11 @@ $  \mathrm{fill\,rate} = \begin{cases} Q_{\mathrm{filled}} / Q_{\mathrm{requeste
 + The rate symbols and exchange rules are subject to the actual contract.
 
 
-
 ### 11. Self-transaction protection mechanism
 **Self-dealing** refers to the behavior of matching buy and sell orders within the same account or account group with actual control relationship.
 
 1. **Automated trading strategy**: The algorithm sends long and short two-way orders for the same contract at the same time, resulting in matching due to system delays or logical loopholes.
 2. **Trading system defects**: For example, some brokerage systems do not intercept self-transactions for specific scenarios (such as simultaneous issuance of orders from MOM accounts).
-
 
 
 **Self-transaction protection mechanism design**
@@ -26085,7 +25850,7 @@ public:
             // Check: same contract + counterparty + same account/trading group
             if (order.symbol == new_order.symbol &&
                 order.side != new_order.side &&
-                (order.account_id == new_order.account_id || 
+                (order.account_id == new_order.account_id ||
                  order.trader_group == new_order.trader_group)) {
                 result.push_back(order);
             }
@@ -26116,7 +25881,7 @@ private:
     STPStrategy strategy;
 
 public:
-    STHPandler(OrderBook& book, STPStrategy strat) 
+    STHPandler(OrderBook& book, STPStrategy strat)
         : order_book(book), strategy(strat) {}
 
     //Perform STP check and return whether new orders are allowed to enter
@@ -26176,7 +25941,6 @@ int main() {
 ```
 
 
-
 ### 12. Current limiter
 In high-concurrency links such as trading systems/risk control/matching/gateways, the goal of current limiting is to turn "uncontrollable burst traffic" into "stable traffic that the system can bear", so as to:
 
@@ -26184,8 +25948,7 @@ In high-concurrency links such as trading systems/risk control/matching/gateways
 + Reduce the risk of cascading failures (avalanche, queue amplification, timeout retry storm)
 + Make latency more predictable (lower tail latency)
 
-Current limiting is done to maintain stability and recoverability as the system approaches saturation.  
-
+Current limiting is done to maintain stability and recoverability as the system approaches saturation.
 
 
 **Common usage scenarios (trading system caliber)**
@@ -26218,8 +25981,7 @@ Current limiting is done to maintain stability and recoverability as the system 
 + `idle_timeout/prune_interval/max_entries` Control key life cycle and memory limit
 
 
-
-**B) **`LockFreeApiRateLimiter`(No lock + GCRA + fixed capacity table) 
+**B) **`LockFreeApiRateLimiter`(No lock + GCRA + fixed capacity table)
 
 **Applicable**: Extreme throughput/low tail latency, controllable and predictable key space, willingness to trade fixed capacity for performance.
 
@@ -26834,7 +26596,6 @@ if (!fast.try_acquire_hashed(h, 1)) {
 ```
 
 
-
 ### 13.Reader/Tree-sitter
 **1. Universal Positioning**
 
@@ -26867,10 +26628,10 @@ Lezer (developed by the CodeMirror team) and Tree-sitter (developed by GitHub) a
 + The status of incremental parsing is traceable, making it easy to locate abnormalities in the trading system (such as protocol parsing errors, data packet loss) and reducing troubleshooting costs.
 + In a distributed trading system, data flows between gateways, strategy engines, and risk control modules. The incremental AST of Tree-sitter/Lezer can be reused between modules to avoid repeated parsing and reduce end-to-end delay.
 
-**4.HFT incremental parser - core code  
+**4.HFT incremental parser - core code
 **[**https://github.com/zzxscodes/hft-incremental-parser**](https://github.com/zzxscodes/hft-incremental-parser)
 
-Order format:`BUY|SELL quantity SYMBOL @ price LIMIT|MARKET`  
+Order format:`BUY|SELL quantity SYMBOL @ price LIMIT|MARKET`
 Example:`BUY 100 AAPL @ 150.25 LIMIT`
 
 **1. Type definition (types.hpp)**
@@ -27043,7 +26804,6 @@ if (r.valid) {
 Actual measurement: ~86 ns/parse, about 11.6 million times/second.
 
 
-
 ### 14. Distributed trading system consensus model
 **1. Definition of two consensus models**
 
@@ -27060,7 +26820,6 @@ Actual measurement: ~86 ns/parse, about 11.6 million times/second.
 **Log content**:`PlaceNewOrder`, `CancelOrder`, `AmendOrder`
 
 
-
 **2. Consensus of results**
 
 **Core logic**: The master node executes first, then reaches consensus on the final status result and synchronizes it.
@@ -27072,7 +26831,6 @@ Actual measurement: ~86 ns/parse, about 11.6 million times/second.
 ![](https://cdn.nlark.com/yuque/__mermaid_v3/f67f1f3f39931e016dd4089770906f1c.svg)
 
 **Log content**:`TradeResult`, `BalanceUpdate`, `PositionUpdate`
-
 
 
 **2. Matching engine: command consensus**
@@ -27115,7 +26873,6 @@ void recover(OrderBook& book, const std::vector<CommandLog>& logs) {
 ```
 
 
-
 **3. Counter system: Consensus of results**
 
 1. **Non-deterministic**: Dependent on external factors (risk control, market price, time, configuration...)
@@ -27129,15 +26886,15 @@ void recover(OrderBook& book, const std::vector<CommandLog>& logs) {
 //The same command may have different execution results at different times.
 void processTrade(const Trade& trade) {
     // Rely on external real-time data
-    auto index_price = MarketData::getIndexPrice(trade.symbol); 
+    auto index_price = MarketData::getIndexPrice(trade.symbol);
     auto fee_rate = Config::getFeeRate(user_id); // Configuration may have changed
-    
+
     //The calculation result is uncertain
-    auto margin = calcMargin(trade, index_price); 
+    auto margin = calcMargin(trade, index_price);
     auto fee = trade.volume * fee_rate;
-    
+
     // Side effects: If replayed, the transfer will be repeated!
-    Ledger::transfer(fee, Account::FEE_POOL); 
+    Ledger::transfer(fee, Account::FEE_POOL);
 }
 
 // 2. Result consensus: directly synchronize the final state
@@ -27157,7 +26914,6 @@ void applyStateUpdate(const StateUpdate& update) {
 ```
 
 
-
 **4. Comparison**
 
 | Dimensions | Matching engine (command consensus) | Counter system (result consensus) |
@@ -27170,15 +26926,14 @@ void applyStateUpdate(const StateUpdate& update) {
 | **Performance Focus** | Low latency | High throughput, reliability |
 
 
-**Architecture Collaboration**:  
+**Architecture Collaboration**:
 `Client -> [Matching (Command Consensus)] -> TradeEvent -> [Counter (Result Consensus)] -> AccountState`
 
 
-
 ### 15. Exchange protocol layering and sequence consistency
-1.**Protocol layering**  
-Session layer: login, heartbeat, reconnection, sequence number maintenance, retransmission negotiation.  
-Business layer: order book increments, transactions, status events, snapshot events.  
+1.**Protocol layering**
+Session layer: login, heartbeat, reconnection, sequence number maintenance, retransmission negotiation.
+Business layer: order book increments, transactions, status events, snapshot events.
 Encoding and decoding layer: byte order conversion, field verification, structure mapping.
 
 ```cpp
@@ -27222,9 +26977,9 @@ public:
 };
 ```
 
-**2. Sequence consistency processing**  
-Market flow maintenance for each channel `last_seq`, strictly check continuity.  
-After detecting the gap, it enters the recovery state: request retransmission, merge playback, and then switch back to the real-time stream.  
+**2. Sequence consistency processing**
+Market flow maintenance for each channel `last_seq`, strictly check continuity.
+After detecting the gap, it enters the recovery state: request retransmission, merge playback, and then switch back to the real-time stream.
 The strategy is prohibited from continuing to consume the real-time increment of the target before the recovery is completed.
 
 ```cpp
@@ -27279,9 +27034,9 @@ private:
 };
 ```
 
-**3.Time stamp layering**  
-`exchange_ts`:Exchange time.  
-`nic_rx_ts`: The network card receives the hardware time.  
+**3.Time stamp layering**
+`exchange_ts`:Exchange time.
+`nic_rx_ts`: The network card receives the hardware time.
 `app_ts`: Application layer processing time.
 
 ```cpp
@@ -27310,15 +27065,14 @@ struct TimeTriple {
 ```
 
 
-
 ### 16. Pre-serialized orders
 Pre-serialized orders means building the **on-the-wire byte template** off the hot path (symbol load, session ready, config changes) and, at send time, **patching in place** only fields that change every order (e.g. `ClOrdID`, price, quantity, timestamps, checksum/signature slots). This avoids full string formatting, repeated tag walks, and allocations on the decision→send path. On the binary side, [FIX Simple Binary Encoding (SBE)](https://github.com/FIXTradingCommunity/fix-simple-binary-encoding) emphasizes fixed layouts and offset-based access for low-latency encode/decode (see its [Introduction](https://github.com/FIXTradingCommunity/fix-simple-binary-encoding/blob/master/v1-0-RC3/doc/01Introduction.md)). Open-source stacks such as [fixpp](https://github.com/sashamakarenko/fixpp) often reuse message buffers and update only fields that change.
 
-**System design notes**:  
+**System design notes**:
 
-1. **Layered templates**: split session/sequence headers from the business body; if sequence numbers must be assigned at the gateway, patch at egress while the strategy keeps a template without seq or with placeholders.  
-2. **Field contract**: know which fields change on every send vs rarely; bake fixed fields as compile-time constants or write them once at startup.  
-3. **Correctness**: pre-serialization does not replace risk checks or the OMS state machine.  
+1. **Layered templates**: split session/sequence headers from the business body; if sequence numbers must be assigned at the gateway, patch at egress while the strategy keeps a template without seq or with placeholders.
+2. **Field contract**: know which fields change on every send vs rarely; bake fixed fields as compile-time constants or write them once at startup.
+3. **Correctness**: pre-serialization does not replace risk checks or the OMS state machine.
 4. **Protocol fidelity**: tag-value FIX needs SOH and body length; binary protocols should use generated code/SBE schema offsets.
 
 **Example** (illustrative: fixed prefix + hot path only patches quantity; replace with real tag layout or SBE-generated structs in production):
@@ -27374,14 +27128,14 @@ struct PreSerializedNewOrder {
 };
 ```
 
-**Advanced: class template specialization + tag dispatch (one code path, multiple venues)**  
-Use empty **tag types** (`SHFETag`, `CFFEXTag`, …) as template parameters and **fully specialize** `PreserializedOrder<>`: the constructor (cold path) pre-fills fixed fields and endianness; hot paths only touch cached pointers via `update_*`. Shared send logic uses `if constexpr` to add venue-specific steps (e.g. local order id vs order ref).  
+**Advanced: class template specialization + tag dispatch (one code path, multiple venues)**
+Use empty **tag types** (`SHFETag`, `CFFEXTag`, …) as template parameters and **fully specialize** `PreserializedOrder<>`: the constructor (cold path) pre-fills fixed fields and endianness; hot paths only touch cached pointers via `update_*`. Shared send logic uses `if constexpr` to add venue-specific steps (e.g. local order id vs order ref).
 **Note**: The `SHFEProtocol` / `CFFEXProtocol` layouts below are **example layouts only**—they are not real gateway binary messages or official field order/endianness.
 
-**Design recap**  
+**Design recap**
 
-1. **Tag dispatching**: empty classes carry venue semantics in the type system.  
-2. **Class template specialization**: the primary template is declared only, forcing a full specialization per venue; protocol details stay in the compilation unit.  
+1. **Tag dispatching**: empty classes carry venue semantics in the type system.
+2. **Class template specialization**: the primary template is declared only, forcing a full specialization per venue; protocol details stay in the compilation unit.
 3. `if constexpr`: in helpers like `simulate_send_order`, expand different side logic per `ExchangeTag` ; unselected branches are not instantiated.
 
 **Full code example**
@@ -27533,7 +27287,6 @@ int main() {
 ```
 
 
-
 ## Business logic design-calculation
 ### 1.Log return (percent asymmetry)
 ```cpp
@@ -27598,7 +27351,6 @@ int main() {
 ```
 
 
-
 ### 2.Changes in state of market trends and volatility
 1. By analyzing market trends and state changes in volatility, we can determine whether the market is stable. If the state change interval presents a random distribution, it means the market is relatively stable; if it stays in a certain state for a long time (such as long-term high volatility), there may be non-stationarity, which will affect the robustness of the trading system. By analyzing the state changes of market indicators, we can test the stability of the market and provide a basis for the development of trading systems (to avoid failure in non-stationary markets).
 2. **Calculation of key indicators**:
@@ -27646,7 +27398,7 @@ double calc_trend(const vector<double>& close, int start_idx, int lookback) {
 }
 
 // 2. Calculate volatility indicator (ATR)
-double calc_volatility(const vector<double>& high, const vector<double>& low, 
+double calc_volatility(const vector<double>& high, const vector<double>& low,
                       const vector<double>& close, int start_idx, int lookback) {
     double sum_tr = 0.0;
     for (int i = 0; i < lookback; ++i) {
@@ -27660,7 +27412,7 @@ double calc_volatility(const vector<double>& high, const vector<double>& low,
 }
 
 // 3. Analyze status change interval distribution
-void analyze_state_gaps(const vector<double>& indicator, double quantile, 
+void analyze_state_gaps(const vector<double>& indicator, double quantile,
                        vector<int>& gap_counts, const vector<int>& gap_bounds) {
     gap_counts.assign(NGAPS, 0);
     if (indicator.empty()) return;
@@ -27695,8 +27447,8 @@ void analyze_state_gaps(const vector<double>& indicator, double quantile,
 }
 
 // 4. Read market data file (format: YYYYMMDD Open High Low Close)
-bool read_market_data(const string& filename, vector<int>& dates, 
-                     vector<double>& open, vector<double>& high, 
+bool read_market_data(const string& filename, vector<int>& dates,
+                     vector<double>& open, vector<double>& high,
                      vector<double>& low, vector<double>& close) {
     ifstream file(filename);
     if (!file.is_open()) {
@@ -27874,7 +27626,7 @@ double calc_trend(const vector<double>& close, int start_idx, int lookback) {
 }
 
 // 2. Calculate volatility indicator
-double calc_volatility(const vector<double>& high, const vector<double>& low, 
+double calc_volatility(const vector<double>& high, const vector<double>& low,
                       const vector<double>& close, int start_idx, int lookback) {
     double sum_tr = 0.0;
     for (int i = 0; i < lookback; ++i) {
@@ -27888,7 +27640,7 @@ double calc_volatility(const vector<double>& high, const vector<double>& low,
 }
 
 // 3. Analyze status change interval distribution
-void analyze_state_gaps(const vector<double>& indicator, double quantile, 
+void analyze_state_gaps(const vector<double>& indicator, double quantile,
                        vector<int>& gap_counts, const vector<int>& gap_bounds) {
     gap_counts.assign(NGAPS, 0);
     if (indicator.empty()) return;
@@ -27921,7 +27673,7 @@ void analyze_state_gaps(const vector<double>& indicator, double quantile,
 }
 
 // 4. Generate simulated S&P 100 index data
-void generate_simulated_oex_data(int bar_count, vector<double>& high, 
+void generate_simulated_oex_data(int bar_count, vector<double>& high,
                                 vector<double>& low, vector<double>& close) {
     random_device rd;
     mt19937 gen(rd());
@@ -27937,7 +27689,7 @@ void generate_simulated_oex_data(int bar_count, vector<double>& high,
         double prev_close = close.back();
         double trend = trend_dist(gen);
         double vol = vol_dist(gen);
-        
+
         // Calculate the price of the day
         double open = prev_close + vol * open_dist(gen);
         double day_high = open + vol * (0.5 + 0.2 * normal_distribution<double>(0,1)(gen));
@@ -28091,7 +27843,6 @@ int main() {
 ```
 
 
-
 ### 3.Indicator stability optimization based on moving window
 **1. Solution to mean non-stationarity (centralization)**
 
@@ -28171,14 +27922,14 @@ double moving_std(const vector<double>& data, int end_idx, int window_len) {
     if (start_idx < 0) start_idx = 0;
     int n = end_idx - start_idx + 1;
     if (n < 2) return 1.0; // avoid dividing by 0
-    
+
     // Calculate the mean first
     double mean = 0.0;
     for (int i = start_idx; i <= end_idx; ++i) {
         mean += data[i];
     }
     mean /= n;
-    
+
     // Calculate standard deviation
     double sum_sq = 0.0;
     for (int i = start_idx; i <= end_idx; ++i) {
@@ -28192,9 +27943,9 @@ vector<int> analyze_state_gaps(const vector<double>& indicator, double quantile)
     const int NGAPS = 11;
     vector<int> gap_counts(NGAPS, 0);
     vector<int> gap_bounds = {1, 2, 4, 8, 16, 32, 64, 128, 256, 512, INT_MAX};
-    
+
     if (indicator.empty()) return gap_counts;
-    
+
     int current_state = (indicator[0] >= quantile) ? 1 : 0;
     int state_duration = 1;
 
@@ -28228,11 +27979,11 @@ void generate_nonstationary_indicator(int len, vector<double>& raw_indicator) {
     random_device rd;
     mt19937 gen(rd());
     normal_distribution<double> noise(0, 0.5);
-    
+
     raw_indicator.resize(len);
     double trend_drift = 0.0; // Long-term trend drift
     double volatility = 0.5; // initial volatility
-    
+
     for (int i = 0; i < len; ++i) {
         // Simulate the first 500 data: drift upward slowly (mean is non-stationary)
         if (i < 500) {
@@ -28246,7 +27997,7 @@ void generate_nonstationary_indicator(int len, vector<double>& raw_indicator) {
         if (i >= 1000) {
             volatility = 1.0;
         }
-        
+
         raw_indicator[i] = 2.0 + trend_drift + noise(gen) * volatility;
     }
 }
@@ -28277,15 +28028,15 @@ int main() {
     for (int i = 0; i < INDICATOR_LEN; ++i) {
         // original indicator
         optimized_indicators[RAW].push_back(raw_indicator[i]);
-        
+
         // 1. Mean centering (current value - moving window mean)
         double mean_win = moving_mean(raw_indicator, i, WINDOW_SHORT);
         optimized_indicators[CENTERED_MEAN].push_back(raw_indicator[i] - mean_win);
-        
+
         // 2. Median centering (current value - moving window median, anti-extreme values)
         double median_win = moving_median(raw_indicator, i, WINDOW_SHORT);
         optimized_indicators[CENTERED_MEDIAN].push_back(raw_indicator[i] - median_win);
-        
+
         // 3. Mean + variance bi-stabilization (after centralization/moving window standard deviation)
         double std_win = moving_std(raw_indicator, i, WINDOW_SHORT);
         double centered_val = raw_indicator[i] - mean_win;
@@ -28301,9 +28052,9 @@ int main() {
 
     //Analyze the stationarity of all indicators (statistical state change interval)
     vector<string> indicator_names = {
-        "Original indicator (without optimization)", 
-        "Short window mean centering", 
-        "Short window median centering", 
+        "Original indicator (without optimization)",
+        "Short window mean centering",
+        "Short window median centering",
         "Short window mean + variance bi-stabilization",
         "Long window mean centering"
     };
@@ -28321,7 +28072,7 @@ int main() {
         vector<double> sorted = all_indicators[i];
         sort(sorted.begin(), sorted.end());
         double quantile = sorted[sorted.size() / 2];
-        
+
         //Analyze status change interval
         gap_results[i] = analyze_state_gaps(all_indicators[i], quantile);
     }
@@ -28345,7 +28096,6 @@ int main() {
     return 0;
 }
 ```
-
 
 
 ### 4. Information entropy for trading indicator evaluation
@@ -28419,7 +28169,7 @@ public:
 
         for (int i = 0; i < nbins; ++i) {
             if (bin_counts[i] == 0) continue; // 0*log(0) is defined as 0, skip
-            
+
             const double p = static_cast<double>(bin_counts[i]) * n_inv;
             entropy -= p * log(p);
         }
@@ -28576,7 +28326,6 @@ cleanup:
 ```
 
 
-
 ### 5. Regularized linear models: the preferred model
 **1. Core Objectives**
 
@@ -28602,8 +28351,8 @@ cleanup:
 + Key steps:
     1. **Data Standardization**: Perform "mean reduction and standard deviation" processing on input indicators (such as trends, volatility) and target variables (such as returns) (required in the book to reduce numerical errors and improve convergence speed);
     2. **Fast update of covariance**: When the number of samples (number of historical bars in the market) is much larger than the number of indicators, the covariance matrix between indicators and the cross-covariance between indicators and targets are pre-calculated, reducing the time complexity of each iteration from $ O(N*K) $ (N is the number of samples, K is the number of indicators) to $ O(K^2) $, adapting to the efficient computing requirements of "large samples, multiple indicators" of the trading system;
-    3. **Soft threshold update**: The core operation of Lasso/L1 regularization, applying "threshold clipping" to the optimized coefficients to return small coefficients to zero (implementing variable selection), the formula is:  
-$ S(z,\gamma)=\begin{cases}z-\gamma &amp;amp;amp;amp;amp; z&amp;amp;amp;amp;gt;\gamma \\ z+\gamma &amp;amp;amp;amp;amp; z&amp;amp;amp;amp;lt;-\gamma \\ 0 &amp;amp;amp;amp;amp; \text{otherwise}\end{cases} $  
+    3. **Soft threshold update**: The core operation of Lasso/L1 regularization, applying "threshold clipping" to the optimized coefficients to return small coefficients to zero (implementing variable selection), the formula is:
+$ S(z,\gamma)=\begin{cases}z-\gamma \& z>\gamma \\ z+\gamma \& z<-\gamma \\ 0 \& \text{otherwise}\end{cases} $
 Among them $ \gamma=\alpha*\lambda $ (the combination of regularization strength and type).
 
 **(3) Lambda Optimization: Path Descent + Cross Validation ("Optimal Regularization Strength Selection") **
@@ -28641,16 +28390,16 @@ public:
      * @param n_lambdas Number of points for lambda path search
      */
     CoordinateDescent(int n_vars, int n_cases, bool use_weights, bool use_covar_updates, int n_lambdas)
-        : n_vars_(n_vars), n_cases_(n_cases), use_weights_(use_weights), 
+        : n_vars_(n_vars), n_cases_(n_cases), use_weights_(use_weights),
           use_covar_updates_(use_covar_updates), n_lambdas_(n_lambdas),
-          beta_(nullptr), residuals_(nullptr), X_inner_(nullptr), Y_inner_(nullptr), 
+          beta_(nullptr), residuals_(nullptr), X_inner_(nullptr), Y_inner_(nullptr),
           XSS_vec_(nullptr), weights_(nullptr), lambdas_(nullptr), lambda_beta_(nullptr) {
         //Parameter check
         if (n_vars_ <= 0 || n_cases_ <= 0 || n_lambdas_ < 0) {
             error_code_ = CoordinateDescentErr::INVALID_PARAM;
             return;
         }
-        
+
         // Sample number check
         if (n_cases_ < n_vars_) {
             error_code_ = CoordinateDescentErr::INSUFFICIENT_DATA;
@@ -28681,7 +28430,7 @@ public:
             error_code_ = CoordinateDescentErr::MEMORY_FAILED;
             return;
         }
-        
+
         error_code_ = CoordinateDescentErr::SUCCESS;
     }
 
@@ -28847,7 +28596,7 @@ public:
                 // Calculate the standardized target variable value
                 double y_std = (Y_[i] - Y_mean_) / Y_std_; // Y_ is the original target variable array
                 residuals_[i] = y_std;
-                
+
                 //Subtract the accumulated value of feature × coefficient
                 for (int j = 0; j < n_vars_; ++j) {
                     // Calculate standardized eigenvalues
@@ -29019,7 +28768,7 @@ public:
     const double* get_beta() const { return beta_; }
     const double* get_lambdas() const { return lambdas_; }
     const double* get_lambda_beta() const { return lambda_beta_; }
-    
+
     // Get error code
     CoordinateDescentErr get_error_code() const { return error_code_; }
 
@@ -29051,17 +28800,17 @@ private:
     double* weights_; // Sample weights (n_cases_)
     double* lambdas_; // lambda value in path (n_lambdas_)
     double* lambda_beta_; // The coefficient corresponding to each lambda (n_lambdas_×n_vars_)
-    
+
     //Add raw data storage
     double* X_; // Original feature data (n_cases_ × n_vars_)
     double* Y_; // Original target variable (n_cases_)
-    
+
     // normalized parameters
     std::vector<double> X_mean_;
     std::vector<double> X_std_;
     double Y_mean_;
     double Y_std_;
-    
+
     // error code
     CoordinateDescentErr error_code_;
 };
@@ -29073,23 +28822,23 @@ private:
 void test_coordinate_descent() {
     std::cout << "Testing Coordinate Descent Implementation\n";
     std::cout << "========================================\n";
-    
+
     //Create test data
     const int n_vars = 5;
     const int n_cases = 100;
-    
+
     // Generate test data
     std::vector<double> X(n_cases * n_vars);
     std::vector<double> Y(n_cases);
     std::vector<double> weights(n_cases, 1.0); // Equal weights
-    
+
     // Fill in feature data (random data)
     for (int i = 0; i < n_cases; ++i) {
         for (int j = 0; j < n_vars; ++j) {
             X[i * n_vars + j] = (double)rand() / RAND_MAX;
         }
     }
-    
+
     // Generate target variables (linear combination plus noise)
     for (int i = 0; i < n_cases; ++i) {
         Y[i] = 0.0;
@@ -29098,7 +28847,7 @@ void test_coordinate_descent() {
         }
         Y[i] += 0.1 * ((double)rand() / RAND_MAX - 0.5); // Add noise
     }
-    
+
     //Test 1: Basic function test
     std::cout << "Test 1: Basic functionality test\n";
     CoordinateDescent cd1(n_vars, n_cases, false, false, 0);
@@ -29106,26 +28855,26 @@ void test_coordinate_descent() {
         std::cout << "  Failed to create CoordinateDescent object\n";
         return;
     }
-    
+
     CoordinateDescentErr err = cd1.load_data(0, n_cases, X.data(), Y.data(), nullptr);
     if (err != CoordinateDescentErr::SUCCESS) {
         std::cout << "  Failed to load data\n";
         return;
     }
-    
+
     err = cd1.core_train(0.5, 0.1, 100, 1e-6, false, false);
     if (err != CoordinateDescentErr::SUCCESS) {
         std::cout << "  Failed to train model\n";
         return;
     }
-    
+
     std::cout << "  Coefficients: ";
     const double* beta = cd1.get_beta();
     for (int j = 0; j < n_vars; ++j) {
         std::cout << std::fixed << std::setprecision(4) << beta[j] << " ";
     }
     std::cout << "\n";
-    
+
     //Test 2: Test with weighted function
     std::cout << "Test 2: Weighted functionality test\n";
     CoordinateDescent cd2(n_vars, n_cases, true, false, 0);
@@ -29133,26 +28882,26 @@ void test_coordinate_descent() {
         std::cout << "  Failed to create weighted CoordinateDescent object\n";
         return;
     }
-    
+
     err = cd2.load_data(0, n_cases, X.data(), Y.data(), weights.data());
     if (err != CoordinateDescentErr::SUCCESS) {
         std::cout << "  Failed to load weighted data\n";
         return;
     }
-    
+
     err = cd2.core_train(1.0, 0.1, 100, 1e-6, true, false);
     if (err != CoordinateDescentErr::SUCCESS) {
         std::cout << "  Failed to train weighted model\n";
         return;
     }
-    
+
     std::cout << "  Coefficients: ";
     beta = cd2.get_beta();
     for (int j = 0; j < n_vars; ++j) {
         std::cout << std::fixed << std::setprecision(4) << beta[j] << " ";
     }
     std::cout << "\n";
-    
+
     //Test 3: Lambda path search test
     std::cout << "Test 3: Lambda path search test\n";
     CoordinateDescent cd3(n_vars, n_cases, false, true, 10);
@@ -29160,21 +28909,21 @@ void test_coordinate_descent() {
         std::cout << "  Failed to create path search CoordinateDescent object\n";
         return;
     }
-    
+
     err = cd3.load_data(0, n_cases, X.data(), Y.data(), nullptr);
     if (err != CoordinateDescentErr::SUCCESS) {
         std::cout << "  Failed to load data for path search\n";
         return;
     }
-    
+
     err = cd3.lambda_train(0.8, 50, 1e-4, true, -1.0, false);
     if (err != CoordinateDescentErr::SUCCESS) {
         std::cout << "  Failed to perform lambda path search\n";
         return;
     }
-    
+
     std::cout << "  Lambda path search completed successfully\n";
-    
+
     //Test 4: Error handling test
     std::cout << "Test 4: Error handling test\n";
     CoordinateDescent cd4(-1, n_cases, false, false, 0);
@@ -29183,14 +28932,14 @@ void test_coordinate_descent() {
     } else {
         std::cout << "  Failed to handle invalid parameter\n";
     }
-    
+
     CoordinateDescent cd5(n_vars, n_vars-1, false, false, 0);
     if (cd5.get_error_code() == CoordinateDescentErr::INSUFFICIENT_DATA) {
         std::cout << "  Correctly handled insufficient data\n";
     } else {
         std::cout << "  Failed to handle insufficient data\n";
     }
-    
+
     std::cout << "All tests completed.\n";
 }
 
@@ -29199,7 +28948,6 @@ int main() {
     return 0;
 }
 ```
-
 
 
 ### 6. Differential evolution optimization: nonlinear parameter optimization
@@ -29288,7 +29036,7 @@ public:
           climb_prob_(climb_prob), criter_(criter), user_data_(user_data),
           pop1_(nullptr), pop2_(nullptr), best_params_(nullptr),
           rng_(std::random_device{}()), initialized_(false) {
-        
+
         DiffEvolutionErr err = initialize(n_params, n_int_params, pop_size, over_init,
                                          min_trades, max_evals, max_bad_gens,
                                          mutate_dev, cross_prob, climb_prob,
@@ -29341,7 +29089,7 @@ private:
         high_bounds_.resize(n_params);
         memcpy(low_bounds_.data(), low_bounds, n_params * sizeof(double));
         memcpy(high_bounds_.data(), high_bounds, n_params * sizeof(double));
-        
+
         initialized_ = true;
         return DiffEvolutionErr::SUCCESS;
     }
@@ -29707,10 +29455,10 @@ private:
 double testFunction(const double* params, int min_trades, void* user_data) {
     double x = params[0];
     double y = params[1];
-    
+
     // Check the number of simulated transactions
     if (min_trades > 10) return -1; // The minimum number of trades is not met
-    
+
     //Objective function: find the maximum value point (3,4)
     double result = -((x-3)*(x-3) + (y-4)*(y-4));
     return -result; // returns a negative value because the algorithm looks for the maximum value
@@ -29719,7 +29467,7 @@ double testFunction(const double* params, int min_trades, void* user_data) {
 // test function
 void runTest() {
     std::cout << "Start differential evolution algorithm test...\n";
-    
+
     //Define parameters
     const int n_params = 2;
     const int n_int_params = 0;
@@ -29731,11 +29479,11 @@ void runTest() {
     const double mutate_dev = 0.5;
     const double cross_prob = 0.3;
     const double climb_prob = 0.1;
-    
+
     //parameter boundaries
     double low_bounds[n_params] = {-10.0, -10.0};
     double high_bounds[n_params] = {10.0, 10.0};
-    
+
     //Create an optimizer instance (without using exceptions)
     DiffEvolutionErr err_code;
     DiffEvolution optimizer(
@@ -29745,16 +29493,16 @@ void runTest() {
         low_bounds, high_bounds,
         testFunction, nullptr, &err_code
     );
-    
+
     if (err_code != DiffEvolutionErr::SUCCESS) {
         std::cout << "Optimizer initialization failed, error code: " << static_cast<int>(err_code) << "\n";
         return;
     }
-    
+
     //Perform optimization
     double best_params[n_params + 1];
     DiffEvolutionErr result = optimizer.optimize(best_params);
-    
+
     if (result == DiffEvolutionErr::SUCCESS) {
         std::cout << "Optimization successful!\n";
         std::cout << "Best parameters: x = " << best_params[0] << ", y = " << best_params[1] << "\n";
@@ -29769,7 +29517,6 @@ int main() {
     return 0;
 }
 ```
-
 
 
 ### 7. Cheap training bias estimation
@@ -29950,10 +29697,10 @@ private:
 // test function
 void test_basic_functionality() {
     std::cout << "Testing basic functionality..." << std::endl;
-    
+
     StocBias sb(5);
     sb.collect(true);
-    
+
     // Simulate the benefits of the first parameter set
     double* returns = sb.expose_returns();
     returns[0] = 0.01;
@@ -29961,82 +29708,81 @@ void test_basic_functionality() {
     returns[2] = -0.01;
     returns[3] = 0.03;
     returns[4] = -0.02;
-    
+
     StocBiasErr err = sb.process();
     assert(err == StocBiasErr::SUCCESS);
-    
+
     // Simulate the benefits of the second parameter set (better)
     returns[0] = 0.02;
     returns[1] = 0.03;
     returns[2] = 0.00;
     returns[3] = 0.04;
     returns[4] = -0.01;
-    
+
     err = sb.process();
     assert(err == StocBiasErr::SUCCESS);
-    
+
     // Calculate deviation
     double IS_return, OOS_return, bias;
     err = sb.compute(&IS_return, &OOS_return, &bias);
     assert(err == StocBiasErr::SUCCESS);
-    
+
     std::cout << "IS Return: " << IS_return << std::endl;
     std::cout << "OOS Return: " << OOS_return << std::endl;
     std::cout << "Bias: " << bias << std::endl;
-    
+
     std::cout << "Basic functionality test passed!" << std::endl;
 }
 
 void test_not_collecting() {
     std::cout << "Testing not collecting state..." << std::endl;
-    
+
     StocBias sb(3);
     // Do not call collect(true), keep the default collecting_=false
-    
+
     double* returns = sb.expose_returns();
     returns[0] = 0.01;
     returns[1] = 0.02;
     returns[2] = 0.03;
-    
+
     StocBiasErr err = sb.process();
     assert(err == StocBiasErr::NOT_COLLECTING);
-    
+
     double IS_return, OOS_return, bias;
     err = sb.compute(&IS_return, &OOS_return, &bias);
     assert(err == StocBiasErr::NOT_COLLECTING);
     assert(IS_return == 0.0);
     assert(OOS_return == 0.0);
     assert(bias == 0.0);
-    
+
     std::cout << "Not collecting test passed!" << std::endl;
 }
 
 void test_invalid_size() {
     std::cout << "Testing invalid size..." << std::endl;
-    
+
     StocBias sb(-1); // Invalid size
-    
+
     double* returns = sb.expose_returns();
     assert(returns == nullptr);
-    
+
     StocBiasErr err = sb.process();
     assert(err == StocBiasErr::INVALID_SIZE);
-    
+
     std::cout << "Invalid size test passed!" << std::endl;
 }
 
 int main() {
     std::cout << "Running StocBias tests with exceptions disabled..." << std::endl;
-    
+
     test_invalid_size();
     test_not_collecting();
     test_basic_functionality();
-    
+
     std::cout << "All tests passed!" << std::endl;
     return 0;
 }
 ```
-
 
 
 ### 8. Parameter relationship analysis
@@ -30252,7 +29998,7 @@ public:
      * @param data input data (n_cases row × (n_params+1) column, each row: parameter 1 ~ parameter n + performance)
      * @throw PostOptMemAlloc is thrown when memory allocation fails
      */
-    ParamCorrelation(int n_params, int n_cases, const double* data) 
+    ParamCorrelation(int n_params, int n_cases, const double* data)
         : n_params(n_params), n_cases(n_cases) {
         // Memory allocation (reusing the work buffer reduces the number of allocations)
         this->data = new (std::nothrow) double[n_cases * (n_params + 1)]();
@@ -30519,7 +30265,7 @@ public:
 //Add test function
 int test_param_correlation() {
     printf("Start testing ParamCorrelation class...\n");
-    
+
     // Prepare test data (3 parameters, 10 samples)
     const int n_params = 3;
     const int n_cases = 10;
@@ -30535,7 +30281,7 @@ int test_param_correlation() {
         {0.85, 1.75, 2.85, 92.5},
         {1.25, 2.35, 3.25, 89.0}
     };
-    
+
     // Convert a two-dimensional array to a one-dimensional array
     double flat_data[40];
     for (int i = 0; i < n_cases; i++) {
@@ -30543,16 +30289,16 @@ int test_param_correlation() {
             flat_data[i * 4 + j] = test_data[i][j];
         }
     }
-    
+
     // Create ParamCorrelation object
     ParamCorrelation* analyzer = nullptr;
     PostOptErr err = ParamCorrelation::create(n_params, n_cases, flat_data, &analyzer);
-    
+
     if (err != POST_OPT_SUCCESS) {
         printf("Failed to create ParamCorrelation object, error code: %d\n", err);
         return err;
     }
-    
+
     // perform analysis
     err = analyzer->analyze("param_analysis_result.txt");
     if (err != POST_OPT_SUCCESS) {
@@ -30560,7 +30306,7 @@ int test_param_correlation() {
         delete analyzer;
         return err;
     }
-    
+
     printf("The test is completed and the results have been saved to param_analysis_result.txt\n");
     delete analyzer;
     return POST_OPT_SUCCESS;
@@ -30576,7 +30322,6 @@ int main() {
     return result;
 }
 ```
-
 
 
 ### 9. Parameter sensitivity curve
@@ -30649,9 +30394,9 @@ public:
              const double* low_bounds, const double* high_bounds,
              PerformanceCriter criter, int min_trades) {
         // Input legality check
-        if (n_params <= 0 || n_int_params < 0 || n_int_params > n_params) 
+        if (n_params <= 0 || n_int_params < 0 || n_int_params > n_params)
             return POST_OPT_INVALID_PARAM;
-        if (!best_params || !low_bounds || !high_bounds || !criter) 
+        if (!best_params || !low_bounds || !high_bounds || !criter)
             return POST_OPT_NULL_PTR;
 
         this->n_params = n_params;
@@ -30679,7 +30424,7 @@ public:
         memcpy(this->best_params, best_params, n_params * sizeof(double));
         memcpy(this->low_bounds, low_bounds, n_params * sizeof(double));
         memcpy(this->high_bounds, high_bounds, n_params * sizeof(double));
-        
+
         return POST_OPT_SUCCESS;
     }
 
@@ -30860,32 +30605,32 @@ int test_param_sensitivity() {
     double best_params[n_params] = {0.0, 0.5, -0.3};
     double low_bounds[n_params] = {-5.0, -2.0, -1.0};
     double high_bounds[n_params] = {5.0, 2.0, 1.0};
-    
+
     //Create ParamSensitivity object
     ParamSensitivity sensitivity;
-    int result = sensitivity.init(n_params, n_int_params, best_params, 
-                                  low_bounds, high_bounds, 
+    int result = sensitivity.init(n_params, n_int_params, best_params,
+                                  low_bounds, high_bounds,
                                   test_performance_function, 15);
-    
+
     if (result != POST_OPT_SUCCESS) {
         printf("Initialization failed, error code: %d\n", result);
         return result;
     }
-    
+
     // Test to generate a single parameter curve
     result = sensitivity.generate_curve(0, 10, 20, "sensitivity_test.log");
     if (result != POST_OPT_SUCCESS) {
         printf("Failed to generate a single parameter curve, error code: %d\n", result);
         return result;
     }
-    
+
     // Test to generate all parameter curves
     result = sensitivity.generate_all_curves(8, 15, "sensitivity_all_test.log");
     if (result != POST_OPT_SUCCESS) {
         printf("Failed to generate all parameter curves, error code: %d\n", result);
         return result;
     }
-    
+
     printf("All tests passed\n");
     return POST_OPT_SUCCESS;
 }
@@ -30903,21 +30648,20 @@ int main() {
 ```
 
 
-
 ### 10. Unbiased trading simulation
 The core goal of unbiased trading simulation is to eliminate the interference of "future data leakage" and "over-fitting" on the performance evaluation of the trading system, and obtain an unbiased estimate of the future performance of the system by simulating the "training-testing" process under real trading scenarios. Its core principles and ideas can be summarized as the following four points:
 
-1. **Strict time series data division logic**  
-Separation of in-sample (IS) and out-of-sample (OOS): Market data (such as logarithmic price candlesticks) must be sorted by timestamp to ensure that the in-sample data is completely earlier than the out-of-sample data, and to prevent future leaks of "training models with future data". When dividing, it is necessary to control the proportion within the sample (usually 0.5~0.8), and ensure that both have sufficient data volume (at least 1 valid data point each) to avoid evaluation bias caused by insufficient data volume.  
+1. **Strict time series data division logic**
+Separation of in-sample (IS) and out-of-sample (OOS): Market data (such as logarithmic price candlesticks) must be sorted by timestamp to ensure that the in-sample data is completely earlier than the out-of-sample data, and to prevent future leaks of "training models with future data". When dividing, it is necessary to control the proportion within the sample (usually 0.5~0.8), and ensure that both have sufficient data volume (at least 1 valid data point each) to avoid evaluation bias caused by insufficient data volume.
 Guard Buffer mechanism: For the indicator lookback period (such as the number of K lines required for moving average calculation) and the target forward period (such as predicting the future returns of N K lines), a "guard buffer" (size = min (lookback period, forward period)-1) is set at the boundary between the in-sample and out-of-sample periods. For example, if the indicator needs to look back 20 K lines and the target looks forward to 10 K lines, the buffer zone will be 9 K lines to avoid hidden future leakage of in-sample data and out-of-sample data due to "indicator calculation overlap".
-2. **Forward Analysis (Walkforward Analysis): simulate the real transaction iteration process**  
-Sliding window training - testing: The historical data is divided into continuous "folds" according to "training window + test window". Within each fold, the training window data is first used to optimize the system parameters (such as the moving average period), and then the test window data is used to calculate out-of-sample returns. Then the entire window is slid forward (sliding step = test window size), and the process is repeated until all data is traversed.  
+2. **Forward Analysis (Walkforward Analysis): simulate the real transaction iteration process**
+Sliding window training - testing: The historical data is divided into continuous "folds" according to "training window + test window". Within each fold, the training window data is first used to optimize the system parameters (such as the moving average period), and then the test window data is used to calculate out-of-sample returns. Then the entire window is slid forward (sliding step = test window size), and the process is repeated until all data is traversed.
 Fits real trading scenarios: Each round of training only uses "historical data as of the current point in time", and testing is only for "limited time windows in the future", fully replicating the process of "regularly updating the model and gradually executing transactions" in real trading, avoiding overfitting caused by training with the full amount of data at one time, and at the same time capturing the impact of market non-stationarity on system performance.
-3. **Cross-Validation: Supplementary evaluation for efficient use of data**  
-The folding logic of time series adaptation: divide the data into N consecutive "folds" according to time, each fold is used as a test set in turn, and the remaining folds (excluding the test set and guard buffer) are used as the training set. Different from traditional cross-validation, guard buffers need to be set up on both sides of the test set to prevent in-sample-test set data overlap caused by indicator lookback/forward.  
+3. **Cross-Validation: Supplementary evaluation for efficient use of data**
+The folding logic of time series adaptation: divide the data into N consecutive "folds" according to time, each fold is used as a test set in turn, and the remaining folds (excluding the test set and guard buffer) are used as the training set. Different from traditional cross-validation, guard buffers need to be set up on both sides of the test set to prevent in-sample-test set data overlap caused by indicator lookback/forward.
 Balance data utilization and unbiasedness: Solve the problem of "small amount of early training data" in forward testing and make full use of historical data through multiple rounds of training-testing, but you need to pay attention to its limitations - because it includes "future data of the test set" for training, it may introduce a slight optimistic bias to the evaluation of non-stationary markets, so it is usually used as a supplement to forward testing, not a replacement.
-4. **Nested Forward Testing: Handling Selection Bias in Multi-Level Optimization**  
-Two-level optimization separation: For the scenario of "system parameter optimization (inner layer) + multi-system selection (outer layer)", the "selection bias" needs to be eliminated through a nested structure. The inner layer uses forward testing to evaluate the out-of-sample performance of each competing system (such as moving average strategies with different parameters). The outer layer selects the optimal system based on the unbiased results of the inner layer, and then uses an independent outer test window to verify the final performance.  
+4. **Nested Forward Testing: Handling Selection Bias in Multi-Level Optimization**
+Two-level optimization separation: For the scenario of "system parameter optimization (inner layer) + multi-system selection (outer layer)", the "selection bias" needs to be eliminated through a nested structure. The inner layer uses forward testing to evaluate the out-of-sample performance of each competing system (such as moving average strategies with different parameters). The outer layer selects the optimal system based on the unbiased results of the inner layer, and then uses an independent outer test window to verify the final performance.
 Avoid "survivor bias": If you directly select the "system with the best performance in the sample" from multiple systems, it is easy to overestimate the performance due to "accidental luck"; the nested structure ensures that the selected system is a system with "real generalization ability" rather than "accidental fitting noise" by "using OOS results to screen the system in the inner layer and verifying it in the outer layer with new OOS results".
 
 ```cpp
@@ -31136,7 +30880,7 @@ public:
         }
 
         // Calculate the guard buffer (core logic: avoid IS/OOS overlap, take min(lookback, lookahead)-1)
-        const size_t guard_size = (std::min(lookback, lookahead) > 0) ? 
+        const size_t guard_size = (std::min(lookback, lookahead) > 0) ?
                                   (std::min(lookback, lookahead) - 1) : 0;
         const size_t fold_size = total_size / n_folds; // Base size of each fold
         out_oos_returns.clear();
@@ -31145,7 +30889,7 @@ public:
         for (size_t fold_idx = 0; fold_idx < n_folds; ++fold_idx) {
             // Calculate the test set range of the current fold
             const size_t test_start = fold_idx * fold_size;
-            const size_t test_end = (fold_idx == n_folds - 1) ? 
+            const size_t test_end = (fold_idx == n_folds - 1) ?
                                     total_size : (fold_idx + 1) * fold_size;
 
             //Construct the training set (exclude the test set and guard buffer to avoid IS/OOS overlap)
@@ -31460,209 +31204,208 @@ private:
 //Test code implementation
 void testSplitInOutSample() {
     std::cout << "Testing splitInOutSample..." << std::endl;
-    
+
     // Test normal conditions
     std::vector<MarketData> data = {
         {1.0, 1}, {2.0, 2}, {3.0, 3}, {4.0, 4}, {5.0, 5}
     };
-    
+
     std::vector<MarketData> in_sample, out_sample;
     auto result = UnbiasedSimulation::splitInOutSample(data, 0.6, in_sample, out_sample);
-    
+
     assert(result == SimErrorCode::SUCCESS);
     assert(in_sample.size() == 3);
     assert(out_sample.size() == 2);
     assert(in_sample[0].timestamp < out_sample[0].timestamp);
-    
+
     //Test invalid ratio
     result = UnbiasedSimulation::splitInOutSample(data, 1.5, in_sample, out_sample);
     assert(result == SimErrorCode::INVALID_RATIO);
-    
+
     result = UnbiasedSimulation::splitInOutSample(data, -0.1, in_sample, out_sample);
     assert(result == SimErrorCode::INVALID_RATIO);
-    
+
     //Insufficient amount of test data
     std::vector<MarketData> small_data = {{1.0, 1}};
     result = UnbiasedSimulation::splitInOutSample(small_data, 0.5, in_sample, out_sample);
     assert(result == SimErrorCode::INSUFFICIENT_DATA);
-    
+
     // Test timestamp is non-increasing
     std::vector<MarketData> unordered_data = {{1.0, 2}, {2.0, 1}};
     result = UnbiasedSimulation::splitInOutSample(unordered_data, 0.5, in_sample, out_sample);
     assert(result == SimErrorCode::TIMESTAMP_ORDER_ERR);
-    
+
     std::cout << "splitInOutSample tests passed." << std::endl;
 }
 
 void testWalkForwardAnalysis() {
     std::cout << "Testing walkForwardAnalysis..." << std::endl;
-    
+
     //Create test data
     std::vector<MarketData> data;
     for (int i = 1; i <= 20; ++i) {
         data.push_back({static_cast<double>(i), i});
     }
-    
+
     //Create trading system
     MACrossSystem system(3, 5);
-    
+
     std::vector<double> oos_returns;
     auto result = UnbiasedSimulation::walkForwardAnalysis(data, 10, 5, system, oos_returns);
-    
+
     assert(result == SimErrorCode::SUCCESS);
-    
+
     //The test window size is illegal
     result = UnbiasedSimulation::walkForwardAnalysis(data, 0, 5, system, oos_returns);
     assert(result == SimErrorCode::INSUFFICIENT_DATA);
-    
+
     result = UnbiasedSimulation::walkForwardAnalysis(data, 15, 10, system, oos_returns);
     assert(result == SimErrorCode::INSUFFICIENT_DATA);
-    
+
     // Test timestamp is non-increasing
     std::vector<MarketData> unordered_data = {{1.0, 2}, {2.0, 1}};
     result = UnbiasedSimulation::walkForwardAnalysis(unordered_data, 1, 1, system, oos_returns);
     assert(result == SimErrorCode::TIMESTAMP_ORDER_ERR);
-    
+
     std::cout << "walkForwardAnalysis tests passed." << std::endl;
 }
 
 void testCrossValidation() {
     std::cout << "Testing crossValidation..." << std::endl;
-    
+
     //Create test data
     std::vector<MarketData> data;
     for (int i = 1; i <= 20; ++i) {
         data.push_back({static_cast<double>(i), i});
     }
-    
+
     MACrossSystem system(2, 4);
-    
+
     std::vector<double> oos_returns;
     auto result = UnbiasedSimulation::crossValidation(data, 4, 2, 1, system, oos_returns);
-    
+
     assert(result == SimErrorCode::SUCCESS);
-    
+
     //The test fold is illegal
     result = UnbiasedSimulation::crossValidation(data, 1, 2, 1, system, oos_returns);
     assert(result == SimErrorCode::INSUFFICIENT_DATA);
-    
+
     //Insufficient amount of test data
     std::vector<MarketData> small_data = {{1.0, 1}, {2.0, 2}};
     result = UnbiasedSimulation::crossValidation(small_data, 3, 1, 1, system, oos_returns);
     assert(result == SimErrorCode::INSUFFICIENT_DATA);
-    
+
     // Test timestamp is non-increasing
     std::vector<MarketData> unordered_data = {{1.0, 2}, {2.0, 1}};
     result = UnbiasedSimulation::crossValidation(unordered_data, 2, 1, 1, system, oos_returns);
     assert(result == SimErrorCode::TIMESTAMP_ORDER_ERR);
-    
+
     std::cout << "crossValidation tests passed." << std::endl;
 }
 
 void testNestedWalkForward() {
     std::cout << "Testing nestedWalkForward..." << std::endl;
-    
+
     //Create test data
     std::vector<MarketData> data;
     for (int i = 1; i <= 30; ++i) {
         data.push_back({static_cast<double>(i), i});
     }
-    
+
     //Create multiple trading systems
     MACrossSystem system1(2, 4);
     MACrossSystem system2(3, 6);
     std::vector<TradingSystem*> systems = {&system1, &system2};
-    
+
     std::vector<double> final_returns;
     auto result = UnbiasedSimulation::nestedWalkForward(data, 8, 4, 12, systems, final_returns);
-    
+
     assert(result == SimErrorCode::SUCCESS);
-    
+
     //The test system list is empty
     std::vector<TradingSystem*> empty_systems;
     result = UnbiasedSimulation::nestedWalkForward(data, 5, 3, 10, empty_systems, final_returns);
     assert(result == SimErrorCode::EMPTY_SYSTEM_LIST);
-    
+
     //The test window size is illegal
     result = UnbiasedSimulation::nestedWalkForward(data, 0, 3, 10, systems, final_returns);
     assert(result == SimErrorCode::INVALID_WINDOW_SIZE);
-    
+
     result = UnbiasedSimulation::nestedWalkForward(data, 5, 3, 0, systems, final_returns);
     assert(result == SimErrorCode::INVALID_WINDOW_SIZE);
-    
+
     // Test timestamp is non-increasing
     std::vector<MarketData> unordered_data = {{1.0, 2}, {2.0, 1}};
     result = UnbiasedSimulation::nestedWalkForward(unordered_data, 1, 1, 1, systems, final_returns);
     assert(result == SimErrorCode::TIMESTAMP_ORDER_ERR);
-    
+
     std::cout << "nestedWalkForward tests passed." << std::endl;
 }
 
 void testMACrossSystem() {
     std::cout << "Testing MACrossSystem..." << std::endl;
-    
+
     // Test parameter validity
     MACrossSystem valid_system(2, 5);
     assert(valid_system.validateParams() == SimErrorCode::SUCCESS);
-    
+
     MACrossSystem invalid_system(5, 3);
     assert(invalid_system.validateParams() == SimErrorCode::INVALID_MA_PARAM);
-    
+
     //Test optimization parameters
     std::vector<MarketData> data;
     for (int i = 1; i <= 10; ++i) {
         data.push_back({static_cast<double>(i), i});
     }
-    
+
     valid_system.optimizeParams(data);
     auto params = valid_system.getOptimalParams();
     assert(params.size() == 2);
-    
+
     // Test to generate revenue
     auto returns = valid_system.generateReturns(data);
     assert(returns.size() == data.size() - 5); // The long period is 5
-    
+
     std::cout << "MACrossSystem tests passed." << std::endl;
 }
 
 int main() {
     std::cout << "Starting tests..." << std::endl;
-    
+
     testSplitInOutSample();
     testWalkForwardAnalysis();
     testCrossValidation();
     testNestedWalkForward();
     testMACrossSystem();
-    
+
     std::cout << "All tests passed!" << std::endl;
-    
+
     return 0;
 }
 ```
 
 
-
 ### 11. Statistical analysis of transaction income
 The core goal of transaction income analysis is to objectively evaluate the income quality, risk level and stability of the trading system based on income data obtained through unbiased simulation, and to avoid misjudgments caused by "improper selection of income granularity" or "indicator calculation deviation". Its core principles and ideas can be summarized as the following four points:
 
-1. **Standardized conversion of revenue granularity**  
-Conversion of single K-line income for an indefinite look-ahead period system: For a trading system with "uncertain opening-closing time" (such as a breakthrough strategy), it is necessary to split the "cumulative income from opening to closing" into "single K-line income" - by recording the position status of each K-line (long/short/no position), and calculating the single K-line income based on the logarithmic price difference (long = next K-line price - current K Line price, short position is the opposite, no position is 0). This transformation not only eliminates the information loss of "complete transaction returns masking intermediate fluctuations", but also provides a basis for subsequent fine-grained analysis.  
-Multi-granularity income adapts to different analysis scenarios: supports further conversion of single K-line income into three types of practical granularity:  
-Position-only K-line returns: Exclude zero-profit K-lines without positions, focus on the system's "actual performance when participating in transactions", and avoid zero returns diluting the true level of returns;  
-Complete transaction income: Accumulated income according to the "opening - closing" cycle, which conforms to traditional transaction analysis habits and is used to evaluate the profit and loss efficiency of a single transaction;  
+1. **Standardized conversion of revenue granularity**
+Conversion of single K-line income for an indefinite look-ahead period system: For a trading system with "uncertain opening-closing time" (such as a breakthrough strategy), it is necessary to split the "cumulative income from opening to closing" into "single K-line income" - by recording the position status of each K-line (long/short/no position), and calculating the single K-line income based on the logarithmic price difference (long = next K-line price - current K Line price, short position is the opposite, no position is 0). This transformation not only eliminates the information loss of "complete transaction returns masking intermediate fluctuations", but also provides a basis for subsequent fine-grained analysis.
+Multi-granularity income adapts to different analysis scenarios: supports further conversion of single K-line income into three types of practical granularity:
+Position-only K-line returns: Exclude zero-profit K-lines without positions, focus on the system's "actual performance when participating in transactions", and avoid zero returns diluting the true level of returns;
+Complete transaction income: Accumulated income according to the "opening - closing" cycle, which conforms to traditional transaction analysis habits and is used to evaluate the profit and loss efficiency of a single transaction;
 Fixed block return: Accumulate the returns of N consecutive K lines (for example, 10 K lines are one block), smooth short-term random fluctuations, and use it to observe the stability of the system in the medium-term time dimension.
-2. **Core indicator calculation based on fine-grained income**  
-Reject "reliance on complete transaction income": Emphasis on calculating indicators based on "single K-line income" or "position K-line income only" to avoid misjudgments caused by "small amount of data and covering up intermediate risks" in complete transaction income. For example, if the profit factor (sum of profits/sum of losses) is calculated based on complete transactions, it may exaggerate performance due to "a few large profitable transactions", while calculation based on fine-grained profits can reflect the true profit and loss structure.  
-Core indicator system:  
-Average return: reflects the expected return per unit time (or unit position K-line) and needs to be calculated using "total return/data volume" to avoid incomparability due to differences in data volume;  
-Return standard deviation: unbiased estimate (divided by n-1), which measures the risk of return fluctuations. The smaller the standard deviation, the more stable the system returns;  
-Profit factor: It is necessary to distinguish between the "total profit income" and the "absolute total loss income" to avoid including zero income, and use a minimum value (such as 1e-60) to protect the denominator from being zero;  
+2. **Core indicator calculation based on fine-grained income**
+Reject "reliance on complete transaction income": Emphasis on calculating indicators based on "single K-line income" or "position K-line income only" to avoid misjudgments caused by "small amount of data and covering up intermediate risks" in complete transaction income. For example, if the profit factor (sum of profits/sum of losses) is calculated based on complete transactions, it may exaggerate performance due to "a few large profitable transactions", while calculation based on fine-grained profits can reflect the true profit and loss structure.
+Core indicator system:
+Average return: reflects the expected return per unit time (or unit position K-line) and needs to be calculated using "total return/data volume" to avoid incomparability due to differences in data volume;
+Return standard deviation: unbiased estimate (divided by n-1), which measures the risk of return fluctuations. The smaller the standard deviation, the more stable the system returns;
+Profit factor: It is necessary to distinguish between the "total profit income" and the "absolute total loss income" to avoid including zero income, and use a minimum value (such as 1e-60) to protect the denominator from being zero;
 Winning rate: number of times of profit/number of total income, reflecting the stability of income, which needs to be comprehensively evaluated in conjunction with the profit factor (high winning rate and low profit factor may still have no actual value due to "small wins and big losses").
-3. **Legality verification of income data**  
-Data timing and integrity verification: Before analysis, it is necessary to verify whether the K-line timestamp is strictly incremental (to avoid revenue calculation errors caused by data disorder), whether the revenue sequence is non-empty (at least 1 valid revenue point), and whether the fixed block size is a positive integer (to avoid invalid granularity division), to ensure the legitimacy of the input data and avoid analysis deviations caused by data quality issues.  
+3. **Legality verification of income data**
+Data timing and integrity verification: Before analysis, it is necessary to verify whether the K-line timestamp is strictly incremental (to avoid revenue calculation errors caused by data disorder), whether the revenue sequence is non-empty (at least 1 valid revenue point), and whether the fixed block size is a positive integer (to avoid invalid granularity division), to ensure the legitimacy of the input data and avoid analysis deviations caused by data quality issues.
 Parameter rationality verification: For systems that rely on parameters (such as moving average breakthrough strategies), it is necessary to verify whether the core parameters (such as moving average lookback period) are positive to avoid signal generation errors caused by illegal parameters and ensure that the source of income data is reliable.
-4. **Balance assessment logic of risks and benefits**  
-Reject "reliance on a single indicator": Emphasize the evaluation of the system through a combination of indicators of "average return + standard deviation + profit factor + winning rate". For example: a system with high average return but high standard deviation may have too high risks, and a system with high winning rate but low profit factor may have "small wins and big losses". The cost-effectiveness of risk and return needs to be comprehensively judged.  
+4. **Balance assessment logic of risks and benefits**
+Reject "reliance on a single indicator": Emphasize the evaluation of the system through a combination of indicators of "average return + standard deviation + profit factor + winning rate". For example: a system with high average return but high standard deviation may have too high risks, and a system with high winning rate but low profit factor may have "small wins and big losses". The cost-effectiveness of risk and return needs to be comprehensively judged.
 Focus on "verification of generalization ability": All return analysis must be based on "out-of-sample returns obtained by unbiased simulation" rather than in-sample returns. In-sample returns are only used for parameter optimization, while out-of-sample returns are the core basis for evaluating the future performance of the system to avoid performance overestimation caused by "fitting in-sample noise".
 
 ```cpp
@@ -31933,7 +31676,7 @@ public:
         for (double ret : returns) {
             sum_sq_diff += (ret - out_stats.mean) * (ret - out_stats.mean);
         }
-        out_stats.std_dev = (out_stats.total_count > 1) ? 
+        out_stats.std_dev = (out_stats.total_count > 1) ?
                             std::sqrt(sum_sq_diff / (out_stats.total_count - 1)) : 0.0;
 
         // Step 3: Calculate the profit factor and winning rate (evaluate the quality of returns based on logarithmic returns)
@@ -32024,7 +31767,7 @@ private:
 
 void testDynamicToBarReturnConverter() {
     std::cout << "Testing DynamicToBarReturnConverter...\n";
-    
+
     // Test case 1: Normal case
     std::vector<LogPriceBar> bars = {
         {1.0, 100},
@@ -32032,26 +31775,26 @@ void testDynamicToBarReturnConverter() {
         {1.2, 300},
         {1.3, 400}
     };
-    
+
     std::function<TradeSignal(size_t)> signalGen = [](size_t idx) -> TradeSignal {
         return idx == 0 ? TradeSignal::LONG : TradeSignal::NO_POSITION;
     };
-    
+
     std::vector<BarReturn> returns;
     TradeAnalysisErrCode result = DynamicToBarReturnConverter::convert(bars, signalGen, returns);
-    
+
     assert(result == TradeAnalysisErrCode::SUCCESS);
     assert(returns.size() == 3);
     assert(std::abs(returns[0].return_val - 0.1) < 1e-10);
     assert(returns[0].position == TradeSignal::LONG);
     std::cout << "  Test case 1 passed\n";
-    
+
     // Test case 2: Insufficient bars
     std::vector<LogPriceBar> insufficientBars = {{1.0, 100}};
     result = DynamicToBarReturnConverter::convert(insufficientBars, signalGen, returns);
     assert(result == TradeAnalysisErrCode::INSUFFICIENT_BARS);
     std::cout << "  Test case 2 passed\n";
-    
+
     // Test case 3: Timestamp order error
     std::vector<LogPriceBar> unorderedBars = {
         {1.0, 200},
@@ -32064,7 +31807,7 @@ void testDynamicToBarReturnConverter() {
 
 void testReturnGranularityConverter() {
     std::cout << "Testing ReturnGranularityConverter...\n";
-    
+
     // Setup test data
     std::vector<BarReturn> barReturns = {
         {0.05, TradeSignal::LONG},
@@ -32076,76 +31819,76 @@ void testReturnGranularityConverter() {
         {0.04, TradeSignal::LONG},
         {0.02, TradeSignal::LONG}
     };
-    
+
     // Test POSITION_ONLY conversion
     std::vector<double> positionOnlyReturns;
     TradeAnalysisErrCode result = ReturnGranularityConverter::convert(
-        barReturns, 
-        ReturnGranularityConverter::GranularityType::POSITION_ONLY, 
+        barReturns,
+        ReturnGranularityConverter::GranularityType::POSITION_ONLY,
         positionOnlyReturns
     );
-    
+
     assert(result == TradeAnalysisErrCode::SUCCESS);
     assert(positionOnlyReturns.size() == 6);
     assert(std::abs(positionOnlyReturns[0] - 0.05) < 1e-10);
     assert(std::abs(positionOnlyReturns[3] - (-0.02)) < 1e-10);
     std::cout << "  POSITION_ONLY test passed\n";
-    
+
     // Test COMPLETED_TRADES conversion
     std::vector<double> completedTradesReturns;
     result = ReturnGranularityConverter::convert(
-        barReturns, 
-        ReturnGranularityConverter::GranularityType::COMPLETED_TRADES, 
+        barReturns,
+        ReturnGranularityConverter::GranularityType::COMPLETED_TRADES,
         completedTradesReturns
     );
-    
+
     assert(result == TradeAnalysisErrCode::SUCCESS);
     assert(completedTradesReturns.size() == 3);
     assert(std::abs(completedTradesReturns[0] - 0.08) < 1e-10);  // 0.05 + 0.03
     assert(std::abs(completedTradesReturns[1] - (-0.03)) < 1e-10); // -0.02 + -0.01
     assert(std::abs(completedTradesReturns[2] - 0.06) < 1e-10);  // 0.04 + 0.02
     std::cout << "  COMPLETED_TRADES test passed\n";
-    
+
     // Test FIXED_BLOCKS conversion
     std::vector<double> fixedBlocksReturns;
     result = ReturnGranularityConverter::convert(
-        barReturns, 
-        ReturnGranularityConverter::GranularityType::FIXED_BLOCKS, 
+        barReturns,
+        ReturnGranularityConverter::GranularityType::FIXED_BLOCKS,
         fixedBlocksReturns,
         3
     );
-    
+
     assert(result == TradeAnalysisErrCode::SUCCESS);
     assert(fixedBlocksReturns.size() == 2);
     assert(std::abs(fixedBlocksReturns[0] - 0.08) < 1e-10);  // 0.05 + 0.03 + 0.0
     assert(std::abs(fixedBlocksReturns[1] - (-0.03)) < 1e-10); // -0.02 + -0.01 + 0.0
     std::cout << "  FIXED_BLOCKS test passed\n";
-    
+
     // Test invalid block size
     result = ReturnGranularityConverter::convert(
-        barReturns, 
-        ReturnGranularityConverter::GranularityType::FIXED_BLOCKS, 
+        barReturns,
+        ReturnGranularityConverter::GranularityType::FIXED_BLOCKS,
         fixedBlocksReturns,
         0
     );
-    
+
     assert(result == TradeAnalysisErrCode::INVALID_BLOCK_SIZE);
     std::cout << "  Invalid block size test passed\n";
 }
 
 void testTradeReturnAnalyzer() {
     std::cout << "Testing TradeReturnAnalyzer...\n";
-    
+
     // Test normal case
     std::vector<double> returns = {0.05, -0.02, 0.03, -0.01, 0.04};
     TradeReturnAnalyzer::Stats stats;
     TradeAnalysisErrCode result = TradeReturnAnalyzer::analyze(returns, stats);
-    
+
     assert(result == TradeAnalysisErrCode::SUCCESS);
     assert(stats.total_count == 5);
     assert(std::abs(stats.mean - 0.018) < 1e-10); // (0.05 - 0.02 + 0.03 - 0.01 + 0.04) / 5
     std::cout << "  Normal case test passed\n";
-    
+
     // Test empty returns
     std::vector<double> emptyReturns;
     result = TradeReturnAnalyzer::analyze(emptyReturns, stats);
@@ -32155,17 +31898,17 @@ void testTradeReturnAnalyzer() {
 
 void testMABreakoutSignalGenerator() {
     std::cout << "Testing MABreakoutSignalGenerator...\n";
-    
+
     // Test parameter validation
     MABreakoutSignalGenerator generator(0, 0.01);
     TradeAnalysisErrCode result = generator.validateParams();
     assert(result == TradeAnalysisErrCode::INVALID_MA_PARAM);
-    
+
     MABreakoutSignalGenerator validGenerator(3, 0.01);
     result = validGenerator.validateParams();
     assert(result == TradeAnalysisErrCode::SUCCESS);
     std::cout << "  Parameter validation test passed\n";
-    
+
     // Test signal generation
     std::vector<LogPriceBar> bars = {
         {1.0, 100},
@@ -32173,13 +31916,13 @@ void testMABreakoutSignalGenerator() {
         {1.1, 300}, // AND = 1.05
         {1.2, 400}    // 1.2 > 1.05 * 1.01, should generate LONG signal
     };
-    
+
     TradeSignal signal = validGenerator.generate(bars, 0);
     assert(signal == TradeSignal::NO_POSITION); // Not enough data
-    
+
     signal = validGenerator.generate(bars, 2);
     assert(signal == TradeSignal::NO_POSITION); // Price notbreak through threshold
-    
+
     signal = validGenerator.generate(bars, 3);
     assert(signal == TradeSignal::LONG); // Price breaks through threshold
     std::cout << "Signal generation test passed\n";
@@ -32187,12 +31930,12 @@ void testMABreakoutSignalGenerator() {
 
 int main() {
     std::cout << "Starting tests...\n";
-    
+
     testDynamicToBarReturnConverter();
     testReturnGranularityConverter();
     testTradeReturnAnalyzer();
     testMABreakoutSignalGenerator();
-    
+
     std::cout << "All tests passed!\n";
     return 0;
 }
@@ -32271,7 +32014,7 @@ public:
      * @param p_value Output: p value (the proportion of original statistics that are better than replacement statistics)
      * @return PermTestErr error code
      */
-    PermTestErr run(int n_perms, int stat_type, double& raw_stat, 
+    PermTestErr run(int n_perms, int stat_type, double& raw_stat,
                    double* perm_stats, double& p_value) {
         if (error_code_ != PermTestErr::SUCCESS) {
             return error_code_;
@@ -32372,15 +32115,15 @@ private:
 // test function
 void test_permutation_test() {
     std::cout << "=== Permutation Test Implementation Test ===" << std::endl;
-    
+
     //Test data: simulate some trading returns
     double test_returns[] = {0.02, -0.01, 0.03, -0.005, 0.015, -0.02, 0.025, 0.01, -0.01, 0.04};
     int n_returns = sizeof(test_returns) / sizeof(test_returns[0]);
-    
+
     const int n_perms = 1000;
     double perm_stats[n_perms];
     double raw_stat, p_value;
-    
+
     //Test 1: Permutation test under normal circumstances
     std::cout << "\nTest 1: Normal permutation test" << std::endl;
     PermutationTest pt(test_returns, n_returns);
@@ -32395,7 +32138,7 @@ void test_permutation_test() {
     } else {
         std::cout << "  Error creating PermutationTest: " << static_cast<int>(pt.get_error_code()) << std::endl;
     }
-    
+
     //Test 2: Sharpe ratio statistic
     std::cout << "\nTest 2: Sharpe ratio statistic" << std::endl;
     PermutationTest pt2(test_returns, n_returns);
@@ -32410,7 +32153,7 @@ void test_permutation_test() {
     } else {
         std::cout << "  Error creating PermutationTest: " << static_cast<int>(pt2.get_error_code()) << std::endl;
     }
-    
+
     //Test 3: Profit probability statistics
     std::cout << "\nTest 3: Win probability statistic" << std::endl;
     PermutationTest pt3(test_returns, n_returns);
@@ -32425,18 +32168,18 @@ void test_permutation_test() {
     } else {
         std::cout << "  Error creating PermutationTest: " << static_cast<int>(pt3.get_error_code()) << std::endl;
     }
-    
+
     // Test 4: Error condition - too little data
     std::cout << "\nTest 4: Invalid data (too few returns)" << std::endl;
     double small_data[] = {0.01};
     PermutationTest pt4(small_data, 1);
     std::cout << "  Error code for insufficient data: " << static_cast<int>(pt4.get_error_code()) << std::endl;
-    
+
     // Test 5: Error condition - null pointer
     std::cout << "\nTest 5: Invalid data (null pointer)" << std::endl;
     PermutationTest pt5(nullptr, 10);
     std::cout << "  Error code for null data: " << static_cast<int>(pt5.get_error_code()) << std::endl;
-    
+
     //Test 6: Error condition - not enough substitutions
     std::cout << "\nTest 6: Insufficient permutations" << std::endl;
     PermutationTest pt6(test_returns, n_returns);
@@ -32444,7 +32187,7 @@ void test_permutation_test() {
         PermTestErr err = pt6.run(50, 0, raw_stat, perm_stats, p_value); // Only 50 perms < 100
         std::cout << "  Error code for insufficient permutations: " << static_cast<int>(err) << std::endl;
     }
-    
+
     std::cout << "\n=== Test Complete ===" << std::endl;
 }
 
@@ -32453,7 +32196,6 @@ int main() {
     return 0;
 }
 ```
-
 
 
 ### 13.Asset Cost Base (ACB) Calculation
@@ -32488,71 +32230,71 @@ private:
         int quantity;
         Position(double p, int q) : price(p), quantity(q) {}
     };
-    
+
     std::queue<Position> positions; // Position queue, following the FIFO principle
     double totalPnL = 0.0; // Accumulated profit and loss
-    
+
     // Error code definition
     enum ErrorCode {
         SUCCESS = 0,
         INVALID_QUANTITY = 1,
         INSUFFICIENT_POSITION = 2
     };
-    
+
 public:
     //Buy operation
     int buy(double price, int quantity) {
         if (quantity <= 0) {
             return INVALID_QUANTITY;
         }
-        
+
         positions.push(Position(price, quantity));
         return SUCCESS;
     }
-    
+
     // sell operation
     int sell(double price, int quantity, double* realizedPnL = nullptr) {
         if (quantity <= 0) {
             return INVALID_QUANTITY;
         }
-        
+
         int remaining = quantity;
         double transactionPnL = 0.0;
-        
+
         // Match positions according to FIFO principle
         while (remaining > 0 && !positions.empty()) {
             Position& oldest = positions.front();
-            
+
             if (oldest.quantity <= remaining) {
                 // Consume all positions in this batch
                 double batchPnL = (price - oldest.price) * oldest.quantity;
                 transactionPnL += batchPnL;
-                
+
                 remaining -= oldest.quantity;
                 positions.pop();
             } else {
                 // Partially consume this batch of positions
                 double batchPnL = (price - oldest.price) * remaining;
                 transactionPnL += batchPnL;
-                
+
                 oldest.quantity -= remaining;
                 remaining = 0;
             }
         }
-        
+
         // Check if there are enough positions
         if (remaining > 0) {
             return INSUFFICIENT_POSITION;
         }
-        
+
         totalPnL += transactionPnL;
         if (realizedPnL != nullptr) {
             *realizedPnL = transactionPnL;
         }
-        
+
         return SUCCESS;
     }
-    
+
     // Get current position
     std::vector<std::pair<double, int>> getCurrentPositions() const {
         std::vector<std::pair<double, int>> result;
@@ -32564,17 +32306,17 @@ public:
         }
         return result;
     }
-    
+
     // Get accumulated profit and loss
     double getTotalPnL() const {
         return totalPnL;
     }
-    
+
     // Check if there is a position
     bool hasPositions() const {
         return !positions.empty();
     }
-    
+
     // Get the total amount of positions
     int getTotalPositionQuantity() const {
         int total = 0;
@@ -32587,7 +32329,6 @@ public:
     }
 };
 ```
-
 
 
 **ACB calculator**
@@ -32731,7 +32472,6 @@ private:
 
 #endif
 ```
-
 
 
 ### 14.Numerical calculation tools
@@ -33044,11 +32784,11 @@ inline double not_nan(double x, double val = 0.0) {
 
 /**
  * @brief Numerical integration implementation class template
- * 
+ *
  * This class integrates the function fn over the interval [a, b] via the recursive trapezoidal rule,
  * And record all sampling points (x, ∫ₐˣ fn(t) dt), and finally build an integral function that can be interpolated and queried.
  * The integration result subtracts ∫ₐᵐ fn(t) dt as a whole, so that F(m) = 0.
- * 
+ *
  * @tparam X Argument type (such as double, float, etc.)
  * @tparam Y Function value and integral value type (usually the same as or compatible with X)
  */
@@ -33057,7 +32797,7 @@ class NumericIntegralImplT {
 public:
     /**
      * @brief Generate points table
-     * 
+     *
      * @param fn integrand (callable object)
      * @param a lower limit of points
      * @param b upper limit of points
@@ -33108,7 +32848,7 @@ protected:
 
     /**
      * @brief Linear interpolation using original (unoffset) integration table
-     * 
+     *
      * Used to calculate offset offset = F(m) to avoid circular dependencies caused by using offset data.
      */
     Y get_raw(X x) const {
@@ -33163,10 +32903,10 @@ protected:
 
     /**
      * @brief Recursively generate integration points (using the trapezoidal rule)
-     * 
+     *
      * Recursively subdivide on the interval [a, b], inserting once at the midpoint of each level.
      * Returns the integral value of the interval ∫ₐᵇ fn(t) dt.
-     * 
+     *
      * @param fn integrand
      * @param a left endpoint of interval
      * @param b right endpoint of interval
@@ -33203,7 +32943,7 @@ protected:
 
 /**
  * @brief Numerical integration interface class (lightweight packaging)
- * 
+ *
  * Holds a shared pointer to an implementation class and provides function call operators.
  */
 template<typename X, typename Y>
@@ -33288,9 +33028,9 @@ struct DeduceArg<Ret (Class::*)(Arg) const noexcept> {
 
 /**
  * @brief Factory function to create a numerical integrator
- * 
+ *
  * Automatically deduce the function parameter type X and return type Y, and construct a NumericIntegralT object.
- * 
+ *
  * @param fn integrand
  * @param a lower limit of points
  * @param b upper limit of points
@@ -33317,14 +33057,14 @@ auto numeric_integral(Fn &&fn, X a, X b, X m, unsigned int levels) {
 
 /**
  * @brief The sign of calculating the value (sign function)
- * 
+ *
  * For any type T (which needs to support comparison with 0), return:
  *   - 1 if val > 0
  *   - 0 if val == 0
  *  -1 if val < 0
- * 
+ *
  * Use the technique of converting Boolean expressions to integers: (true) - (false) = 1 - 0 = 1
- * 
+ *
  * @tparam T Numeric type (such as int, float, double, etc.)
  * @param val input value
  * @return int symbolic value (-1, 0, or 1)
@@ -33336,10 +33076,10 @@ inline int sgn(T val) {
 
 /**
  * @brief Calculates the square of a double value
- * 
+ *
  * Avoid the function call overhead caused by calling std::pow(x, 2),
  * Using multiplication directly has higher performance.
- * 
+ *
  * @param x input value
  * @return double x squared
  */
@@ -33349,20 +33089,20 @@ inline double pow2(double x) {
 
 /**
  * @brief Determines whether two double floating point numbers are "approximately equal"
- * 
+ *
  * Since floating point numbers have precision errors, they cannot be compared directly with ==.
  * This function uses a "mixed tolerance" strategy:
  *   - When the absolute values ​​of both numbers are small (< 1.0), use **absolute error** to judge;
  *   - Otherwise, use relative error judgment to avoid accuracy problems with large numbers.
- * 
+ *
  * formula:
  *   If max(|a|, |b|) < 1.0:
  *       |a - b| <= e
  *   otherwise:
  *       |a - b| <= e * max(|a|, |b|)
- * 
+ *
  * This method takes into account both the absolute precision of small values ​​and the relative precision of large values.
- * 
+ *
  * @param a the first floating point number
  * @param b second floating point number
  * @param e tolerance threshold (default 1e-8)
@@ -33393,7 +33133,6 @@ inline bool similar(double a, double b, double e = 1e-8) {
 ```
 
 
-
 ### 15.EMA and EMASTDEV (time smoothing)
 ```cpp
 #ifndef _EMA_H_
@@ -33401,18 +33140,18 @@ inline bool similar(double a, double b, double e = 1e-8) {
 
 /**
  * @brief Exponential Moving Average (EMA) class
- * 
+ *
  * EMA is a commonly used time series smoothing technique where new values ​​decay historical data with exponential weighting.
  * Update formula: new_value = alpha * input + (1 - alpha) * old_value
  * where alpha = 2 / (period + 1)
- * 
+ *
  * This implementation supports compile-time construction (constexpr) and is suitable for high-frequency numerical calculation scenarios.
  */
 class EMA {
 public:
     /**
      * @brief constructs EMA object
-     * 
+     *
      * @param period Smoothing period (must > 0), the larger the period, the slower the response
      * @param value initial value, default is 0
      */
@@ -33423,7 +33162,7 @@ public:
 
     /**
      * @brief copies the multiplier from another EMA and assigns the new current value
-     * 
+     *
      * Used to implement immutable operations such as operator+
      */
     constexpr EMA(const EMA& other, double value)
@@ -33440,7 +33179,7 @@ public:
 
     /**
      * @brief In-place update: Update the current EMA value to the result after adding the new input
-     * 
+     *
      * NOTE: This operation has side effects and cannot be used in a constexpr context (unless the object itself is constexpr)
      */
     EMA& operator+=(double input) {
@@ -33479,7 +33218,7 @@ private:
 
     /**
      * @brief Calculate the EMA value after adding new input
-     * 
+     *
      * Formula: new_value =α * input + (1 - α) * old_value
      * Equivalent deformation: (input - old_value) * α + old_value (reduced by one multiplication)
      */
@@ -33500,20 +33239,20 @@ private:
 
 /**
  * @brief Exponentially Weighted Moving Standard Deviation
- * 
+ *
  * Tracked separately via two EMAs:
  *   - Mean μₜ = EMA(xₜ)
  *   - Variance σ²ₜ = EMA( (xₜ - μₜ)² )
- * 
+ *
  * Standard deviation σₜ = sqrt(σ²ₜ)
- * 
+ *
  * Note: The smoothing periods for the mean and variance can be different, but it is generally recommended to keep them consistent to ensure statistical consistency.
  */
 class EMStDev {
 public:
     /**
      * @brief constructor: mean and variance use the same smoothing period
-     * 
+     *
      * @param period smoothing period (for mean and variance)
      */
     constexpr EMStDev(unsigned int period)
@@ -33521,7 +33260,7 @@ public:
 
     /**
      * @brief constructor: allows the mean and variance to use different smoothing periods
-     * 
+     *
      * @param mean_period The smoothing period of the mean
      * @param variance_period variance smoothing period
      */
@@ -33536,7 +33275,7 @@ public:
 
     /**
      * @brief Immutable update: return a new EMStDev object with new values ​​added
-     * 
+     *
      * Calculate the deviation using the updated mean: (v - new_mean)^2
      */
     constexpr EMStDev operator+(double v) const {
@@ -33548,7 +33287,7 @@ public:
 
     /**
      * @brief Update in place: Add new value v to statistics
-     * 
+     *
      * First update the mean, then use the new mean to calculate the deviation and update the variance.
      * This is a common approximation that remains consistent with operator+ behavior.
      */
@@ -33572,7 +33311,7 @@ public:
 
     /**
      * @brief Get the current index moving standard deviation
-     * 
+     *
      * Note: std::sqrt is not constexpr (before C++23), so this function cannot be constexpr
      */
     double get_stdev() const {
@@ -33581,7 +33320,7 @@ public:
 
     /**
      * @brief reset initial state
-     * 
+     *
      * @param mean initial mean
      * @param stddev initial standard deviation (note: not variance!)
      */
@@ -33592,7 +33331,7 @@ public:
 
     /**
      * @brief maps the standard normal variable x to the current distribution: μ + σ * x
-     * 
+     *
      * Commonly used to generate random numbers or standardized inverse transformations that conform to current statistical properties.
      */
     double operator()(double x) const {
@@ -33613,12 +33352,10 @@ private:
 ```
 
 
-
 ### 16.Avellaneda-Stoikov market making strategy
 **Theoretical Background**
 
 The Avellaneda-Stoikov model is a classic market maker strategy model proposed by Marco Avellaneda and Sasha Stoikov in 2008. This model helps market makers find a balance between risk control and profit maximization through mathematical optimization methods.
-
 
 
 **Core Question**
@@ -33630,14 +33367,12 @@ Core issues facing market makers:
 3. **Profit Optimization**: How to maximize expected profit for a given level of risk?
 
 
-
 **Model Assumptions**
 
 + Price follows a random walk process (geometric Brownian motion)
 + Order arrival rate is related to price sensitivity
 + Market makers have risk aversion preferences (expressed by risk aversion coefficient γ)
 + Operates within a limited time period T
-
 
 
 **Mathematical Model**
@@ -33666,7 +33401,6 @@ r(t,q) = S(t) - q * γ * σ² * T
 + The larger the inventory, the greater the price adjustment.
 
 
-
 **2. Optimal Spread**
 
 The optimal spread is the spread that maximizes expected profit at a given level of risk aversion:
@@ -33687,7 +33421,6 @@ The optimal spread is the spread that maximizes expected profit at a given level
 2. **Liquidity Premium**:`(2/γ) * ln(1 + γ/κ)` - Reflects the impact of market liquidity on spreads
 
 
-
 **3. Optimal Quotes**
 
 Based on the reservation price and the optimal spread, calculate the bid and offer quotes:
@@ -33702,7 +33435,6 @@ ask = r + δ*/2
 + The buying price is lower than the reserve price and the selling price is higher than the reserve price
 + Spreads are evenly distributed on both sides of the reservation price
 + Ensure buy and sell quotes are symmetrical around the reserve price
-
 
 
 **4. Volatility estimation**
@@ -33728,7 +33460,6 @@ Estimating using high and low price data is more efficient:
 + Only high and low price data are needed, no frequent price sampling is required
 + More accurate estimates of volatility
 + High computational efficiency
-
 
 
 **Core Algorithm**
@@ -33808,12 +33539,12 @@ struct alignas(64) OrderBookSnapshot {
     double bid_volume; // buy a volume
     double ask_volume; // sell a volume
     int64_t timestamp_ns; // Nanosecond timestamp
-    
+
     // Calculate the middle price
     inline double mid_price() const noexcept {
         return (best_bid + best_ask) * 0.5;
     }
-    
+
     // Calculate spread
     inline double spread() const noexcept {
         return best_ask - best_bid;
@@ -33862,7 +33593,6 @@ inline QuoteUpdate AvellanedaStoikov::calculate_quotes(int64_t timestamp_ns) noe
 + Inventory `q` The sign determines the price adjustment direction
 
 
-
 **2. Optimal spread calculation**
 
 ```cpp
@@ -33881,7 +33611,6 @@ inline QuoteUpdate AvellanedaStoikov::calculate_quotes(int64_t timestamp_ns) noe
 + Add the two parts to get the optimal spread
 
 
-
 **3. Spread limit**
 
 ```cpp
@@ -33896,7 +33625,6 @@ inline QuoteUpdate AvellanedaStoikov::calculate_quotes(int64_t timestamp_ns) noe
 + The spread is too small: transaction costs may not be covered
 + Excessive spread: may not attract counterparties
 + Use base points (bps, 1 bps = 0.01%) for easy configuration
-
 
 
 **4. Calculation of buy and sell quotes**
@@ -33927,7 +33655,6 @@ inline QuoteUpdate AvellanedaStoikov::calculate_quotes(int64_t timestamp_ns) noe
     - The goal is to reduce short inventory
 
 
-
 **5. Order size adjustment**
 
 ```cpp
@@ -33942,7 +33669,6 @@ inline QuoteUpdate AvellanedaStoikov::calculate_quotes(int64_t timestamp_ns) noe
 + When the inventory is 0:`size_adjustment = 1.0`, using the full order size
 + When inventory is close to maximum:`size_adjustment → 0`, reduce order size
 + When inventory reaches maximum:`size_adjustment = 0`, stop placing orders
-
 
 
 **6. Volatility Update**
@@ -33977,7 +33703,6 @@ double PriceHistory::calculate_parkinson_volatility() const noexcept {
 + More accurate than simple standard deviation estimates
 
 
-
 **7. Inventory Management**
 
 ```cpp
@@ -33987,10 +33712,10 @@ inline void AvellanedaStoikov::on_fill(bool is_buy, double quantity) noexcept {
     } else {
         inventory_ -= quantity; // sell to reduce inventory
     }
-    
+
     //Limit inventory range [-max_inventory, +max_inventory]
     inventory_ = std::clamp(inventory_, -config_.max_inventory, config_.max_inventory);
-    
+
     //Update statistics (atomic operation, thread safe)
     stats_.current_inventory.store(inventory_, std::memory_order_relaxed);
     stats_.inventory_adjustments.fetch_add(1, std::memory_order_relaxed);
@@ -34002,7 +33727,6 @@ inline void AvellanedaStoikov::on_fill(bool is_buy, double quantity) noexcept {
 + use `std::clamp` Ensure inventory does not exceed limits
 + Atomic operations ensure multi-thread safety
 + `memory_order_relaxed` Minimize synchronization overhead
-
 
 
 **Parameter Tuning Guide**
@@ -34033,7 +33757,6 @@ inline void AvellanedaStoikov::on_fill(bool is_buy, double quantity) noexcept {
 4. **Low Liquidity Market**:
     - Increase `κ`(reduce price sensitivity)
     - Increase `min_spread_bps`(Ensure sufficient spread)
-
 
 
 **Core Code File**
@@ -34203,13 +33926,13 @@ inline QuoteUpdate AvellanedaStoikov::calculate_quotes(int64_t timestamp_ns) noe
 
 inline void AvellanedaStoikov::update_volatility(const OrderBookSnapshot& snapshot) noexcept {
     price_history_->add_price(snapshot.mid_price());
-    
+
     if (config_.use_parkinson) {
         volatility_ = price_history_->calculate_parkinson_volatility();
     } else {
         volatility_ = price_history_->calculate_volatility();
     }
-    
+
     stats_.current_volatility.store(volatility_, std::memory_order_relaxed);
 }
 
@@ -34337,7 +34060,7 @@ struct alignas(64) OrderBookSnapshot {
 // Price history - used to calculate volatility
 class PriceHistory {
 public:
-    explicit PriceHistory(size_t window_size) 
+    explicit PriceHistory(size_t window_size)
         : window_size_(window_size)
         , prices_(window_size)
         , high_low_(window_size)
@@ -34406,12 +34129,11 @@ private:
 ```
 
 
-
 ### 17. Fixed point number of trading system
 **1. Why floating point numbers are disabled**
 
-+ **Accuracy collapse**: 0.1 binary cannot be tabled, high-frequency accumulation causes invalid orders/reconciliation errors 
-+ **Cross-environment drift**: CPU/compiler differences cause backtest-real signal distortion 
++ **Accuracy collapse**: 0.1 binary cannot be tabled, high-frequency accumulation causes invalid orders/reconciliation errors
++ **Cross-environment drift**: CPU/compiler differences cause backtest-real signal distortion
 + **Rule Conflict**: The exchange matching engine only recognizes prices that are integer multiples of tick_size, and orders generated by floating point prices will be cancelled.
 
 **2. Core rules of fixed-point numbers**
@@ -34420,10 +34142,10 @@ private:
 Physical value = fixed-point integer / Scale // Scale = an integer multiple of 1/tick_size
 ```
 
-+ **Scale selection**: strictly align exchange tick_size (example: IF futures tick=0.2 → Scale=10) 
-+ **Data type**:`int64_t`(Range ±9e18, supports negative values, consistent across all platforms, CPU native acceleration) 
-+ **Rounding Rules**: 
-    - price → align downward tick(`align_price_to_tick`) 
++ **Scale selection**: strictly align exchange tick_size (example: IF futures tick=0.2 → Scale=10)
++ **Data type**:`int64_t`(Range ±9e18, supports negative values, consistent across all platforms, CPU native acceleration)
++ **Rounding Rules**:
+    - price → align downward tick(`align_price_to_tick`)
     - Funds/Profit and Loss → Round to Cents
 
 **3. Engineering implementation**
@@ -34437,12 +34159,12 @@ constexpr int64_t MONEY_SCALE = 100; // Funds/profit and loss
 int64_t fixed_mul(a, a_sc, b, b_sc, tgt_sc) {
     // Multiply first, then divide + round + overflow check (is_mul_overflow compile-time check)
 }
-int64_t align_price_to_tick(price, tick) { 
+int64_t align_price_to_tick(price, tick) {
     return (price / tick) * tick; // Align downward to prevent wasted orders
 }
 ```
 
-+ **Zero floating point mixed use**: market decoding → calculation → whole order integer 
++ **Zero floating point mixed use**: market decoding → calculation → whole order integer
 + **Explicit transfer of Scale**: Hard coding is prohibited, and the source/target Scale is clearly specified during operation.
 
 **4. Scene quick check**
@@ -34464,7 +34186,6 @@ int64_t align_price_to_tick(price, tick) {
 5. Ensure rounding rules comply with exchange
 
 
-
 ## digital currency
 ### 1.uniswap-v2
 Uniswap is a decentralized automated liquidity protocol built on the Ethereum blockchain. It implements a **constant product formula** through a set of non-upgradeable smart contracts, allowing for seamless token exchange without relying on a centralized intermediary.
@@ -34482,14 +34203,13 @@ in `x` and `y` is the reserve amount of the two tokens in the pool,`k` is a cons
 Uniswap charges a fee of **0.30%** per transaction, which is added back to the reserve, making `k` Values increase slightly over time. Since the price of tokens within a pool can only be changed through transactions, any difference between the price in the pool and the external market creates an arbitrage opportunity. Arbitrage ensures that Uniswap prices closely track global market prices.
 
 
-
 For end users, Uniswap provides a simple and intuitive experience. Users select an input token and an output token, specify the input amount, and the protocol calculates the output amount they will receive. Once confirmed, the exchange is executed and the output tokens are immediately sent to the user's wallet.
 
 <!-- 这是一张图片，ocr 内容为： -->
 ![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1755049700474-bae42ec7-92bd-449b-87c6-d61e758561e6.png)
 
-+**Trader** -> **Execute Swap**  
-- **Input:** 3 Token A + 0.30% handling fee  
++**Trader** -> **Execute Swap**
+- **Input:** 3 Token A + 0.30% handling fee
 - **Output:** 1 Token B
 
 + **Execute Exchange** -> **Uniswap Trading Pair (Uniswap Pair)**
@@ -34499,7 +34219,6 @@ For end users, Uniswap provides a simple and intuitive experience. Users select 
         * **Pool Start:** 1200 Token A / 400 Token B = Price 3
         * **Pool End:** 1203.03 / 399 = Price 3.01
     - **Result:** -> **Next price**
-
 
 
 This system will simulate an arbitrage scenario involving two Uniswap-style liquidity pools:
@@ -34519,7 +34238,6 @@ The ETH/DAI price in each pool is determined by:
 + **Pool B:** Y2/X2
 
 The price difference between the two pools introduces arbitrage opportunities.
-
 
 
 **1. Pool status management**
@@ -34546,7 +34264,6 @@ The price difference between the two pools introduces arbitrage opportunities.
 **4. Benchmark testing**
 
 + Implement a test to perform performance benchmarking of non-blocking execution.
-
 
 
 ```cpp
@@ -34619,18 +34336,18 @@ double Pool::swap(Token input_token, double input_amount) {
     if (k == 0) {
         throw std::runtime_error("Swap failed: pool has no liquidity.");
     }
-    
+
     const double input_after_fee = input_amount * (1.0 - SWAP_FEE);
     double output_amount = 0.0;
 
     if (input_token == Token::DAI) {
         // Calculate the output amount
         output_amount = (state.eth * input_after_fee) / (state.dai + input_after_fee);
-        
+
         if (output_amount > state.eth) {
             throw std::runtime_error("Swap failed: insufficient ETH liquidity for this trade size.");
         }
-        
+
         // Use the full input amount when updating reserves
         state.dai += input_amount;
         state.eth -= output_amount;
@@ -34642,12 +34359,12 @@ double Pool::swap(Token input_token, double input_amount) {
         if (output_amount > state.dai) {
             throw std::runtime_error("Swap failed: insufficient DAI liquidity for this trade size.");
         }
-        
+
         // Use the full input amount when updating reserves
         state.eth += input_amount;
         state.dai -= output_amount;
     }
-    
+
     if (output_amount < 0) return 0;
     return output_amount;
 }
@@ -34761,7 +34478,7 @@ double get_price_difference_after_trade(double eth_input, const PoolState& high_
 ArbitrageOpportunity ArbitrageEngine::calculate_arbitrage(const PoolState& state_a, const PoolState& state_b) {
     double price_a = (state_a.eth > 0) ? state_a.dai / state_a.eth : 0.0;
     double price_b = (state_b.eth > 0) ? state_b.dai / state_b.eth : 0.0;
-    
+
     if (std::abs(price_a - price_b) < 1e-6) {
         return {false};
     }
@@ -34773,8 +34490,8 @@ ArbitrageOpportunity ArbitrageEngine::calculate_arbitrage(const PoolState& state
     // the trade amount that makes the prices equal. This ensures that the prices converge after the trade.
     double low = 0;
     // Set a reasonable upper bound for the search, e.g., the ETH reserves of the high-price pool.
-    double high = high_price_pool_state->eth; 
-    
+    double high = high_price_pool_state->eth;
+
     // Check if the endpoints of the search interval have opposite signs, a prerequisite for the bisection method.
     if (get_price_difference_after_trade(low, *high_price_pool_state, *low_price_pool_state) *
         get_price_difference_after_trade(high, *high_price_pool_state, *low_price_pool_state) >= 0) {
@@ -34791,7 +34508,7 @@ ArbitrageOpportunity ArbitrageEngine::calculate_arbitrage(const PoolState& state
             high = mid;
         }
     }
-    
+
     double optimal_eth_amount = (low + high) / 2.0;
     double profit = calculate_profit_for_input(optimal_eth_amount, *high_price_pool_state, *low_price_pool_state);
 
@@ -34860,7 +34577,7 @@ void test_arbitrage_simulation() {
 
     ArbitrageEngine engine;
     auto future_opp = engine.find_arbitrage_async(pool_a, pool_b);
-    ArbitrageOpportunity opportunity = future_opp.get(); 
+    ArbitrageOpportunity opportunity = future_opp.get();
 
     assert(opportunity.profitable);
 
@@ -34917,7 +34634,7 @@ void benchmark_execution() {
     auto end_sync = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double, std::milli> sync_duration = end_sync - start_sync;
     std::cout << "Sync execution for " << num_tasks << " tasks took:  " << sync_duration.count() << " ms" << std::endl;
-    
+
     std::cout << "\nNote: Async performance gain depends on core count and task complexity." << std::endl;
     std::cout << "On multi-core systems, async should be faster for CPU-bound tasks." << std::endl;
 }
@@ -35001,7 +34718,7 @@ namespace V3Math {
         if (sqrt_price_a > sqrt_price_b) std::swap(sqrt_price_a, sqrt_price_b);
         return liquidity * (sqrt_price_b - sqrt_price_a);
     }
-    
+
     // Calculate the next price based on the input.
     inline double get_next_sqrt_price_from_amount0_in(double sqrt_price, double liquidity, double amount_in) {
         if (liquidity == 0) return sqrt_price;
@@ -35038,7 +34755,7 @@ struct PoolState {
 class Pool {
 public:
     Pool(int initial_tick);
-    
+
     void add_liquidity(int lower_tick, int upper_tick, double amount);
     double swap(Token input_token, double input_amount);
 
@@ -35103,7 +34820,7 @@ std::pair<double, PoolState> Pool::simulate_swap(Token input_token, double input
 
     while (amount_remaining > 1e-12) {
         double sqrt_price_start = temp_state.sqrt_price;
-        
+
         int next_tick;
         if (is_token0_in) {
             auto it = temp_state.liquidity_net.lower_bound(temp_state.current_tick);
@@ -35112,9 +34829,9 @@ std::pair<double, PoolState> Pool::simulate_swap(Token input_token, double input
             auto it = temp_state.liquidity_net.upper_bound(temp_state.current_tick);
             next_tick = (it == temp_state.liquidity_net.end()) ? std::numeric_limits<int>::max() - 1 : it->first;
         }
-        
+
         double sqrt_price_next_tick = V3Math::tick_to_sqrt_price(next_tick);
-        
+
         double amount_in_to_reach_next = std::numeric_limits<double>::max();
         if (temp_state.current_liquidity > 0) {
             if (is_token0_in) {
@@ -35123,9 +34840,9 @@ std::pair<double, PoolState> Pool::simulate_swap(Token input_token, double input
                 amount_in_to_reach_next = V3Math::get_amount1_delta(sqrt_price_start, sqrt_price_next_tick, temp_state.current_liquidity);
             }
         }
-        
+
         double amount_to_swap = std::min(amount_remaining, amount_in_to_reach_next);
-        
+
         if (temp_state.current_liquidity > 0 && amount_to_swap > 0) {
             double sqrt_price_target;
             if (is_token0_in) {
@@ -35153,9 +34870,9 @@ std::pair<double, PoolState> Pool::simulate_swap(Token input_token, double input
         } else {
             temp_state.current_tick = V3Math::sqrt_price_to_tick(temp_state.sqrt_price);
         }
-        
+
         if (std::abs(temp_state.sqrt_price - sqrt_price_start) < 1e-12) {
-            break; 
+            break;
         }
     }
     return {output_amount, temp_state};
@@ -35475,7 +35192,7 @@ int main() {
 
 **Multi-Currency Exchange:**
 
-1. **Mainstream coins (BTC/ETH/BNB)** → TreeOrderBook (balanced performance and functionality) or CircularArrayOrderBook (high-frequency market making area)  
+1. **Mainstream coins (BTC/ETH/BNB)** → TreeOrderBook (balanced performance and functionality) or CircularArrayOrderBook (high-frequency market making area)
 2. **Extremely low price coins (SHIB/PEPE)** → TreeOrderBook or HashOrderBook
 3. **Exclusive for High Frequency Trading** → VectorOrderBook or CircularArrayOrderBook (Memory + Latency Balanced)
 
@@ -35483,35 +35200,33 @@ int main() {
 
 + **If not sure which one to choose** → Use TreeOrderBook directly
 + **Pursue ultimate low latency** → VectorOrderBook
-+ **Pursue high frequency performance but limited memory** → CircularArrayOrderBook  
++ **Pursue high frequency performance but limited memory** → CircularArrayOrderBook
 + **Resource Constrained Environment** → HashOrderBook
 
 ### 4. Triangular Arbitrage
-Suppose there are three trading pairs (a trading pair refers to a market where two assets are exchanged at a certain ratio).  
-The first pair is A-B with an exchange ratio of 1:10 (i.e., 1 A can be exchanged for 10 B, and 10 B can be exchanged for 1 A, the same below);  
-The second pair is B-C with an exchange ratio of 1:100;  
-The third pair is A-C with an exchange ratio of 1:1000.  
+Suppose there are three trading pairs (a trading pair refers to a market where two assets are exchanged at a certain ratio).
+The first pair is A-B with an exchange ratio of 1:10 (i.e., 1 A can be exchanged for 10 B, and 10 B can be exchanged for 1 A, the same below);
+The second pair is B-C with an exchange ratio of 1:100;
+The third pair is A-C with an exchange ratio of 1:1000.
 
 Assume we hold 1 unit of asset A. When Price(A,C) changes to 1:1100, we can exchange 1 A for 1100 C via the third pair, then exchange 1100 C for 11 B via the second pair, and finally exchange 11 B for 1.1 A via the first pair, achieving a profit of 0.1 A.
 
 
-
 **Question 1: When Price(A,C) changes to 1:900, is there an arbitrage opportunity? How to operate?**
 
-**Answer to Question 1**  
-When Price(A,C) changes to 1:900, arbitrage is possible. The operation path is A→B→C→A, with the following steps:  
+**Answer to Question 1**
+When Price(A,C) changes to 1:900, arbitrage is possible. The operation path is A→B→C→A, with the following steps:
 
-1. Exchange 1 A for 10 B (using the A-B ratio of 1:10);  
-2. Exchange 10 B for 1000 C (using the B-C ratio of 1:100, 10×100=1000);  
+1. Exchange 1 A for 10 B (using the A-B ratio of 1:10);
+2. Exchange 10 B for 1000 C (using the B-C ratio of 1:100, 10×100=1000);
 3. Exchange 1000 C for approximately 1.111 A (using the A-C ratio of 1:900, 1000/900≈1.111).
 
 The final profit is approximately 0.111 A, indicating an arbitrage opportunity.
 
 
-
 **Question 2: Write a function to detect arbitrage opportunities and determine the operation when any of the three trading pairs' exchange ratios change.**
 
-**Arbitrage Detection Function Implementation**  
+**Arbitrage Detection Function Implementation**
 Model the exchange ratios between assets as a rate matrix of a directed graph, and judge arbitrage opportunities by detecting "whether the product of exchange rates along a cyclic path is greater than 1". For 3 assets, two core cyclic paths need to be detected: A→B→C→A and A→C→B→A.
 
 ```cpp
@@ -35598,14 +35313,13 @@ int main() {
 ```
 
 
-
 **Question 3: With 50,000 similar trading pairs in the market, how to find all possible arbitrage loops?**
 
-**Loop Detection for Massive Trading Pairs**  
-Model trading pairs as a directed graph (nodes are assets, edge weights are the logarithms of exchange rates), and convert the "arbitrage loop" problem into a "positive-weight cycle" detection problem (product > 1 is equivalent to log sum > 0). Since long loops have low practical arbitrage value, limit the loop length (e.g., ≤ 5 steps) and use a modified Bellman-Ford algorithm for efficient detection:  
+**Loop Detection for Massive Trading Pairs**
+Model trading pairs as a directed graph (nodes are assets, edge weights are the logarithms of exchange rates), and convert the "arbitrage loop" problem into a "positive-weight cycle" detection problem (product > 1 is equivalent to log sum > 0). Since long loops have low practical arbitrage value, limit the loop length (e.g., ≤ 5 steps) and use a modified Bellman-Ford algorithm for efficient detection:
 
-1. **Graph Modeling**: Assets are nodes, and the weight of edge X→Y is ln(rate[X][Y]);  
-2. **Short Cycle Detection**: For each node, run the Bellman-Ford algorithm to detect positive-weight cycles with ≤ 5 steps (limit the number of relaxation operations to 5);  
+1. **Graph Modeling**: Assets are nodes, and the weight of edge X→Y is ln(rate[X][Y]);
+2. **Short Cycle Detection**: For each node, run the Bellman-Ford algorithm to detect positive-weight cycles with ≤ 5 steps (limit the number of relaxation operations to 5);
 3. **Loop Collection**: Record all detected positive-weight cycles, remove duplicates, and obtain valid loops.
 
 ```cpp
@@ -35632,7 +35346,7 @@ struct Edge {
 
 // Loop structure: stores path and profit multiplier (product of exchange rates)
 struct Loop {
-    vector<AssetId> path; 
+    vector<AssetId> path;
     double profit_multiplier; // Product of exchange rates along the path (>1 indicates profit)
 
     // Hash function for deduplication
@@ -35680,7 +35394,7 @@ namespace std {
 
 class ArbitrageLoopDetector {
 private:
-    vector<Edge> edges; 
+    vector<Edge> edges;
     unordered_set<AssetId> all_assets;
     const int MAX_LOOP_LENGTH = 5; // Maximum loop length (long loops are meaningless in practice)
     const double EPS = 1e-8; // Floating-point precision
@@ -35784,10 +35498,9 @@ int main() {
 ```
 
 
-
 **Question 4: Design a data structure to store all found loops, and write a function to quickly find the most profitable loop when any of the 50,000 trading pairs' exchange ratios change.**
 
-**Data Structure**  
+**Data Structure**
 
 1. **Loop Struct (Loop)**:
 
@@ -35800,13 +35513,13 @@ struct Loop {
 ```
 
 2. **Index Structures**:
-+ edge_to_loops: Hash table (key is trading pair (X,Y), value is the list of loops dependent on this pair);  
++ edge_to_loops: Hash table (key is trading pair (X,Y), value is the list of loops dependent on this pair);
 + profit_set: Ordered set (sorted by profit in descending order, storing (profit, Loop*) to support fast maximum query).
 
-**Update and Query Process**  
+**Update and Query Process**
 
 1. When a trading pair is updated:
-+ Traverse all loops dependent on this pair in edge_to_loops;  
++ Traverse all loops dependent on this pair in edge_to_loops;
 + Recalculate the profit of the loop and update it in profit_set (delete the old value, insert the new value).
 2. Query the maximum profit: Directly return the first element of profit_set (O(1) complexity).
 
@@ -35863,7 +35576,7 @@ struct Loop {
             if (i > 0) std::cout << ", ";
             std::cout << pairToStr(edges[i]);
         }
-        std::cout << "\nCurrent Profit Multiplier: " << profit_multiplier 
+        std::cout << "\nCurrent Profit Multiplier: " << profit_multiplier
                   << " (Profit: " << (profit_multiplier - 1) * 100 << "%)\n";
     }
 };
@@ -36049,13 +35762,12 @@ int main() {
 ```
 
 
-
 **Question 5: If the amount exchanged is not fixed at 1 A but ranges from 0 to 1000 A, and due to slippage costs, the larger the input of A, the lower the return rate, but the absolute return may rise in a certain range. How to design an algorithm to find the maximum profit for each loop and all loops?**
 
-**Maximum Profit Algorithm Under Slippage Costs**  
-Slippage costs cause the return rate to decrease as the input amount increases, but the absolute return may follow a unimodal distribution (first increases, then decreases). Use the ternary search method to find the optimal input amount in the interval [0,1000]:  
+**Maximum Profit Algorithm Under Slippage Costs**
+Slippage costs cause the return rate to decrease as the input amount increases, but the absolute return may follow a unimodal distribution (first increases, then decreases). Use the ternary search method to find the optimal input amount in the interval [0,1000]:
 
-1. **Slippage Cost Modeling**: Define function f(X→Y, x) as the amount of Y obtainable by investing x units of X (marginal decreasing);  
+1. **Slippage Cost Modeling**: Define function f(X→Y, x) as the amount of Y obtainable by investing x units of X (marginal decreasing);
 2. **Absolute Return Function**: For loop X1→X2→...→Xk→X1, the absolute return of investing a units of X1 is:
 
 $ R(a) = f(X_k→X1, f(X_{k-1}→X_k, ...f(X1→X2, a)...)) - a $
@@ -36095,27 +35807,24 @@ double findMaxProfit(const Loop& loop, const std::vector<double>& base_rates) {
 ```
 
 
-
 **Statistical Arbitrage Strategy (Pairs Trading)**
 
-1. **Asset Pair Screening (Code Logic)**: Calculate the sum of squared price differences of candidate asset pairs $ \sum_{t=1}^{T}\left(S_{i,t}-S_{j,t}\right)^{2} $, and select the pair with the minimum value (e.g., stocks in the same industry);  
-2. **Deviation Judgment (Code Formula)**: Calculate the mean of price differences $ E[\Delta S_t]=\frac{1}{T}\sum_{t=1}^T \Delta S_t $ and standard deviation $ \sigma[\Delta S_t]=\sqrt{\frac{1}{T-1}\sum_{t=1}^T (\Delta S_t-E[\Delta S_t])^2} $;  
-3. **Trade Trigger**:  
-If $ \Delta S_\tau &amp;amp;amp;gt; E[\Delta S_\tau] + 2\sigma[\Delta S_\tau] $, execute "sell i, buy j";  
-If $ \Delta S_\tau &amp;amp;amp;lt; E[\Delta S_\tau] - 2\sigma[\Delta S_\tau] $, execute "buy i, sell j".
-
+1. **Asset Pair Screening (Code Logic)**: Calculate the sum of squared price differences of candidate asset pairs $ \sum_{t=1}^{T}\left(S_{i,t}-S_{j,t}\right)^{2} $, and select the pair with the minimum value (e.g., stocks in the same industry);
+2. **Deviation Judgment (Code Formula)**: Calculate the mean of price differences $ E[\Delta S_t]=\frac{1}{T}\sum_{t=1}^T \Delta S_t $ and standard deviation $ \sigma[\Delta S_t]=\sqrt{\frac{1}{T-1}\sum_{t=1}^T (\Delta S_t-E[\Delta S_t])^2} $;
+3. **Trade Trigger**:
+If $ \Delta S_\tau > E[\Delta S_\tau] + 2\sigma[\Delta S_\tau] $, execute "sell i, buy j";
+If $ \Delta S_\tau < E[\Delta S_\tau] - 2\sigma[\Delta S_\tau] $, execute "buy i, sell j".
 
 
 ### 5.quant trading workflow
-quant trading workflow in crypto  
+quant trading workflow in crypto
 
-1. data process  
-2. statical analysis of trade data and orderbook data, to check anormal data and bad trade execution  
-3. research market event  
+1. data process
+2. statical analysis of trade data and orderbook data, to check anormal data and bad trade execution
+3. research market event
 4. imporve strategy model and its parameter
 
 example 1: In multi-cryptocurrency trading scenarios, when calculating profit and loss (PnL), it's necessary to convert profits and losses from different coins into a unified pricing unit (typically a stablecoin like USDT). If this standardization conversion is not performed, the avg Pnl significantly greater than mean value, maybe the problem come from the null value in datasets.
-
 
 
 example 2: we have a trade data and a BBO data, and we should analysize our trading quality, if we use the VWAP
@@ -36123,11 +35832,10 @@ example 2: we have a trade data and a BBO data, and we should analysize our trad
 method to analysize, we should use the previous and next BBO data to calculate the VWAP market price to compare our trade's price.
 
 
-
 ### 6.Binance U-based contract multi-factor
-Project address:[https://github.com/zzxscodes/long-short-infra](https://github.com/zzxscodes/long-short-infra)(Python implementation)  
+Project address:[https://github.com/zzxscodes/long-short-infra](https://github.com/zzxscodes/long-short-infra)(Python implementation)
 
-Project structure:  
+Project structure:
 Event-Driven Coordination Process (Process 1) - IPC Server
 
 ```plain
@@ -36158,7 +35866,7 @@ Monitoring Process (Process 5) - Metrics & Alerts + Web API
        ↕ HTTP API
 ```
 
-Web monitoring interface ([http://localhost:8080](http://localhost:8080))  
+Web monitoring interface ([http://localhost:8080](http://localhost:8080))
 
 ```plain
 data/
@@ -36233,7 +35941,6 @@ long-short-infra/
 ```
 
 
-
 ### 7.Gemini target BBO monitoring
 Live connection to Gemini exchange's WebSocket market data stream
 
@@ -36244,7 +35951,6 @@ Use **sorted list + binary search** to achieve O(log n) time complexity price in
 Use **dictionary** to implement price query with O(1) time complexity
 
 The best price access is O(1), which meets the performance requirements of high-frequency trading scenarios.
-
 
 
 [https://github.com/zzxscodes/gemini_orderbook_monitor](https://github.com/zzxscodes/gemini_orderbook_monitor)
@@ -36263,7 +35969,7 @@ class Orderbook:
         # Maintain price order using sorted list
         self._bid_prices: list = [] # Sort in descending order (highest price first)
         self._ask_prices: list = [] # Sort in ascending order (lowest price first)
-        
+
         # Use a dictionary to store the mapping from price to quantity
         self._bid_levels: Dict[float, float] = {}
         self._ask_levels: Dict[float, float] = {}
@@ -36283,10 +35989,10 @@ def _insert_bid_price(self, price: float):
     neg_price = -price
     neg_prices = [-p for p in self._bid_prices]
     idx = bisect.bisect_left(neg_prices, neg_price)
-    
+
     if idx < len(self._bid_prices) and self._bid_prices[idx] == price:
         return # The price already exists
-    
+
     self._bid_prices.insert(idx, price)
 ```
 
@@ -36311,7 +36017,7 @@ def update_bid(self, price: float, quantity: float):
         if price not in self._bid_levels:
             self._insert_bid_price(price)
         self._bid_levels[price] = quantity
-    
+
     # Update best price
     self._update_best_bid()
 ```
@@ -36323,7 +36029,6 @@ def update_bid(self, price: float, quantity: float):
 + Ensure data consistency
 
 
-
 **2. WebSocket Client (**`gemini_client.py`**)**
 
 Responsible for establishing connections with Gemini exchanges, subscribing to data streams and processing messages.
@@ -36333,7 +36038,7 @@ Responsible for establishing connections with Gemini exchanges, subscribing to d
 ```python
 async def connect(self):
     self.running = True
-    
+
     while self.running:
         try:
             async with websockets.connect(
@@ -36345,13 +36050,13 @@ async def connect(self):
                 # If the connection is successful, reset the reconnection delay
                 self.reconnect_delay = 1.0
                 self.reconnect_count = 0
-                
+
                 # Subscribe to order book updates
                 await self._subscribe(websocket)
-                
+
                 # Process messages
                 await self._process_messages(websocket)
-                
+
         except ConnectionClosed:
             if self.running:
                 await self._wait_before_reconnect()
@@ -36387,18 +36092,18 @@ async def _subscribe(self, websocket):
 ```python
 async def _handle_message(self, data: dict):
     msg_type = data.get("type")
-    
+
     # Process different types of messages
     if msg_type == "heartbeat":
         return #Heartbeat message, no need to process
-    
+
     if msg_type in ("l2", "l2_updates"):
         changes = data.get("changes", [])
-        
+
         # A large number of changes may be the initial snapshot
         if len(changes) > 1000:
             self.orderbook.clear()
-        
+
         await self._process_orderbook_changes(changes)
 ```
 
@@ -36415,19 +36120,19 @@ async def _handle_message(self, data: dict):
 async def _process_orderbook_changes(self, changes: list):
     previous_best_bid = self.orderbook.get_best_bid()[0]
     previous_best_ask = self.orderbook.get_best_ask()[0]
-    
+
     for change in changes:
         side = change[0]  # "buy" or "sell"
         price = float(change[1])
         quantity = float(change[2])
-        
+
         if side == "bid" or side == "buy":
             self.orderbook.update_bid(price, quantity)
         elif side == "ask" or side == "sell":
             self.orderbook.update_ask(price, quantity)# Check if the best price has changed
     final_best_bid = self.orderbook.get_best_bid()[0]
     final_best_ask = self.orderbook.get_best_ask()[0]
-    
+
     if final_best_bid != previous_best_bid or final_best_ask != previous_best_ask:
         # Trigger callback notification
         if self.on_update:
@@ -36443,7 +36148,6 @@ async def _process_orderbook_changes(self, changes: list):
 + Support Gemini API's "buy"/"sell" and "bid"/"ask" formats
 
 
-
 **3. Main program (**`main.py`**)**
 
 The entry point of the application, responsible for coordinating the various components.
@@ -36451,7 +36155,7 @@ The entry point of the application, responsible for coordinating the various com
 **Output formatting**
 
 ```python
-def format_output(self, bid_price: float, bid_qty: float, 
+def format_output(self, bid_price: float, bid_qty: float,
                  ask_price: float, ask_qty: float) -> str:
     return f"{bid_price:.2f} {bid_qty:.8f} - {ask_price:.2f} {ask_qty:.8f}"
 ```
@@ -36471,7 +36175,7 @@ def setup_signal_handlers(self):
         self.running = False
         if self.client:
             asyncio.create_task(self.client.disconnect())
-    
+
     signal.signal(signal.SIGINT, signal_handler)   # Ctrl+C
     signal.signal(signal.SIGTERM, signal_handler) # Terminate signal
 ```
@@ -36490,7 +36194,7 @@ async def run(self):
         symbol="BTCUSD",
         on_update=self.on_orderbook_update
     )
-    
+
     try:
         await self.client.connect()
     except KeyboardInterrupt:
@@ -36508,7 +36212,6 @@ async def run(self):
 4. Exception handling and resource cleanup
 
 
-
 ### 8.polymarket market robot
 [https://github.com/zzxscodes/polymarket-15minutes-robot](https://github.com/zzxscodes/polymarket-15minutes-robot)
 
@@ -36519,7 +36222,6 @@ async def run(self):
 + `py-clob-client`:Polymarket official CLOB trading client to place orders, check balances, and check order books
 + `requests`:access `gamma-api.polymarket.com` HTTP interface to obtain market data
 + **The transaction logic (order placement) on the chain is unified `py-clob-client`, off-chain market information `gamma-api` + `requests` Separation.
-
 
 
 `slug_get.py`
@@ -36554,7 +36256,6 @@ PREFIX_MAP = {
         * spell:`{prefix}-15m-{timestamp}`
         * **High-frequency short-cycle market (15m) is usually identified directly with timestamp** to facilitate back-end retrieval and no duplication of names.
         * Align time to a fixed granularity (15m) to avoid "cross-frame" errors.
-
 
 
 `last_minute_buyer_15min.py`**(Core Strategy & Trading Logic)**
@@ -36660,7 +36361,6 @@ self.client.create_and_post_order(order)
     - Simple strategy: **Use the handicap price as the probability**, if it is greater than 0.5, it means it is biased to this side.
 
 
-
 ### 9.Monitoring of crypto trading systems
 Example:[https://github.com/zzxscodes/feishu-monitor](https://github.com/zzxscodes/feishu-monitor)
 
@@ -36712,7 +36412,6 @@ Example:[https://github.com/zzxscodes/feishu-monitor](https://github.com/zzxscod
     - Use the "last sent record id" (e.g. `last_error_id`,`last_asset_id`) to determine whether it is a new event and avoid refreshing the screen.
     - Similar alarms can be merged, for example, only one alarm with the same error will be sent within 5 minutes.
 + **Format content**
-
 
 
     - Convert database rows to readable text using line breaks or simple key=value lists.
