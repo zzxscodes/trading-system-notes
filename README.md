@@ -1272,6 +1272,10 @@ b = 1; assert(a == 1); // Possible failure?
 
 **Conclusion**: The store buffer causes "the submission order of write operations ≠ the code order", that is, "write reordering (Store Reordering)".
 
+**Store-to-Load Forwarding (STLF)**: When code stores then loads the same address, if data is still in the store buffer and has not yet been committed to L1, the CPU can forward directly from the store buffer to the load without waiting for L1 cache. However, STLF has strict width/alignment constraints: if the store is two 32-bit writes but the load is one 64-bit read — the two small stores cannot be merged and forwarded to one large load, causing STLF failure and a fallback to L1 read with additional latency. Therefore, in store-then-load patterns, ensure **store and load widths and alignments match** (e.g., use a single 64-bit write followed by a 64-bit read). Use `perf stat -e ls_stlf` (AMD) or `ld_blocks.store_forward` (Intel) to detect STLF hit rates.
+
++ [https://whichisfaster.dev/q/store-to-load_forwarding.html](https://whichisfaster.dev/q/store-to-load_forwarding.html)
+
 **2. Invalidate Queue: Hide cache consistency delay**
 
 **Principle**: When a CPU modifies a shared variable, it must first send an "Invalidate" request to other CPUs through the "cache consistency protocol (such as MESI)"; in order to avoid waiting for all CPUs to confirm the invalidity, the CPU stores the "invalid request" in the "invalidation queue" and processes it asynchronously - other CPUs may delay receiving the invalid request, causing "read operations to see outdated data."   
@@ -1597,6 +1601,10 @@ The "three priorities" principle of CPU pipeline adaptation ensures no pauses in
 2. **Data enters registers first**: Highly accessed core data (prices, trading volumes, rates) are preloaded into registers, eliminating dependence on memory access;
 3. **Instruction type priority balancing**: Intersperse integer, floating point, and logic instructions to allow multiple CPU execution units to work in parallel without wasting ILP potential.
 
+**False Dependency**: Even when no true data dependency exists between instructions, certain x86 instructions create false output dependencies due to microarchitectural implementation quirks, preventing the out-of-order engine from scheduling them in parallel. A classic example is `popcnt` / `lzcnt` / `tzcnt` on older Intel microarchitectures: the hardware treats the destination register as both input and output, causing consecutive `popcnt` instructions to form an unnecessary dependency chain. The fix is to `xor reg, reg` the destination register before each operation to break the chain, or use multiple independent accumulator registers in alternation. Newer compilers (GCC 11+/Clang 14+) typically insert the zeroing instruction automatically, but care is needed when writing intrinsics or inline assembly. Detect such stalls with `perf stat -e cycles,resource_stalls.any` ([whichisfaster.dev/false_dependency](https://whichisfaster.dev/q/false_dependency.html)).
+
+**Register Spill**: x86-64 provides 16 general-purpose registers and 16/32 SIMD registers. When the number of simultaneously live variables in a function exceeds the available registers, the compiler is forced to spill some variables to stack memory, and later reload (fill) them back into registers. Each spill/fill introduces extra store/load instructions — even L1-hitting loads cost 4-5 cycles and consume load/store ports, reducing throughput for other memory operations. Aggressive loop unrolling or using too many independent accumulators within a loop body can backfire due to excessive register pressure. Mitigation: limit the number of live variables in hot-path functions; use `__attribute__((noinline))` to isolate helper logic and relieve register pressure; inspect compiler-generated assembly for stack operations (`mov [rsp+...]` patterns) in critical loops; in SIMD code, prefer AVX-512's 32 ZMM registers to alleviate pressure ([whichisfaster.dev/register_spill](https://whichisfaster.dev/q/register_spill.html)).
+
 Optimize and split the dependency chain of complex structures and system globals using algorithms such as topological sorting to resolve dependencies.
 
 
@@ -1914,6 +1922,8 @@ TLB:       4493       6108      73789       5014   TLB shootdowns
 // At the source code level, runtime execution of these system calls, namely munmap, mprotect and madvise, should be avoided.
 // At the operating system level, disable kernel features that cause TLB evictions due to their functionality, such as transparent hugepages and automatic NUMA balancing.
 ```
+
+**Cost of TLB Shootdowns**: When one core modifies page tables (e.g. `munmap`, `mprotect`, THP compaction), it must send IPIs (Inter-Processor Interrupts) to all other cores that may have cached the corresponding page table entries, invalidating their TLBs. This process is called a TLB Shootdown. IPIs are hardware interrupts — the target cores must pause their current work to handle them, with latency typically in the microsecond range. On many-core systems (especially servers), a single TLB Shootdown may need to interrupt dozens of cores, creating a broadcast storm. This is the fundamental reason why low-latency systems prohibit dynamic memory mapping operations on the hot path and disable THP and NUMA balancing — it's not just the local TLB miss cost, but the IPI-driven disruption to all other cores. Monitor with `perf stat -e tlb:tlb_flush` or `watch -d 'grep TLB /proc/interrupts'` ([whichisfaster.dev/tlb_shootdown](https://whichisfaster.dev/q/tlb_shootdown.html)).
 
 **3. Reasonably choose data structure**
 
@@ -4335,7 +4345,15 @@ In matrix operations, severe cache contention can result if the row size of the 
 + If the matrix has 1024 ints per row (4 bytes per int), then each row size is 4096 bytes = 4KB
 + This can cause elements in adjacent rows to compete for the same cache line, creating cache contention
 
-To avoid this problem,Use tiling technology to divide large matrices into small blocks for processing, and alsoThe matrix can be resized to 4097 ints per row (adding a padding element) so that the row size is not a multiple of 4KB.
+To avoid this problem, use tiling technology to divide large matrices into small blocks for processing, and also the matrix can be resized to 4097 ints per row (adding a padding element) so that the row size is not a multiple of 4KB.
+
+**Cache Bank Conflict**: L1 cache is organized into banks that can be accessed independently. When two simultaneous accesses (e.g., two loads issued in the same cycle by a superscalar pipeline) map to the same bank, one must wait for the other (a bank conflict). This effect is highly dependent on the specific CPU microarchitecture and array alignment; adjusting data layout so concurrent accesses fall on different banks can mitigate it.
+
++ [https://whichisfaster.dev/q/cache_bank_conflict.html](https://whichisfaster.dev/q/cache_bank_conflict.html)
+
+**Cache Associativity Conflict**: For fast lookup, each address can only map to a specific cache set. Even if the cache itself is not full, if many addresses share the same low k-bits, they compete for the limited ways in that set, causing frequent evictions. Typical scenario: when the inner loop processes more data per iteration (e.g., N=128 vs N=64), cache pressure increases and may trigger more set-conflict evictions. Verify with `perf stat -e cache-misses,cache-references`.
+
++ [https://whichisfaster.dev/q/cache_associativity.html](https://whichisfaster.dev/q/cache_associativity.html)
 
 
 
@@ -4352,7 +4370,26 @@ To avoid this problem,Use tiling technology to divide large matrices into small 
 | Intra-class variables | Non-static members are stored continuously in the order of declaration; static members are stored in the static area |
 
 
-**8. Pay attention to the channel and rank parameters of the memory hardware to ensure memory load balancing**
+**8. Pay attention to the channel, rank, and bank parameters of the memory hardware to ensure memory load balancing**
+
+Each DRAM bank has a row buffer. Accessing data in the currently open row (row buffer hit) is fast. Accessing a different row in the same bank requires closing the current row and opening the new one (row buffer miss/conflict), adding significant latency. Sequential access benefits from row buffer locality; strided access that jumps between rows in the same bank (e.g., column-major traversal of a row-major matrix) causes repeated row buffer misses.
+
+```cpp
+int matrix[31250][2048];
+// Row-major sequential traversal: contiguous addresses, row buffer hits, fast
+for (int i = 0; i < 31250; ++i)
+  for (int j = 0; j < 2048; ++j)
+    sum += matrix[i][j];
+
+// Column-first traversal: stride spans entire rows, frequent row conflicts in same bank, slow
+for (int j = 0; j < 2048; ++j)
+  for (int i = 0; i < 31250; ++i)
+    sum += matrix[i][j];
+```
+
++ [https://whichisfaster.dev/q/memory_bank_conflict.html](https://whichisfaster.dev/q/memory_bank_conflict.html)
+
+**DRAM Refresh Latency Spikes**: DRAM uses capacitor-based storage where charge leaks over time, so the memory controller must periodically refresh all rows (typically all rows within 64ms, tREFI ≈ 7.8μs per batch). During refresh, the affected bank is inaccessible, blocking memory requests and causing tail latency spikes. In low-latency systems, this is a hardware-level jitter source that cannot be fully eliminated in software. Mitigation strategies include: using DDR4/DDR5 memory with Fine-Granularity Refresh (FGR) to shorten per-refresh blocking time; keeping hot data sets within L3 cache to reduce DRAM access dependency; recording P99/P999 metrics in latency measurements to distinguish refresh-induced spikes from other jitter sources ([whichisfaster.dev/dram_refresh](https://whichisfaster.dev/q/dram_refresh.html)).
 
 ```cpp
 CPU memory controller
@@ -4498,6 +4535,10 @@ void process_order(const Order& order) {
 **6.** **branchless calculation**
 
 Use arithmetic and bit operations to replace conditional judgments and completely eliminate branches. Suitable for numerical calculations.  
+
+**Note: branchless is not always faster**. When a branch is well-predicted (e.g., sorted data where branch direction forms long consecutive runs), the branched version allows the CPU to skip unnecessary work entirely, making it actually faster. The branchless version always computes the conditional index and does the store, which is more work per iteration. Use `perf stat -e branch-misses,branches` to confirm the branch prediction hit rate before deciding to eliminate branches.
+
++ [https://whichisfaster.dev/q/well_predicted.html](https://whichisfaster.dev/q/well_predicted.html)
 
 + **principle:** Arithmetic expression substitution branch
 
@@ -5480,7 +5521,7 @@ template for (constexpr auto i : 0..4) {
 + **Loop Code Motion**: Move loop-invariant calculations (such as array length, constant coefficients) outside the loop to reduce repeated calculations, but do not change the parallelism of the loop;
 + **Loop Strength Reduction**: Replace strong operations such as multiplication with addition (such as `a[i] = 10*i` Change to `x += 10`), but it will introduce data dependencies between iterations and cannot be executed in parallel.
 
-
+**Function Chaining and icache/dcache Trade-off**: When applying multiple operations sequentially to the same dataset (e.g. `filter → transform → reduce`), two strategies exist: **Fused/Chained** — apply all operations to each element in a single pass, loading data from memory only once (dcache friendly), but the large combined function body increases icache footprint; **Split** — each operation independently traverses the entire dataset, with small and simple loop bodies per pass (icache friendly, easier to vectorize), but data is traversed multiple times (increased dcache pressure). The choice depends on dataset size and operation complexity: when the dataset fits in L2/L3 cache, the split approach's multiple passes still hit cache, making icache-friendliness more advantageous; when the dataset far exceeds cache capacity, the fused approach's single pass avoids repeated DRAM accesses. In practice, compare both approaches using `perf stat -e L1-icache-load-misses,LLC-load-misses` to evaluate icache vs dcache behavior before deciding ([whichisfaster.dev/chaining_function](https://whichisfaster.dev/q/chaining_function.html)).
 
 **3. Parallel exclusive optimization (vectorization core technology)**
 
@@ -6213,7 +6254,9 @@ for (int i = 0; i + 7 < N; i += 8) { // Process 8 ints (32 bytes) each time
 // It allows us to perform "streaming" write operations (Streaming Stores), where data is written directly to memory without disturbing the cache.
 ```
 
+**Why Non-Temporal Stores are faster (RFO elimination)**: Normal stores to a cold cache line trigger a Read-For-Ownership (RFO): the CPU reads the entire 64-byte cache line from memory, modifies it, then eventually writes it back. This doubles memory traffic — 128 bytes moved per 64 bytes written. Non-temporal (streaming) stores bypass the cache entirely and write directly to memory via write-combining buffers, eliminating the RFO read. In theory this gives 2x bandwidth. 
 
++ [https://whichisfaster.dev/q/non_temporal_write.html](https://whichisfaster.dev/q/non_temporal_write.html)
 
 ### 17. Regarding potential optimizations of functions
 **1. Return value optimization (RVO, NRVO)**
@@ -6498,7 +6541,7 @@ Compilers (e.g. GCC, MSVS) will do this when optimizations are enabled (e.g. `-O
 
 + **Floating point operations**: Even floating point addition, the latency is about 2-3 times that of integer addition; floating point multiplication has even higher latency (about 3-5 times that of integer multiplication);
 + **Multiplication(**`*`**)**: The latency of integer multiplication is about 4-6 times that of integer addition, and the latency of floating-point multiplication is even higher;
-+ **Division(**`/`) and remainder (`%`**)**: The latency of division in the CPU is 10-20 times that of multiplication, and the latency of remainder operations (especially remainders of powers other than 2) is even higher;
++ **Division(**`/`) and remainder (`%`**)**: The latency of division in the CPU is 10-20 times that of multiplication, and the latency of remainder operations (especially remainders of powers other than 2) is even higher. When the divisor is a compile-time constant, the compiler automatically converts division/modulo into multiplication + shift ([Barrett reduction](https://en.wikipedia.org/wiki/Division_algorithm)), but cannot optimize when the divisor is only known at runtime. If the same divisor will be used repeatedly, use [libdivide](https://libdivide.com/) to precompute the multiplication constant at runtime; using the divisor as a compile-time constant in a switch-case also triggers this optimization ([whichisfaster.dev/modulo](https://whichisfaster.dev/q/modulo.html));
 + **Math functions**: e.g. `sqrtf`(square root),`expf`(exponential), it needs to be optimized through hardware instructions or approximate algorithms, and the delay of directly calling the standard library function is extremely high.
 
 
@@ -6957,6 +7000,8 @@ Modern processors (SSE and subsequent instruction sets) provide specific instruc
 + No performance improvement in most tests
 + Modern processors have implemented automatic prefetching through out-of-order execution and prediction mechanisms
 + When the data access pattern has a fixed step size and regular structure, manual prefetching is generally not required
+
+**Memory-Level Parallelism (MLP) and Pointer Chasing Optimization**: The CPU's Line Fill Buffers (LFB, Intel terminology) / Miss Status Holding Registers (MSHR) can track multiple outstanding cache miss requests simultaneously (modern Intel cores have ~12 LFB entries), allowing independent memory accesses to proceed in parallel. However, pointer chasing patterns (e.g. linked list traversal `node = node->next`) create serial dependency chains — each load must wait for the previous load to complete before obtaining the next address, leaving only 1 outstanding miss in the LFB and wasting the remaining parallel slots. Optimization approaches: **Batch Prefetching (Software Pipelining)** — issue prefetch instructions for the next N nodes while processing the current node, converting serial dependencies into parallel requests; **Data Structure Restructuring** — replace linked lists with array indices or cache-friendly structures like B+ trees; **Interleaved Processing** — interleave multiple independent data streams in the same loop (e.g. traversing two independent trees simultaneously), allowing cache misses from different streams to fill LFB entries in parallel ([whichisfaster.dev/async](https://whichisfaster.dev/q/async.html)).
 
 **Nontemporal Writes**
 
@@ -10076,7 +10121,7 @@ Small objects that could otherwise be passed through registers (such as`int`) is
 
 If there is no need to customize copy/move logic or destruction behavior, rely on the default version generated by the compiler;
 
-
+**ABI Return Value Path Follows the Same Rule**: The Itanium C++ ABI / System V AMD64 ABI applies the same logic to function return values. If the returned struct is ≤ 16 bytes and trivially copyable, it is returned via the `rax`+`rdx` register pair with zero copy; if the type is non-trivially copyable (e.g. has a custom destructor or `std::string` member), the ABI forces the caller to pre-allocate hidden temporary space on the stack, and the callee writes through an implicit pointer parameter, potentially triggering extra copy/move construction on return. For functions called at high frequency on the hot path (e.g. price calculation, hash lookups), ensuring the returned struct remains trivially copyable directly avoids this hidden stack memory round-trip. If a non-trivial type cannot be avoided, prefer output parameters (pass by reference) over function return values ([whichisfaster.dev/abi](https://whichisfaster.dev/q/abi.html)).
 
 **6. Use string_view to avoid copying**
 
@@ -11340,7 +11385,8 @@ gcc documentation:[https://gcc.gnu.org/onlinedocs/](https://gcc.gnu.org/onlinedo
 
 | Optimization flag | Function description |
 | --- | --- |
-| -falign-functions, -falign-labels, -falign-loops | Align the starting addresses of functions, jump targets, and loop locations to allow the processor to access memory efficiently |
+| -falign-functions, -falign-labels, -falign-loops | Align the starting addresses of functions, jump 
+targets, and loop locations to allow the processor to access memory efficiently，the Loop Buffer caches decoded uops and replays them directly, bypassing the entire fetch-decode pipeline for latency and power savings |
 | -fdelete-null-pointer-checks | Assume dereferencing a null pointer is unsafe, remove redundant null pointer checks |
 | -fdevirtualize and -fdevirtualize-speculatively | Convert virtual function calls to direct calls whenever possible to increase inlining possibilities |
 | -fgcse | Eliminate global common subexpressions and eliminate repeated calculations in functions |
