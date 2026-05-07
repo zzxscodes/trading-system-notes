@@ -64,13 +64,14 @@
   - [4. Avoid using Magic Static which has overhead](#4-avoid-using-magic-static-which-has-overhead)
   - [5. socket technology and TCP, UDP](#5-socket-technology-and-tcp-udp)
 - [Transaction data processing](#transaction-data-processing)
-  - [Task One (data flow merging)](#task-one-data-flow-merging)
-  - [Task Two (data dependency issues)](#task-two-data-dependency-issues)
-  - [Task Three (csv<->binary)](#task-three-csv-binary)
-  - [Task Four (incremental calculation and advance calculation)](#task-four-incremental-calculation-and-advance-calculation)
-  - [Task Five (handling high-frequency data problems)](#task-five-handling-high-frequency-data-problems)
-  - [Task Six (Order Timing Competition Analysis)](#task-six-order-timing-competition-analysis)
-  - [Task Eight (Futures Daily Mark-to-Market Processing)](#task-eight-futures-daily-mark-to-market-processing)
+  - [1. Task One (data flow merging)](#1-task-one-data-flow-merging)
+  - [2. Task Two (data dependency issues)](#2-task-two-data-dependency-issues)
+  - [3. Task Three (csv<->binary)](#3-task-three-csv-binary)
+  - [4. Task Four (incremental calculation and advance calculation)](#4-task-four-incremental-calculation-and-advance-calculation)
+  - [5. Task Five (handling high-frequency data problems)](#5-task-five-handling-high-frequency-data-problems)
+  - [6. Task Six (Order Timing Competition Analysis)](#6-task-six-order-timing-competition-analysis)
+  - [7. Task Seven (Service Access Log Analysis)](#7-task-seven-service-access-log-analysis)
+  - [8. Task Eight (Futures Daily Mark-to-Market Processing)](#8-task-eight-futures-daily-mark-to-market-processing)
 - [Business logic design-system](#business-logic-design-system)
   - [1. Order management system](#1-order-management-system)
   - [2. Order book design](#2-order-book-design)
@@ -14440,7 +14441,7 @@ namespace Common {
 
 
 ## Transaction data processing
-### Task One (data flow merging)
+### 1. Task One (data flow merging)
 ```markdown
 The three data files order.csv snap.csv trans.csv represent the order, snapshot and transaction data of the stock respectively.
 These three sets of data are real-time data streams from three data sources published by the exchange. The first column in the data, time, represents the time when the data was released, and the second column, price, represents the price of the release.
@@ -14581,7 +14582,7 @@ int main() {
 ```
 
 
-### Task Two (data dependency issues)
+### 2. Task Two (data dependency issues)
 ```markdown
 When we process data, there will be scenarios where the data are interdependent.
 For example, I named the new data generated after processing a data m1 m1plus, and merged this new data with another data source m1a and processed it again to generate data m1plus2.
@@ -14805,7 +14806,7 @@ int main(int argc, char* argv[]) {
 ```
 
 
-### Task Three (csv<->binary)
+### 3. Task Three (csv<->binary)
 ```markdown
 # background
 There are at least two problems with using csv format to store tickdata:
@@ -15216,7 +15217,7 @@ install(TARGETS tdb DESTINATION bin)
 ```
 
 
-### Task Four (incremental calculation and advance calculation)
+### 4. Task Four (incremental calculation and advance calculation)
 **Incremental calculation and advance calculation**
 
 Incremental calculation means that only the changed parts of the data are processed instead of recalculating the entire data set.
@@ -15369,7 +15370,7 @@ private:
 ```
 
 
-### Task Five (handling high-frequency data problems)
+### 5. Task Five (handling high-frequency data problems)
 **1. Data sampling (solve the problem of "irregular time")**
 
 + Closing price sampling: take the last valid quote in the time period, the code logic is "traverse the data in the time period, record the last non-empty quote" (applicable to low-frequency backtesting, assuming that the price does not change when there is no new data);
@@ -15392,7 +15393,7 @@ Code formula: $ \hat{q}_{t_{m}}^{m}=\frac{1}{2}\left(q_{t_{a}}^{a}+q_{t_{b}}^{b}
 Advanced: If you need to consider the weight of order volume, the code implements size-weighted middle price $ \tilde{q}_{t}^{s}=\frac{q_{t_{b}}^{b} s_{t_{a}}^{a}+q_{t_{a}}^{a} s_{t_{b}}^{b}}{s_{t_{a}}^{a}+s_{t_{b}}^{b}} $ ($ s $ is the order volume corresponding to the buying/selling price).
 
 
-### Task Six (Order Timing Competition Analysis)
+### 6. Task Six (Order Timing Competition Analysis)
 In transactions, requests (orders) issued by programs on different servers arrive at the exchange in order, and high-frequency transactions
 
 Yi is very sensitive to this sequence. According to log files, statistics on different servers at the same time
@@ -15916,7 +15917,7 @@ int main(int argc, char* argv[]) {
 ### <!-- 这是一张图片，ocr 内容为： -->
 ![](https://cdn.nlark.com/yuque/0/2026/png/35485470/1767619685321-d70ca01e-e867-4a84-b4bb-0ee03a8ea80c.png)
 
-Task Seven (Service Access Log Analysis)
+### 7. Task Seven (Service Access Log Analysis)
 | service_id | access_time | response_time | flow_bytes | status_code |
 | --- | --- | --- | --- | --- |
 | S001 | 2025/3/20 10:00 | 150 | 512 | 200 |
@@ -15995,7 +15996,7 @@ print(df_filtered)
 ```
 
 
-### Task Eight (Futures Daily Mark-to-Market Processing)
+### 8. Task Eight (Futures Daily Mark-to-Market Processing)
 The core of this task is end-to-end futures daily mark-to-market processing. The main program is `main.py`. Inputs are `trades_cf.csv` (tick-level open/close records, including open time/price, close time/price, direction, lots, fee parameters, etc.) and `cf2309.csv` (daily aggregated market data, including `trade_date`, `datetime`, `close`). The core logic is daily MTM calculation, with a post-processing script for risk/performance statistics and field standardization, ultimately producing unified-format results ready for reporting.
 
 Complete processing flow of the main program (`main.py`): read and clean CSV files (compatible with four encodings: `utf-8`, `utf-8-sig`, `gb18030`, `gbk`, and can automatically handle headers with description rows) -> map natural time to trade date (21:00 and later belongs to the next trade date) -> generate per-trade table `output/trades.csv`, daily position table `output/position.csv`, and daily equity table `output/balance.csv`. Core calculations follow the daily MTM convention.
