@@ -18,7 +18,7 @@
   - [6. Memory pool](#6-memory-pool)
   - [7. Large page memory](#7-large-page-memory)
   - [8. Inline and inline assembly](#8-inline-and-inline-assembly)
-  - [9. lock-free queue andmicro-batching](#9-lock-free-queue-andmicro-batching)
+  - [9. lock-free queue and micro-batching](#9-lock-free-queue-and-micro-batching)
   - [10. spmc shared memory lock-free queue application](#10-spmc-shared-memory-lock-free-queue-application)
   - [11. Memory alignment and typical memory layout optimization](#11-memory-alignment-and-typical-memory-layout-optimization)
   - [12. Branch optimization and branch prediction](#12-branch-optimization-and-branch-prediction)
@@ -3161,7 +3161,7 @@ double ipow(double x, int n) {
     - Generate assembly code through a compiler (e.g.`gcc -S`) Verify the correctness of inline assembly; use test programs to compare the output of C++ implementation and assembly implementation to ensure consistent functionality.
 
 
-### 9. lock-free queue andmicro-batching
+### 9. lock-free queue and micro-batching
 Excellent blog:[https://moodycamel.com/blog/2014/a-fast-general-purpose-lock-free-queue-for-c++.htm](https://moodycamel.com/blog/2014/a-fast-general-purpose-lock-free-queue-for-c++.htm)
 
 Lock-free operation:
@@ -3173,7 +3173,7 @@ Lock-free operation:
 3.Memory barriers ensure visibility and orderliness of operations
 
 
-**The simple spsc implementation version, the advanced multi-mode version can be seen in the simple practice. Because it is compatible with the initial version and consistent with the code usage in subsequent actual projects, it does not implement the interface for blocking the consumption location, and only prevents the producer from overwriting the old data. **
+The simple spsc implementation version, the advanced multi-mode version can be seen in the simple practice. Because it is compatible with the initial version and consistent with the code usage in subsequent actual projects, it does not implement the interface for blocking the consumption location, and only prevents the producer from overwriting the old data. 
 
 ```cpp
 #pragma once
@@ -3297,8 +3297,6 @@ namespace Common {
 
 
 
-
-```markdown
 **SPSC cache-friendly optimization (cached peer indices)**
 
 The implementation above is already lock-free / wait-free for SPSC (no RMW spin loops).
@@ -3346,7 +3344,6 @@ Implementation notes:
 - cached copies are only for fast checks; boundary truth still comes from atomics;
 - `release` publishes slot writes, `acquire` observes peer progress;
 - combine with `alignas(64)` to further reduce false sharing.
-```
 
 
 
@@ -3582,6 +3579,7 @@ namespace Common {
 }
 
 ```
+
 
 The core idea of Micro-Batching is to process multiple messages into one batch to reduce the fixed cost of single processing (message processing and calculation). However, batch processing that is too large will increase latency, and batch processing that is too small will not be able to take advantage of the batch size. Therefore, this processor passes**Dynamically adjust batch size**, automatically select the optimal strategy based on the current message queue backlog:
 
