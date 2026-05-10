@@ -569,7 +569,7 @@ Advanced scenarios (high-performance networks) are CPU, memory, Consistent with 
 **4.Before NUMA**
 
 + **The core is "share-nothing"**: Using the Share-Nothing architecture, the system is divided into independent computing units, each with its own data (data partition). Cross-NUMA node memory access is logically eradicated.
-+ **Replace "global shared" with "thread local"**: Use thread local storage (TLS) to eliminate data races and locks. Each thread only works on its own "territory" (i.e., local NUMA memory) to avoid cross-node cache synchronization due to data contention.
++ **Replace "global shared" with "thread local"**: Use thread local storage (TLS) to eliminate data races and locks. Each thread only works on its own "territory" (i.e., local NUMA memory) to avoid cross-node cache synchronization due to data contention. On GNU/Linux, microbenchmarks and ELF/TLS implementation notes (access can match ordinary static data when statically linked; TLS in dynamically loaded modules may pay `__tls_get_addr` lookup costs) are in [David Gross — TLS performance overhead and cost on GNU/Linux](https://david-grs.github.io/tls_performance_overhead_cost_linux/).
 + **Replace "shared memory" with "message passing"**: Use Actor model, disruptor communication and other modes, that is, CSP concurrency philosophy.
 
 
