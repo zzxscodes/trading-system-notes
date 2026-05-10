@@ -4795,7 +4795,7 @@ ConcurrentQueue<QueueMode::NonBlocking> q2; // Non-blocking queue
 ```
 
 
-**Concepts (C++20)** Explicitly define constraints on template parameters, replacing parts`std::enable_if`complex logic to make the code more readable.
+Concepts (C++20) Explicitly define constraints on template parameters, replacing parts`std::enable_if`complex logic to make the code more readable.
 
 ```cpp
 #include <concepts>
@@ -4894,14 +4894,14 @@ void process_packet_refactored(const Packet& pkt) {
 }
 ```
 
-Relatively speaking, there is **attribute**((hot)) Used to mark functions as "hot functions", i.e. functions that execute more frequently or are on a performance-critical path.
+Relatively speaking, there is __attribute__((hot)) Used to mark functions as "hot functions", i.e. functions that execute more frequently or are on a performance-critical path.
 
 
 **11. Relying on cpu branch predictorHistorical execution records**
 
-Branch Predictor records branch instructions**Historical execution records**(As many times in the past`if`In the judgment, the frequency and regularity of "conditions are met" or "conditions are not met"), and based on these historical data, the direction of the current branch can be "predicted in advance" (for example, "This time`if`"High probability of meeting the conditions");
+Branch Predictor records branch instructions **Historical execution records**(As many times in the past`if`In the judgment, the frequency and regularity of "conditions are met" or "conditions are not met"), and based on these historical data, the direction of the current branch can be "predicted in advance" (for example, "This time`if`"High probability of meeting the conditions");
 
-The essence of case2 being faster is that "the sorted data regularizes branch judgments and greatly reduces the rate of branch misjudgments." By sorting,`if`The branches of judgment are presented**stable law**, let the branch predictor grasp the rules.
+The essence of case2 being faster is that "the sorted data regularizes branch judgments and greatly reduces the rate of branch misjudgments." By sorting,`if`The branches of judgment are presented **stable law**, let the branch predictor grasp the rules.
 
 ```cpp
 #include <iostream>
@@ -4974,6 +4974,56 @@ int main() {
     return 0;
 }
 ```
+
+
+**12. Semi-static conditions (`semi-static-conditions`)**
+
+Applicable when conditional branches on the hot path or in the innermost loop exhibit poor branch-predictor accuracy (branch mispredictions dominate), while branch direction (which target runs next) can be updated at a lower frequency or a coarser scheduling granularity: [semi-static-conditions](https://github.com/maxlucuta/semi-static-conditions).
+
++ **Principle:** Decouple branch-direction resolution from dispatch to the selected target: resolve direction on a colder control path; on the hot path, perform a single unconditional control transfer through a stub (`jmp` to the chosen target), avoiding repeated conditional branches and their misprediction penalties. Changing direction rewrites instruction bytes at run time (patching the `jmp rel32` displacement); in steady state the hot path is only an unconditional jump with no conditional-branch semantics.
++ **Contrast (illustrative):**
+
+```cpp
+#include <branch.hpp>
+void handle_a(int x);
+void handle_b(int x);
+
+// Style A: conditional in the innermost loop — random outcomes raise misprediction rate
+for (...) {
+  if (use_strategy_a)
+    handle_a(x);
+  else
+    handle_b(x);
+}
+
+// Style B: semi-static — update direction outside; inner loop calls the stub (near jmp at entry)
+BranchChanger ch(handle_a, handle_b);
+void refresh_strategy(bool use_a) {
+  ch.set_direction(use_a); // rewrite jmp rel32 (often bool for two-way branches)
+}
+for (...) {
+  ch.branch(x); // hot path: implicit dispatch via jmp to handle_a / handle_b
+}
+```
+
++ **Self-modifying code (SMC):** At run time, the program rewrites bytes in executable-mapped memory (e.g. RX/RWX) that will later be fetched and decoded as instructions—the instruction encoding changes, not merely data or read-only code text. Here, `memcpy` overwrites the rel32 field of an in-place `jmp rel32`, which is a canonical SMC pattern.
+
++ **Coherence and cost:** After a store into instruction bytes, the CPU must reconcile what the memory subsystem exposes with what instruction fetch decodes. Implementations commonly raise machine clears, synchronized refetch, or I-cache coherence events; these add cycles and may interfere near instruction boundaries. This is typical SMC behavior on general-purpose CPUs.
+
++ **Implementation (x86-64):** The stub starts with a near relative `jmp rel32`, encoded `0xE9` + rel32 (little-endian). Construction forms rel32 as target − RIP at end of the jmp, validates displacement range, caches four bytes per candidate, and `memcpy`s the chosen encoding into executable pages only when branch direction changes, triggering the SMC coherence path above. Unchanged direction skips the write.
+
++ **`force_smc_clear` (GCC/Clang):** After the `jmp rel32` displacement the library places `ret` (`0xC3`); after each displacement patch it calls that `ret` via `void(*)()`, forcing execution through the just-modified instruction bytes so SMC-related synchronization is confined to the direction-update call (comments cite ~110–120 cycles). No direction change ⇒ no `memcpy` ⇒ no such call sequence.
+
++ **API usage:**
+
+```cpp
+#include <branch.hpp>
+BranchChanger ch(handle_a, handle_b);
+ch.set_direction(use_strategy_a); // update branch direction / jmp target
+ch.branch(x);                       // hot-path dispatch; matches handle_* arity
+```
+
++ **Notice:** Default builds may leave the stub mapping `mprotect` RWX; defining `SAFE_MODE` (upstream commonly `-DSAFE_MODE`) briefly maps RW around the patch then restores RX, tightening page permissions at higher `set_direction` cost. Typically one `BranchChanger` instance per function signature per process (`MULTIPLE_INSTANCE_ERROR`). Requires C++17+; AArch64 uses distinct branch encodings and displacement limits.
 
 
 ### 13. Composition takes precedence over inheritance
