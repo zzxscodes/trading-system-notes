@@ -101,7 +101,7 @@
   - [9. Parameter sensitivity curve](#9-parameter-sensitivity-curve)
   - [10. Unbiased trading simulation](#10-unbiased-trading-simulation)
   - [11. Statistical analysis of transaction income](#11-statistical-analysis-of-transaction-income)
-  - [12. Permutation test verification strategy (income)](#12-permutation-test-verification-strategy-income)
+  - [12. Permutation test verification strategyincome](#12-permutation-test-verification-strategyincome)
   - [13. Asset Cost Base (ACB) Calculation](#13-asset-cost-base-acb-calculation)
   - [14. Numerical calculation tools](#14-numerical-calculation-tools)
   - [15. EMA and EMASTDEV (time smoothing)](#15-ema-and-emastdev-time-smoothing)
@@ -3581,7 +3581,7 @@ namespace Common {
 ```
 
 
-The core idea of Micro-Batching is to process multiple messages into one batch to reduce the fixed cost of single processing (message processing and calculation). However, batch processing that is too large will increase latency, and batch processing that is too small will not be able to take advantage of the batch size. Therefore, this processor passes**Dynamically adjust batch size**, automatically select the optimal strategy based on the current message queue backlog:
+The core idea of Micro-Batching is to process multiple messages into one batch to reduce the fixed cost of single processing (message processing and calculation). However, batch processing that is too large will increase latency, and batch processing that is too small will not be able to take advantage of the batch size. Therefore, this processor **dynamically adjusts batch size** and automatically selects the optimal strategy based on the current message queue backlog:
 
 + When the queue backlog is small, use small batches to reduce delays;
 + When the queue is backlogged, use large batches to improve throughput.
@@ -7034,7 +7034,7 @@ Modern processors (SSE and subsequent instruction sets) provide specific instruc
 + Usually only valid for write-back memory areas
 
 
-**cache prefetch**Is a hardware or software technology that loads data from slower main memory into the faster CPU cache in advance before it is officially requested by the CPU. The core idea is to predict the data that the program may need in the future and move it closer to the computing core in advance, thereby hiding the latency of memory access and preventing the CPU from being idle waiting for data.
+**Cache prefetch** is a hardware or software technology that loads data from slower main memory into the faster CPU cache in advance before it is officially requested by the CPU. The core idea is to predict the data that the program may need in the future and move it closer to the computing core in advance, thereby hiding the latency of memory access and preventing the CPU from being idle waiting for data.
 
 <!-- 这是一张图片，ocr 内容为： -->
 ![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1754008438918-0e899738-57c1-460f-95cd-1b338f5e7c91.png)
@@ -7781,12 +7781,12 @@ x86 CPU instructions related to cache
 
 
 <!-- 这是一张图片，ocr 内容为： -->
-![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1753491708830-db9b5c2b-9a45-43a8-b14d-3baf38c25974.png)**vectorization**It is an optimization technology that uses the SIMD hardware unit in the CPU to process multiple data elements in parallel. Modern CPUs (such as SSE, AVX, AVX-512 of x86 architecture; NEON of ARM architecture) all contain SIMD instruction sets.
+![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1753491708830-db9b5c2b-9a45-43a8-b14d-3baf38c25974.png)**Vectorization** is an optimization technology that uses the SIMD hardware unit in the CPU to process multiple data elements in parallel. Modern CPUs (such as SSE, AVX, AVX-512 of x86 architecture; NEON of ARM architecture) all contain SIMD instruction sets.
 
 Add 1 to every element in an array.
 
 + **Scalar operations**: The traditional way is to use a loop, take an element each iteration, perform an addition, and then save it back. Only one data is processed at a time.
-+ **Vector operations**: If the CPU has a 256-bit SIMD register (such as AVX2), it can load eight 32-bit integers at once. The CPU can execute a**vector addition instructions**, this instruction can perform addition operations on these 8 integers at the same time. In theory, this can bring up to 8x performance improvement.
++ **Vector operations**: If the CPU has a 256-bit SIMD register (such as AVX2), it can load eight 32-bit integers at once. The CPU can execute **vector addition instructions**; this instruction can perform addition operations on these 8 integers at the same time. In theory, this can bring up to 8x performance improvement.
 
 **Vector sizes available in different instruction set extensions**
 
@@ -8374,10 +8374,10 @@ This code loops through 8 floating point numbers at a time and performs far bett
 
 In practice the best strategy is usually:
 
-1. **Write concise, compiler-friendly loops**: avoid complex control flow and pointer aliases, let**auto-vectorization**and**Hardware prefetching**Make the most of it. This is the most basic and important step.
+1. **Write concise, compiler-friendly loops**: avoid complex control flow and pointer aliases; let **auto-vectorization** and **hardware prefetching** make the most of it. This is the most basic and important step.
 2. **Use analysis tools**: Take advantage of the compiler's optimization reports (`-fopt-info-vec`) and Profiler to locate bottlenecks.
 3. **Auxiliary compiler**: When you find that a critical loop fails to vectorize or memory access becomes a bottleneck, try using `#pragma omp simd` or `__builtin_prefetch` to assist the compiler.
-4. **last resort**: Only consider using it for core code segments with extreme performance requirements.**built-in functions**Do a manual rewrite.
+4. **Last resort**: Only consider using it for core code segments with extreme performance requirements — **built-in functions** require a manual rewrite.
 
 
 **SIMD vectorization error handling: NAN/INF propagation**
@@ -9018,7 +9018,7 @@ void unlock() {
     - **Simple to implement**: Much simpler than MCS lock.
     - `unlock` Very fast operation, just one `fetch_add`.
 + **shortcoming**:
-    - **Cache contention still exists**: Like the Test-and-Set lock, all waiting threads are**same one**Atomic variables `head` Spin on. when `unlock` Revise `head` , it will also invalidate all cache lines waiting for the core, causing bus traffic. Although slightly better than implementation one (because `unlock` The operation itself is fast), but does not scale well under high contention as an MCS lock.
+    - **Cache contention still exists**: Like the Test-and-Set lock, all waiting threads spin on the **same** atomic variable `head`. When `unlock` revises `head`, it also invalidates peer cores' cache lines, causing bus traffic. Although slightly better than implementation one (because `unlock` itself is fast), it still does not scale well under high contention compared with an MCS lock.
 
 
 | characteristic | Implementation 1 (Test-and-Set) | Implementation 2 (MCS Lock) | Implementation 3 (Ticket Lock) |
@@ -9045,7 +9045,7 @@ The conditional check of the while loop (... != EXPECTED_VALUE) is a conditional
 
 + During spin wait, this loop condition _vast majority_ all the time `true`(The data has not come yet, so the cycle continues).
 + The branch predictor predicts that the result of the next check will be`true`.
-+ CPU meeting**speculatively**Start executing the instructions in the loop body.
++ The CPU may **speculatively** start executing the instructions in the loop body.
 + When the data finally arrives, the loop condition suddenly becomes `false`.
 + The CPU must discard all instructions and intermediate results that were speculatively executed based on the misprediction, clear its instruction pipeline, and then restart instruction fetching and execution from the correct branch path.
 
@@ -9056,10 +9056,10 @@ The conditional check of the while loop (... != EXPECTED_VALUE) is a conditional
 + The speculative execution path of the consumer core (based on the misprediction of "loop continuation") and the write operation of the producer core (leading to "loop exit") conflict in the memory order buffer (Memory Order Buffer) inside the CPU.
 + The CPU's memory model must ensure that instructions after the loop exit must "see" the write that caused the loop to exit.
 + But due to speculative execution, the CPU may have started executing subsequent instructions based on an old memory state (the data has not yet arrived). When it finally detects a branch misprediction, it also detects this memory timing mess caused by speculative execution.
-+ This conflict is detected once (potentially) by the CPU's internal logic**memory ordering violation**. To correct this error and strictly adhere to the memory consistency model, the CPU triggers a deeper and more expensive pipeline flush.
++ This conflict is detected once (potentially) by the CPU's internal logic as a **memory ordering violation**. To correct this error and strictly adhere to the memory consistency model, the CPU triggers a deeper and more expensive pipeline flush.
 
 
-**PAUSE command** It is an assembly instruction used to optimize spin-wait loops. It was first introduced in the Intel Pentium 4 processor, but is backwards compatible with all IA-32 processors. In early processors, the PAUSE instruction behaved like a NOP (No Operation) instruction, while in modern processors, it has more complex functionality.
+The **PAUSE** instruction is an assembly instruction used to optimize spin-wait loops. It was first introduced in the Intel Pentium 4 processor, but is backwards compatible with all IA-32 processors. In early processors, the PAUSE instruction behaved like a NOP (No Operation) instruction, while in modern processors, it has more complex functionality.
 
 1. **Optimize spin-wait loop performance** In a spin-wait loop, the processor may experience performance degradation due to detected memory order violations. The PAUSE instruction helps the processor avoid memory order violations by providing a hint to the processor that the current code is a spin-wait loop. This optimization significantly improves the performance of spin locks.
 2. **Reduce power consumption** In a spin-wait loop, the processor may execute the loop at extremely high speeds, resulting in significant power consumption. Inserting the PAUSE instruction reduces the power consumption of the processor, making it more energy efficient while waiting for resources.
@@ -9167,7 +9167,7 @@ Flags config = Flags::FeatureA | Flags::FeatureC;
 bool hasA = (static_cast<uint8_t>(config) & static_cast<uint8_t>(Flags::FeatureA)) != 0;
 ```
 
-Bitfields are only used for**Memory/Storage Critical Path**, and recommend:
+Bitfields are only used for **memory/storage critical paths**; recommendations:
 
 1. Initialize/update via batch bit operations
 2. use`static_assert`Verify memory layout
@@ -11052,7 +11052,7 @@ private:
 + The distance of a data point from the ceiling indicates the potential for performance improvement. A larger distance represents an opportunity to optimize the program to better utilize the capabilities of the hardware.
 
 
-Roofline model talks about procedures**Under the constraints of the two indicators of computing power and bandwidth of the computing platform, the upper bound of the theoretical performance that can be achieved**, rather than the actual achieved performance, because during the actual calculation**There are other important factors besides computing power and bandwidth**, they will also affect the actual performance of the model, which is not taken into account by the Roofline Model.
+The Roofline model talks about procedures **under the constraints of the two indicators of computing power and bandwidth of the computing platform, the upper bound of the theoretical performance that can be achieved**, rather than the actual achieved performance, because during the actual calculation **there are other important factors besides computing power and bandwidth**; they also affect the actual performance of the model, which is not taken into account by the Roofline Model.
 
 
 For the Intel Core i5-8259U processor, the maximum number of FLOPs (single precision floating point) using AVX2 and 2 Fused Multiply Add (FMA) units can be calculated as follows:
@@ -16675,11 +16675,11 @@ Mealy state machine and Moore state machine are two classic finite state machine
 
 The core elements of finite state machines:
 
-1. **State**Represents the specific state of an object at a certain moment and is the basic unit of FSM. For example, the status of the order is "new order", "processing", "cancelled", etc. status has**exclusivity**: The object can only be in one state at the same time.
-2. **Event**An external or internal signal that triggers a state transition. Events such as "Order Success" and "Order Cancellation Instruction" will push the state machine to switch from the current state to the new state.
-3. **Transition**Rules that define how "current state + event" maps to "next state". For example: after the "Processing" state receives the "Order Completed" event, it transitions to the "Successful" state.
-4. **Action**Specific actions to perform during state transitions (optional). For example, recording logs when canceling orders, updating order status, etc.
-5. **Guard**Conditions for state transition (optional). Events trigger state transitions only when conditions are met. For example, order cancellation is only allowed if the order cancellation interval exceeds 5 seconds.
+1. **State** represents the specific state of an object at a certain moment and is the basic unit of FSM. For example, the status of the order is "new order", "processing", "cancelled", etc. Status has **exclusivity**: the object can only be in one state at the same time.
+2. **Event**: an external or internal signal that triggers a state transition. Events such as "Order Success" and "Order Cancellation Instruction" will push the state machine to switch from the current state to the new state.
+3. **Transition**: rules that define how "current state + event" maps to "next state". For example: after the "Processing" state receives the "Order Completed" event, it transitions to the "Successful" state.
+4. **Action**: specific actions to perform during state transitions (optional). For example, recording logs when canceling orders, updating order status, etc.
+5. **Guard**: conditions for state transition (optional). Events trigger state transitions only when conditions are met. For example, order cancellation is only allowed if the order cancellation interval exceeds 5 seconds.
 
 
 1.2 Branchless state table
