@@ -101,7 +101,7 @@
   - [9. Parameter sensitivity curve](#9-parameter-sensitivity-curve)
   - [10. Unbiased trading simulation](#10-unbiased-trading-simulation)
   - [11. Statistical analysis of transaction income](#11-statistical-analysis-of-transaction-income)
-  - [12. Permutation test verification strategyincome](#12-permutation-test-verification-strategyincome)
+  - [12. Permutation test verification strategy (income)](#12-permutation-test-verification-strategy-income)
   - [13. Asset Cost Base (ACB) Calculation](#13-asset-cost-base-acb-calculation)
   - [14. Numerical calculation tools](#14-numerical-calculation-tools)
   - [15. EMA and EMASTDEV (time smoothing)](#15-ema-and-emastdev-time-smoothing)
