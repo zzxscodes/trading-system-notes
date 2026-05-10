@@ -549,9 +549,9 @@ Advanced scenarios (high-performance networks) are CPU, memory, Consistent with 
 **3. Management and optimization tools**
 
 1. `numactl` (most commonly used): Command line tool to specify the NUMA policy of an application when starting it.
-    - **Force binding (**`--membind`**)**: `numactl --cpunodebind=0 --membind=0 my_app`
+    - **Force binding (`--membind`)**: `numactl --cpunodebind=0 --membind=0 my_app`
         * **Effect**: Forced `my_app` Can only run on node 0's CPU and can only be allocated from node 0's memory. If node 0 runs out of memory, the allocation will fail. Provides the strongest performance certainty.
-    - **Priority Use (**`--preferred`**)**: `numactl --preferred=0 my_app`
+    - **Priority use (`--preferred`)**: `numactl --preferred=0 my_app`
         * **Effect**: Prioritize allocation from node 0. If it fails, it will automatically fall back to other nodes. Optimize while ensuring program availability.
 2. `sysctl`(System level adjustment):
     - `sudo sysctl -w vm.zone_reclaim_mode=0`: Ensure that the system adopts the default NUMA allocation behavior to avoid unnecessary local memory reclamation delays.
@@ -699,7 +699,7 @@ The following tables list common **libnuma** APIs and NUMA-related syscalls (see
 |  | `int getcpu(unsigned *cpu, unsigned *node, struct getcpu_cache *tcache);` | `int` | Current CPU / node |
 
 
-**Common **`mbind`** / **`set_mempolicy`** modes**: `MPOL_DEFAULT`, `MPOL_BIND`, `MPOL_INTERLEAVE`, `MPOL_WEIGHTED_INTERLEAVE`, `MPOL_PREFERRED`, `MPOL_PREFERRED_MANY`, `MPOL_LOCAL`. Flags such as `MPOL_MF_MOVE`, `MPOL_MF_STRICT`: see [mbind(2)](https://man7.org/linux/man-pages/man2/mbind.2.html).
+**Common `mbind` / `set_mempolicy` modes:** `MPOL_DEFAULT`, `MPOL_BIND`, `MPOL_INTERLEAVE`, `MPOL_WEIGHTED_INTERLEAVE`, `MPOL_PREFERRED`, `MPOL_PREFERRED_MANY`, `MPOL_LOCAL`. Flags such as `MPOL_MF_MOVE`, `MPOL_MF_STRICT`: see [mbind(2)](https://man7.org/linux/man-pages/man2/mbind.2.html).
 
 **Example: Allocate memory on a specific node**
 
@@ -772,9 +772,9 @@ int main() {
 }
 ```
 
-**Compile:**`g++ -std=c++11 test.cpp -o test -lnuma -pthread`
+**Compile:** `g++ -std=c++11 test.cpp -o test -lnuma -pthread`
 
-**run:**`./test`
+**Run:** `./test`
 
 
 **NUMA data sharding**
@@ -1036,10 +1036,10 @@ Common options:
 
 **Identify Bottlenecks**: Before tuning, use `top`, `htop`, `mpstat -P ALL 1` Wait for tools and observe `si` (softirq) or `%irq` Is it too high on a certain CPU core, confirm that interrupt handling is the bottleneck.
 
-+ **Find the IRQ number of the device**`cat /proc/interrupts`
++ **Find the IRQ number of the device**: `cat /proc/interrupts`
 + Pass the device name in the last column (e.g. `eth0-rx-0`) to find the corresponding IRQ number.
 + **Core file for executing binding**: `/proc/irq/<IRQNo.>/smp_affinity_list` (recommended) or `smp_affinity` (bitmask).
-+ `smp_affinity_list`** (CPU list)**: Write the CPU core number directly.
++ **`smp_affinity_list` (CPU list)**: Write the CPU core number directly.
 
 ```shell
 # Example: Bind IRQ 128 to CPU Core 2
@@ -2981,8 +2981,8 @@ inline related content
 + **Core**: allow the same`inline`function or variable in multiple compilation units (`.cpp`file) have exactly the same definition. The linker ensures that only one instance of the definition exists in the final program.
 + **Main uses**:
     - **Define function in header file**: This is`inline`The most fundamental purpose is to avoid "multiple definition" link errors caused by including header files in multiple places.
-    - **C++17 **`inline`**Variables**: Allows global variables to be defined in header files to ensure their uniqueness throughout the program (such as `inline AppConfig cfg;`).
-+ **Implicit**`inline`** rule**:
+    - **C++17 `inline` variables**: Allows global variables to be defined in header files to ensure their uniqueness throughout the program (such as `inline AppConfig cfg;`).
++ **Implicit `inline` rule**:
     - exist `class`/`struct` Declare internally defined member functions.
     - All function templates and member functions of class templates.
 
@@ -2991,10 +2991,10 @@ inline related content
 + **Core**: Replace function calls with the function body itself, eliminating the fixed overhead of function calls.
 + **Compiler decision-making authority**:
     - `inline` Just a suggestion, the compiler has the right to ignore it. Compilers usually refuse inlining if a function is too large, complex, or recursive.
-    - The compiler will automatically inline any appropriate non-`inline`**Function**, at high optimization level (`-O2`, `-O3`) or via link-time optimization (LTO).
+    - The compiler will automatically inline any appropriate non-`inline` functions, at high optimization level (`-O2`, `-O3`) or via link-time optimization (LTO).
 + **Forced inlining**:
     - To override the compiler's judgment, use specific instructions`__attribute__((always_inline))`.
-+ **Call-chain flattening (**`flatten`**)**:
++ **Call-chain flattening (`flatten`)**:
     - GCC/Clang support `__attribute__((flatten))`, which asks the compiler to inline as many calls inside the annotated function as possible (when callees are inlinable), effectively flattening a hot call chain.
     - This is useful for small performance-critical paths, but it can increase code size and i-cache pressure; always validate with profiling (`perf`/PMU counters).
     - Focus difference: `always_inline` is about forcing a specific inline decision, while `flatten` is about aggressively expanding the whole local call hierarchy.
@@ -3005,9 +3005,9 @@ inline related content
 
 **Lambdas are very easy to expand inline at compile time.**
 
-**If the error handling function is inline, it will increase the instruction cache occupation of the fast path, resulting in an increased risk of instruction cache misses. **
+**If the error handling function is inline, it will increase the instruction cache occupation of the fast path, resulting in an increased risk of instruction cache misses.**
 
-**Even if an error does not occur, inline error handling code will still occupy cache space and slow down the fast path. **
+**Even if an error does not occur, inline error handling code will still occupy cache space and slow down the fast path.**
 
 **Pay more attention to the use of always_inline and noline**
 
@@ -4471,16 +4471,16 @@ The main types of branching in C++ code include:
 + Function pointer (and function name).
 
 
-**1. **`if-else`** statement**
+**1. `if-else` statement**
 
-The most basic branch structure. Performance bottlenecks mainly occur in **long **`if-else if`** chain** , because the prediction difficulty increases linearly as the number of conditions increases.
+The most basic branch structure. Performance bottlenecks mainly occur in **long `if-else if` chain**, because the prediction difficulty increases linearly as the number of conditions increases.
 
 + **Optimization ideas:**
     - **Reduce conditions:** Simplify judgment logically.
     - **Reorganization conditions:** Put the most likely (or fastest to calculate) conditions first.Put the code for common scenarios in`if`In the code block, place the error handling logic in`else`code block. Reduce the number of branches as much as possible,Delay or combine multiple error checking logic to ensure that only one error handling branch remains. avoidDependence on "unpredictable conditions" branch.
 
 
-**2. **`for / while`** cycle**
+**2. `for / while` loop**
 
 A loop is essentially a branch that jumps backwards at the end of each iteration.
 
@@ -4489,7 +4489,7 @@ A loop is essentially a branch that jumps backwards at the end of each iteration
     - **Difficult to predict:** For loops that rely on external data and exit early, branch prediction at the exit point can easily fail.
 
 
-**3. **`switch`** statement**
+**3. `switch` statement**
 
 `switch` It is a multi-way jump. Its efficiency depends on `case` Distribution of labels.
 
@@ -4504,8 +4504,8 @@ A loop is essentially a branch that jumps backwards at the end of each iteration
  For scenarios with simple logic and difficult branch prediction (random data patterns), using the ternary operator can avoid branch prediction failures.
 
 + **principle:**  The compiler can optimize simple ternary operators into branchless conditional move instructions (x86's`cmov`). This instruction will pre-calculate or load the results of the two branches, and then directly select one of the two results to store in the target register based on the conditional judgment result, without code jumps in the whole process.
-+ **Example:**`result = (input> threshold) ? value1 : value2;`
-+ **Notice:**  High compiler optimization levels (O2 and above). When the expression within the branch has**side effect**(Function calls, I/O operations) or when the calculation logic is complex, the compiler may not generate conditional move instructions.
++ **Example:** `result = (input> threshold) ? value1 : value2;`
++ **Notice:**  High compiler optimization levels (O2 and above). When the expression within the branch has **side effects** (function calls, I/O operations) or when the calculation logic is complex, the compiler may not generate conditional move instructions.
 
 
 **5. Look-up table method to replace branch**
@@ -4513,7 +4513,7 @@ A loop is essentially a branch that jumps backwards at the end of each iteration
 For scenarios where the input value range is limited, the lookup table method can completely eliminate branches and is suitable for avoiding branches with the same probability.
 
 + **principle:** The outputs for all possible inputs are pre-computed and stored in an array or hash table. The results are obtained directly from the input value index at runtime.
-+ **Example:**`result = lookup_table[input];`
++ **Example:** `result = lookup_table[input];`
 + **Notice:** You can also use a function pointer table, generallyIt is completely acceptable compared to the branch misprediction penalty, similar to the virtual function table.
 
 ```cpp
@@ -5195,7 +5195,7 @@ void processOrder(const Order& order) {
 }
 ```
 
-**1.4**`if constexpr`**Compile-time polymorphism**
+**1.4 `if constexpr` compile-time polymorphism**
 
 ```cpp
 template <typename Animal>
@@ -5278,7 +5278,7 @@ cfactor.set_real(2.0); // Compilation error: const object cannot call non-const 
 
 **3. Const restrictions on non-member functions**
 
-Non-member functions (such as global functions and friend functions) cannot be `const`**Modification**——`const` Function modifications only apply to class member functions (limiting the function's permission to modify the object state). If you need to restrict non-member functions from modifying parameters, you need to use it at the parameter level. `const`,For example:
+Non-member functions (such as global functions and friend functions) cannot use **`const`** on the function itself to restrict modifications——**`const`** on member functions only applies to class member functions (limiting the function's permission to modify the object state). If you need to restrict non-member functions from modifying parameters, apply **`const`** at the parameter level. For example:
 
 ```cpp
 //Non-member function: restrict modification through parameter const, not the function itself const
@@ -5391,7 +5391,7 @@ template <auto V>
 void h(std::nontype_t<V>);  // V fixed by the template argument; parameter type carries that constant for overload selection
 ```
 
-**Role in **`std::function_ref`
+**Role in `std::function_ref`**
 `std::function_ref` provides two constructor styles: one accepts a pointer or similar handle to a callable and stores it at runtime; the other accepts `std::nontype_t<f>` and binds the callable `f` as a non-type template argument, without storing a large object such as a runtime member pointer inside the object. On several ABIs (e.g. Itanium C++ ABI), member function pointers are typically much larger than ordinary function pointers; a small, trivially copyable reference type that does not reserve storage for a member pointer then relies on the latter form for compile-time binding. See the C++26 definition of `std::function_ref` for full signatures.
 
 ```cpp
@@ -5470,7 +5470,7 @@ Vector<runtime_dim> v3; // Compilation error!
 + An ordinary function may call `consteval` functions, but **arguments must be compile-time constants** (otherwise the immediate-function call cannot be formed).
 + When `consteval` calls `constexpr`, the latter is forced onto the compile-time path.
 
-**C++23: **`if consteval`
+**C++23 — `if consteval`**
 
 Inside a `constexpr` function, tell constant evaluation apart from runtime evaluation and use the best implementation for each (e.g. a hand-written compile-time `strlen` at compile time, the library implementation at runtime):
 
@@ -5484,7 +5484,7 @@ constexpr size_t f(const char* s) {
 }
 ```
 
-**C++23: **`constexpr`** consteval propagation (escalation)**
+**C++23: `constexpr` / `consteval` propagation (escalation)**
 
 If a `constexpr` template function passes an argument to a `consteval` function, the whole call may be required to be a compile-time evaluation in that context; a non-compile-time argument fails. This propagates the “must be compile-time” constraint to callers.
 
@@ -6558,8 +6558,8 @@ Compilers (e.g. GCC, MSVS) will do this when optimizations are enabled (e.g. `-O
 **1. "Strong operations" that need to be avoided first**
 
 + **Floating point operations**: Even floating point addition, the latency is about 2-3 times that of integer addition; floating point multiplication has even higher latency (about 3-5 times that of integer multiplication);
-+ **Multiplication(**`*`**)**: The latency of integer multiplication is about 4-6 times that of integer addition, and the latency of floating-point multiplication is even higher;
-+ **Division(**`/`) and remainder (`%`**)**: The latency of division in the CPU is 10-20 times that of multiplication, and the latency of remainder operations (especially remainders of powers other than 2) is even higher. When the divisor is a compile-time constant, the compiler automatically converts division/modulo into multiplication + shift ([Barrett reduction](https://en.wikipedia.org/wiki/Division_algorithm)), but cannot optimize when the divisor is only known at runtime. If the same divisor will be used repeatedly, use [libdivide](https://libdivide.com/) to precompute the multiplication constant at runtime; using the divisor as a compile-time constant in a switch-case also triggers this optimization ([whichisfaster.dev/modulo](https://whichisfaster.dev/q/modulo.html));
++ **Multiplication (`*`):** Integer multiply latency is roughly 4–6× that of add; floating-point multiply costs more still.
++ **Division (`/`) and remainder (`%`):** Division is often 10–20× slower than multiply; remainder with non-power-of-two divisors is especially costly at runtime (compile-time divisors can be strength-reduced). When the divisor is a compile-time constant, the compiler automatically converts division/modulo into multiplication + shift ([Barrett reduction](https://en.wikipedia.org/wiki/Division_algorithm)), but cannot optimize when the divisor is only known at runtime. If the same divisor will be used repeatedly, use [libdivide](https://libdivide.com/) to precompute the multiplication constant at runtime; using the divisor as a compile-time constant in a switch-case also triggers this optimization ([whichisfaster.dev/modulo](https://whichisfaster.dev/q/modulo.html));
 + **Math functions**: e.g. `sqrtf`(square root),`expf`(exponential), it needs to be optimized through hardware instructions or approximate algorithms, and the delay of directly calling the standard library function is extremely high.
 
 
@@ -6654,11 +6654,11 @@ int cents = total_cents % 100;
 **Note**: Integer division/remainder is still an inefficient operation and should be avoided as much as possible - for example, in the above scenario, if you only need to output the total price, you can format it directly `total_cents` is a string (such as `sprintf(buf, "%d.%02d", total_cents/100, total_cents%100)`) to avoid performing division/remainder in the hot path.
 
 
-**3. Avoidance of inefficient operations: for remainder (**`%`**) with type conversion**
+**3. Avoid inefficient remainder (`%`) with implicit conversions**
 
 ---
 
-**1. Avoid remainder operation (**`%`**): Replace with branches or bit operations**
+**1. Avoid remainder (`%`): use branches or bit tricks where applicable**
 
 ---
 
@@ -6712,7 +6712,7 @@ unsigned char rem = static_cast<unsigned char>(x); // result=255, equivalent to 
 
 | **Method** | **Instructions** |
 | --- | --- |
-| **Use**`static_cast`   **Perform explicit conversion and avoid implicit conversion** | Explicit conversion avoids potential errors caused by C-style casts and the performance loss of implicit conversions |
+| **Use `static_cast` for explicit conversion (avoid implicit conversion)** | Explicit conversion avoids potential errors caused by C-style casts and the performance loss of implicit conversions |
 | **Keep data type precision consistent in critical calculations** | Mixed precision may cause additional conversion instructions and reduce performance. |
 | **Avoid mixing integer and floating-point operations** | Mixing integer and floating-point types requires additional conversion, which increases calculation overhead. Priority is given to unifying floating point or integer processing. |
 | **Create a type-safe API to avoid mixed type calls** | Use function overloading or templates to design APIs to force parameter types to be consistent and reduce the risk of implicit conversions. |
@@ -6726,7 +6726,7 @@ unsigned char rem = static_cast<unsigned char>(x); // result=255, equivalent to 
 | **Avoid implicit behavior of sign extension or zero extension during type conversion** | For example, when converting int to unsigned int, negative numbers will be interpreted as large positive numbers, and boundary conditions need to be dealt with explicitly. |
 
 
-**(1)Avoid **`float`** and **`double`** mix**
+**(1) Avoid mixing `float` and `double`**
 
 `double` Operational latency is higher than `float`, and mixed use will trigger implicit conversion:
 
@@ -6749,7 +6749,7 @@ float scale = sqrtf(2.0f) * 3.14159f;
 **Note**: The compiler will optimize "constant expressions" (such as `sqrt(2.0f)` may be calculated at compile time), but still needs to be specified explicitly `float` Type - if missing `f` suffix, the compiler may issue a "precision loss" warning and the runtime may still execute `double` Operation.
 
 
-**(2)Avoid **`float`** and **`int`** mix**
+**(2) Avoid mixing `float` and `int`**
 
 `int` and `float` The mixed operation triggers an "integer-to-floating-point" operation with a latency of about 2-3 nanoseconds:
 
@@ -6963,9 +6963,9 @@ void preorder_tail_rec(Node* root) {
 
 + **Essence of the problem**: Passing large objects (such as`std::vector`, custom matrix class), value transfer will trigger object copying (calling the copy constructor), and the cost is much higher than reference transfer;
 + **Optimization solution**:
-    1. **For large objects**`const&`**Transfer**: For parameters that do not need to be modified, use "`const Type&`" pass to avoid copying, e.g.`void process(const Matrix& mat)`;
-2.**Small type direct value transfer**: Yes`int`,`float`For scalar types, the cost of value transfer is equivalent to that of reference transfer (or even faster, avoiding pointer indirect access), and there is no need to force the use of references;
-    2. **Avoid temporary object passing**: Pass constants to reference parameters (such as`process(5)`), the compiler will automatically create a temporary object. If you need to pass constants frequently, you can overload the function to adapt constant parameters (such as`void process(int val)`).
+    1. **For large objects, use `const&`**: For parameters that do not need to be modified, use `const Type&` to avoid copying, e.g. `void process(const Matrix& mat)`;
+    2. **Small types: pass by value**: For scalar types such as `int` and `float`, the cost of pass-by-value is comparable to reference passing (or faster, avoiding pointer indirection), so references are not required;
+    3. **Avoid unnecessary temporaries with reference parameters**: Passing constants to reference parameters (such as `process(5)`) makes the compiler create a temporary. If this happens often, overload for value parameters (such as `void process(int val)`).
 
 
 ### 21. Cache prefetch warm-up and vectorization
@@ -6989,7 +6989,7 @@ Modern processors (SSE and subsequent instruction sets) provide specific instruc
 | 512-bit NT store (64 B int) | VMOVNTDQ | `_mm512_stream_si512` | AVX-512F |
 
 
-`_mm_prefetch`** hints** ([Intel Intrinsics Guide](https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html)):
+**`_mm_prefetch` hints** ([Intel Intrinsics Guide](https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html)):
 
 | Macro | Instruction | Summary |
 | --- | --- | --- |
@@ -8768,7 +8768,7 @@ void lock() {
 1. `compare_exchange_weak`: This is a core atomic operation. it will compare `locked` value and `zero` value.
     - If equal (i.e. `locked` is 0), it will atomically `locked` The value of is updated to 1 and returns `true`. The thread successfully acquires the lock and the loop ends.
     - If not equal (i.e. `locked` is 1), it will fail to update and will `locked` The current value of (that is, 1) is loaded into `zero` in and return `false`.
-2. `while`** cycle**: if only `compare_exchange_weak` return `false`(Indicating that the lock was not grabbed), the cycle will continue. Because after failure `zero` The value will be changed to `locked` current value (1), so it must be reset to `0`, so that you can continue to try "replace 0 with 1".
+2. **`while` loop**: if only `compare_exchange_weak` returns `false` (indicating that the lock was not grabbed), the loop will continue. Because after failure `zero` The value will be changed to `locked` current value (1), so it must be reset to `0`, so that you can continue to try "replace 0 with 1".
 3. `memory_order_acq_rel`: This is a memory sequence.`acq_rel` = `acquire` + `release`.
     - **Acquire**: Ensure that all memory read and write operations after successfully acquiring the lock will not be rescheduled to before acquiring the lock. This ensures that the thread can see all modifications made in the critical section by the previous thread holding the lock.
     - **Release**: Ensures that all memory operations have completed before attempting to acquire the lock.
@@ -8868,7 +8868,7 @@ int main() {
 }
 ```
 
-The MCS lock organizes a queue (logical linked list) of waiting threads. Each thread wishing to acquire a lock assigns one of its own `lock_node` The node is added to the end of the queue. Then,**Each thread is only in its own **`lock_node`** spin on node**, wait for the previous thread to release the lock and notify it.
+The MCS lock organizes a queue (logical linked list) of waiting threads. Each thread wishing to acquire a lock enqueues its own `lock_node`. Then, **each thread spins only on its own `lock_node`**, waiting for the predecessor to release the lock and hand off.
 
 ```cpp
 void lock(lock_node* node) {
@@ -8896,7 +8896,7 @@ void lock(lock_node* node) {
 2. use `tail.exchange()` Atomically sets itself to the new end of the queue and retrieves the pointer to the previous end of the queue. `prev`.
 3. if `prev` yes `nullptr`, means that the lock is free, and the current thread directly acquires the lock and returns.
 4. if `prev` no `nullptr`, means there is a thread in front of it. It takes its own `node` The address is stored in the previous node's `next` Pointers form a linked list.
-5. Finally, it's**own**`node->locked` Spin on the logo. This is crucial because each thread spins on a different memory address, avoiding cache contention.
+5. Finally, it spins on its own `node->locked` flag. This is crucial because each thread spins on a different cache line, reducing coherence traffic.
 
 ```cpp
 void unlock(lock_node* node) {
@@ -10007,7 +10007,7 @@ An unnamed object temporarily created during expression evaluation. The default 
 **Life cycle extension**: by`const T&`or`T&&`After binding, the life cycle is consistent with the reference.
 
 
-**2. **`const T&`**Function**
+**2. `const T&` binding**
 
 Safely "borrow" objects, avoiding copy overhead while ensuring read-only availability.
 
@@ -10015,9 +10015,9 @@ Safely "borrow" objects, avoiding copy overhead while ensuring read-only availab
 + Extend the life cycle of the bound rvalue, allowing safe access but not modification.
 
 
-**3. **`T&&`**Function**
+**3. `T&&` binding**
 
-**breakthrough**`const T&`**Limitations**: Realize "taking over" rather than "borrowing" temporary object resources.
+**Beyond `const T&` limitations**: Take over temporary object resources rather than only borrowing them.
 
 **Move Semantics**: Take over rvalue resources through move construction/assignment operators to avoid deep copying and repeated release of resources.
 
@@ -10417,10 +10417,10 @@ inline auto Common::rdtsc() noexcept {
 ```
 
 3. **Working mechanism and implementation details of performance detection method**
-4. `rdtsc`**Function**: Using assembly instructions `rdtsc` Read the value from the TSC register, combining the lower 32 bits and upper 32 bits into a 64-bit `uint64_t` Type value representing elapsed CPU clock cycles. This is the basis of the entire performance instrumentation and is used to obtain the precise number of CPU clock cycles.
-5. `START_MEASURE`** Macro **: Use this macro where you need to start measuring latency, it will call `rdtsc` The function gets the current number of CPU clock cycles and creates a file with the specified name (`TAG`) to store this value in a constant variable for subsequent calculation of the delay.
-6. `END_MEASURE`** Macro **: Use this macro where you need to end the measured delay, it calls again `rdtsc` The function gets the current number of CPU clock cycles, calculates the difference from the value stored when the measurement was started, gets the number of delayed CPU clock cycles, and passes it to the logger (`LOGGER`) records the current time string and delay value.
-7. `TTT_MEASURE`**Macro**: used to record the current timestamp (in nanoseconds), by calling `Common::getCurrentNanos()` The function gets the current time and then uses a logger to log the current time string and that time value.
+4. **`rdtsc`**: Uses the `rdtsc` instruction to read the TSC, combining low and high halves into a 64-bit `uint64_t` count of elapsed CPU cycles—the basis of this instrumentation.
+5. **`START_MEASURE` macro**: At the start of a latency measurement, calls `rdtsc` and stores the cycle count in a constant named `TAG` for later differencing.
+6. **`END_MEASURE` macro**: At the end of a measurement, calls `rdtsc` again, subtracts the stored start count, and logs the delta via `LOGGER`.
+7. **`TTT_MEASURE` macro**: Records the current timestamp in nanoseconds (`Common::getCurrentNanos()`) and logs it.
 8. An excellentIntel Linux Invariant TSC CPUHigh-precision timer implementation example, source[https://github.com/a858438680/TSCTimer](https://github.com/a858438680/TSCTimer)
 
 ```cpp
@@ -11257,14 +11257,15 @@ gcc documentation:[https://gcc.gnu.org/onlinedocs/](https://gcc.gnu.org/onlinedo
 
 #### Adjust compiler options
 1. The most basic and important step is to enable the compiler's optimization flags. Usually, the following are necessary:
-+ `-O3`**:** Enable machine-independent aggressive optimization. This is one of the highest levels of optimization provided by most compilers and does a lot of code transformations such as loop unrolling, function inlining, dead code elimination, etc.
-+ `-march=native`** or `-march=<CPU_ARCH>`:** Enables optimizations for specific CPU architectures. This instructs the compiler to generate files specific to the current machine or to a specific architecture such as `core-avx2`,`arm64`)'s instruction set optimizes code to take advantage of CPU-specific high-performance instructions (such as AVX, AVX2, AVX-512, NEON).
-+ `-flto`** (Link Time Optimization) / `-fipo` (Inter-Procedural Optimization): ** Enables link-time optimization (LTO), also known as inter-procedural optimization (IPO). Typically, compilers can only optimize one compilation unit (source file) at a time. LTO allows the compiler to globally analyze and optimize the entire program during the link phase, uncovering optimization opportunities across file boundaries such as more aggressive function inlining, dead code elimination, and data flow optimizations.
++ **`-O3`:** Enables machine-independent aggressive optimization. This is one of the highest levels of optimization provided by most compilers and does a lot of code transformations such as loop unrolling, function inlining, dead code elimination, etc.
++ **`-march=native` or `-march=<CPU_ARCH>`:** Enables optimizations for specific CPU architectures so the compiler can emit ISA extensions available on the build host or named target (e.g. `core-avx2`, `arm64`), including AVX/AVX2/AVX-512/NEON where applicable.
++ **`-flto` (Link Time Optimization) / `-fipo` (Inter-Procedural Optimization):** Enables link-time optimization (LTO), also known as inter-procedural optimization (IPO). Typically, compilers can only optimize one compilation unit (source file) at a time. LTO allows the compiler to globally analyze and optimize the entire program during the link phase, uncovering optimization opportunities across file boundaries such as more aggressive function inlining, dead code elimination, and data flow optimizations.
 + `-fwhole-program` The option Enable WPO enables inter-procedural optimization, treating the entire codebase as a monolithic program, similar to the LTO feature.
-+ `-fprofile-generate`: Insert performance probes during compilation to record the execution frequency of the program when it is running (such as the number of function calls, the number of branch jumps, etc.).\n++ `-fprofile-use`: The compiler uses the hotspot data collected by program execution with probes to perform more aggressive optimizations on frequently executed code paths, and may reduce optimization overhead on cold paths.
++ `-fprofile-generate`: Insert performance probes during compilation to record execution frequency while the instrumented binary runs (e.g. call counts, branch counts).
++ `-fprofile-use`: Recompile using profiles from the instrumented run so hot paths get more aggressive optimization and cold paths may get less.
     1. **Other Important Options:** There are many other options that affect performance, such as:
-    - `-ffast-math`**:** Allows the compiler to rewire floating-point operations, possibly changing the order of operations, thereby enabling more optimizations (such as vectorization of floating-point operations). Use with caution, however, as it can lead to minor inaccuracies in the results and involves special behavior such as NaNs, infinities, etc. In databases, this is typically used only in analytical queries where numerical precision is less critical.
-    - `-mprefer-vector-width=###`**:** If you don't want to use certain heavy AVX instructions (like AVX-512, which can cause throttling on some older CPUs), you can set this to 128 or 256 to fix the maximum vector width.
+    - **`-ffast-math`:** Allows the compiler to reassociate floating-point operations, possibly changing evaluation order and enabling more optimizations (such as FP vectorization). Use with caution: results may differ slightly; NaNs/infinities behave differently. In databases this is usually reserved for analytical workloads where precision trade-offs are acceptable.
+    - **`-mprefer-vector-width=###`:** Avoids the widest SIMD (e.g. AVX-512 on CPUs that throttle) by capping at 128 or 256 bits.
 
 **GCC's most commonly used compilation options**
 
@@ -11436,9 +11437,9 @@ These optimization flags are not automatically enabled in any of the standard op
 
 #### Provide compiler hints
 1. In some cases, the compiler cannot prove on its own that an optimization is safe or beneficial. Provide additional information through **Compiler Hints** to assist the compiler in making decisions.
-+ `__restrict__`** Keyword (C/C++): ** Used to tell the compiler that the memory regions pointed to by pointers do not overlap (aliasing problems), which allows the compiler to confidently perform optimizations such as loop vectorization and code movement without inserting expensive runtime alias checks.
-+ `#pragma unroll(N)`** / `#pragma clang loop vectorize(enable)`:** Forces the compiler to unroll or vectorize a loop even if its cost model deems it unhelpful. This is useful in certain scenarios where human judgment is more accurate than the compiler.
-+ `[[likely]]`** / `[[unlikely]]` Property (C++20): ** Used to prompt the compiler to predict conditional branches. The compiler optimizes the machine code layout based on these hints, placing the most frequently executed code paths together, thus reducing the penalty for branch mispredictions.
++ **`__restrict__` keyword (C/C++):** Tells the compiler that pointer targets do not alias, enabling aggressive optimizations without runtime alias checks.
++ **`#pragma unroll(N)` / `#pragma clang loop vectorize(enable)`:** Forces unrolling or vectorization even when the cost model disagrees—use when you know better than the heuristic.
++ **`[[likely]]` / `[[unlikely]]` (C++20):** Branch prediction hints; the compiler may lay out hot paths to reduce misprediction cost.
 
 #### Use compiler built-in functions
 gcc (g++) provides many types of built-in functions, which are generally well-optimized implementations of corresponding functions. In some scenarios, you need to implement a better version yourself.
@@ -11464,7 +11465,7 @@ gcc (g++) provides many types of built-in functions, which are generally well-op
 + Auto-vectorization assistance:`__builtin_assume_aligned`(Specify alignment to assist the compiler in generating vector instructions)
 + Explicit vector operations: like x86`__builtin_ia32_addps`(AVX/SSE vector addition), ARM`__builtin_neon_vadds8`(NEON vector operations)
 10. **Other useful built-in functions**
-+ `__builtin_parity(x)`**(GCC)**: Count the parity of the number of 1's in x (odd numbers return 1, even numbers return 0), used for error detection (such as checksum);
++ **`__builtin_parity(x)` (GCC):** Returns parity of the popcount of `x` (odd → 1, even → 0); useful for checksums and similar checks.
 
 
 #### Check the code generated by the compiler
@@ -11672,7 +11673,7 @@ Compiler dynamic link option optimization
 
 
 ### 4. Special hardware instructions
-**1. **`_mm_CRC32_uXX`** series function**: Used as a high-performance hash function
+**1. `_mm_CRC32_uXX` family:** Used as a high-performance hash primitive.
 
 | **function name** | **input data type** | **Corresponding hardware instructions** | **illustrate** |
 | :--- | :--- | :--- | :--- |
@@ -11750,7 +11751,7 @@ Debugging and performance analysis tools:[https://www.yuque.com/bluememories/lan
 
 Perf in-depth analysis reference:[https://xie.infoq.cn/article/d86b3a3ca106449cb3f369a0f](https://xie.infoq.cn/article/d86b3a3ca106449cb3f369a0f)
 
-+ `perf`**Tools**: Sampling CPU cycles, cache miss rate, branch prediction failure rate, etc., and locating hot functions (such as through`perf record -g`Analyze the call stack).
++ **`perf`:** Samples cycles, cache misses, branch mispredictions, etc., and finds hot code (e.g. `perf record -g` + stack analysis).
 + `numastat`: Monitor the local/remote memory access ratio under the NUMA architecture. The remote access ratio needs to be controlled below 10% to avoid performance loss.
 + `valgrind`: Detect memory access locality issues and optimize data layout to improve cache hit rate.
 + `Intel VTune`: Analyze hardware-level bottlenecks such as instruction pipeline stalls and cache failures.
@@ -17738,8 +17739,8 @@ int main() {
 ID: 1002 | GOOGL @ 140.2 x 150
 ```
 
-+ On the left is**Full Event Log**(Record "what happened");
-+ On the right is**Current status reconstructed from logs**(Documenting "what it's like now").
++ On the left is **full event log** (records “what happened”).
++ On the right is **current state reconstructed from logs** (describes “what it is now”).
 
 
 **CQRS (Command Query Responsibility Separation)**: Split the system into two independent models - the command side focuses on processing write operations and business rules (optimizing transaction processing), and the query side specializes in reading operations (optimizing data retrieval). The two can use different technology stacks and expand independently. When combined with event sourcing, they can achieve performance isolation between high-frequency transactions and complex analysis.
@@ -20121,9 +20122,9 @@ Every message must start with a message header. It contains basic information fo
 
 **2. Message body**
 
-The message body contains specific business data of this specific message type. Its content is completely determined by **in the message header**`MsgType (35)` Decide.
+The message body contains business fields for this message type; which fields appear is determined by **`MsgType (35)`** in the header.
 
-+ **Example:**`NewOrderSingle (35=D)`** The message body may contain: **
++ **Example (`NewOrderSingle`, 35=D):** the body may contain:
     - `11=CLORDID`: Client order ID.
     - `55=SYMBOL`: Transaction object (such as stock code).
     - `54=SIDE`: Buying and selling direction (`1 = Buy`, `2 = Sell`).
@@ -21890,7 +21891,7 @@ ctp multi-account manual trading terminal tool
         * `client` group package `LoginReqBody -> serialize_login_req -> Message::encode() -> send()`
         * `server` exist `Session` After receiving the data `Message::decode()`,according to `MsgType` distributed to `ServerApp::on_*_req()`.
 + **Multi-account business logic and callback distribution**
-    - **Login Process**(`ServerApp::on_login_req`):
+    - **Login process** (`ServerApp::on_login_req`):
         * check `user_id` Not empty.
         * If it already exists and is logged in, directly reuse the Trader channel and replace the current `Session` bind to the `user_id`, send a successful login response packet.
         * Otherwise create new `CtpTraderAdapter`, set the login completion callback and construct it in the callback `LoginRspBody`, broadcast to all sessions under this account.
@@ -21923,11 +21924,11 @@ ctp multi-account manual trading terminal tool
 
 **Project Purpose**: Use the CTP futures trading interface (Trading Trader / Market Md) to query account funds, handling rates, margins, contracts and other information, and store it into MySQL through the C++ MySQL C API, corresponding to each CTP structure field and database table structure.
 
-+ **Quotes Interface**`CThostFtdcMdApi` / `CThostFtdcMdSpi`(`ctp_md.hpp`)
++ **Quotes interface:** `CThostFtdcMdApi` / `CThostFtdcMdSpi` (`ctp_md.hpp`)
     - `SimpleQSpi` inherit `CThostFtdcMdSpi`, override callback `OnFrontConnected`,`OnFrontDisconnected`,`OnRspUserLogin`.
     - Login process: pre-connect → `OnFrontConnected` → Fill in `CThostFtdcReqUserLoginField` → `ReqUserLogin`.
     - use `std::atomic<bool> disconnected` and `is_done` Mark the login completion/disconnection status, and the main thread polls and waits.
-+ **Trading Interface**`CThostFtdcTraderApi` / `CThostFtdcTraderSpi`(`ctp_td.hpp`)
++ **Trading interface:** `CThostFtdcTraderApi` / `CThostFtdcTraderSpi` (`ctp_td.hpp`)
     - `SimpleTSpi` inherit `CThostFtdcTraderSpi`, to implement query logic for funds, handling fees, margins, contracts, etc.:
         * Login callback `OnRspUserLogin` Push multiple query tasks into `requestQueue`,use `processNextRequest` Serial execution.
         * Query function:`queryTradingAccount`,`queryCommissionRate`,`queryMarginRate`,`queryInstrument`.
@@ -21937,15 +21938,15 @@ ctp multi-account manual trading terminal tool
 + **SPI callback driver + request queue model**
     - use `std::queue<std::function<void()>> requestQueue` Store pending requests via `processNextRequest` Implement chain calls of "after the last response of a request comes back, then send the next request" to ensure order and reduce throttling pressure.
     - Callback based on `bIsLast` Determine whether this query has ended, and then call `processNextRequest()`.
-+ **Main process control (**`main.cpp`**)**
++ **Main process control (`main.cpp`)**
     - `quote()`: Initialize MdApi, register `SimpleQSpi`, connect to the market leader and wait for login completion/disconnection, and then release.
     - `trade()`: initialize TraderApi, register `SimpleTSpi`, connect the transaction frontend and keep running until disconnected.
     - `main()`: call first `create_table()` Initialize the MySQL table and then call `trade()`,at last `close_connection()`.
-+ **MySQL connection management (**`mysql_utils.hpp`**)**
++ **MySQL connection management (`mysql_utils.hpp`)**
     - Turn off SSL and set the character set to `utf8mb4`, and execute `SET NAMES utf8mb4` To avoid garbled Chinese comments.
     - overall situation `inline MYSQL *conn` reuse connections,`create_connection()` + `close_connection()` Management life cycle.
     - pass `SHOW VARIABLES LIKE 'character_set_client'` Verify whether the character set setting takes effect.
-+ **Table creation statements for four core tables (**`mysql_utils.hpp`**)**
++ **Table creation statements for four core tables (`mysql_utils.hpp`)**
 `markdown/api_struct.md` Field descriptions in:
     - `ctp_account` **↔** `CThostFtdcTradingAccountField`
         * 50 fields, completely mapping capital account information (last settlement reserve, currently available funds, margin, deposits and withdrawals, interest, special product fields, etc.).
@@ -26070,7 +26071,7 @@ Current limiting is done to maintain stability and recoverability as the system 
 
 **Current limiting algorithm selection**
 
-**A) **`ApiRateLimiter`**(Shard Lock + Token Bucket, general production version)**
+**A) `ApiRateLimiter` (shard lock + token bucket, general production version)**
 
 **Applicable**: The number of keys is large, automatic expiration cleaning is required, a hard upper limit is required to prevent key flooding, and concurrency is medium to high.
 
@@ -26087,7 +26088,7 @@ Current limiting is done to maintain stability and recoverability as the system 
 + `idle_timeout/prune_interval/max_entries` Control key life cycle and memory limit
 
 
-**B) **`LockFreeApiRateLimiter`(No lock + GCRA + fixed capacity table)
+**B) `LockFreeApiRateLimiter` (no lock + GCRA + fixed-capacity table)**
 
 **Applicable**: Extreme throughput/low tail latency, controllable and predictable key space, willingness to trade fixed capacity for performance.
 
@@ -29086,7 +29087,7 @@ For the "regularized strategy parameter optimization" scenario in the trading sy
 
 + Stop iteration when "there is no performance improvement in consecutive max_bad_gen generations" and output the global optimal parameter combination and its performance (by`get_best`Obtained), in line with the optimization criterion of "stop when stable convergence".
 
-**(5)Performance evaluation interface:**`trade_system_criter`
+**(5) Performance evaluation interface:** `trade_system_criter`
 
 + Input: parameter combination to be evaluated (such as moving average lookback period, threshold) + minimum number of transactions constraints;
 + Internal logic: reproduce the trading strategy according to parameters (such as moving average cross opening/closing), calculate the performance during the backtest period (total return, Sharpe ratio, profit factor, etc. supported in the book), and return invalid values if the number of transactions is insufficient;
@@ -32048,8 +32049,9 @@ int main() {
 
 ```
 
-### 12. Permutation test verification strategyincome
-Replacement test passed**Randomly rearrange sample labels**(such as the positive and negative marks of transaction income), destroy the potential correlation in the original data, generate an "uncorrelated" reference distribution, and then judge the statistical significance of the original data. In trading systems, it is often used to verify "whether the strategy returns are significantly better than random":
+### 12. Permutation test verification strategy (income)
+
+A **permutation test** randomly permutes sample labels (such as the positive/negative marks of transaction income), destroying correlations present in the original data and yielding an “uncorrelated” reference distribution; you then assess whether the original statistic is extreme relative to that null. In trading systems this often answers whether strategy returns are materially better than random:
 
 1. Calculate the core statistics of the original strategy (such as average return, Sharpe ratio).
 2. Rearrange the "directional labels" of returns multiple times (such as randomly exchanging "profit" and "loss") to generate a large number of "random strategy" statistics.
@@ -36063,7 +36065,7 @@ The best price access is O(1), which meets the performance requirements of high-
 
 **Core code analysis**
 
-**1. Order book data structure (**`orderbook.py`**)**
+**1. Order book data structure (`orderbook.py`)**
 
 This is the core data structure of the entire system and is responsible for efficiently maintaining the order books of buyers and sellers.
 
@@ -36135,7 +36137,7 @@ def update_bid(self, price: float, quantity: float):
 + Ensure data consistency
 
 
-**2. WebSocket Client (**`gemini_client.py`**)**
+**2. WebSocket client (`gemini_client.py`)**
 
 Responsible for establishing connections with Gemini exchanges, subscribing to data streams and processing messages.
 
@@ -36254,7 +36256,7 @@ async def _process_orderbook_changes(self, changes: list):
 + Support Gemini API's "buy"/"sell" and "bid"/"ask" formats
 
 
-**3. Main program (**`main.py`**)**
+**3. Main program (`main.py`)**
 
 The entry point of the application, responsible for coordinating the various components.
 
@@ -36364,7 +36366,7 @@ PREFIX_MAP = {
         * Align time to a fixed granularity (15m) to avoid "cross-frame" errors.
 
 
-`last_minute_buyer_15min.py`**(Core Strategy & Trading Logic)**
+**`last_minute_buyer_15min.py` (core strategy & trading logic)**
 
 **1. Overall strategy idea**
 
