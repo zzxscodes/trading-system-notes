@@ -11537,17 +11537,17 @@ Disassembly analysis of target files
 
 | Optimization Types | MS Compilers | Gnu and Clang Compilers | Intel Compilers (Windows) | Intel Compilers (Linux) |
 | --- | --- | --- | --- | --- |
-| 16-byte alignment | __declspec(align(16)) | __attribute((aligned(16))) | __declspec(align(16)) | __attribute((aligned(16))) |
+| 16-byte alignment | __declspec(align(16)) | `__attribute__((aligned(16)))` | __declspec(align(16)) | `__attribute__((aligned(16)))` |
 | 16-byte alignment (C++11) | alignas(16) | alignas(16) | alignas(16) | alignas(16) |
 | Assume pointers are aligned | #pragma vector aligned | #pragma vector aligned |  |  |
 | Assume pointers are not aliased | #pragma optimize("a", on) __restrict | __restrict | __declspec(noalias) __restrict #pragma ivdep | __restrict #pragma ivdep |
-| Assume the function is pure |  | __attribute((const)) |  | __attribute((const)) |
+| Assume the function is pure |  | `__attribute__((const))` |  | `__attribute__((const))` |
 | Assume the function does not throw an exception | throw() | throw() | throw() | throw() |
 | Functions are assumed to be called only from the same module | static | static | static | static |
-| Assume that member functions are only called from the same module |  | __attribute((visibility("internal"))) |  | __attribute((visibility("internal"))) |
+| Assume that member functions are only called from the same module |  | `__attribute__((visibility("internal")))` |  | `__attribute__((visibility("internal")))` |
 | Vectorization | #pragma vector always | #pragma vector always |  |  |
 | Optimization function | #pragma optimize(...) |  |  |  |
-| Fast call function | __fastcall | __attribute((fastcall)) | __fastcall |  |
+| Fast call function | __fastcall | `__attribute__((fastcall))` | __fastcall |  |
 | Vector call function | __vectorcall | __vectorcall (Clang only) | __vectorcall |  |
 | Non-cached writes | #pragma vector nontemporal | #pragma vector nontemporal |  |  |
 
@@ -11561,7 +11561,7 @@ Disassembly analysis of target files
 | 32-bit platform | not _WIN64 | not _WIN64 |  |  |  |
 | 64-bit platforms | _WIN64 | _LP64 | _LP64 | _WIN64 | _LP64 |
 | Windows platform | _WIN32 | _WIN32 |  |  |  |
-| Linuxplatform | n.a. | __unix__，__linux__ | __unix__，__linux__ | __unix__，__linux__ | __unix__，__linux__ |
+| Linux platform | n.a. | __unix__，__linux__ | __unix__，__linux__ | __unix__，__linux__ | __unix__，__linux__ |
 | x86 platform | _M_IX86 | _M_IX86 |  |  |  |
 | x86-64 platform | _M_IX86 and _WIN64 | _M_X64 | _M_X64 |  |  |
 
