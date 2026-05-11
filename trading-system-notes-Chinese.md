@@ -5069,6 +5069,95 @@ int main() {
 }
 ```
 
+Mixin（组合语义下的编译期组装）。面向对象教材里常强调「组合优先于继承」，指的是**不要用 public 继承去复用实现**（「是一个」被滥用），而应通过成员对象把能力**委托**出去（「有一个」）。Mixin（混入）乍看仍在用 `class Odd<X> : public X`，容易让人误以为和这条原则冲突；实质上它是**用继承语法表达一组正交能力在编译期的纵向叠加**：外层 mixin **包装**内层对象的状态与接口，整条继承链在实例里只占**一份**连续布局，等价于把多层装饰器**熔成单一具体类型**，因此更接近「强约束下的组合」，而不是「用继承替代组合」。
+
+Fu Zhe 在《[C++：使用 mixin 获得比继承+组合更好的性能](https://fuzhe1989.github.io/2018/07/22/cpp-use-mixin-to-get-better-performance/)》里用矩阵遍历_iterator_ 说明：若「底层遍历 + 过滤奇数 + 按行附加 + 数值翻倍」用**公共接口类 + 运行期嵌套指针**一层层包起来，每一层往往伴随**堆分配、虚调用、空指针检查**，调用链越长开销越大。若把这些层改成 **模板 mixin**，则：
+
++ **零每层堆分配**：整条能力链是一个栈上的完整对象，而不是多个独立分配的装饰器节点。
++ **静态派发**：热路径上对「下一层」的调用在编译期解析，便于内联；不存在每层一道虚函数的开销。
++ **组合顺序即类型**：`Double<Odd<Raw>>` 与 `Odd<Double<Raw>>` 是不同的静态类型，表达能力组合的拓扑；运行期方案则常在接口之下抹平类型。
+
+代价也要写进笔记：mixin **组合爆炸**（每种顺序、每种是否启用都会产生不同类型）、二进制体积与编译时间上升、错误信息变长；需要统一接口约定（博客中用嵌套 `Context` 类型把各层构造参数串联起来；C++11 以后可用变参、`std::piecewise_construct`、`using Base::Base` 等减轻样板代码）。
+
+下面给出一个与上文同一思想的 **C++20** 极简示意（无虚拟接口；能力通过模板层叠加）。可与「成员持有 `Iterator*` 的装饰器链」对比心智模型：这里是**编译期**把链「压扁」成一个类型。
+
+```cpp
+// C++20：mixin 链 = 编译期组合；热路径无虚函数、无每层堆分配。
+#include <span>
+#include <utility>
+#include <vector>
+
+struct Cell {
+    int row{};
+    int col{};
+    int value{};
+};
+
+// 叶子：裸遍历二维 vector（按行主序）
+class MatrixWalk {
+public:
+    explicit MatrixWalk(std::span<const std::vector<int>> rows) : rows_{rows} { skip_empty(); }
+
+    [[nodiscard]] Cell cell() const {
+        return {.row = static_cast<int>(r_), .col = static_cast<int>(c_), .value = rows_[r_][c_]};
+    }
+    [[nodiscard]] bool valid() const noexcept { return r_ < rows_.size(); }
+
+    void next() {
+        if (!valid()) return;
+        ++c_;
+        if (c_ >= rows_[r_].size()) {
+            c_ = 0;
+            ++r_;
+            skip_empty();
+        }
+    }
+
+private:
+    std::span<const std::vector<int>> rows_;
+    std::size_t r_{};
+    std::size_t c_{};
+
+    void skip_empty() {
+        while (r_ < rows_.size() && rows_[r_].empty()) ++r_;
+    }
+};
+
+template <class Base>
+class OddOnly : public Base {
+public:
+    template <class... Args>
+    explicit OddOnly(Args&&... args) : Base(std::forward<Args>(args)...) {
+        while (Base::valid() && (Base::cell().value % 2 == 0)) Base::next();
+    }
+
+    void next() {
+        do {
+            Base::next();
+        } while (Base::valid() && (Base::cell().value % 2 == 0));
+    }
+};
+
+template <class Base>
+class DoubleValue : public Base {
+public:
+    template <class... Args>
+    explicit DoubleValue(Args&&... args) : Base(std::forward<Args>(args)...) {}
+
+    [[nodiscard]] Cell cell() const {
+        Cell x = Base::cell();
+        x.value *= 2;
+        return x;
+    }
+};
+
+// 用法：类型即组合顺序——交换模板顺序会得到不同布局/行为的类型。
+// using Iter = DoubleValue<OddOnly<MatrixWalk>>;
+// Iter it{std::span<const std::vector<int>>(matrix)};
+```
+
+**小结：** 「组合优先于继承」反对的是**拿继承当代码复用捷径**；mixin 是用模板在**编译期**把多个小对象的行为合成一个整体，用来替代**运行期多层指针 + 虚接口**时，往往更符合高性能路径的需求，并与组合思想一致——只是组合发生在类型构造阶段，而非仅靠成员子对象。
+
 
 ### 14. 编译期多态及编译期计算
 **1.编译期多态**

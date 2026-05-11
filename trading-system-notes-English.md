@@ -5033,7 +5033,7 @@ ch.branch(x);                       // hot-path dispatch; matches handle_* arity
 //Define an Order structure to represent order information
 // Each order contains an id of integer type and a price of double precision floating point type.
 struct Order {
-    you hand;
+    int id;
     double price;
 };
 
@@ -5066,6 +5066,95 @@ int main() {
     return 0;
 }
 ```
+
+Mixin (compile-time composition in the spirit of “prefer composition”). Books usually phrase “favor composition over inheritance” as: **do not use public inheritance to reuse implementation** (avoid stretching “is-a”), and instead **delegate** behavior to member objects (“has-a”). Mixins look like `class Odd<X> : public X`, which can feel like a violation; in practice they are **vertical stacking of orthogonal capabilities at compile time**. An outer mixin **wraps** the inner object’s state and API; the whole chain is a **single concrete instance** with one contiguous layout—multiple decorators **fused into one type**. That is closer to **composition under strong static constraints** than to “inheritance instead of composition.”
+
+Fu Zhe’s *[C++: using mixin for better performance than inheritance plus composition](https://fuzhe1989.github.io/2018/07/22/cpp-use-mixin-to-get-better-performance/)* (original article, in Chinese) uses matrix iterators to show that if “raw scan → odd filter → per-row append → double values” is built as a **runtime hierarchy** (abstract iterator + nested owning pointers), each layer tends to add **heap allocation, virtual calls, and null checks**, and cost grows with depth. Template mixins flip this:
+
++ **No per-layer heap nodes**: one stack (or inline) object for the full pipeline, not a linked tower of decorators.
++ **Static dispatch**: calls through the chain resolve at compile time and inline well; no per-layer virtual overhead on the hot path.
++ **Order is in the type**: `Double<Odd<Raw>>` vs `Odd<Double<Raw>>` are distinct static types; the runtime/interface approach often erases that structure behind one pointer type.
+
+Trade-offs belong in the same note: **combinatorial explosion** of types, larger binaries and compile times, and heavier diagnostics; layers need a consistent construction story (the article nests a `Context` type per mixin to thread constructor arguments; C++11 and later add variadic templates, `std::piecewise_construct`, `using Base::Base`, etc., to cut boilerplate).
+
+Below is a minimal **C++20** sketch of the same idea (no virtual iterator API; capabilities are template layers). Compare mentally to a decorator chain that **holds** `Iterator*`: here the chain is **flattened at compile time** into one type.
+
+```cpp
+// C++20: a mixin stack is compile-time composition; no virtual calls or per-layer heap nodes on the hot path.
+#include <span>
+#include <utility>
+#include <vector>
+
+struct Cell {
+    int row{};
+    int col{};
+    int value{};
+};
+
+// Leaf: row-major walk over a 2D vector stored as vector<vector<int>>.
+class MatrixWalk {
+public:
+    explicit MatrixWalk(std::span<const std::vector<int>> rows) : rows_{rows} { skip_empty(); }
+
+    [[nodiscard]] Cell cell() const {
+        return {.row = static_cast<int>(r_), .col = static_cast<int>(c_), .value = rows_[r_][c_]};
+    }
+    [[nodiscard]] bool valid() const noexcept { return r_ < rows_.size(); }
+
+    void next() {
+        if (!valid()) return;
+        ++c_;
+        if (c_ >= rows_[r_].size()) {
+            c_ = 0;
+            ++r_;
+            skip_empty();
+        }
+    }
+
+private:
+    std::span<const std::vector<int>> rows_;
+    std::size_t r_{};
+    std::size_t c_{};
+
+    void skip_empty() {
+        while (r_ < rows_.size() && rows_[r_].empty()) ++r_;
+    }
+};
+
+template <class Base>
+class OddOnly : public Base {
+public:
+    template <class... Args>
+    explicit OddOnly(Args&&... args) : Base(std::forward<Args>(args)...) {
+        while (Base::valid() && (Base::cell().value % 2 == 0)) Base::next();
+    }
+
+    void next() {
+        do {
+            Base::next();
+        } while (Base::valid() && (Base::cell().value % 2 == 0));
+    }
+};
+
+template <class Base>
+class DoubleValue : public Base {
+public:
+    template <class... Args>
+    explicit DoubleValue(Args&&... args) : Base(std::forward<Args>(args)...) {}
+
+    [[nodiscard]] Cell cell() const {
+        Cell x = Base::cell();
+        x.value *= 2;
+        return x;
+    }
+};
+
+// Usage: the type spells the order—swapping template arguments yields a different type.
+// using Iter = DoubleValue<OddOnly<MatrixWalk>>;
+// Iter it{std::span<const std::vector<int>>(matrix)};
+```
+
+**Takeaway:** “Composition over inheritance” targets **using inheritance as a convenience for implementation reuse**. Mixins use templates to **fuse** small behaviors into one static type, which is often the right tool when the alternative is **runtime layering behind virtuals and pointers**—still aligned with composition, but applied **while the type is being assembled**, not only via explicit member subobjects.
 
 
 ### 14. Compile-time polymorphism and compile-time calculation
