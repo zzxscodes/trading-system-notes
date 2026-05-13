@@ -4,8 +4,6 @@ English version：[https://github.com/zzxscodes/trading-system-notes/blob/main/t
 
 + GitHub: [https://github.com/zzxscodes/trading-system-notes](https://github.com/zzxscodes/trading-system-notes)
 
-*致谢 Sourav Ghosh 的好书 *Building Low Latency Applications with C++*。*
-
 ## 目录
 
 - [低延迟系统开发基础](#低延迟系统开发基础)

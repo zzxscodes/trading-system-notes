@@ -4,8 +4,6 @@
 
 + GitHub: [https://github.com/zzxscodes/trading-system-notes](https://github.com/zzxscodes/trading-system-notes)
 
-*Special thanks to Sourav Ghosh for his excellent book *Building Low Latency Applications with C++*.*
-
 ## Table of Contents
 
 - [Low latency system development basics](#low-latency-system-development-basics)

@@ -13,4 +13,8 @@ Repository: [github.com/zzxscodes/trading-system-notes](https://github.com/zzxsc
 
 ## Acknowledgments
 
-*Special thanks to Sourav Ghosh for his excellent book *Building Low Latency Applications with C++*.*
+*Special thanks to Sourav Ghosh for his excellent book* *Building Low Latency Applications with C++*.
+
+*Also thanks to Agner Fog for his excellent book Optimizing Software in C++, which are invaluable for low-level performance work.*
+
+*And thanks to Denis Bakhvalov for* *Performance Analysis and Tuning on Modern CPU*.
