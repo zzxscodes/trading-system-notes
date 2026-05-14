@@ -6620,6 +6620,9 @@ double Func2(double x) {
 
 
 ### 18. 强度削弱优化及算术优化
+
+《Hacker's Delight》一书涵盖了非常多利用二进制表示的数学特性和整数运算技巧，用低成本的位运算、移位和乘法替代昂贵的除法、浮点运算或分支指令的算法。虽然现代 CPU 已经集成了很多对应的硬件指令，但这些软件实现仍有价值，可参阅：[hacker's delight](https://www.yuque.com/bluememories/lanaff/gbcvffbztfazolyo)。
+
 **整数变量与操作符运算效率表**
 
 | 运算类型 | 强度等级 | 典型CPU周期 | 关键说明和优化 |
