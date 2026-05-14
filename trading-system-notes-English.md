@@ -6631,7 +6631,7 @@ double Func2(double x) {
 
 | Operation Type | Intensity Level | Typical CPU Cycles | Key Notes and Optimizations |
 | --- | --- | --- | --- |
-| Addition (+), subtraction (-), bit operations (&, | , ^, <<, >>, etc.) | 1 (weakest) | ~1 |
+| Addition (+), subtraction (-), bit operations (&, \|, ^, <<, >>, etc.) | 1 (weakest) | ~1 | Typically single-cycle class on common cores; exact latency is microarchitecture-dependent. |
 | Multiplication (*) | 2 (medium) | ~3 - 4 | The hardware is highly optimized and fast; the compiler will automatically optimize simple scenarios without excessive manual intervention. |
 | Division (/), modulo (%) (unsigned integer) | 3 (stronger) | ~40 - 80 | Division/modulo of unsigned integers is faster than signed integers; it should be avoided in high-frequency loops, and you can rely on the compiler to optimize "constant division" into a multiplication + shift operation. |
 | Division (/), modulo (%) (signed integer) | 3 (strongest) | ~40 - 80 (usually slightly slower than unsigned) | Signed integer needs to process the sign bit, which adds additional logic overhead, and is slightly slower than unsigned integer; like unsigned scenarios, high-frequency scenarios need to be avoided as much as possible or rely on compiler optimization. |
