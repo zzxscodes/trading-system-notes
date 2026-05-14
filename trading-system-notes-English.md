@@ -6624,6 +6624,9 @@ double Func2(double x) {
 
 
 ### 18. Strength weakening optimization and arithmetic optimization
+
+*Hacker's Delight* covers a great many algorithms that exploit mathematical properties of binary representations and integer-arithmetic tricks, replacing costly division, floating-point operations, or branches with cheaper bit operations, shifts, and multiplications. Although modern CPUs already integrate many corresponding hardware instructions, these software implementations remain valuable; see [hacker's delight](https://www.yuque.com/bluememories/lanaff/gbcvffbztfazolyo).
+
 **Integer variable and operator operation efficiency table**
 
 | Operation Type | Intensity Level | Typical CPU Cycles | Key Notes and Optimizations |
