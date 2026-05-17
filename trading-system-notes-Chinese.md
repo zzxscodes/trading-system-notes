@@ -3166,6 +3166,24 @@ double ipow(double x, int n) {
 4. **调试与验证**：
     - 通过编译器生成汇编代码（如`gcc -S`）验证内联汇编正确性；使用测试程序对比C++实现与汇编实现的输出，确保功能一致。
 
+**手写汇编的延迟优化技巧**
+
+以下技巧微架构细节见 Agner Fog manual 3/4 与 Intel/AMD 优化手册。
+
+| 类别 | 技巧 |
+| --- | --- |
+| 乱序与依赖 | 写完整寄存器（32/64 位）而非 8/16 位部分寄存器；用 `movzx`/`mov eax` 清零高位，避免 AH–DH；用 `add/sub` 替代 `inc/dec`（避免 flags 伪依赖）；用 `xor reg,reg`/`xorps` 打破伪依赖与清零；避免长依赖链，用多累加器或 `(a+b)+(c+d)` 树形归约 |
+| 标志依赖 | `ror` 等改 flags 的指令后可用 `xor edx,edx` 打断对 flags 的伪依赖（不能用 `clc` 打断进位依赖） |
+| 取指/解码 | 关键循环/子程序入口按 16（必要时 64）字节对齐；减少跳转；条件分支把最常见路径放在 **not taken**；热循环保持短小以命中 µop cache / loopback buffer，避免无谓展开 |
+| 分支 | 难预测分支（约 50/50）优先 `cmov`/查表/位运算；可预测且处于长依赖链时分支常优于 `cmov`（经验：预测率 >75%）；布尔用 `setcc`+`movzx`；尾调用用 `jmp` 替代 `call`+`ret`；`call`/`ret` 必须配对，勿用 `ret` 当间接跳转 |
+| 循环 | 循环出口分支放末尾，去掉循环内无条件跳；用整数向下计数到 0（`sub`/`jnz`），避免 `loop`/`jecxz`；数组可用“指向末尾 + 负索引”配合 `js`；循环退出条件勿依赖循环体刚算出的数据；浮点收敛条件可改为固定最大整数次数 |
+| 循环外提 | 循环不变量、不变分支提到循环外；周期为 r 的模式分支可展开 r 倍消除 |
+| 执行端口 | 按 manual 4 统计 µop 与各 port 负载；累加器个数 ≈ 指令 latency ÷ reciprocal throughput；混合整数/浮点/向量/访存以利并行 |
+| 内存 | 按数据宽度对齐（SIMD 16/32/64）；热数据优先栈上连续块；尽早算好指针便于 CPU 判地址无关；顺序前向访问；大步长为 2 的幂时注意 cache set 冲突；大块只写一次的数据可用 `movnt*` |
+| 对齐填充 | 对齐循环入口优先“加长前序指令”或多字节 `nop 0F 1F`，勿用 `mov rax,rax`/`lea` 等带寄存器假依赖的填充；勿在可能被多条路径共用的标号前插入无意义 prefix——同一指令若从不同地址进入，部分 CPU 会误判指令边界，增加解码开销 |
+| SIMD / AVX | 使用 YMM/ZMM 的代码在返回或调用可能含 legacy SSE 的模块前执行 `vzeroupper`；同一热区尽量统一 VEX 编码，或与 legacy SSE 隔离；AVX-512 掩码 load 用 `{k}{z}` 打破假依赖；能用 FMA 合并乘加；向量清零优先 `pxor xmm,xmm` |
+| 慢指令 | 慎用 `div`/`idiv`、x87 `fscale`/`fprem`、未向量化的 `rep movs`；`lea` 有时比 add+shift 快但有时更慢，需实测；整数除常数可改乘+移位 |
+
 
 ### 9. lock-free queue及micro-batching
 优秀博客：[https://moodycamel.com/blog/2014/a-fast-general-purpose-lock-free-queue-for-c++.htm](https://moodycamel.com/blog/2014/a-fast-general-purpose-lock-free-queue-for-c++.htm)

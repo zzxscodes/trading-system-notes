@@ -3157,6 +3157,24 @@ double ipow(double x, int n) {
 4. **Debug and Verify**:
     - Generate assembly code through a compiler (e.g.`gcc -S`) Verify the correctness of inline assembly; use test programs to compare the output of C++ implementation and assembly implementation to ensure consistent functionality.
 
+**Assembly latency tips for hand-written code**
+
+The microarchitecture specifics of following techniques are in Agner Fog manuals 3/4 and vendor optimization guides.
+
+| Category | Technique |
+| --- | --- |
+| Out-of-order / deps | Write full registers (32/64-bit), not 8/16-bit partials; use `movzx` / 32-bit writes to zero the upper part; avoid AH–DH; prefer `add`/`sub` over `inc`/`dec` (flags false deps); use `xor reg,reg` / `xorps` to break false deps and zero; avoid long chains—use multiple accumulators or tree reduction `(a+b)+(c+d)` |
+| Flag deps | After `ror` and similar flag-writing ops, `xor edx,edx` can break false dependence on flags (`clc` does not break carry dependence) |
+| Fetch / decode | Align critical loop and subroutine entries to 16 bytes (64 if needed); minimize jumps; put the most common branch path on the **not-taken** side; keep hot loops small for µop cache / loopback buffer; avoid pointless unrolling |
+| Branches | For ~50/50 branches prefer `cmov`, lookup, or bit tricks; when predictable and in a long dependency chain, branches often beat `cmov` (rule of thumb: >75% prediction); use `setcc` + `movzx` for booleans; tail calls: `jmp` instead of `call`+`ret`; always match `call`/`ret`, never use `ret` as indirect jump |
+| Loops | Put the exit branch at the bottom; remove in-loop unconditional jumps; count down to zero with integer `sub`/`jnz`; avoid `loop`/`jecxz`; end-of-array + negative index + `js` is often good; do not make loop exit depend on data just computed in the body; replace FP exit tests with a fixed max integer trip count when cheaper |
+| Hoisting | Move loop-invariant expressions and invariant branches out of the loop; unroll by r to remove periodic inner branches |
+| Execution ports | Use manual 4 µop/port tables; number of accumulators ≈ latency ÷ reciprocal throughput; mix integer, FP/vector, and memory ops for parallelism |
+| Memory | Align by operand width (SIMD 16/32/64); prefer contiguous stack for hot data; compute pointers early for disambiguation; sequential forward access; watch 2^k stride set conflicts; `movnt*` for large write-only regions |
+| Alignment padding | Pad loop entries with longer encodings or multi-byte `nop 0F 1F`, not `mov rax,rax` / `lea` (false register deps); do not place meaningless prefixes before a label reached from multiple paths—the same instruction decoded from different addresses can confuse instruction boundaries and slow decoding on some CPUs |
+| SIMD / AVX | After YMM/ZMM code, issue `vzeroupper` before returning or calling modules that may use legacy SSE; keep a hot region all-VEX or isolate legacy SSE; AVX-512 masked loads use `{k}{z}` to avoid false deps; use FMA for multiply-add; prefer `pxor xmm,xmm` to zero vectors |
+| Slow instructions | Avoid hot-path `div`/`idiv`, x87 `fscale`/`fprem`, naive `rep movs`; `lea` is situational; constant divisors → multiply + shift |
+
 
 ### 9. lock-free queue and micro-batching
 Excellent blog:[https://moodycamel.com/blog/2014/a-fast-general-purpose-lock-free-queue-for-c++.htm](https://moodycamel.com/blog/2014/a-fast-general-purpose-lock-free-queue-for-c++.htm)
