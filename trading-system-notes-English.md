@@ -8808,6 +8808,8 @@ private:
 };
 ```
 
+**Extension** "Latest quote or parameter panel only" -> **triple buffer** (adds a spare buffer beyond double buffering for more decoupled read/write and dropping intermediate updates). Reference: Ng Song Guan, [Triple Buffer: Lock-free Concurrency Primitive](https://medium.com/@sgn00/triple-buffer-lock-free-concurrency-primitive-611848627a1e)
+
 
 ### 24. Custom spin lock implementation
 in the form of a lock abstractionUsed to protect shared resource operations with extremely short execution time (much shorter than the thread context switching time), such as real-time updating of order books, capturing market data snapshots, and rapid calculation of trading signals.

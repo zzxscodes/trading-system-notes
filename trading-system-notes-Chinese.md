@@ -8774,6 +8774,8 @@ private:
 };
 ```
 
+**扩展** 只要最新行情 / 最新参数面板 -> **triple buffer**（三缓冲，在双缓冲基础上增加 spare 缓冲，读写更解耦、可丢弃中间更新）。参考：Ng Song Guan, [Triple Buffer: Lock-free Concurrency Primitive](https://medium.com/@sgn00/triple-buffer-lock-free-concurrency-primitive-611848627a1e)
+
 
 ### 24. 自定义自旋锁实现
 以锁的抽象方式用于保护执行时间极短（远短于线程上下文切换耗时）的共享资源操作，如订单簿实时更新、行情数据快照抓取、交易信号快速计算等场景。
