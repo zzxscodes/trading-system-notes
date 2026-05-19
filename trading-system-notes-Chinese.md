@@ -10385,16 +10385,15 @@ struct WaitFreeCounter {
 | isolcpus=8-15 | 修改/etc/default/grub，在GRUB_CMDLINE_LINUX中添加参数，执行update-grub | 是 | 将指定CPU从内核通用调度器隔离，避免普通进程抢占 | 隔离的核心范围需与nohz_full、rcu_nocbs保持一致 |
 | nohz_full=8-15 | 同上述GRUB配置方式 | 是 | 在隔离核心禁用时钟滴答（timer tick），消除周期性时钟中断 | 需确保内核编译时开启CONFIG_NO_HZ_FULL=y |
 | rcu_nocbs=8-15 | 同上述GRUB配置方式 | 是 | 将隔离核心的RCU回调任务卸载到非隔离核心，避免RCU操作干扰 | nohz_full会隐含rcu_nocbs，但显式配置更安全 |
-| preempt=full | 同上述GRUB配置方式 | 是 | 启用完全抢占式内核，减少内核路径中的不可抢占区域 | 需内核支持CONFIGPreemptFull |
+| preempt=full | 同上述GRUB配置方式 | 是 | 启用完全抢占式内核，减少内核路径中的不可抢占区域 | 需内核支持 CONFIG_PREEMPT_FULL |
 | threadirqs | 同上述GRUB配置方式 | 是 | 将软中断分配到多个CPU核心，避免单核过载 | 可能增加中断处理开销，需权衡 |
-| no_watchdog | 同上述GRUB配置方式 | 是 | 禁用内核watchdog服务，消除watchdog进程带来的干扰 | 生产环境需评估风险，测试环境可放心禁用 |
+| nowatchdog | 同上述GRUB配置方式 | 是 | 禁用内核watchdog服务，消除watchdog进程带来的干扰 | 生产环境需评估风险，测试环境可放心禁用；常与 `nmi_watchdog=0` 配合 |
 | tsc=reliable | 同上述GRUB配置方式 | 是 | 标记TSC为可靠时间源，减少时间源验证带来的延迟 | 仅Intel CPU建议添加，AMD CPU根据实际情况选择 |
 | mce=off | 同上述GRUB配置方式 | 是 | 禁用机器检查异常处理，避免MCE触发的中断 | 仅测试环境使用，生产环境禁用可能导致硬件故障无法检测 |
 | ipv6.disable=1 | 同上述GRUB配置方式 | 是 | 禁用IPv6协议栈，减少IPv6相关内核任务消耗 | 若系统需使用IPv6，此参数需删除 |
 | audit=0 | 同上述GRUB配置方式 | 是 | 禁用审计子系统，消除auditd和audit backlog处理带来的不确定性开销 | 可大幅减少上下文切换和软中断 |
 | mitigations=off | 同上述GRUB配置方式 | 是 | 禁用所有CPU漏洞缓解措施（Spectre、Meltdown、L1TF、MDS、TAA等），消除其对系统调用、上下文切换和内存访问的性能开销 | 视应用而定；可显著提升性能但移除了针对CPU侧信道攻击的安全保护；也可考虑使用不含漏洞缓解微码的旧版CPU微码进一步降低延迟 |
 | tuned-adm profile network-latency | 执行tuned-adm命令 | 否 | 启用预定义的低延迟网络配置 | 需安装tuned包，效果显著但可能与其他优化冲突 |
-| preempt=full | 同上述GRUB配置方式 | 是 | 启用完全抢占式内核，减少内核路径中的不可抢占区域 | 需内核支持CONFIGPreemptFull |
 
 
 ---
@@ -10410,8 +10409,8 @@ struct WaitFreeCounter {
 | net.ipv4.tcp_low_latency=1 | 同上述sysctl配置方式 | 否 | 启用TCP低延迟模式，优先保证延迟而非吞吐量 | 对延迟敏感的场景必开，普通吞吐量场景可关闭 |
 | net.ipv4.tcp_nodelay=1 | 同上述sysctl配置方式 | 否 | 禁用Nagle算法，小数据包立即发送，减少延迟 | 适用于小数据包频繁传输的场景，如RPC调用 |
 | net.ipv4.tcp_congestion_control=bbr | 同上述sysctl配置方式 | 否 | 启用BBR拥塞控制算法，减少网络延迟 | 需内核版本≥4.9且支持BBR |
-| net.core bus y_read=50 | 同上述sysctl配置方式 | 否 | 启用繁忙轮询模式，减少网络接收路径中的延迟 | 增加CPU使用率，需根据负载调整 |
-| net.core bus y Poll=50 | 同上述sysctl配置方式 | 否 | 轮询和选择的低延迟繁忙轮询超时 | 与bus y_read配合使用效果更佳 |
+| net.core busy_read=50 | 同上述sysctl配置方式 | 否 | 启用繁忙轮询模式，减少网络接收路径中的延迟 | 增加CPU使用率，需根据负载调整 |
+| net.core busy Poll=50 | 同上述sysctl配置方式 | 否 | 轮询和选择的低延迟繁忙轮询超时 | 与bus y_read配合使用效果更佳 |
 | net.ipv4.tcp_fastopen=3 | 同上述sysctl配置方式 | 否 | 启用TCP快速打开，减少三次握手延迟 | 适用于短连接场景，如金融交易 |
 
 
@@ -10421,7 +10420,7 @@ struct WaitFreeCounter {
 | --- | --- | --- | --- | --- |
 | vm.swappiness=0 | 执行sysctl -w参数=值，或写入/etc/sysctl.conf后执行sysctl -p | 否 | 禁止内存交换（swap），避免I/O交换带来的高延迟 | 需确保物理内存充足，避免OOM |
 | vm.dirty_ratio=5/vm.dirty_background_ratio=1 | 同上述sysctl配置方式 | 否 | 减少脏页积累，避免批量写盘延迟 | 数值过低可能增加磁盘I/O次数 |
-| vm zone_reclaim_mode=0 | 同上述sysctl配置方式 | 否 | NUMA节点本地内存不足时，优先使用远程内存，避免本地内存回收延迟 | 仅NUMA架构服务器需要配置 |
+| vm.zone_reclaim_mode=0 | 同上述sysctl配置方式 | 否 | NUMA节点本地内存不足时，优先使用远程内存，避免本地内存回收延迟 | 仅NUMA架构服务器需要配置 |
 | kernel.numa_balancing=0 | 同上述sysctl配置方式 | 否 | 禁用自动NUMA平衡，避免计划外的内存迁移 | 需结合numactl进行手动NUMA管理 |
 | transparent_hugepage=never | 通过GRUB添加启动参数或执行命令echo never > /sys/kernel/mm/transparent_hugepage/enabled | 否 | 禁用透明大页（THP），避免后台合并线程产生的延迟尖峰 | 需权衡数据库等应用的性能影响 |
 | 禁用KSM（内核同页合并） | 执行 `echo 0 > /sys/kernel/mm/ksm/run`；或 `systemctl stop ksm && systemctl disable ksm` | 否 | 禁用内存页面去重，消除合并过程中锁定页表和触发TLB shootdown导致的不可预测内存访问延迟 | KSM仅对通过 `madvise(..., MADV_MERGEABLE)` 标记的页面生效；主要影响虚拟化工作负载；若需取消已合并的页面使用 `echo 2 > /sys/kernel/mm/ksm/run` |
@@ -10433,10 +10432,10 @@ struct WaitFreeCounter {
 
 | 配置项 | 操作方式 | 是否需BIOS/重启 | 核心目的 | 注意事项 |
 | --- | --- | --- | --- | --- |
-| 停止并禁用irqbalance | 执行systemctl stopirqbalance和systemctl disableirqbalance | 否 | 防止irqbalance自动调整中断绑定，保证中断亲和性配置稳定 | 禁用后需手动维护中断绑定 |
-| 网卡中断绑定 | 执行echo  > /proc/irq//smp_affinity | 否 | 将网卡中断绑定到非关键核心，避免干扰关键任务 | 需定期检查/proc/interrupts，防止新设备中断误绑 |
+| 停止并禁用irqbalance | 执行 systemctl stop irqbalance 和 systemctl disable irqbalance | 否 | 防止irqbalance自动调整中断绑定，保证中断亲和性配置稳定 | 禁用后需手动维护中断绑定 |
+| 网卡中断绑定 | 执行 echo <mask> > /proc/irq/<irq_num>/smp_affinity | 否 | 将网卡中断绑定到非关键核心，避免干扰关键任务 | 需定期检查/proc/interrupts，防止新设备中断误绑 |
 | 中断合并配置 | 执行ethtool -C ethX rx-usecs 100 rx-frames 64 adaptive-rx off | 否 | 减少网卡中断频率，降低CPU中断处理开销 | 可能增加网络延迟，需根据流量场景调整 |
-| 禁用中断平衡 | 执行echo 0 > /proc/irq//smp_affinity_list | 否 | 防止中断在多个CPU核心间迁移，保持中断处理稳定性 | 需针对每个关键中断单独配置 |
+| 禁用中断平衡 | 执行 echo 0 > /proc/irq/<irq_num>/smp_affinity_list | 否 | 防止中断在多个CPU核心间迁移，保持中断处理稳定性 | 需针对每个关键中断单独配置 |
 | 工作队列限制 | 执行echo 0-7 > /sys/devices/virtual/workqueue/cpumask | 否 | 限制所有通用工作队列仅在非关键CPU上运行，防止内核worker抢占 | 需root权限，系统更新后可能重置 |
 
 
