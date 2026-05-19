@@ -10409,8 +10409,8 @@ struct WaitFreeCounter {
 | net.ipv4.tcp_low_latency=1 | 同上述sysctl配置方式 | 否 | 启用TCP低延迟模式，优先保证延迟而非吞吐量 | 对延迟敏感的场景必开，普通吞吐量场景可关闭 |
 | net.ipv4.tcp_nodelay=1 | 同上述sysctl配置方式 | 否 | 禁用Nagle算法，小数据包立即发送，减少延迟 | 适用于小数据包频繁传输的场景，如RPC调用 |
 | net.ipv4.tcp_congestion_control=bbr | 同上述sysctl配置方式 | 否 | 启用BBR拥塞控制算法，减少网络延迟 | 需内核版本≥4.9且支持BBR |
-| net.core busy_read=50 | 同上述sysctl配置方式 | 否 | 启用繁忙轮询模式，减少网络接收路径中的延迟 | 增加CPU使用率，需根据负载调整 |
-| net.core busy Poll=50 | 同上述sysctl配置方式 | 否 | 轮询和选择的低延迟繁忙轮询超时 | 与bus y_read配合使用效果更佳 |
+| net.core.busy_read=50 | 同上述sysctl配置方式 | 否 | 启用繁忙轮询模式，减少网络接收路径中的延迟 | 增加CPU使用率，需根据负载调整 |
+| net.core.busy_poll=50 | 同上述sysctl配置方式 | 否 | 轮询和选择的低延迟繁忙轮询超时 | 与 busy_read 配合使用效果更佳 |
 | net.ipv4.tcp_fastopen=3 | 同上述sysctl配置方式 | 否 | 启用TCP快速打开，减少三次握手延迟 | 适用于短连接场景，如金融交易 |
 
 
@@ -10423,7 +10423,7 @@ struct WaitFreeCounter {
 | vm.zone_reclaim_mode=0 | 同上述sysctl配置方式 | 否 | NUMA节点本地内存不足时，优先使用远程内存，避免本地内存回收延迟 | 仅NUMA架构服务器需要配置 |
 | kernel.numa_balancing=0 | 同上述sysctl配置方式 | 否 | 禁用自动NUMA平衡，避免计划外的内存迁移 | 需结合numactl进行手动NUMA管理 |
 | transparent_hugepage=never | 通过GRUB添加启动参数或执行命令echo never > /sys/kernel/mm/transparent_hugepage/enabled | 否 | 禁用透明大页（THP），避免后台合并线程产生的延迟尖峰 | 需权衡数据库等应用的性能影响 |
-| 禁用KSM（内核同页合并） | 执行 `echo 0 > /sys/kernel/mm/ksm/run`；或 `systemctl stop ksm && systemctl disable ksm` | 否 | 禁用内存页面去重，消除合并过程中锁定页表和触发TLB shootdown导致的不可预测内存访问延迟 | KSM仅对通过 `madvise(..., MADV_MERGEABLE)` 标记的页面生效；主要影响虚拟化工作负载；若需取消已合并的页面使用 `echo 2 > /sys/kernel/mm/ksm/run` |
+| 禁用KSM（内核同页合并） | 执行 echo 0 > /sys/kernel/mm/ksm/run；或 systemctl stop ksm && systemctl disable ksm | 否 | 禁用内存页面去重，消除合并过程中锁定页表和触发TLB shootdown导致的不可预测内存访问延迟 | KSM仅对通过 madvise(..., MADV_MERGEABLE) 标记的页面生效；主要影响虚拟化工作负载；若需取消已合并的页面使用 echo 2 > /sys/kernel/mm/ksm/run |
 
 
 **服务与中断层优化**
