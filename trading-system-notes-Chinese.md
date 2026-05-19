@@ -1031,6 +1031,8 @@ chrt 支持多种实时调度策略，其中最常用的是：
 5. **优先级反转**：关键路径互斥使用本节前文 **`PTHREAD_PRIO_INHERIT`**（或等价机制），避免 FIFO 线程被低优先级持锁方间接拖住。
 6. **验证**：用 **`cyclictest`**、**`perf`**（以及应用侧计时）在代表性负载下对比调整 **`chrt`/线程优先级、`sched_setattr`、内核是否 PREEMPT_RT** 前后的延迟分布。
 
+[Real-time Ubuntu — 操作指南](https://documentation.ubuntu.com/real-time/latest/how-to/)
+
 
 ### 3. 中断绑定及常见中断核心隔离
 **中断绑定**是指将中断请求（IRQ）分配到特定的CPU核心上处理，避免中断处理对关键路径的干扰。通过合理地绑定中断，可以减少关键路径上的CPU负载，确保确定性延迟。
@@ -1076,6 +1078,9 @@ grub2-mkconfig -o /boot/grub2/grub.cfg
 ```
 
 [中断与进程绑定 — Red Hat RHEL for Real Time 调优指南](https://docs.redhat.com/zh-cn/documentation/red_hat_enterprise_linux_for_real_time/7/html/tuning_guide/Interrupt_and_process_binding)
+
+[IRQ 亲和性 — Red Hat 技术简报](https://access.redhat.com/sites/default/files/attachments/irq_affinity_tech_brief.pdf)
+
 
 ### 4. 系统静默配置步骤总结
 

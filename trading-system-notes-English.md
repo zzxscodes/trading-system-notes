@@ -1027,6 +1027,8 @@ Common options:
 5. **Priority inversion**: Use **`PTHREAD_PRIO_INHERIT`** (or equivalent) on critical mutexes, matching the discussion earlier in this section.
 6. **Validation**: Compare latency distributions with **`cyclictest`** / **`perf`** / app timers after changing **`chrt`/priorities, `sched_setattr`, or PREEMPT_RT** kernels under representative load.
 
+[Real-time Ubuntu — How-to guides](https://documentation.ubuntu.com/real-time/latest/how-to/)
+
 
 ### 3. Interrupt binding and common interrupt core isolation
 **Interrupt binding** refers to allocating interrupt requests (IRQs) to specific CPU cores for processing to avoid interrupt processing from interfering with the critical path. By properly bundling interrupts, you can reduce the CPU load on the critical path and ensure deterministic latency.
@@ -1072,6 +1074,9 @@ grub2-mkconfig -o /boot/grub2/grub.cfg
 ```
 
 [Interrupt and Process Binding — Red Hat RHEL for Real Time Tuning Guide](https://docs.redhat.com/zh-cn/documentation/red_hat_enterprise_linux_for_real_time/7/html/tuning_guide/Interrupt_and_process_binding)
+
+[IRQ Affinity — Red Hat Technical Brief](https://access.redhat.com/sites/default/files/attachments/irq_affinity_tech_brief.pdf)
+
 
 ### 4. Summary of system silent configuration steps
 | Configuration phase | Specific operations | Purpose | Precautions |
