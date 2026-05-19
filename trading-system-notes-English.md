@@ -1071,6 +1071,7 @@ grub_cmdline="isolcpus=8-15 nohz_full=8-15 rcu_nocbs=8-15"
 grub2-mkconfig -o /boot/grub2/grub.cfg
 ```
 
+[Interrupt and Process Binding — Red Hat RHEL for Real Time Tuning Guide](https://docs.redhat.com/zh-cn/documentation/red_hat_enterprise_linux_for_real_time/7/html/tuning_guide/Interrupt_and_process_binding)
 
 ### 4. Summary of system silent configuration steps
 | Configuration phase | Specific operations | Purpose | Precautions |

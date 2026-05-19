@@ -1075,6 +1075,7 @@ grub_cmdline="isolcpus=8-15 nohz_full=8-15 rcu_nocbs=8-15"
 grub2-mkconfig -o /boot/grub2/grub.cfg
 ```
 
+[中断与进程绑定 — Red Hat RHEL for Real Time 调优指南](https://docs.redhat.com/zh-cn/documentation/red_hat_enterprise_linux_for_real_time/7/html/tuning_guide/Interrupt_and_process_binding)
 
 ### 4. 系统静默配置步骤总结
 
