@@ -130,7 +130,7 @@
 ```shell
   Start the process: taskset -c 1 ./my_app (running on CPU 1)
   Modify a running process: taskset -pc 3 <PID>  (Move PID process to CPU 3)
-  Query process: tasksset -pc <PID>
+  Query process: taskset -pc <PID>
   Bind threads under the process: ps -T -p <PID> taskset -p -c <CPU list> <TID>
 ```
 
@@ -209,13 +209,13 @@ SYSTEM_CORE="0"
 # Cores reserved for exclusive tasks
 EXCLUSIVE_CORE="1"
 
-seven
+set -e
 
 # Make sure the script is run with root privileges
-if [[ $(u -id) -ne 0 ]]; then
+if [[ $(id -u) -ne 0 ]]; then
     echo "This script must be run as root."
     exit 1
-be
+fi
 
 # 1. Create cgroup directory
 echo "-->Creating cpuset core pool..."
@@ -10418,16 +10418,15 @@ Tip: Use high bit stealing to carry the state, and the read operation also parti
 | isolcpus=8-15 | Modify /etc/default/grub, add parameters in GRUB_CMDLINE_LINUX, and execute update-grub | Yes | Isolate the specified CPU from the kernel general scheduler to avoid common process preemption | The isolated core range must be consistent with nohz_full and rcu_nocbs |
 | nohz_full=8-15 | Same as the above GRUB configuration method | Yes | Disable timer tick in the isolated core to eliminate periodic clock interrupts | Make sure CONFIG_NO_HZ_FULL=y is turned on when compiling the kernel |
 | rcu_nocbs=8-15 | Same as the above GRUB configuration method | Yes | Offload the RCU callback tasks of the isolated core to the non-isolated core to avoid interference with RCU operations | nohz_full will imply rcu_nocbs, but explicit configuration is safer |
-| preempt=full | Same as the above GRUB configuration method | Yes | Enable fully preemptive kernel to reduce the non-preemptible area in the kernel path | The kernel needs to support CONFIGPreemptFull |
+| preempt=full | Same as the above GRUB configuration method | Yes | Enable fully preemptive kernel to reduce the non-preemptible area in the kernel path | The kernel needs to support CONFIG_PREEMPT_FULL |
 | threadirqs | Same as the above GRUB configuration method | Yes | Allocate soft interrupts to multiple CPU cores to avoid single core overload | May increase interrupt processing overhead, need to be weighed |
-| no_watchdog | Same as the above GRUB configuration method | Yes | Disable the kernel watchdog service to eliminate the interference caused by the watchdog process | The production environment needs to assess the risk, and the test environment can be safely disabled |
+| nowatchdog | Same as the above GRUB configuration method | Yes | Disable the kernel watchdog service to eliminate the interference caused by the watchdog process | Assess risk in production; often used with `nmi_watchdog=0` |
 | tsc=reliable | Same as the above GRUB configuration method | Yes | Mark TSC as a reliable time source to reduce the delay caused by time source verification | Only Intel CPU is recommended to add it, AMD CPU is selected according to the actual situation |
 | mce=off | Same as the above GRUB configuration method | Yes | Disable machine check exception handling to avoid interruptions triggered by MCE | Only used in test environments, disabling it in production environments may cause hardware failures to be undetectable |
 | ipv6.disable=1 | Same as the above GRUB configuration method | Yes | Disable the IPv6 protocol stack to reduce the consumption of IPv6-related kernel tasks | If the system needs to use IPv6, this parameter needs to be deleted |
 | audit=0 | Same as the above GRUB configuration method | Yes | Disable the audit subsystem to eliminate the uncertainty overhead caused by auditd and audit backlog processing | Can significantly reduce context switching and soft interrupts |
 | mitigations=off | Same as the above GRUB configuration method | Yes | Disable all CPU vulnerability mitigations (Spectre, Meltdown, L1TF, MDS, TAA, etc.) to eliminate their performance overhead on syscalls, context switches and memory access | Application dependent; can yield significant performance gains but removes security protections against CPU side-channel attacks; also consider using older CPU microcode without vulnerability mitigations for further latency reduction |
 | tuned-adm profile network-latency | Execute tuned-adm command | No | Enable predefined low-latency network configuration | Tuned package needs to be installed, the effect is significant but may conflict with other optimizations |
-| preempt=full | Same as the above GRUB configuration method | Yes | Enable fully preemptive kernel to reduce the non-preemptible area in the kernel path | The kernel needs to support CONFIGPreemptFull |
 
 
 ---
@@ -10443,8 +10442,8 @@ Tip: Use high bit stealing to carry the state, and the read operation also parti
 | net.ipv4.tcp_low_latency=1 | Same as the above sysctl configuration | No | Enable TCP low latency mode, giving priority to latency rather than throughput | Must be enabled in scenarios that are sensitive to latency, and can be disabled in normal throughput scenarios |
 | net.ipv4.tcp_nodelay=1 | Same as above sysctl configuration | No | Disable Nagle algorithm, small data packets are sent immediately, reducing delay | Suitable for scenarios where small data packets are frequently transmitted, such as RPC calls |
 | net.ipv4.tcp_congestion_control=bbr | Same as above sysctl configuration | No | Enable BBR congestion control algorithm to reduce network delay | Requires kernel version ≥ 4.9 and supports BBR |
-| net.core bus y_read=50 | Same as the above sysctl configuration | No | Enable busy polling mode to reduce delays in the network receiving path | Increase CPU usage, need to be adjusted according to load |
-| net.core bus y Poll=50 | Same as sysctl configuration above | No | Low-latency busy polling timeout for polling and selection | Better when used with bus y_read |
+| net.core.busy_read=50 | Same as the above sysctl configuration | No | Enable busy polling mode to reduce delays in the network receiving path | Increase CPU usage, need to be adjusted according to load |
+| net.core.busy_poll=50 | Same as sysctl configuration above | No | Low-latency busy polling timeout for polling and selection | Better when used with busy_read |
 | net.ipv4.tcp_fastopen=3 | Same as above sysctl configuration | No | Enable TCP fast open to reduce three-way handshake delay | Suitable for short connection scenarios, such as financial transactions |
 
 
@@ -10454,7 +10453,7 @@ Tip: Use high bit stealing to carry the state, and the read operation also parti
 | --- | --- | --- | --- | --- |
 | vm.swappiness=0 | Execute sysctl -w parameter = value, or write /etc/sysctl.conf and then execute sysctl -p | No | Disable memory swap (swap) to avoid high delays caused by I/O swapping | Ensure sufficient physical memory to avoid OOM |
 | vm.dirty_ratio=5/vm.dirty_background_ratio=1 | Same as the above sysctl configuration | No | Reduce the accumulation of dirty pages and avoid batch write delays | Too low a value may increase the number of disk I/Os |
-| vm zone_reclaim_mode=0 | Same as the above sysctl configuration method | No | When the local memory of the NUMA node is insufficient, remote memory will be used first to avoid local memory reclamation delay | Only NUMA architecture servers need to be configured |
+| vm.zone_reclaim_mode=0 | Same as the above sysctl configuration method | No | When the local memory of the NUMA node is insufficient, remote memory will be used first to avoid local memory reclamation delay | Only NUMA architecture servers need to be configured |
 | kernel.numa_balancing=0 | Same as the above sysctl configuration | No | Disable automatic NUMA balancing to avoid unplanned memory migration | Need to be combined with numactl for manual NUMA management |
 | transparent_hugepage=never | Add startup parameters through GRUB or execute the command echo never > /sys/kernel/mm/transparent_hugepage/enabled | No | Disable transparent huge pages (THP) to avoid latency spikes generated by background merge threads | The performance impact of applications such as databases needs to be weighed |
 | Disable KSM (Kernel Samepage Merging) | Execute `echo 0 > /sys/kernel/mm/ksm/run`; or `systemctl stop ksm && systemctl disable ksm` | No | Disable memory page deduplication to eliminate unpredictable memory access latencies caused by TLB shootdowns and page table locking during the merging process | KSM only operates on pages opted in via `madvise(..., MADV_MERGEABLE)`; primarily affects virtualization workloads; to unmerge existing shared pages use `echo 2 > /sys/kernel/mm/ksm/run` |
@@ -10466,10 +10465,10 @@ Tip: Use high bit stealing to carry the state, and the read operation also parti
 
 | Configuration items | Operation methods | Whether BIOS/reboot is required | Core purpose | Precautions |
 | --- | --- | --- | --- | --- |
-| Stop and disable irqbalance | Execute systemctl stopirqbalance and systemctl disableirqbalance | No | Prevent irqbalance from automatically adjusting interrupt binding to ensure stable interrupt affinity configuration | Interrupt binding needs to be maintained manually after disabling |
-| Network card interrupt binding | Execute echo > /proc/irq//smp_affinity | No | Bind network card interrupts to non-critical cores to avoid interfering with key tasks | Regularly check /proc/interrupts to prevent new device interrupts from being accidentally bound |
+| Stop and disable irqbalance | Execute `systemctl stop irqbalance` and `systemctl disable irqbalance` | No | Prevent irqbalance from automatically adjusting interrupt binding to ensure stable interrupt affinity configuration | Interrupt binding needs to be maintained manually after disabling |
+| Network card interrupt binding | Execute `echo <mask> > /proc/irq/<irq_num>/smp_affinity` | No | Bind network card interrupts to non-critical cores to avoid interfering with key tasks | Regularly check /proc/interrupts to prevent new device interrupts from being accidentally bound |
 | Interrupt merge configuration | Execute ethtool -C ethX rx-usecs 100 rx-frames 64 adaptive-rx off | No | Reduce the frequency of network card interrupts and reduce CPU interrupt processing overhead | May increase network latency, need to be adjusted according to traffic scenarios |
-| Disable interrupt balancing | Execute echo 0 > /proc/irq//smp_affinity_list | No | Prevent interrupts from migrating between multiple CPU cores and maintain interrupt processing stability | Each critical interrupt needs to be configured separately |
+| Disable interrupt balancing | Execute `echo 0 > /proc/irq/<irq_num>/smp_affinity_list` | No | Prevent interrupts from migrating between multiple CPU cores and maintain interrupt processing stability | Each critical interrupt needs to be configured separately |
 | Work queue restrictions | Execute echo 0-7 > /sys/devices/virtual/workqueue/cpumask | No | Restrict all general work queues to run only on non-critical CPUs to prevent kernel worker preemption | Root privileges are required and may be reset after system updates |
 
 
