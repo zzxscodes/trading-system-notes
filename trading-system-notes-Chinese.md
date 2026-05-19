@@ -10387,7 +10387,7 @@ struct WaitFreeCounter {
 | rcu_nocbs=8-15 | 同上述GRUB配置方式 | 是 | 将隔离核心的RCU回调任务卸载到非隔离核心，避免RCU操作干扰 | nohz_full会隐含rcu_nocbs，但显式配置更安全 |
 | preempt=full | 同上述GRUB配置方式 | 是 | 启用完全抢占式内核，减少内核路径中的不可抢占区域 | 需内核支持 CONFIG_PREEMPT_FULL |
 | threadirqs | 同上述GRUB配置方式 | 是 | 将软中断分配到多个CPU核心，避免单核过载 | 可能增加中断处理开销，需权衡 |
-| nowatchdog | 同上述GRUB配置方式 | 是 | 禁用内核watchdog服务，消除watchdog进程带来的干扰 | 生产环境需评估风险，测试环境可放心禁用；常与 `nmi_watchdog=0` 配合 |
+| nowatchdog | 同上述GRUB配置方式 | 是 | 禁用内核watchdog服务，消除watchdog进程带来的干扰 | 生产环境需评估风险，测试环境可放心禁用；常与 nmi_watchdog=0 配合 |
 | tsc=reliable | 同上述GRUB配置方式 | 是 | 标记TSC为可靠时间源，减少时间源验证带来的延迟 | 仅Intel CPU建议添加，AMD CPU根据实际情况选择 |
 | mce=off | 同上述GRUB配置方式 | 是 | 禁用机器检查异常处理，避免MCE触发的中断 | 仅测试环境使用，生产环境禁用可能导致硬件故障无法检测 |
 | ipv6.disable=1 | 同上述GRUB配置方式 | 是 | 禁用IPv6协议栈，减少IPv6相关内核任务消耗 | 若系统需使用IPv6，此参数需删除 |
@@ -10445,7 +10445,7 @@ struct WaitFreeCounter {
 | --- | --- | --- | --- | --- |
 | 设置CPU频率策略为performance | 执行cpupower frequency-set -g performance | 否 | 将CPU保持在最高频率，避免性能策略切换延迟 | idle=poll极大增加功耗，仅适用于短期压测 |
 | 锁定CPU频率 | 执行cpupower frequency-set -f MHz | 否 | 固定CPU频率，避免dvfs过渡态引入抖动 | 需根据CPU型号确定目标频率 |
-| 禁用P-State动态切换 | 执行 `echo 0 > /sys/devices/system/cpu/intel_pstate/no_turbo`   并设置 `echo performance > /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor` | 否 | 确保系统不使用intel_pstate驱动的动态P-State调整 | 仅适用于使用 `intel_pstate` 驱动的Intel CPU；AMD系统需通过 `acpi-cpufreq` + `performance` 策略实现类似效果 |
+| 禁用P-State动态切换 | 执行 echo 0 > /sys/devices/system/cpu/intel_pstate/no_turbo   并设置 echo performance > /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor | 否 | 确保系统不使用intel_pstate驱动的动态P-State调整 | 仅适用于使用 intel_pstate 驱动的Intel CPU；AMD系统需通过 acpi-cpufreq + performance 策略实现类似效果 |
 | 禁用C-States | 执行echo 1 > /sys/devices/system/cpu/cpuX/intel_idle.max_cstate | 否 | 消除C-States带来的唤醒延迟 | 需配合BIOS设置，效果更佳 |
 | 禁用Turbo Boost | 执行echo 0 > /sys/devices/system/cpu/cpuX/cpufreq/boost | 否 | 避免Turbo Boost带来的频率波动 | 需确保所有核心的Turbo Boost都被禁用 |
 
