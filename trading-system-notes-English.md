@@ -10408,7 +10408,7 @@ Tip: Use high bit stealing to carry the state, and the read operation also parti
 | Disable VT-x/AMD-V virtualization technology | Enter BIOS→Virtualization Settings→Disable VT-x/AMD-V | Yes | Reduce the interference of virtualization-related kernel tasks and reduce MSR operation latency | If the system needs to run a virtual machine, this option needs to remain enabled |
 
 
----
+
 
 **System boot layer optimization**
 
@@ -10430,7 +10430,7 @@ Tip: Use high bit stealing to carry the state, and the read operation also parti
 | tuned-adm profile network-latency | Execute tuned-adm command | No | Enable predefined low-latency network configuration | Tuned package needs to be installed, the effect is significant but may conflict with other optimizations |
 
 
----
+
 
 **Kernel parameter layer optimization**
 
@@ -10460,6 +10460,8 @@ Tip: Use high bit stealing to carry the state, and the read operation also parti
 | Disable KSM (Kernel Samepage Merging) | Execute echo 0 > /sys/kernel/mm/ksm/run; or systemctl stop ksm && systemctl disable ksm | No | Disable memory page deduplication to eliminate unpredictable memory access latencies caused by TLB shootdowns and page table locking during the merging process | KSM only operates on pages opted in via madvise(..., MADV_MERGEABLE); primarily affects virtualization workloads; to unmerge existing shared pages use echo 2 > /sys/kernel/mm/ksm/run |
 
 
+
+
 **Service and Interruption Layer Optimization**
 
 **1. Interrupt control**
@@ -10484,6 +10486,8 @@ Tip: Use high bit stealing to carry the state, and the read operation also parti
 | Disable Turbo Boost | Execute echo 0 > /sys/devices/system/cpu/cpuX/cpufreq/boost | No | Avoid frequency fluctuations caused by Turbo Boost | Make sure all core Turbo Boosts are disabled |
 
 
+
+
 **Application and memory layer optimization**
 
 **1. Memory Management**
@@ -10502,6 +10506,7 @@ Tip: Use high bit stealing to carry the state, and the read operation also parti
 | CPU binding | Execute taskset -c 8-15 ./app | No | Bind the application to the isolated core to ensure exclusive resources | Make sure the application is not preempted by other processes |
 | Real-time scheduling | Execute chrt -f 99 taskset -c 8-15 ./app | No | Set the application to real-time priority to ensure that ordinary tasks are preempted immediately | Only used for a single critical process to avoid system unresponsiveness |
 | NUMA binding | Execute numactl --cpunodebind=0 --membind=0 ./app | No | Bind the application to a specific NUMA node to reduce cross-node delay | Use numactl --show to verify the actual binding result |
+
 
 
 ### 32. Latency measurement (clock cycles)

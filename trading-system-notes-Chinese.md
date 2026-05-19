@@ -10375,7 +10375,7 @@ struct WaitFreeCounter {
 | 禁用VT-x/AMD-V虚拟化技术 | 进入BIOS→虚拟化设置→禁用VT-x/AMD-V | 是 | 减少虚拟化相关内核任务干扰，降低MSR操作延迟 | 若系统需运行虚拟机，此选项需保留启用 |
 
 
----
+
 
 **系统引导层优化**
 
@@ -10397,7 +10397,7 @@ struct WaitFreeCounter {
 | tuned-adm profile network-latency | 执行tuned-adm命令 | 否 | 启用预定义的低延迟网络配置 | 需安装tuned包，效果显著但可能与其他优化冲突 |
 
 
----
+
 
 **内核参数层优化**
 
@@ -10427,6 +10427,8 @@ struct WaitFreeCounter {
 | 禁用KSM（内核同页合并） | 执行 echo 0 > /sys/kernel/mm/ksm/run；或 systemctl stop ksm && systemctl disable ksm | 否 | 禁用内存页面去重，消除合并过程中锁定页表和触发TLB shootdown导致的不可预测内存访问延迟 | KSM仅对通过 madvise(..., MADV_MERGEABLE) 标记的页面生效；主要影响虚拟化工作负载；若需取消已合并的页面使用 echo 2 > /sys/kernel/mm/ksm/run |
 
 
+
+
 **服务与中断层优化**
 
 **1. 中断控制**
@@ -10451,6 +10453,8 @@ struct WaitFreeCounter {
 | 禁用Turbo Boost | 执行echo 0 > /sys/devices/system/cpu/cpuX/cpufreq/boost | 否 | 避免Turbo Boost带来的频率波动 | 需确保所有核心的Turbo Boost都被禁用 |
 
 
+
+
 **应用与内存层优化**
 
 **1. 内存管理**
@@ -10469,6 +10473,7 @@ struct WaitFreeCounter {
 | CPU绑定 | 执行taskset -c 8-15 ./app | 否 | 将应用绑定到隔离核心，确保独占资源 | 需确保应用未被其他进程抢占 |
 | 实时调度 | 执行chrt -f 99 taskset -c 8-15 ./app | 否 | 将应用设置为实时优先级，确保立即抢占普通任务 | 仅用于单个关键进程，避免系统无响应 |
 | NUMA绑定 | 执行numactl --cpunodebind=0 --membind=0 ./app | 否 | 将应用绑定到特定NUMA节点，减少跨节点延迟 | 需结合numactl --show验证实际绑定结果 |
+
 
 
 ### 32. 延迟测量（时钟周期）
