@@ -983,7 +983,7 @@ Common options:
 --version: Display version information.
 ```
 
-**Kernel patches relevant to ultra-low latency**
+**relevant Kernel patches**
 
 | Patch / change | Effect | Status |
 | --- | --- | --- |
