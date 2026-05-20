@@ -983,49 +983,16 @@ Common options:
 --version: Display version information.
 ```
 
-`pthread_setschedparam` and `chrt` set the scheduling policy (e.g. **SCHED_FIFO / SCHED_RR**) and, for RT policies, static priority; the kernel uses that for **CPU allocation among runnable threads**. That does not by itself cap worst-case latency: a thread may remain runnable yet wait when the kernel stays non-preemptible too long or interrupt/softirq paths consume too much time. Low-latency, deterministic designs should plan **user-space RT settings and kernel preemption (including PREEMPT_RT)** together.
+**Kernel patches relevant to ultra-low latency**
 
-**PREEMPT_RT and kernel-side latency**
-
-+ On generic kernels without full RT preemption, `SCHED_FIFO` alone does not remove long non-preemptible intervals or heavy interrupt paths.
-+ **PREEMPT_RT** converts many `spinlock`-based regions into sleepable `rt_mutex` paths (with priority inheritance) and pushes threaded interrupt handling, shortening non-preemptible windows in combination with user-space priority settings.
-+ Kernel docs: [Real-time preemption](https://docs.kernel.org/core-api/real-time/index.html), [Theory of operation](https://docs.kernel.org/core-api/real-time/theory.html), [Differences vs non-RT](https://docs.kernel.org/core-api/real-time/differences.html); preemption models: [LF Wiki — preemption models](https://wiki.linuxfoundation.org/realtime/documentation/technical_basics/preemption_models).
-
-**Old → new: out-of-tree patch, upstream merge, scheduler changes**
-
-| Phase | Summary | References |
+| Patch / change | Effect | Status |
 | --- | --- | --- |
-| Traditional | PREEMPT_RT maintained out-of-tree; distributions ship `-rt` builds | [LF Wiki — preempt_rt_versions](https://wiki.linuxfoundation.org/realtime/preempt_rt_versions) |
-| Linux 6.12 | Real-time preemption merged upstream; remaining friction included **`printk`** and related paths vs full kernel preemption | [LWN — Realtime preemption upstream](https://lwn.net/Articles/989212/), [Phoronix — Linux 6.12 Real-Time](https://www.phoronix.com/news/Linux-6.12-Does-Real-Time), [Phoronix — printk](https://www.phoronix.com/news/Linux-6.12-Printk-Merged), [Merge tag commit](https://github.com/torvalds/linux/commit/baeb9a7d8b60b021d907127509c44507539c15e5) |
-| Linux 6.13+ | **`CONFIG_PREEMPT_LAZY`**: some fair-class (e.g. CFS) preemption may defer to tick boundaries; **FIFO / RR / SCHED_DEADLINE** retain full preemption semantics (see your kernel `PREEMPT_*` help) | [Phoronix — lazy preemption](https://www.phoronix.com/news/Linux-6.13-Sched-Lazy-Preempt) |
+| PREEMPT_RT | Fully preemptible kernel; spinlocks → rt_mutex (with PI); hard IRQ handlers threaded to shorten non-preemptible windows | Merged upstream in Linux 6.12; before that, distros shipped `-rt` kernel packages |
+| printk (RT) | printk paths made sleepable/lockless for full-kernel preemption | Merged with PREEMPT_RT in 6.12 |
+| CONFIG_PREEMPT_LAZY | Some fair-class (CFS) preemption may defer to tick boundaries; FIFO / RR / SCHED_DEADLINE unchanged | Optional since 6.13 |
+| Proxy execution | Propagates scheduling priority along blocked-on chains where PI does not reach | Merged in 6.17 |
 
-**Scheduling: static priority vs deadline scheduling (beyond legacy APIs)**
-
-+ **SCHED_FIFO / SCHED_RR**: static priority for threads that must stay ahead of CFS; no deadline semantics among equal-priority peers; misconfiguration can starve tasks.
-+ **SCHED_DEADLINE** (since 3.14): `runtime`, `deadline`, `period` with EDF + CBS and kernel **admission control**; infeasible setups are rejected—useful for bounding periodic CPU supply. Prefer **`sched_setattr`/`sched_getattr`** with `struct sched_attr` instead of **`sched_setscheduler`** alone.
-+ Docs: [Deadline Task Scheduling](https://www.kernel.org/doc/html/latest/scheduler/sched-deadline.html), [sched_setattr(2)](https://man7.org/linux/man-pages/man2/sched_setattr.2.html).
-+ **Versus SCHED_FIFO / SCHED_RR**: [sched(7)](https://man7.org/linux/man-pages/man7/sched.7.html) documents that `SCHED_DEADLINE` threads are the highest-priority **user-controllable** threads—**any runnable DL thread preempts** threads under other policies (including FIFO/RR). Do not put non-critical work on DL or it may starve critical FIFO threads.
-
-**Locks and threaded interrupts (pairs with IRQ affinity later in this chapter)**
-
-+ RT locking: [rt-mutex](https://docs.kernel.org/locking/rt-mutex.html), [Lock types](https://docs.kernel.org/locking/locktypes.html). Threaded IRQ overview: [LF Wiki — threadirq](https://wiki.linuxfoundation.org/realtime/documentation/technical_details/threadirq).
-
-**High-resolution timers**
-
-+ [hrtimers — The Linux Kernel documentation](https://docs.kernel.org/timers/hrtimers.html); combine with `NO_HZ_FULL`, pinning, and isolation to reduce timer-tick jitter.
-
-**Proxy execution (ongoing upstream work)**
-
-+ Scheduler-side mitigation along blocked-on chains for priority inversion. [LWN](https://lwn.net/Articles/1029152/), [Phoronix — Proxy Execution](https://www.phoronix.com/news/Linux-6.17-Proxy-Execution).
-
-**Best practices**
-
-1. **Privileges**: Ensure **`CAP_SYS_NICE`** / **`RLIMIT_RTPRIO`** (etc.) so **`pthread_setschedparam`**, **`chrt`**, and **`sched_setattr`** can apply RT/DL attributes reliably.
-2. **Policy and APIs**: Use **SCHED_FIFO / SCHED_RR** (examples and **`chrt`** above) when threads must stay ahead of CFS; use **SCHED_DEADLINE** with **`sched_setattr`/`sched_getattr`** and **`struct sched_attr`** when period and WCET are known, respecting admission tests—avoid casual DL use because it **preempts FIFO/RR** per [sched(7)](https://man7.org/linux/man-pages/man7/sched.7.html).
-3. **RT/DL bandwidth**: Tune **`sched_rt_runtime_us`** and DL/global caps so RT workloads neither wedge the system nor starve needed threads; see [sched-deadline](https://www.kernel.org/doc/html/latest/scheduler/sched-deadline.html), [sched-rt-group](https://www.kernel.org/doc/html/latest/scheduler/sched-rt-group.html).
-4. **Kernel preemption**: If user-space priority alone does not tame tail latency, evaluate **PREEMPT_RT** as described earlier in this section.
-5. **Priority inversion**: Use **`PTHREAD_PRIO_INHERIT`** (or equivalent) on critical mutexes, matching the discussion earlier in this section.
-6. **Validation**: Compare latency distributions with **`cyclictest`** / **`perf`** / app timers after changing **`chrt`/priorities, `sched_setattr`, or PREEMPT_RT** kernels under representative load.
+Out-of-tree PREEMPT_RT history: [LF Wiki — preempt_rt_versions](https://wiki.linuxfoundation.org/realtime/preempt_rt_versions). Differences vs generic kernels: [Real-time differences](https://docs.kernel.org/core-api/real-time/differences.html).
 
 [Real-time Ubuntu — How-to guides](https://documentation.ubuntu.com/real-time/latest/how-to/)
 

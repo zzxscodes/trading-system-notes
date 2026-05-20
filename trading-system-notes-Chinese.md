@@ -987,49 +987,16 @@ chrt 支持多种实时调度策略，其中最常用的是：
 --version: 显示版本信息。
 ```
 
-`pthread_setschedparam`、`chrt` 用于设置调度策略（如 **SCHED_FIFO / SCHED_RR**）以及实时类下的静态优先级；内核据此在可运行线程之间做 **CPU 分配决策**。这不等同于端到端最坏延迟上界：**线程已经 runnable，却仍长时间拿不到 CPU** 的情况仍可出现于内核禁止抢占区间过长、硬中断或软中断占用过重等路径。低延迟、强确定性部署应把上述用户态设置与 **内核抢占模型（含是否启用 PREEMPT_RT）** 一并设计。
+**与超低延迟相关的内核补丁**
 
-**PREEMPT_RT 与内核侧延迟**
-
-+ 在未启用实时抢占特性的通用内核上，即便使用 `SCHED_FIFO`，内核态长时间禁止抢占或中断路径过重时，仍可能出现明显的尾延迟。
-+ **PREEMPT_RT** 将大量基于 `spinlock` 的临界区改为可睡眠的 `rt_mutex`（支持优先级继承），并推动中断处理线程化等，以缩短不可抢占窗口，与用户态实时优先级设置形成叠加关系。
-+ 内核文档：[Real-time preemption](https://docs.kernel.org/core-api/real-time/index.html)，[Theory of operation](https://docs.kernel.org/core-api/real-time/theory.html)，[与用户态/非 RT 内核的差异](https://docs.kernel.org/core-api/real-time/differences.html)；抢占模型对照：[LF Wiki — preemption models](https://wiki.linuxfoundation.org/realtime/documentation/technical_basics/preemption_models)。
-
-**从旧到新：树外补丁、主线合入与调度相关改动**
-
-| 阶段 | 说明 | 参考 |
+| 补丁/改动 | 作用 | 状态 |
 | --- | --- | --- |
-| 传统做法 | PREEMPT_RT 长期以补丁集形式维护在主线之外，发行版提供带 `-rt` 的内核构建 | [LF Wiki — preempt_rt_versions](https://wiki.linuxfoundation.org/realtime/preempt_rt_versions) |
-| Linux 6.12 | 实时抢占能力合并进上游；合入前的阻力之一包括 **`printk` 等路径** 与全内核可抢占模型的兼容改造 | [LWN — Realtime preemption upstream](https://lwn.net/Articles/989212/)，[Phoronix — Linux 6.12 Real-Time](https://www.phoronix.com/news/Linux-6.12-Does-Real-Time)，[Phoronix — printk](https://www.phoronix.com/news/Linux-6.12-Printk-Merged)，[merge 标签提交](https://github.com/torvalds/linux/commit/baeb9a7d8b60b021d907127509c44507539c15e5) |
-| Linux 6.13+ | **`CONFIG_PREEMPT_LAZY`**：对 CFS 等公平类任务可将部分抢占推迟到时钟滴答边界；**FIFO / RR / SCHED_DEADLINE** 等实时类仍保持完整抢占语义（以所用内核的 `PREEMPT_*` 配置说明为准） | [Phoronix — lazy preemption](https://www.phoronix.com/news/Linux-6.13-Sched-Lazy-Preempt) |
+| PREEMPT_RT | 内核可抢占；spinlock 换 rt_mutex（含优先级继承）；硬中断 handler 线程化，缩短不可抢占窗口 | Linux 6.12 合入主线；此前发行版提供 `-rt` 内核包 |
+| printk（RT） | printk 路径改造为可睡眠/无锁化，满足全内核可抢占 | 6.12 随 PREEMPT_RT 合入 |
+| CONFIG_PREEMPT_LAZY | CFS 等公平类任务的抢占可推迟到 tick 边界；FIFO / RR / SCHED_DEADLINE 语义不变 | 6.13+，可选 |
+| Proxy execution | 沿阻塞链传递调度优先级，补 PI 覆盖不到的优先级反转 | 6.17+ 合入 |
 
-**调度策略：静态优先级与限期调度（相对「旧」接口的扩展）**
-
-+ **SCHED_FIFO / SCHED_RR**：静态优先级，适合必须稳定优先于 CFS 任务的线程；同级之间没有内核给出的截止时间保证，配置不当可能出现饥饿。
-+ **SCHED_DEADLINE**（Linux 3.14+）：以 `runtime`、`deadline`、`period` 描述周期性 CPU 需求，采用 EDF + CBS，并由内核执行**带宽准入**；不可行配置会被拒绝，便于界定周期任务的 CPU 供给。用户态宜使用 **`sched_setattr` / `sched_getattr`** 与 `struct sched_attr`，而非仅依赖 **`sched_setscheduler`**。
-+ 文档：[Deadline Task Scheduling](https://www.kernel.org/doc/html/latest/scheduler/sched-deadline.html)，[sched_setattr(2)](https://man7.org/linux/man-pages/man2/sched_setattr.2.html)。
-+ **相对 SCHED_FIFO / SCHED_RR**：手册 [sched(7)](https://man7.org/linux/man-pages/man7/sched.7.html) 说明，`SCHED_DEADLINE` 线程属于「可由用户配置的线程」中抢占优先级最高的一类——**只要有可运行的 DL 线程，即可抢占**运行于其它策略（含 FIFO/RR）下的线程。混合部署时不要随意把非关键线程设为 DL，以免挤压关键 FIFO 路径。
-
-**锁与中断线程化（可与本节后文 IRQ 绑定配合）**
-
-+ PREEMPT_RT 下的锁类型：[rt-mutex](https://docs.kernel.org/locking/rt-mutex.html)，[Lock types](https://docs.kernel.org/locking/locktypes.html)。线程化中断概述：[LF Wiki — threadirq](https://wiki.linuxfoundation.org/realtime/documentation/technical_details/threadirq)。
-
-**高精度定时**
-
-+ [hrtimers — The Linux Kernel documentation](https://docs.kernel.org/timers/hrtimers.html)；与 `NO_HZ_FULL`、CPU 隔离及绑核等组合，有助于压低时钟滴答引起的抖动。
-
-**Proxy execution（调度器侧，持续合入）**
-
-+ 通过跟踪阻塞链缓解复杂锁场景下的优先级反转问题。[LWN](https://lwn.net/Articles/1029152/)，[Phoronix — Proxy Execution](https://www.phoronix.com/news/Linux-6.17-Proxy-Execution)。
-
-**最佳实践**
-
-1. **特权**：保证 **`CAP_SYS_NICE`**、**`RLIMIT_RTPRIO`** 等满足要求，否则 **`pthread_setschedparam`**、**`chrt`**、**`sched_setattr`** 无法稳定设置实时/DL 属性。
-2. **策略与接口**：需长期压过 CFS 的路径用 **SCHED_FIFO / SCHED_RR**（本节示例与 **`chrt`**）；周期任务且可给出 WCET/周期时评估 **SCHED_DEADLINE**，用 **`sched_setattr`/`sched_getattr`** 与 **`struct sched_attr`**，服从内核准入；勿随意使用 DL，以免按 [sched(7)](https://man7.org/linux/man-pages/man7/sched.7.html) 所述抢占 FIFO/RR 路径。
-3. **RT/DL 带宽**：按需配置 **`sched_rt_runtime_us`** 等与实时节流相关的全局参数（及 DL 侧带宽上限），避免 RT 任务挤占过度或必要线程饿死；参见 [sched-deadline](https://www.kernel.org/doc/html/latest/scheduler/sched-deadline.html)、[sched-rt-group](https://www.kernel.org/doc/html/latest/scheduler/sched-rt-group.html)。
-4. **内核抢占**：若本节所述用户态优先级仍无法压住尾延迟，按前文评估 **PREEMPT_RT** 内核（主线选项或发行版 `-rt`）。
-5. **优先级反转**：关键路径互斥使用本节前文 **`PTHREAD_PRIO_INHERIT`**（或等价机制），避免 FIFO 线程被低优先级持锁方间接拖住。
-6. **验证**：用 **`cyclictest`**、**`perf`**（以及应用侧计时）在代表性负载下对比调整 **`chrt`/线程优先级、`sched_setattr`、内核是否 PREEMPT_RT** 前后的延迟分布。
+树外时代 PREEMPT_RT 补丁集见 [LF Wiki — preempt_rt_versions](https://wiki.linuxfoundation.org/realtime/preempt_rt_versions)；与通用内核差异见 [Real-time differences](https://docs.kernel.org/core-api/real-time/differences.html)。
 
 [Real-time Ubuntu — 操作指南](https://documentation.ubuntu.com/real-time/latest/how-to/)
 
