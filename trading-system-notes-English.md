@@ -5822,6 +5822,71 @@ for (; i < n; i += 4) { /* Normal processing */ }
 + **Loop Sentinel**: Add a "sentinel element" at the end of the array to eliminate boundary judgment in the loop (such as when looking for a negative number, add a negative number at the end of the array to avoid `i < n` judgment), but it is necessary to ensure that the array is writable and there is no risk of going out of bounds.
 
 
+**4. Software Pipelining and MII/ResMII/RecMII (Modulo Scheduling Methodology)**
+
+**Software pipelining** overlaps instructions from multiple iterations to hide latency; **modulo scheduling** is the framework that implements it. Unlike the loop unrolling/vectorization above (SIMD batch processing), this methodology applies to loops that **cannot fully parallelize due to cross-iteration dependences**. It gives a theoretical throughput lower bound and shows whether to optimize resources or dependences first.
+
+**(1) Initiation Interval and MII**
+
++ **Initiation Interval (II)**: Cycles between starting consecutive new iterations. Smaller II means more overlap and higher throughput.
++ **Minimum Initiation Interval (MII)**: The lower bound on II for any legal schedule, from two independent constraints:
+
+```
+MII = max(ResMII, RecMII)
+```
+
+MII is the **performance ceiling** for a loop on given hardware and dependence structure: no amount of unrolling, reordering, or software pipelining can push II below MII.
+
+**(2) ResMII: Resource Constraints**
+
+**Resource-constrained MII** reflects limits from functional-unit counts. If there were **no data dependences**, iterations could overlap fully; ResMII is driven by per-class instruction demand:
+
+```
+ResMII = max( ⌈instructions of class / units of class⌉ )   // max over all unit classes
+```
+
+Example: one iteration has 3 adds and 2 muls; the machine has 2 add units and 1 mul unit → add ResMII = ⌈3/2⌉ = 2, mul ResMII = 2 → **ResMII = 2**.
+
+**(3) RecMII: Dependence-Circuit Constraints**
+
+**Recurrence-constrained MII** reflects limits from **cross-iteration (loop-carried) dependences**:
+
++ **Intra-iteration dependences** (RAW/WAR/WAW within the same `i`): can be hidden by reordering inside one iteration.
++ **Cross-iteration dependences** (e.g. `a[i]` depends on `a[i-1]`): form dependence circuits; latency along the circuit cannot be removed by intra-iteration reordering alone—the main bottleneck for software pipelining.
+
+For a single dependence circuit:
+
+```
+RecMII(circuit) = sum of edge latencies on the circuit / iteration distance
+RecMII = max(RecMII over all circuits)
+```
+
+When iteration distance is 1, RecMII equals the sum of latencies on the circuit; when distance is k, a back edge occurs only every k iterations and RecMII is reduced accordingly.
+
+**(4) Worked Example**
+
+```c
+for (int i = 1; i < N; i++) {
+    a[i] = a[i-1] * 2 + b[i];
+}
+```
+
++ **RecMII**: cross-iteration circuit `a[i-1] → mul(2) → add(1) → a[i]`, latency 3, distance 1 → **RecMII = 3**.
++ **ResMII**: 1 mul, 1 add, 2 loads, 1 store; load-port ResMII = ⌈2/1⌉ = 2, all others 1 → **ResMII = 2**.
++ **MII**: `max(2, 3) = 3`. The bottleneck is cross-iteration dependence—even with spare load bandwidth, II cannot go below 3.
+
+**(5) Significance for Loop Optimization**
+
+| Diagnosis | Meaning | Optimization direction |
+| --- | --- | --- |
+| RecMII > ResMII | Dependence circuit is the bottleneck | **Strength reduction** (recurrence → increment), **loop fission** to break the circuit, or change the algorithm to remove `a[i]`’s dependence on `a[i-1]` |
+| ResMII > RecMII | Functional units are the bottleneck | **CSE**, **loop-invariant hoisting** to reduce instructions per class; fewer loads/stores (tiling for locality) |
+| MII lower bound reached | Cannot go faster with current structure | Change dependences at the algorithm/data-structure level |
+| Cannot vectorize | Cross-iteration RAW present | Vectorization requires iteration independence; the MII framework shows when to pursue software pipelining or break dependences |
+
+**Methodology takeaway**: Draw the dependence DAG, compute RecMII from circuits and ResMII from functional-unit demand, take the maximum as MII; comparing the two tells you whether the bottleneck is **dependence** or **resources**, so you can pick the right loop transformation.
+
+
 **Overall Process**
 
 Loop vectorization needs to follow the priority of "prepare first, then transform, then adapt" to ensure maximum parallel efficiency:
