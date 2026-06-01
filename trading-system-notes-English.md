@@ -1323,14 +1323,16 @@ Define the memory model, clarify "which memory access sequences must be guarante
 
 **rule**:
 
-1. It is forbidden to "write → read" reordering (StoreLoad Reordering): that is, "the store executed first will not be overridden by the load executed later" - for example`a=1; b=load(c);`middle,`b=load(c)`not before`a=1`The store is submitted to memory;
-2. It is forbidden to "write → write" reordering (StoreStore Reordering): that is, "the store that is executed first, other threads must see it first" - for example`a=1; b=1;`, other threads will not see it first`b=1`See you again`a=1`;
-3. "Read → Write" reordering (LoadStore Reordering) is prohibited: that is, "the load executed first will not be overridden by the store executed later" - for example`a=load(c); b=1;`middle,`b=1`not before`a=load(c)`submit;
-4. **Allow "Read→Read" reordering (LoadLoad Reordering)**: that is, "execute the load first, and see the results later" - for example`a=load(c); b=load(d);`medium, if`c`cache line miss while`d`cache line hit,`b`Maybe get the value first,`a`Then get the value.
+1. **Load → Load** reordering is forbidden (LoadLoad Reordering): Reads are not reordered with other reads — in `a=load(c); b=load(d);`, the global visibility order of the two loads matches program order;
+2. **Load → Store** reordering is forbidden (LoadStore Reordering): Reads are not reordered with writes — in `a=load(c); b=1;`, the store `b=1` will not be committed before `a=load(c)`;
+3. **Store → Store** reordering is forbidden (StoreStore Reordering): Writes are not reordered with other writes — in `a=1; b=1;`, other threads will not see `b=1` before `a=1`;
+4. **Store → Load** reordering is allowed for different locations (StoreLoad Reordering): Reads may be reordered with older writes to different locations — in `a=1; b=load(c);` where `c` and `a` are different addresses, the load may become globally visible to other threads before the store `a=1`; same-address cases are still constrained by Store-to-Load Forwarding.
 
-**Exception**: x86`non-temporal store`(like`_mm_stream_store_si128`) and "unaligned memory access" may break TSO rules and require additional memory barriers.
+Reference: [Intel® 64 and IA-32 Architectures Software Developer's Manual, Vol. 3A, §11.2](https://www.intel.com/content/www/us/en/developer/articles/technical/intel-sdm.html)
 
-**Significance**: The strong memory model of x86 reduces software complexity. In most cases, there is no need to manually deal with the "write → read/write → write/read → write" out-of-order. However, attention should be paid to the exceptions of "read → read" out-of-order and special instructions.
+**Exception**: x86 `non-temporal store` (such as `_mm_stream_store_si128`) and "unaligned memory access" may break TSO rules and require additional memory barriers.
+
+**Significance**: x86's strong memory model reduces software complexity. In most cases there is no need to manually handle Load→Load, Load→Store, or Store→Store reordering, but attention must be paid to Store→Load reordering (different locations, caused by the store buffer) and exceptions for special instructions.
 
 **(2) ARM/PowerPC: Weak memory model (Partial Store Order, PSO / Weak Order) **
 

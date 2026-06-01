@@ -1328,14 +1328,16 @@ assert(a == 1); // 可能失败？
 
 **规则**：
 
-1. 禁止“写→读”乱序（StoreLoad Reordering）：即“先执行的store，不会被后执行的load越过”——例如`a=1; b=load(c);`中，`b=load(c)`不会先于`a=1`的store提交到内存；
-2. 禁止“写→写”乱序（StoreStore Reordering）：即“先执行的store，其他线程必先看到”——例如`a=1; b=1;`中，其他线程不会先看到`b=1`再看到`a=1`；
-3. 禁止“读→写”乱序（LoadStore Reordering）：即“先执行的load，不会被后执行的store越过”——例如`a=load(c); b=1;`中，`b=1`不会先于`a=load(c)`提交；
-4. **允许“读→读”乱序（LoadLoad Reordering）**：即“先执行的load，可能后看到结果”——例如`a=load(c); b=load(d);`中，若`c`的缓存行未命中而`d`的缓存行命中，`b`可能先获取值，`a`后获取值。
+1. 禁止读→读乱序（LoadLoad Reordering）：读操作不会与其他读操作重排——在 `a=load(c); b=load(d);` 中，两次 load 的全局可见顺序与程序顺序一致；
+2. 禁止读→写乱序（LoadStore Reordering）：读操作不会与写操作重排——在 `a=load(c); b=1;` 中，`b=1` 的 store 不会先于 `a=load(c)` 提交；
+3. 禁止写→写乱序（StoreStore Reordering）：写操作不会与其他写操作重排——在 `a=1; b=1;` 中，其他线程不会先看到 `b=1` 再看到 `a=1`；
+4. 允许写→读乱序（StoreLoad Reordering，针对不同地址）：读操作可能与较早的、不同地址的写操作重排——在 `a=1; b=load(c);`（`c` 与 `a` 不同地址）中，后续 load 可能先于 `a=1` 的 store 对其他线程可见；同一地址仍受 Store-to-Load Forwarding 约束。
+
+参考：[Intel® 64 and IA-32 Architectures Software Developer's Manual, Vol. 3A, §11.2](https://www.intel.com/content/www/us/en/developer/articles/technical/intel-sdm.html)
 
 **例外**：x86的`non-temporal store`（如`_mm_stream_store_si128`）与“未对齐内存访问”可能打破TSO规则，需额外加内存屏障。
 
-**意义**：x86的强内存模型降低了软件复杂度，多数情况下无需手动处理“写→读/写→写/读→写”乱序，但需注意“读→读”乱序与特殊指令的例外。
+**意义**：x86 的强内存模型降低了软件复杂度，多数情况下无需手动处理读→读、读→写、写→写乱序，但需注意写→读乱序（不同地址，store buffer 导致）与特殊指令的例外。
 
 **（2）ARM/PowerPC：弱内存模型（Partial Store Order, PSO / Weak Order）**
 
