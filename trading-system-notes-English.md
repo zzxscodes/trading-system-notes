@@ -1522,6 +1522,23 @@ struct alignas(CACHE_LINE_SIZE) CacheLineAligned : public T {
 // This method is more concise and ensures that the structure is aligned in memory to meet the cache line size requirements.
 ```
 
+**Inverse use: dry-run dual copy + false-sharing warm-up + branchless index**
+
+For multi-threaded contention, use alignment to isolate unrelated variables on the same cache line. Single-threaded dry-run can flip this: keep two copies per hot-path counter, `[0]` live and `[1]` dry-run placeholder, **deliberately no** `alignas` so both sit on one cache line; a dry-run write to `[1]` loads `[0]` into cache without changing it. Cast `bool dry_run` to `0/1` for branchless indexing; dry-run runs everything except the actual order submit. Suitable for single-threaded warm-up of L1/L2 cache; no impact on multi-threaded L3 cache.
+
+```cpp
+int g_order_count[2] = { 0, 0 }; // [0] live, [1] dry-run placeholder (same cache line; no alignas on purpose)
+
+void execute_trade(Order &order, bool dry_run)
+{
+    g_order_count[(int)dry_run]++; // false→[0] live++; true→[1] dry-run++ and warms [0]
+    // other stats: g_xxx[(int)dry_run]++ likewise
+    if (!dry_run) {
+        // actual order submit only here
+    }
+}
+```
+
 True sharing issues can be passed std::atomic (not performance sensitive) and thread_local solve the problem.
 
 

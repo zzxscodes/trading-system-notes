@@ -1524,6 +1524,23 @@ struct alignas(CACHE_LINE_SIZE) CacheLineAligned : public T {
 // 这种方式更加简洁，并且可以确保结构体在内存中的对齐符合缓存行的大小要求。
 ```
 
+**反用：干跑双副本 + 伪共享预热 + 无分支索引**
+
+针对多线程争用，用对齐隔离同一缓存行内的无关变量。单线程干跑场景可反其道行之：热路径统计量维护两份副本，`[0]` 实时、`[1]` 干跑占位，**故意不用** `alignas`，让二者落在同一缓存行；干跑时写 `[1]` 会把 `[0]` 一并载入缓存而不改其值。`bool dry_run` 转为 `0/1` 作数组索引，一行无分支更新；干跑执行除实际下单外的全部逻辑。适合L1、L2 cache的单线程预热，L3 cache多线程无影响。
+
+```cpp
+int g_order_count[2] = { 0, 0 }; // [0] 实时, [1] 干跑占位（同缓存行，故意不 alignas）
+
+void execute_trade(Order &order, bool dry_run)
+{
+    g_order_count[(int)dry_run]++; // false→[0] 实时自增; true→[1] 干跑自增并预热 [0]
+    // 其他统计量同样 g_xxx[(int)dry_run]...
+    if (!dry_run) {
+        // 仅在此处真正提交订单
+    }
+}
+```
+
 真共享问题可以通过 **std::atomic（性能不敏感）和 thread_local 解决问题。**
 
 
