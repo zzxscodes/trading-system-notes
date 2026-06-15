@@ -252,6 +252,12 @@ echo "To stop the task, run: kill ${TASK_PID}"
 | **Dynamic** | **Static (requires restart)** | **Dynamic** | Dynamic | Dynamic |
 
 
+**CPU Pinning notes**
+
+1. Prioritize avoiding core 0: the Linux kernel tends to schedule system tasks on core 0 by default; do not pin business hot paths to this core.
+2. Core 1 may have similar issues; this has been discussed in the open-source community.
+
+
 The CPU's Hyper-Threading Technology (HT) simulates the physical core into two logical cores, sharing the core's execution units (such as ALU, FPU) and L1/L2 cache.
 
 (1) If threads bound to the same physical core perform computationally intensive operations, especially AVX equal-width instruction sets, the shared floating point unit will be completely occupied, causing the transaction thread to be blocked;
@@ -11456,6 +11462,11 @@ gcc documentation:[https://gcc.gnu.org/onlinedocs/](https://gcc.gnu.org/onlinedo
     1. **Other Important Options:** There are many other options that affect performance, such as:
     - **`-ffast-math`:** Allows the compiler to reassociate floating-point operations, possibly changing evaluation order and enabling more optimizations (such as FP vectorization). Use with caution: results may differ slightly; NaNs/infinities behave differently. In databases this is usually reserved for analytical workloads where precision trade-offs are acceptable.
     - **`-mprefer-vector-width=###`:** Avoids the widest SIMD (e.g. AVX-512 on CPUs that throttle) by capping at 128 or 256 bits.
+
+**ISA / compilation notes**
+
+Use AVX-512 with caution; it can be disabled:
+On Intel Skylake-SP / Cascade Lake / Ice Lake-SP, executing AVX-512 triggers core downclocking by hundreds of MHz for ~1 ms; mixing AVX-512 into the hot path slows all subsequent code. Keep critical hot loops on AVX2 or pure scalar; use AVX-512 only on cold paths and dedicated batch-processing cores. AMD Zen 4 and later have no AVX-512 downclocking; on Intel-centric HFT servers, most teams still avoid AVX-512 on the hot path.
 
 **GCC's most commonly used compilation options**
 
