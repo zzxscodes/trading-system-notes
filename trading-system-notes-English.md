@@ -13195,6 +13195,33 @@ namespace lfc {
 } // namespace lfc
 ```
 
+**Low-latency symbol mapping**
+
+[https://zhuanlan.zhihu.com/p/27988783559](https://zhuanlan.zhihu.com/p/27988783559)
+
+Core problem: in quant systems, contract/stock symbols must be mapped at high frequency to in-memory objects (market-data filtering, factors, order entry, positions, etc.); `std::unordered_map` is too slow.
+Overall approach: compile-time mapping ideas from qlibs/mph + Intel BMI2 `_pext_u64` (extract selected bits per mask into an integer) + StrHash greedy bit selection (each step picks one bit to minimize collision cost Σ n(n−1)/2; collisions resolved by linear probing). Futures/stocks/options use CRTP per-type encoding and can share one table; the interface inherits `unordered_map`; call `sync_with_unordered_map` before use; global perfect hashing also requires `sync_with_additional_symbols`.
+
+Three symbol kinds → 64-bit integer
+
+| Type | Method |
+| --- | --- |
+| Futures (5–6 chars) | Read 8 bytes via `*(__int64*)symbol`, mask with `0xFFFFFFFFFFFF`; `(sym[5]==0 \|\| sym[6]==0)` distinguishes options (options → 0, futures keep original value; `-value` trick avoids branches) |
+| Stocks (e.g. 600001.SSE) | Low 6 bytes = code, high 2 bytes = exchange; 9th character shifted left 4 bits and OR’d in |
+| ETF options | Exchange letter S/Z shifted left 4 bits (`0x30`/`0xA0`) OR’d onto digit ASCII without conflicting with `0x30`–`0x39` |
+| Commodity options | `pext` extract: digits low 4 bits (`0x0f`), first letter `0x1f`, second char `0x5f`; max 16 bits, validated at init |
+
+After encoding, no need to compare all 64 bits—`pext` only the distinguishing bits (e.g. zn2503 vs zn2506: compare only the lowest bit of the last digit).
+
+Three acceleration tiers (mainly for futures)
+
+1. Ordinary table: greedy mask + linear probing → hybrid.
+2. Same-day perfect hash: limited contract count; compile-time mask yields no bucket collisions; lookup skips collision checks.
+3. Global perfect hash: preload all same-day contracts from CTP/market data; `sync_with_additional_symbols` updates mask; if mask’s highest bit ≤48, conversion can drop `&` and option checks.
+
+The original article covers implementation details and performance benchmarks.
+
+
 ### 2. Implement thread-safe queues
 **1.disruptor**
 
