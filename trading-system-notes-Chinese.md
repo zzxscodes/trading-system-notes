@@ -13169,6 +13169,33 @@ namespace lfc {
 } // namespace lfc
 ```
 
+**证券代码的低延迟映射方法**
+
+[https://zhuanlan.zhihu.com/p/27988783559](https://zhuanlan.zhihu.com/p/27988783559)
+
+核心问题：量化里要把合约/股票代码高频映射到内存对象（行情过滤、因子、下单、持仓等），std::unordered_map 太慢。
+整体思路：借鉴 qlibs/mph 的编译期映射思想 + Intel BMI2 的 _pext_u64（按 mask 提取指定位组成整数）+ StrHash 的贪心选位（每次选一位使碰撞代价 Σ n(n-1)/2 最小，碰撞用线性探测）。期货/股票/期权用 CRTP 分类型编码，可合并成一张表；接口继承 unordered_map，用前需 sync_with_unordered_map，全局完美哈希还需 sync_with_additional_symbols。
+
+三类代码 → 64 位整数
+
+| 类型 | 做法 |
+| --- | --- |
+| 期货（5–6 位） | *(__int64*)symbol 读 8 字节，与 0xFFFFFFFFFFFF 清脏数据；(sym[5]==0 \|\| sym[6]==0) 区分期权（期权为 0，期货保留原值，可用 -value 技巧避免分支） |
+| 股票（如 600001.SSE） | 低 6 字节存代码，高 2 字节存交易所；第 9 字符左移 4 位叠加 |
+| ETF 期权 | 交易所字母 S/Z 左移 4 位（0x30/0xA0）叠加到数字 ASCII 上，与 0x30–0x39 不冲突 |
+| 商品期权 | pext 提取：数字取低 4 位（0x0f），首字母 0x1f，第二字符 0x5f；最长 16 位，初始化校验 |
+
+编码后不必比满 64 位，只 pext 提取若干区分位即可（如 zn2503 vs zn2506 只比末位数字最低 bit）。
+
+三层加速（主要针对期货）
+
+1. 普通表：贪心 mask + 线性探测 → 混合。
+2. 当日完美哈希：合约数有限，编译期 mask 使桶内无碰撞，查找免碰撞检测。
+3. 全局完美哈希：CTP/行情预载当日全部合约，sync_with_additional_symbols 更新 mask；mask 最高位 ≤48 则转换可去掉 & 和期权判断。
+
+原文详细讲解了实现方法并展示了性能benchmark。
+
+
 ### 2. **实现线程安全队列**
 **1.disruptor**
 
