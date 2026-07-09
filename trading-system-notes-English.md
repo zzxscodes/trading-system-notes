@@ -2612,6 +2612,7 @@ vec.emplace_back(1); // Undefined behavior
 1. Large page memory simplifies the address translation process by increasing the granularity of a single page and reducing the page table traversal level (1GB large page level 4 becomes level 2).
 2. Because the memory page table is accessed less, the latency of a single address translation is reduced, avoiding performance losses caused by CPU waiting.
 3. Significantly improve the TLB hit rate, reduce the number of page table traversals triggered by TLB misses, and especially optimize the address translation efficiency in large memory scenarios.
+4. Huge pages are typically obtained via `mmap(MAP_HUGETLB)` or hugetlbfs mapping; for page faults on first access, Prefault/Prealloc tuning, and hugetlbpage vs THP trade-offs, see [mmap Performance Analysis and Tuning](https://xoyo.space/2017/11/mmap-performance-analyzing-and-tuning/).
 
 ```cpp
 #include <sys/mman.h>
