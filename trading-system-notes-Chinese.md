@@ -2615,6 +2615,7 @@ vec.emplace_back(1); // 未定义行为
 1. 大页内存通过增大单页粒度，减少页表遍历层级（1GB大页 4 级变 2 级），简化地址转换流程。
 2. 因少访问内存页表，单次地址转换延迟降低，避免 CPU 等待带来的性能损耗。
 3. 大幅提升 TLB 命中率，减少 TLB 未命中触发的页表遍历次数，尤其优化大内存场景的地址转换效率。
+4. 大页内存多通过 `mmap(MAP_HUGETLB)` 或 hugetlbfs 映射获取；`mmap` 首次访问时的 page fault、Prefault/Prealloc 调优及 hugetlbpage 与 THP 取舍，参见 [mmap 性能分析与优化](https://xoyo.space/2017/11/mmap-performance-analyzing-and-tuning/)。
 
 ```cpp
 #include <sys/mman.h>
