@@ -4225,6 +4225,154 @@ struct EmployeeData {
 ```
 
 
+**AoS 视图 + SoA 存储**
+
+AoS 视图 + SoA 存储是底层采用 Structure of Arrays (SoA) 内存布局获得极致缓存友好性与 SIMD 向量化能力，上层通过轻量代理对象封装出 Array of Structures (AoS) 的直观访问接口，兼顾性能与代码可读性。
+
+模式的核心是代理引用（Proxy Reference）设计模式，整体分为三层：
+
+1. 底层存储层：维护多组平行的连续数组（SoA 布局），负责内存管理、增删元素
+2. 代理对象层：`operator[]` 返回的不是真实结构体，而是一个轻量代理对象，仅持有存储指针和元素索引
+3. 访问转发层：代理对象提供与原生结构体一致的成员访问接口，内部将读写操作转发到底层对应数组的对应索引位置
+4. 迭代器适配层：实现随机访问迭代器，支持范围 for 循环与 STL 风格遍历
+
+```cpp
+#include <vector>
+#include <cstddef>
+#include <iterator>
+#include <iostream>
+
+class ParticleSoA;
+
+// 非const代理引用：AoS 视图的单个"虚拟元素"
+struct ParticleRef {
+    ParticleSoA* storage;
+    size_t index;
+
+    float& x() const;
+    float& y() const;
+    float& vx() const;
+    float& vy() const;
+};
+
+// const代理引用：只读视图
+struct ParticleConstRef {
+    const ParticleSoA* storage;
+    size_t index;
+
+    const float& x() const;
+    const float& y() const;
+    const float& vx() const;
+    const float& vy() const;
+};
+
+// 底层 SoA 存储容器
+class ParticleSoA {
+    std::vector<float> x_;
+    std::vector<float> y_;
+    std::vector<float> vx_;
+    std::vector<float> vy_;
+
+public:
+    // 基础容量操作
+    void reserve(size_t n) {
+        x_.reserve(n); y_.reserve(n);
+        vx_.reserve(n); vy_.reserve(n);
+    }
+    void push_back(float x, float y, float vx, float vy) {
+        x_.push_back(x); y_.push_back(y);
+        vx_.push_back(vx); vy_.push_back(vy);
+    }
+    size_t size() const { return x_.size(); }
+    bool empty() const { return x_.empty(); }
+
+    // AoS 视图访问接口
+    ParticleRef operator[](size_t i) { return {this, i}; }
+    ParticleConstRef operator[](size_t i) const { return {this, i}; }
+
+    // 直接访问底层数组（性能关键路径使用）
+    const std::vector<float>& x_array() const { return x_; }
+    std::vector<float>& x_array() { return x_; }
+    // y_array / vx_array / vy_array 同理...
+
+    // 迭代器支持（随机访问迭代器）
+    struct iterator {
+        using iterator_category = std::random_access_iterator_tag;
+        using value_type = ParticleRef;
+        using difference_type = ptrdiff_t;
+        using reference = ParticleRef;
+
+        ParticleSoA* storage;
+        size_t idx;
+
+        reference operator*() const { return (*storage)[idx]; }
+        iterator& operator++() { ++idx; return *this; }
+        iterator operator++(int) { auto tmp = *this; ++idx; return tmp; }
+        iterator& operator--() { --idx; return *this; }
+        bool operator==(const iterator& o) const { return idx == o.idx; }
+        bool operator!=(const iterator& o) const { return idx != o.idx; }
+        iterator& operator+=(ptrdiff_t n) { idx += n; return *this; }
+        difference_type operator-(const iterator& o) const { return idx - o.idx; }
+    };
+
+    iterator begin() { return {this, 0}; }
+    iterator end() { return {this, size()}; }
+
+    friend struct ParticleRef;
+    friend struct ParticleConstRef;
+};
+
+// 代理成员函数实现：转发到底层数组
+float& ParticleRef::x() const { return storage->x_[index]; }
+float& ParticleRef::y() const { return storage->y_[index]; }
+float& ParticleRef::vx() const { return storage->vx_[index]; }
+float& ParticleRef::vy() const { return storage->vy_[index]; }
+
+const float& ParticleConstRef::x() const { return storage->x_[index]; }
+const float& ParticleConstRef::y() const { return storage->y_[index]; }
+const float& ParticleConstRef::vx() const { return storage->vx_[index]; }
+const float& ParticleConstRef::vy() const { return storage->vy_[index]; }
+
+// ADL 交换：支持 std::swap 正确交换底层数据
+void swap(ParticleRef a, ParticleRef b) {
+    using std::swap;
+    swap(a.x(), b.x()); swap(a.y(), b.y());
+    swap(a.vx(), b.vx()); swap(a.vy(), b.vy());
+}
+
+
+
+
+//-----------------------------------代码示例-------------------------------------------
+
+
+int main() {
+    ParticleSoA particles;
+    particles.push_back(0, 0, 1, 1);
+    particles.push_back(1, 2, 3, 4);
+
+    // 1. 下标访问，和 AoS 写法几乎一致
+    particles[0].x() = 10.0f;
+    std::cout << particles[0].x() << ", " << particles[0].y() << "\n";
+
+    // 2. 范围 for 遍历
+    for (auto p : particles) {
+        p.x() += p.vx(); // 物理更新：位置 += 速度
+        p.y() += p.vy();
+    }
+
+    // 3. 性能关键路径直接访问底层 SoA 数组，最大化缓存/SIMD 收益
+    auto& x = particles.x_array();
+    auto& vx = particles.x_array();
+    for (size_t i = 0; i < particles.size(); ++i) {
+        x[i] += vx[i];
+    }
+
+    return 0;
+}
+```
+
+
 **2. 去规范化的数据结构**
 
 ```cpp
