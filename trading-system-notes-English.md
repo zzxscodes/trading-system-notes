@@ -4218,6 +4218,154 @@ struct EmployeeData {
 ```
 
 
+**AoS View + SoA Storage**
+
+AoS View + SoA Storage uses a Structure of Arrays (SoA) memory layout at the bottom layer to achieve excellent cache friendliness and SIMD vectorization capability, while the upper layer wraps a lightweight proxy object to provide an intuitive Array of Structures (AoS) access interface, balancing performance and code readability.
+
+The core of this pattern is the Proxy Reference design pattern, consisting of four layers:
+
+1. **Storage layer**: maintains multiple parallel contiguous arrays (SoA layout), responsible for memory management and element insertion/deletion
+2. **Proxy object layer**: `operator[]` returns not a real struct, but a lightweight proxy object that only holds a storage pointer and element index
+3. **Access forwarding layer**: the proxy object provides member access interfaces consistent with a native struct, internally forwarding read/write operations to the corresponding index in the underlying arrays
+4. **Iterator adaptation layer**: implements random-access iterators, supporting range-for loops and STL-style traversal
+
+```cpp
+#include <vector>
+#include <cstddef>
+#include <iterator>
+#include <iostream>
+
+class ParticleSoA;
+
+// Non-const proxy reference: a single "virtual element" in the AoS view
+struct ParticleRef {
+    ParticleSoA* storage;
+    size_t index;
+
+    float& x() const;
+    float& y() const;
+    float& vx() const;
+    float& vy() const;
+};
+
+// Const proxy reference: read-only view
+struct ParticleConstRef {
+    const ParticleSoA* storage;
+    size_t index;
+
+    const float& x() const;
+    const float& y() const;
+    const float& vx() const;
+    const float& vy() const;
+};
+
+// Underlying SoA storage container
+class ParticleSoA {
+    std::vector<float> x_;
+    std::vector<float> y_;
+    std::vector<float> vx_;
+    std::vector<float> vy_;
+
+public:
+    // Basic capacity operations
+    void reserve(size_t n) {
+        x_.reserve(n); y_.reserve(n);
+        vx_.reserve(n); vy_.reserve(n);
+    }
+    void push_back(float x, float y, float vx, float vy) {
+        x_.push_back(x); y_.push_back(y);
+        vx_.push_back(vx); vy_.push_back(vy);
+    }
+    size_t size() const { return x_.size(); }
+    bool empty() const { return x_.empty(); }
+
+    // AoS view access interface
+    ParticleRef operator[](size_t i) { return {this, i}; }
+    ParticleConstRef operator[](size_t i) const { return {this, i}; }
+
+    // Direct access to underlying arrays (for performance-critical paths)
+    const std::vector<float>& x_array() const { return x_; }
+    std::vector<float>& x_array() { return x_; }
+    // y_array / vx_array / vy_array likewise...
+
+    // Iterator support (random-access iterator)
+    struct iterator {
+        using iterator_category = std::random_access_iterator_tag;
+        using value_type = ParticleRef;
+        using difference_type = ptrdiff_t;
+        using reference = ParticleRef;
+
+        ParticleSoA* storage;
+        size_t idx;
+
+        reference operator*() const { return (*storage)[idx]; }
+        iterator& operator++() { ++idx; return *this; }
+        iterator operator++(int) { auto tmp = *this; ++idx; return tmp; }
+        iterator& operator--() { --idx; return *this; }
+        bool operator==(const iterator& o) const { return idx == o.idx; }
+        bool operator!=(const iterator& o) const { return idx != o.idx; }
+        iterator& operator+=(ptrdiff_t n) { idx += n; return *this; }
+        difference_type operator-(const iterator& o) const { return idx - o.idx; }
+    };
+
+    iterator begin() { return {this, 0}; }
+    iterator end() { return {this, size()}; }
+
+    friend struct ParticleRef;
+    friend struct ParticleConstRef;
+};
+
+// Proxy member function implementations: forward to underlying arrays
+float& ParticleRef::x() const { return storage->x_[index]; }
+float& ParticleRef::y() const { return storage->y_[index]; }
+float& ParticleRef::vx() const { return storage->vx_[index]; }
+float& ParticleRef::vy() const { return storage->vy_[index]; }
+
+const float& ParticleConstRef::x() const { return storage->x_[index]; }
+const float& ParticleConstRef::y() const { return storage->y_[index]; }
+const float& ParticleConstRef::vx() const { return storage->vx_[index]; }
+const float& ParticleConstRef::vy() const { return storage->vy_[index]; }
+
+// ADL swap: enables std::swap to correctly exchange underlying data
+void swap(ParticleRef a, ParticleRef b) {
+    using std::swap;
+    swap(a.x(), b.x()); swap(a.y(), b.y());
+    swap(a.vx(), b.vx()); swap(a.vy(), b.vy());
+}
+
+
+
+
+//-----------------------------------Code Example-------------------------------------------
+
+
+int main() {
+    ParticleSoA particles;
+    particles.push_back(0, 0, 1, 1);
+    particles.push_back(1, 2, 3, 4);
+
+    // 1. Subscript access, almost identical to AoS style
+    particles[0].x() = 10.0f;
+    std::cout << particles[0].x() << ", " << particles[0].y() << "\n";
+
+    // 2. Range-for traversal
+    for (auto p : particles) {
+        p.x() += p.vx(); // physics update: position += velocity
+        p.y() += p.vy();
+    }
+
+    // 3. Performance-critical path: directly access underlying SoA arrays for maximum cache/SIMD benefit
+    auto& x = particles.x_array();
+    auto& vx = particles.x_array();
+    for (size_t i = 0; i < particles.size(); ++i) {
+        x[i] += vx[i];
+    }
+
+    return 0;
+}
+```
+
+
 **2. Denormalized data structure**
 
 ```cpp
