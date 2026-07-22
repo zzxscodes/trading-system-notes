@@ -86,6 +86,7 @@ English version：[https://github.com/zzxscodes/trading-system-notes/blob/main/t
   - [14. 分布式交易系统共识模型](#14-分布式交易系统共识模型)
   - [15. 交易所协议分层与序列一致性](#15-交易所协议分层与序列一致性)
   - [16. 预序列化订单](#16-预序列化订单)
+  - [17. 自适应负载丢弃器（CoDEL）](#17-自适应负载丢弃器codel)
 - [业务逻辑设计-计算](#业务逻辑设计-计算)
   - [1. 对数收益率(百分比非对称性)](#1-对数收益率百分比非对称性)
   - [2. 市场趋势和波动率的状态变化](#2-市场趋势和波动率的状态变化)
@@ -5190,6 +5191,110 @@ ch.branch(x);                     // 热路径派发；实参与 handle_* 一致
 + **注意：** 默认可能对桩所在页保持 `mprotect` RWX；定义 `SAFE_MODE`（上游通常为 `-DSAFE_MODE`）时仅在修补前后短暂 `RW`→`RX`，页权限更严格但 `set_direction` 成本上升。同一函数签名在进程内通常仅允许一个 `BranchChanger` 实例（`MULTIPLE_INSTANCE_ERROR`）。要求 C++17+；支持 x86-64 与 AArch64（跳转编码与位移约束因 ISA 而异）。
 
 
+**13. 编译期分支决策树**
+
+将交易策略的分支判定以**类型**拼成二叉决策树，在编译期递归展开并固化，热路径接近硬编码流水线：无虚表、无动态多态调度、无堆分配与 RTTI。规则必须在编译期静态确定，不支持运行时改树。与上文 `if constexpr` / 查表 / 无分支计算互补：这里把一整棵策略树做成静态类型图，运行时只剩内联后的条件判断与动作返回。
+
+| 组件 | 作用 |
+| --- | --- |
+| `MarketContext` | 行情/账户输入总线 |
+| `ActionNode<Action>` | 叶子：直接返回交易动作 |
+| 条件类型（如 `IsHighVol`） | 统一 `static bool check(ctx)` |
+| `DecisionNode<Cond, L, R>` | `Cond` 为真走左枝，否则右枝 |
+| `CompiledStrategy<Root>` | 调用入口；可用 `using` 拼装预构建块 |
+
+```cpp
+#include <cmath>
+#include <cstdint>
+
+#if defined(__GNUC__) || defined(__clang__)
+#define HFT_LIKELY(x)   __builtin_expect(!!(x), 1)
+#define HFT_FORCE_INLINE [[gnu::always_inline]] inline
+#else
+#define HFT_LIKELY(x)   (x)
+#define HFT_FORCE_INLINE inline
+#endif
+
+namespace hft::ct_tree {
+
+struct MarketContext {
+    double mid_price{};
+    double obi{};
+    double volatility{};
+    int32_t position{};
+};
+
+enum class ActionType : uint8_t { NONE, BUY, SELL, CLOSE };
+
+template<ActionType A>
+struct ActionNode {
+    HFT_FORCE_INLINE static ActionType evaluate(const MarketContext&) { return A; }
+};
+
+template<long ThresX1000>
+struct IsHighVol {
+    HFT_FORCE_INLINE static bool check(const MarketContext& ctx) {
+        return ctx.volatility > static_cast<double>(ThresX1000) / 1000.0;
+    }
+};
+
+template<long ThresX1000>
+struct IsOBIBullish {
+    HFT_FORCE_INLINE static bool check(const MarketContext& ctx) {
+        return ctx.obi > static_cast<double>(ThresX1000) / 1000.0;
+    }
+};
+
+template<int MaxPos>
+struct IsPositionSafe {
+    HFT_FORCE_INLINE static bool check(const MarketContext& ctx) {
+        return std::abs(ctx.position) < MaxPos;
+    }
+};
+
+template<typename Cond, typename Left, typename Right>
+struct DecisionNode {
+    HFT_FORCE_INLINE static ActionType evaluate(const MarketContext& ctx) {
+        if (HFT_LIKELY(Cond::check(ctx))) return Left::evaluate(ctx);
+        return Right::evaluate(ctx);
+    }
+};
+
+template<typename Root>
+struct CompiledStrategy {
+    HFT_FORCE_INLINE static ActionType execute(const MarketContext& ctx) {
+        return Root::evaluate(ctx);
+    }
+};
+
+template<long Threshold>
+using MomentumBlock = DecisionNode<
+    IsOBIBullish<Threshold>,
+    ActionNode<ActionType::BUY>,
+    DecisionNode<
+        IsOBIBullish<-Threshold>,
+        ActionNode<ActionType::NONE>,
+        ActionNode<ActionType::SELL>
+    >
+>;
+
+using ExampleStrategy = DecisionNode<
+    IsPositionSafe<100>,
+    DecisionNode<
+        IsHighVol<500>,
+        ActionNode<ActionType::NONE>,
+        MomentumBlock<200>
+    >,
+    ActionNode<ActionType::CLOSE>
+>;
+
+} // namespace hft::ct_tree
+```
+
++ **优势**：全静态绑定，易配合强制内联与 `HFT_LIKELY`；类型错误编译期暴露
++ **代价**：策略变更需重新编译；树过深可能拉长编译时间与指令缓存占用
+
+
 ### 13. 组合优先于继承
 ```cpp
 #include <cstdio>
@@ -6607,6 +6712,31 @@ for (int i = 0; i + 7 < N; i += 8) { // 每次处理8个int (32字节)
 **为什么 Non-Temporal Store 更快（RFO 消除）**：普通 store 写入一个不在缓存中的地址时，CPU 会触发 Read-For-Ownership（RFO）——先从内存读取整条 64 字节缓存行到缓存，再修改其中的数据，最终写回内存。这意味着每写 64 字节实际产生 128 字节的内存流量。Non-Temporal Store 绕过缓存直接写入内存（经写合并缓冲区），消除了 RFO 读，理论上可获得 2 倍带宽提升。
 
 + [https://whichisfaster.dev/q/non_temporal_write.html](https://whichisfaster.dev/q/non_temporal_write.html)
+
+**其他优化：向 PCIe/MMIO 写入时用 `uint64_t` 整块写替代通用 `memcpy`**
+
+通用 `memcpy` 内部常有长度分支、对齐分支，短拷贝或未对齐路径会拆成大量离散的单字节 / 双字节 store。目标若是网卡/FPGA 等映射为 WC（Write Combining）的 PCIe BAR / DMA 缓冲区，这些碎写会各自变成独立的 PCIe 写事务，打散写合并窗口，总线交互次数飙升。用对齐的 `uint64_t`（或更宽的固定宽度整型 / NT store）整块写入，单次 store 位宽贴合 PCIe 写合并粒度，控制器更容易把相邻写并成更少事务，从而降低总线往返耗时。
+
++ **适用**：固定或已知长度的小包/描述符/门铃字段写入设备映射内存
++ **要点**：源/目的尽量 8 字节对齐；热路径避免依赖通用 `memcpy` 的“万能分支”；必要时配合 `sfence` 刷新 WC 缓冲（见前文 SFENCE）
++ **注意**：普通 DRAM 上现代 `memcpy` 已高度优化，本优化针对 **PCIe/MMIO/WC** 路径，勿盲目替换所有拷贝
+
+```cpp
+#include <cstdint>
+#include <cstddef>
+
+// 向 PCIe WC/MMIO 目标做定长、对齐的 8 字节整块写（示意）
+inline void copy_u64_blocks(volatile void* dst, const void* src, size_t nbytes) {
+    // nbytes 须为 8 的倍数；dst/src 建议 8 字节对齐
+    auto* d = static_cast<volatile uint64_t*>(dst);
+    const auto* s = static_cast<const uint64_t*>(src);
+    const size_t n = nbytes / sizeof(uint64_t);
+    for (size_t i = 0; i < n; ++i) {
+        d[i] = s[i]; // 宽 store，利于 PCIe 写合并，避免 memcpy 拆成 1B/2B 碎写
+    }
+    // 若后续依赖“设备已见全部写入”，按平台对 WC 内存补 sfence / 适当屏障
+}
+```
 
 ### 17. 关于函数的潜在优化
 **1.返回值优化（RVO、NRVO）**
@@ -9373,6 +9503,34 @@ while 循环的条件检查 (... != EXPECTED_VALUE) 是一个条件分支 (Condi
 3. **减少流水线刷新 在多核或超线程环境下，PAUSE 指令可以减少因推测性执行导致的流水线刷新，从而提高资源利用率，避免浪费其他线程的计算资源。**
 4. **延迟操作 PAUSE 指令在某些处理器上实现为预定义的延迟操作（pre-defined delay），延迟时间有限，甚至可能为零。它不会改变处理器的架构状态，仅执行延迟操作。**
 
+**其他优化：CPU 原生地址监控等待（`umonitor`/`umwait`、`WFE`）**
+
+`PAUSE` 仍在用户态忙等，只是降低争用与功耗；操作系统级同步（如 futex）睡眠省电但唤醒路径长、抖动大。更进一步可用 CPU **地址监控** 指令：等待线程登记要监视的内存地址后进入低功耗休眠；发送线程只需对该地址执行普通写，由 **缓存一致性硬件**（MESI 等）探测到写命中监视区间，直接唤醒等待核——无需系统调用，也无需高功耗纯自旋。
+
+
+```cpp
+// x86 WAITPKG（需 CPUID 支持）：用户态地址监控等待示意
+#include <immintrin.h>
+#include <cstdint>
+
+inline void wait_until_nonzero(volatile uint32_t* flag) {
+    while (*flag == 0) {
+        _umonitor(const_cast<void*>(static_cast<const volatile void*>(flag)));
+        // ctrl: 超时/C-state 等；若监视地址在 umwait 前已被写入，硬件可立即返回
+        (void)_umwait(0 /* ctrl */, 0 /* counter: 0 表示不限时，具体语义依平台 */);
+    }
+}
+
+inline void signal(volatile uint32_t* flag) {
+    *flag = 1; // 普通 store 即可；一致性协议命中对方 umonitor 区间 → 唤醒
+}
+
+// ARM64 侧常见模式：等待线程 WFE，发送线程在写入并保证可见性后 SEV（或依赖可唤醒的存储事件）
+//   wfe;  // 事件流为空则低功耗等待
+//   sev;  // 发送事件唤醒处于 WFE 的核
+```
+
++ **注意**：依赖微架构与固件（WAITPKG、C-state 策略）；超时与虚假唤醒需在循环中重检条件；HFT 若全局禁用深 C-state，实际休眠深度可能变浅，但仍可减少空转探听
 
 ### 25. 位域与位运算
 **位域（Bitfield）** 是一种特殊的 `struct` 成员，它允许我们精确地定义一个变量占用的二进制位数。其在HFT中的核心价值在于：
@@ -18944,6 +19102,77 @@ public:
 } // namespace lob
 ```
 
+**其他优化：PriceSetBit 位图加速有单价格层级查找**
+
+向量订单簿按 tick 把价格映射到数组下标时，实际有单的价位往往稀疏。最优买/卖价被撤空后，上文 `update_best_price` 需沿相邻空档线性扫描，稀疏场景延迟会明显抖动。可额外维护一张 `PriceSetBit` 占用位图：某价位首次挂单时置位、该档清空时清位；再通过编译器内建的后置零 / 前导零计数（GCC/Clang：`__builtin_ctzll` / `__builtin_clzll`；MSVC：`_BitScanForward64` / `_BitScanReverse64`）在 64 位字内一次跳到下一个 / 上一个有单价位，将“找下一档有单价格”从 O(价格跨度) 降到近似 O(占用字数)。
+
+```cpp
+// PriceSetBit：按 tick index 维护“该价位是否有订单”
+struct PriceSetBit {
+    static constexpr size_t BITS_PER_WORD = 64;
+    std::vector<uint64_t> words; // words[i] 的第 b 位对应 tick = i*64+b
+
+    void ensure(size_t tick) {
+        size_t need = tick / BITS_PER_WORD + 1;
+        if (words.size() < need) words.resize(need, 0);
+    }
+
+    void set(size_t tick) {
+        ensure(tick);
+        words[tick / BITS_PER_WORD] |= (1ULL << (tick % BITS_PER_WORD));
+    }
+
+    void clear(size_t tick) {
+        if (tick / BITS_PER_WORD >= words.size()) return;
+        words[tick / BITS_PER_WORD] &= ~(1ULL << (tick % BITS_PER_WORD));
+    }
+
+    bool test(size_t tick) const {
+        size_t wi = tick / BITS_PER_WORD;
+        if (wi >= words.size()) return false;
+        return (words[wi] >> (tick % BITS_PER_WORD)) & 1ULL;
+    }
+
+    // 从 after_tick 向更高价找下一个有单价位（卖侧找更高 ask 常用）
+    std::optional<size_t> next_set(size_t after_tick) const {
+        size_t start = after_tick + 1;
+        size_t wi = start / BITS_PER_WORD;
+        size_t bit = start % BITS_PER_WORD;
+        for (; wi < words.size(); ++wi, bit = 0) {
+            uint64_t w = words[wi] >> bit;
+            if (w == 0) continue;
+            // 后置零个数 = 最低置位相对当前扫描起点的偏移
+            return wi * BITS_PER_WORD + bit + static_cast<size_t>(__builtin_ctzll(w));
+        }
+        return std::nullopt;
+    }
+
+    // 从 before_tick 向更低价找上一个有单价位（买侧找更低 bid 常用）
+    std::optional<size_t> prev_set(size_t before_tick) const {
+        if (before_tick == 0 || words.empty()) return std::nullopt;
+        size_t start = before_tick - 1;
+        size_t wi = start / BITS_PER_WORD;
+        size_t bit = start % BITS_PER_WORD;
+        for (;;) {
+            uint64_t w = words[wi] & ((bit == 63) ? ~0ULL : ((1ULL << (bit + 1)) - 1));
+            if (w != 0) {
+                // 前导零个数定位最高置位：index = 63 - clz(w)
+                return wi * BITS_PER_WORD + (63u - static_cast<unsigned>(__builtin_clzll(w)));
+            }
+            if (wi == 0) break;
+            --wi;
+            bit = 63;
+        }
+        return std::nullopt;
+    }
+};
+
+// 挂单/撤空时与价格数组同步维护：
+//   档位首次非空 -> bids_bits.set(idx) / asks_bits.set(idx)
+//   档位清空     -> bids_bits.clear(idx) / asks_bits.clear(idx)
+// 最优价失效时用 prev_set / next_set 替代线性空档扫描。
+```
+
 **方案2：哈希订单簿 (Hash-based LOB)**
 
 **核心**:
@@ -27762,6 +27991,66 @@ int main() {
 ```
 
 
+### 17. 自适应负载丢弃器（CoDEL）
+
+单线程低延迟链路中，策略一旦落后行情，继续处理队列里的过时包只会白白占 CPU、把延迟堆得更糟。借鉴网络 AQM 的 **CoDEL（Controlled Delay）**：用包的**驻留时间**（出队时刻 − 入队时刻）判断拥堵；当驻留持续超过目标阈值，并越过观测窗口后进入丢弃模式，主动丢掉过期数据以排空积压，保护核心交易路径的延迟稳定性。与限流器“限制发送速率”互补——这里是**按陈旧度做主动过载保护**。
+
+```cpp
+#include <cstdint>
+
+namespace hft::reliability {
+
+// CoDEL 风格自适应丢弃：单线程出队路径调用，无需原子
+class AdaptiveLoadShedder {
+public:
+    explicit AdaptiveLoadShedder(uint64_t target_ns = 5'000,   // 目标驻留，如 5us
+                                 uint64_t interval_ns = 100'000) // 持续超标窗口，如 100us
+        : target_(target_ns), interval_(interval_ns) {}
+
+    // 出队时调用：true = 应丢弃该包
+    bool should_drop(uint64_t enqueue_ns, uint64_t now_ns) {
+        const uint64_t sojourn = now_ns - enqueue_ns;
+
+        if (sojourn < target_) {          // 已恢复：退出丢弃模式
+            dropping_ = false;
+            first_above_ = 0;
+            return false;
+        }
+
+        if (first_above_ == 0) {          // 首次超标：启动观测窗口
+            first_above_ = now_ns + interval_;
+            return false;
+        }
+
+        if (now_ns >= first_above_) {     // 窗口内持续拥堵 → 丢弃
+            dropping_ = true;
+            return true;
+        }
+
+        return dropping_;
+    }
+
+    bool dropping() const { return dropping_; }
+
+private:
+    uint64_t target_;
+    uint64_t interval_;
+    bool dropping_ = false;
+    uint64_t first_above_ = 0; // 0 = 未进入“持续超标”计时
+};
+
+} // namespace hft::reliability
+
+// 典型用法（单线程消费环）：
+// if (shedder.should_drop(pkt.enqueue_ns, now_ns)) continue; // 丢弃陈旧包
+// else handle(pkt);
+```
+
++ **适用**：行情/策略输入队列、单写单读热路径上的积压保护
++ **调参**：`target_` 贴近可接受的端到端驻留；`interval_` 过短易抖动丢包，过长则排空变慢
++ **注意**：入队时间戳必须单调可信；丢弃是有损保护，需监控丢弃率与恢复时间
+
+
 ## 业务逻辑设计-计算
 ### 1. 对数收益率(百分比非对称性)
 ```cpp
@@ -34662,6 +34951,34 @@ int64_t align_price_to_tick(price, tick) {
 4. 确保溢出防护
 5. 确保舍入规则符合交易所
 
+**其他优化：Boost.Multiprecision `cpp_bin_float`**
+
+热路径价格/数量仍应坚持定点数；但回测公式、中间统计量、高动态范围中间结果等场景有时必须保留“浮点语义”。此时勿直接用 `double`：二进制不可表小数、累加舍入与跨平台 FPU/编译差异都会引入难以复现的误差。Boost.Multiprecision 的 `cpp_bin_float` 是软件实现的二进制浮点，可在模板参数中固定有效位数，在需要浮点运算时尽量保证精度可控、结果可复现，降低“算错 / 对不齐”的风险。
+
++ **定位**：定点管撮合与报单；`cpp_bin_float` 管必须用浮点表达的离线/旁路计算
++ **精度**：如 `cpp_bin_float_50` / `cpp_bin_float_100`（十进制有效位数约 50/100），或自定义 Digits
++ **代价**：比硬件 `double`/`int64` 慢得多，禁止放进撮合热路径；算完再按 tick/Scale 量化回整数定点
+
+```cpp
+#include <boost/multiprecision/cpp_bin_float.hpp>
+#include <iomanip>
+#include <iostream>
+
+namespace mp = boost::multiprecision;
+using float50 = mp::cpp_bin_float_50; // 约 50 位十进制精度的二进制浮点
+
+int main() {
+    // 0.1 在 IEEE double 中不可精确表示；提高位数后中间结果更稳
+    float50 a("0.1");
+    float50 b("0.2");
+    float50 sum = a + b; // 仍按二进制浮点规则运算，但有效位数可配置
+
+    std::cout << std::setprecision(50) << sum << "\n";
+
+    // 最终若要报单：再按交易所 tick / PRICE_SCALE 量化为 int64_t 定点，勿把 cpp_bin_float 直接送撮合
+    return 0;
+}
+```
 
 ## 数字货币
 ### 1. uniswap-v2

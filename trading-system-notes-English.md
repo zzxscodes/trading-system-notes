@@ -86,6 +86,7 @@
   - [14. Distributed trading system consensus model](#14-distributed-trading-system-consensus-model)
   - [15. Exchange protocol layering and sequence consistency](#15-exchange-protocol-layering-and-sequence-consistency)
   - [16. Pre-serialized orders](#16-pre-serialized-orders)
+  - [17. Adaptive load shedder (CoDEL)](#17-adaptive-load-shedder-codel)
 - [Business logic design-calculation](#business-logic-design-calculation)
   - [1. Log return (percent asymmetry)](#1-log-return-percent-asymmetry)
   - [2. Changes in state of market trends and volatility](#2-changes-in-state-of-market-trends-and-volatility)
@@ -5188,6 +5189,110 @@ ch.branch(x);                       // hot-path dispatch; matches handle_* arity
 + **Notice:** Default builds may leave the stub mapping `mprotect` RWX; defining `SAFE_MODE` (upstream commonly `-DSAFE_MODE`) briefly maps RW around the patch then restores RX, tightening page permissions at higher `set_direction` cost. Typically one `BranchChanger` instance per function signature per process (`MULTIPLE_INSTANCE_ERROR`). Requires C++17+; AArch64 uses distinct branch encodings and displacement limits.
 
 
+**13. Compile-time branch decision tree**
+
+Encode strategy branches as **types** in a binary decision tree that the compiler recursively expands and freezes. The hot path behaves like a hard-coded pipeline: no vtable, no dynamic dispatch, no heap allocation, no RTTI. Rules must be fixed at compile time. Complements `if constexpr` / lookup tables / branchless arithmetic above: here the whole strategy tree is a static type graph; at runtime only inlined checks and action returns remain.
+
+| Component | Role |
+| --- | --- |
+| `MarketContext` | Market / account input bus |
+| `ActionNode<Action>` | Leaf: return a trading action |
+| Condition types (e.g. `IsHighVol`) | Uniform `static bool check(ctx)` |
+| `DecisionNode<Cond, L, R>` | Left if `Cond` is true, else right |
+| `CompiledStrategy<Root>` | Entry point; compose blocks with `using` |
+
+```cpp
+#include <cmath>
+#include <cstdint>
+
+#if defined(__GNUC__) || defined(__clang__)
+#define HFT_LIKELY(x)   __builtin_expect(!!(x), 1)
+#define HFT_FORCE_INLINE [[gnu::always_inline]] inline
+#else
+#define HFT_LIKELY(x)   (x)
+#define HFT_FORCE_INLINE inline
+#endif
+
+namespace hft::ct_tree {
+
+struct MarketContext {
+    double mid_price{};
+    double obi{};
+    double volatility{};
+    int32_t position{};
+};
+
+enum class ActionType : uint8_t { NONE, BUY, SELL, CLOSE };
+
+template<ActionType A>
+struct ActionNode {
+    HFT_FORCE_INLINE static ActionType evaluate(const MarketContext&) { return A; }
+};
+
+template<long ThresX1000>
+struct IsHighVol {
+    HFT_FORCE_INLINE static bool check(const MarketContext& ctx) {
+        return ctx.volatility > static_cast<double>(ThresX1000) / 1000.0;
+    }
+};
+
+template<long ThresX1000>
+struct IsOBIBullish {
+    HFT_FORCE_INLINE static bool check(const MarketContext& ctx) {
+        return ctx.obi > static_cast<double>(ThresX1000) / 1000.0;
+    }
+};
+
+template<int MaxPos>
+struct IsPositionSafe {
+    HFT_FORCE_INLINE static bool check(const MarketContext& ctx) {
+        return std::abs(ctx.position) < MaxPos;
+    }
+};
+
+template<typename Cond, typename Left, typename Right>
+struct DecisionNode {
+    HFT_FORCE_INLINE static ActionType evaluate(const MarketContext& ctx) {
+        if (HFT_LIKELY(Cond::check(ctx))) return Left::evaluate(ctx);
+        return Right::evaluate(ctx);
+    }
+};
+
+template<typename Root>
+struct CompiledStrategy {
+    HFT_FORCE_INLINE static ActionType execute(const MarketContext& ctx) {
+        return Root::evaluate(ctx);
+    }
+};
+
+template<long Threshold>
+using MomentumBlock = DecisionNode<
+    IsOBIBullish<Threshold>,
+    ActionNode<ActionType::BUY>,
+    DecisionNode<
+        IsOBIBullish<-Threshold>,
+        ActionNode<ActionType::NONE>,
+        ActionNode<ActionType::SELL>
+    >
+>;
+
+using ExampleStrategy = DecisionNode<
+    IsPositionSafe<100>,
+    DecisionNode<
+        IsHighVol<500>,
+        ActionNode<ActionType::NONE>,
+        MomentumBlock<200>
+    >,
+    ActionNode<ActionType::CLOSE>
+>;
+
+} // namespace hft::ct_tree
+```
+
++ **Pros**: fully static binding; works well with forced inlining and `HFT_LIKELY`; type errors fail at compile time
++ **Cons**: strategy changes require rebuild; very deep trees can inflate compile time and I-cache footprint
+
+
 ### 13. Composition takes precedence over inheritance
 ```cpp
 #include <cstdio>
@@ -6613,6 +6718,31 @@ for (int i = 0; i + 7 < N; i += 8) { // Process 8 ints (32 bytes) each time
 **Why Non-Temporal Stores are faster (RFO elimination)**: Normal stores to a cold cache line trigger a Read-For-Ownership (RFO): the CPU reads the entire 64-byte cache line from memory, modifies it, then eventually writes it back. This doubles memory traffic — 128 bytes moved per 64 bytes written. Non-temporal (streaming) stores bypass the cache entirely and write directly to memory via write-combining buffers, eliminating the RFO read. In theory this gives 2x bandwidth.
 
 + [https://whichisfaster.dev/q/non_temporal_write.html](https://whichisfaster.dev/q/non_temporal_write.html)
+
+**Other optimization: prefer `uint64_t` bulk stores over generic `memcpy` for PCIe/MMIO writes**
+
+Generic `memcpy` often branches on length and alignment; short or unaligned paths emit many discrete 1-byte / 2-byte stores. When the destination is a NIC/FPGA BAR or DMA buffer mapped as WC (Write Combining) PCIe memory, those fragmented stores become separate PCIe write transactions and break the write-combining window. Aligned `uint64_t` (or wider fixed-width / NT) bulk stores match the controller’s write-combining granularity better, so adjacent writes coalesce into fewer bus transactions and cut PCIe round-trip cost.
+
++ **Use when**: fixed/known-size packets, descriptors, or doorbell fields written into device-mapped memory
++ **Keys**: keep src/dst 8-byte aligned; avoid relying on generic `memcpy`’s “catch-all” branches on the hot path; flush WC buffers with `sfence` when needed (see SFENCE above)
++ **Caveat**: on ordinary DRAM, modern `memcpy` is already highly tuned—this tip targets **PCIe/MMIO/WC** paths, not every copy in the process
+
+```cpp
+#include <cstdint>
+#include <cstddef>
+
+// Fixed-size, aligned 8-byte bulk write into PCIe WC/MMIO (sketch)
+inline void copy_u64_blocks(volatile void* dst, const void* src, size_t nbytes) {
+    // nbytes must be a multiple of 8; prefer 8-byte-aligned dst/src
+    auto* d = static_cast<volatile uint64_t*>(dst);
+    const auto* s = static_cast<const uint64_t*>(src);
+    const size_t n = nbytes / sizeof(uint64_t);
+    for (size_t i = 0; i < n; ++i) {
+        d[i] = s[i]; // wide stores favor PCIe write combining vs memcpy's 1B/2B fragments
+    }
+    // If later code assumes the device has observed all writes, add sfence / platform barriers for WC
+}
+```
 
 ### 17. Regarding potential optimizations of functions
 **1. Return value optimization (RVO, NRVO)**
@@ -9407,6 +9537,34 @@ The **PAUSE** instruction is an assembly instruction used to optimize spin-wait 
 3. **Reduce pipeline refresh** In a multi-core or hyper-threaded environment, the PAUSE instruction can reduce pipeline refreshes caused by speculative execution, thereby improving resource utilization and avoiding wasting computing resources of other threads.
 4. **Delay operation** The PAUSE instruction is implemented as a pre-defined delay on some processors, and the delay time is limited or even zero. It does not change the architectural state of the processor, only performs deferred operations.
 
+**Other optimization: CPU native address-monitor waits (`umonitor`/`umwait`, `WFE`)**
+
+`PAUSE` still busy-waits in user space—it only softens contention and power draw. OS-level sync (e.g. futex) sleeps cheaply but has a long, jittery wakeup path. Go further with CPU **address-monitor** instructions: the waiter arms a monitored memory address and enters a low-power wait; the sender only needs an ordinary store to that address; **cache-coherence hardware** (MESI, etc.) observes a write into the monitored range and wakes the waiting core—no syscall, and no high-power pure spin.
+
+
+```cpp
+// x86 WAITPKG (requires CPUID support): sketch of user-space address-monitor wait
+#include <immintrin.h>
+#include <cstdint>
+
+inline void wait_until_nonzero(volatile uint32_t* flag) {
+    while (*flag == 0) {
+        _umonitor(const_cast<void*>(static_cast<const volatile void*>(flag)));
+        // ctrl: timeout / C-state hints; if the address is written before umwait, hardware may return immediately
+        (void)_umwait(0 /* ctrl */, 0 /* counter: 0 = no timeout; semantics are platform-specific */);
+    }
+}
+
+inline void signal(volatile uint32_t* flag) {
+    *flag = 1; // ordinary store; coherence hit on peer's umonitor range → wakeup
+}
+
+// ARM64 pattern: waiter uses WFE; sender SEV after a visible store (or rely on store-induced wake events)
+//   wfe;  // low-power wait when the event stream is empty
+//   sev;  // send event to wake cores in WFE
+```
+
++ **Caveats**: depends on microarchitecture/firmware (WAITPKG, C-state policy); re-check the predicate after timeout/spurious wakeups; if HFT disables deep C-states, sleep depth may be shallow, but idle snoop traffic still drops
 
 ### 25. Bit fields and bit operations
 **Bitfield** is a special `struct` member, which allows us to precisely define the number of binary digits occupied by a variable. Its core value in HFT is:
@@ -18952,6 +19110,77 @@ public:
 } // namespace lob
 ```
 
+**Other optimization: PriceSetBit bitmap for occupied price levels**
+
+When a vector order book maps prices to array indices by tick, occupied levels are often sparse. After the best bid/ask level is emptied, `update_best_price` above walks adjacent empty slots linearly, which can jitter badly under sparsity. Maintain an extra `PriceSetBit` occupancy bitmap: set a bit when a level first becomes non-empty, clear it when the level empties; then use compiler builtins for trailing/leading zero counts (GCC/Clang: `__builtin_ctzll` / `__builtin_clzll`; MSVC: `_BitScanForward64` / `_BitScanReverse64`) to jump within a 64-bit word to the next/previous occupied tick, reducing “find next live price” from O(price span) to roughly O(number of occupied words).
+
+```cpp
+// PriceSetBit: track whether a tick index currently has orders
+struct PriceSetBit {
+    static constexpr size_t BITS_PER_WORD = 64;
+    std::vector<uint64_t> words; // bit b of words[i] <-> tick = i*64+b
+
+    void ensure(size_t tick) {
+        size_t need = tick / BITS_PER_WORD + 1;
+        if (words.size() < need) words.resize(need, 0);
+    }
+
+    void set(size_t tick) {
+        ensure(tick);
+        words[tick / BITS_PER_WORD] |= (1ULL << (tick % BITS_PER_WORD));
+    }
+
+    void clear(size_t tick) {
+        if (tick / BITS_PER_WORD >= words.size()) return;
+        words[tick / BITS_PER_WORD] &= ~(1ULL << (tick % BITS_PER_WORD));
+    }
+
+    bool test(size_t tick) const {
+        size_t wi = tick / BITS_PER_WORD;
+        if (wi >= words.size()) return false;
+        return (words[wi] >> (tick % BITS_PER_WORD)) & 1ULL;
+    }
+
+    // Next occupied tick strictly above after_tick (common when scanning higher asks)
+    std::optional<size_t> next_set(size_t after_tick) const {
+        size_t start = after_tick + 1;
+        size_t wi = start / BITS_PER_WORD;
+        size_t bit = start % BITS_PER_WORD;
+        for (; wi < words.size(); ++wi, bit = 0) {
+            uint64_t w = words[wi] >> bit;
+            if (w == 0) continue;
+            // trailing-zero count = offset of lowest set bit from the scan start
+            return wi * BITS_PER_WORD + bit + static_cast<size_t>(__builtin_ctzll(w));
+        }
+        return std::nullopt;
+    }
+
+    // Previous occupied tick strictly below before_tick (common when scanning lower bids)
+    std::optional<size_t> prev_set(size_t before_tick) const {
+        if (before_tick == 0 || words.empty()) return std::nullopt;
+        size_t start = before_tick - 1;
+        size_t wi = start / BITS_PER_WORD;
+        size_t bit = start % BITS_PER_WORD;
+        for (;;) {
+            uint64_t w = words[wi] & ((bit == 63) ? ~0ULL : ((1ULL << (bit + 1)) - 1));
+            if (w != 0) {
+                // leading-zero count locates the highest set bit: index = 63 - clz(w)
+                return wi * BITS_PER_WORD + (63u - static_cast<unsigned>(__builtin_clzll(w)));
+            }
+            if (wi == 0) break;
+            --wi;
+            bit = 63;
+        }
+        return std::nullopt;
+    }
+};
+
+// Keep the bitmap in sync with the price arrays:
+//   level becomes non-empty -> bids_bits.set(idx) / asks_bits.set(idx)
+//   level becomes empty     -> bids_bits.clear(idx) / asks_bits.clear(idx)
+// When best price is invalidated, use prev_set / next_set instead of linear empty-slot scans.
+```
+
 ---
 
 **Option 2: Hash-based LOB**
@@ -27771,6 +28000,66 @@ int main() {
 ```
 
 
+### 17. Adaptive load shedder (CoDEL)
+
+On a single-threaded low-latency path, once the strategy lags the market, continuing to process stale queued packets only burns CPU and deepens delay. Borrow **CoDEL (Controlled Delay)** from network AQM: use packet **sojourn time** (dequeue − enqueue) as the congestion signal. When sojourn stays above a target past an observation interval, enter drop mode and discard expired packets to drain backlog and keep the core trading path stable. Complements a rate limiter (which caps send rate)—this is **staleness-based active overload protection**.
+
+```cpp
+#include <cstdint>
+
+namespace hft::reliability {
+
+// CoDEL-style adaptive shedder: call on the single-threaded dequeue path (no atomics)
+class AdaptiveLoadShedder {
+public:
+    explicit AdaptiveLoadShedder(uint64_t target_ns = 5'000,    // target sojourn, e.g. 5us
+                                 uint64_t interval_ns = 100'000) // sustained-over-target window, e.g. 100us
+        : target_(target_ns), interval_(interval_ns) {}
+
+    // On dequeue: true = drop this packet
+    bool should_drop(uint64_t enqueue_ns, uint64_t now_ns) {
+        const uint64_t sojourn = now_ns - enqueue_ns;
+
+        if (sojourn < target_) {          // recovered: leave drop mode
+            dropping_ = false;
+            first_above_ = 0;
+            return false;
+        }
+
+        if (first_above_ == 0) {          // first breach: start observation window
+            first_above_ = now_ns + interval_;
+            return false;
+        }
+
+        if (now_ns >= first_above_) {     // still congested through the window → drop
+            dropping_ = true;
+            return true;
+        }
+
+        return dropping_;
+    }
+
+    bool dropping() const { return dropping_; }
+
+private:
+    uint64_t target_;
+    uint64_t interval_;
+    bool dropping_ = false;
+    uint64_t first_above_ = 0; // 0 = not timing a sustained breach
+};
+
+} // namespace hft::reliability
+
+// Typical use (single-threaded consumer):
+// if (shedder.should_drop(pkt.enqueue_ns, now_ns)) continue; // drop stale
+// else handle(pkt);
+```
+
++ **Fit**: market-data / strategy input queues; backlog protection on SPSC hot paths
++ **Tuning**: `target_` near acceptable end-to-end sojourn; too-short `interval_` oscillates drops, too-long drains slowly
++ **Caveat**: enqueue timestamps must be monotonic and trusted; dropping is lossy—monitor drop rate and recovery time
+
+
 ## Business logic design-calculation
 ### 1. Log return (percent asymmetry)
 ```cpp
@@ -34670,6 +34959,35 @@ int64_t align_price_to_tick(price, tick) {
 4. Ensure spill protection
 5. Ensure rounding rules comply with exchange
 
+**Other optimization: Boost.Multiprecision `cpp_bin_float`**
+
+Hot-path prices and quantities should still use fixed-point integers. Some workloads—backtest formulas, intermediate statistics, high-dynamic-range intermediates—still need floating-point semantics. Do not reach for hardware `double` lightly: binary-inexact decimals, accumulation rounding, and cross-platform FPU/compiler differences produce hard-to-reproduce errors. Boost.Multiprecision `cpp_bin_float` is a software binary floating-point type whose significant digits are fixed by template parameters, so when floating-point math is unavoidable you can keep precision controllable and results more reproducible, reducing “wrong / mismatched” arithmetic risk.
+
++ **Role**: fixed-point for matching and order entry; `cpp_bin_float` for offline / side-path math that must stay floating-point
++ **Precision**: e.g. `cpp_bin_float_50` / `cpp_bin_float_100` (~50 / ~100 decimal digits), or a custom Digits parameter
++ **Cost**: far slower than hardware `double` / `int64`; never put it on the matching hot path—quantize back to integer fixed-point by tick / Scale when done
+
+```cpp
+#include <boost/multiprecision/cpp_bin_float.hpp>
+#include <iomanip>
+#include <iostream>
+
+namespace mp = boost::multiprecision;
+using float50 = mp::cpp_bin_float_50; // binary float with ~50 decimal digits of precision
+
+int main() {
+    // 0.1 is not exact in IEEE double; more digits keep intermediate results more stable
+    float50 a("0.1");
+    float50 b("0.2");
+    float50 sum = a + b; // still binary floating-point rules, but significant digits are configurable
+
+    std::cout << std::setprecision(50) << sum << "\n";
+
+    // Before sending an order: quantize to int64_t fixed-point by exchange tick / PRICE_SCALE;
+    // never feed cpp_bin_float straight into the matcher
+    return 0;
+}
+```
 
 ## digital currency
 ### 1. uniswap-v2
