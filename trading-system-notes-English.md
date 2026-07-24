@@ -22577,6 +22577,55 @@ ctp multi-account manual trading terminal tool
 Nasdaq ITCH/OUCH protocol (binary): The code needs to be parsed according to a fixed byte length (such as ITCH message fixed length, no text escaping required), ITCH is used to receive quotation/transaction data (needs to parse the "order new-transaction-cancellation" identification), OUCH is used to send orders (needs to encapsulate the "order type-quantity-price" binary package);
 
 
+**Other optimization: FIX zero-copy field views + O(1) tag-indexed lookup**
+
+A FIX message is a `tag=value` byte stream delimited by SOH (`0x01`). High-performance parsing is usually two-phase: a **scan** walks the buffer and builds views into the original bytes (tag plus value span)—no field copies, no heap strings; an **index** stage uses common tags (e.g. below 512) as array subscripts and stores each view in `entries_[tag]`. After parsing, reading by tag is a single array access (O(1)), with no linear walk of the field list and no associative container. A fixed sparse table buys deterministic lookup latency; field views must not outlive the original network buffer.
+
+```cpp
+#include <array>
+#include <cstddef>
+#include <span>
+#include <string_view>
+
+// Zero-copy FIX field view: value spans the original wire bytes (excluding tag, '=', SOH)
+struct FieldView {
+    int tag = 0;  // e.g. 37=OrderID, 55=Symbol
+    std::span<const char> value;
+
+    std::string_view as_string() const {
+        return {value.data(), value.size()};
+    }
+};
+
+// O(1) lookup table indexed by FIX tag (for tags in [1, MaxTag))
+template <size_t MaxTag = 512>
+class FieldTable {
+    std::array<FieldView, MaxTag> entries_{};
+
+public:
+    // During parse: for "37=ORD1\x01" call set(37, span→"ORD1")
+    void set(int tag, std::span<const char> value) {
+        if (tag > 0 && static_cast<size_t>(tag) < MaxTag)
+            entries_[static_cast<size_t>(tag)] = FieldView{tag, value};
+    }
+
+    // Lookup: one subscript, no scan of the whole message field list
+    FieldView get(int tag) const {
+        if (tag > 0 && static_cast<size_t>(tag) < MaxTag)
+            return entries_[static_cast<size_t>(tag)];
+        return {};
+    }
+};
+
+// Flow: scan FIX wire + set into table → repeated get(tag)
+// Constraint: while FieldView is used, the original FIX buffer must stay alive
+```
+
++ **Fit**: hot path repeatedly reads fixed tags (e.g. `35`/`11`/`55`/`44`) whose values sit in a small integer range
++ **Trade-off**: larger `MaxTag` costs more memory; rare/huge tags can use a side map instead of growing the sparse array unboundedly
++ **Caveat**: repeating groups that reuse the same tag will overwrite `entries_[tag]`; handle groups with group-aware storage
+
+
 ### 4. Message middleware (zmq)
 Implementation based on order book design and simple message center of ZeroMQ
 
