@@ -1548,6 +1548,30 @@ void execute_trade(Order &order, bool dry_run)
 
 True sharing issues can be passed std::atomic (not performance sensitive) and thread_local solve the problem.
 
+**Other optimization: local batching and per-CPU buckets for hot counters**
+
+Hot-path `atomic_fetch_add` / `lock inc` on one global counter is true sharing: each update takes the line Exclusive, and coherence traffic grows roughly with core count; `memory_order_relaxed` does not remove the hardware RFO. Reduce contention by case:
+
+1. **Local batching**: accumulate on a stack local in the loop; flush with one `atomic_fetch_add` per batch or at function exit. Pure compute loops can drop the in-loop threshold and flush once at the end.
+2. **Per-CPU buckets**: an `alignas(64)` bucket array indexed by `sched_getcpu()` (or equivalent); readers sum across buckets. Put related stats in one struct to amortize padding and CPU-id lookups.
+3. **TLS fallback**: when a shared library cannot own a global bucket array, use `thread_local` / `__thread` locals and periodically merge into the global.
+
+```cpp
+#include <atomic>
+#include <cstdint>
+
+std::atomic<uint64_t> g_hits{0};
+
+void process_batch(const int* items, int n) {
+    uint64_t local = 0;
+    for (int i = 0; i < n; ++i) {
+        // ... work ...
+        ++local;
+    }
+    g_hits.fetch_add(local, std::memory_order_relaxed); // one flush instead of n atomic increments
+}
+```
+
 
 **Cache Isolation**
 
@@ -6070,6 +6094,28 @@ The core premise of vectorization is "no data dependence between loop iterations
 + **Read and write dependencies (WAR)**: such as `b[i] = c[i]; a[i] = b[i-1]`, the loop sequence needs to be adjusted or the loop split;
 + **Write after dependency (WAW)**: e.g. `a[i] = 1; a[i] = 2`, repeated write operations need to be merged.
 
+**Other optimization: parallel accumulators to break reduction latency chains**
+
+A single `sum += a[i]` creates a loop-carried dependence: each FP add waits for the previous one, so throughput is capped by add **latency** (~4–5 cycles), not issue rate. Even with cache hits and good branches, IPC can stay far below 1. Multiple independent accumulators (or SIMD vector accumulators) let the OoO engine overlap chains. Only associative ops (add/mul/min/max, …) may be reassociated; FP rounding order changes—skip if bit-identical reproducibility is required.
+
+```cpp
+// Level 1: pure-C multi-accumulator
+float sum_parallel(const float* a, int n) {
+    float s0 = 0, s1 = 0, s2 = 0, s3 = 0;
+    int i = 0;
+    for (; i + 3 < n; i += 4) {
+        s0 += a[i];
+        s1 += a[i + 1];
+        s2 += a[i + 2];
+        s3 += a[i + 3];
+    }
+    for (; i < n; ++i) s0 += a[i];
+    return (s0 + s1) + (s2 + s3);
+}
+```
+
+SIMD paths follow the same idea: accumulate in `__m128`/`__m256`, then horizontal-reduce; scalar tails should keep multi-accumulators so the remainder does not re-serialize. Rough accumulator count ≈ instruction latency ÷ reciprocal throughput (see the execution-port row in the handwritten-asm tips table).
+
 
 **2. Adapt hardware SIMD width: Maximize parallel efficiency**
 
@@ -8571,6 +8617,31 @@ float vector_dot_product(float* v1, float* v2, int len) {
 }
 ```
 
+**Other optimization: runtime CPU dispatch (`target_clones` / `__builtin_cpu_supports`)**
+
+The `cpuid` + manual `if` approach above works, but every call site pays a branch. Prefer one of:
+
+1. **`target_clones` (GCC/Clang, plain C/C++ loops)**: the compiler emits ISA clones and an IFUNC resolver picks the best at load time. Pair with `noinline`; the function must not be `static` or the resolver may vanish. Use feature strings (`"default"`, `"avx2,fma"`, `"avx512f"`), not `x86-64-v3` forms the attribute rejects. Hand-written `_mm*` intrinsics are **not** auto-widened—use option 2 then.
+2. **`__builtin_cpu_supports`**: detect once, store a `static` function pointer; later calls are one well-predicted indirect branch—fit for hand-tuned AVX2/AVX-512 variants.
+
+```cpp
+#if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+__attribute__((noinline, target_clones("default", "avx2,fma", "avx512f")))
+#endif
+void scale(float* dst, const float* src, int n) {
+    for (int i = 0; i < n; ++i) dst[i] = src[i] * 2.0f; // compiler emits multi-ISA clones
+}
+
+// Hand-written multi-version sketch:
+// using Fn = void(*)(float*, const float*, int);
+// static Fn impl = nullptr;
+// if (!impl) impl = __builtin_cpu_supports("avx512f") ? impl512
+//              : __builtin_cpu_supports("avx2") ? impl256 : impl_scalar;
+```
+
+Check `objdump -t` for a `.resolver` symbol; if missing, the function was inlined and dispatch is gone.
+
+
 `_mm256_zeroupper()`
 
 + **Function**: Clear the upper half of the YMM register
@@ -9259,6 +9330,31 @@ void unlock() {
     - **unfair**: The order in which threads acquire locks is random, which may lead to "starvation" of some threads.
     - **High Cache Contention**: This is the biggest problem. All waiting threads are in the same atomic variable `locked` Spin on. On a multi-core system, when a thread releases the lock (modify`locked`) will cause the cache lines of all other spinning cores to become invalid. This will cause a large amount of cache coherence traffic (Cache Coherence Traffic), occupy the memory bus, and seriously affect performance, especially when the number of cores is large.
 
+**Other optimization: Test-and-Test-and-Set (TTAS)**
+
+Bare TAS issues `cmpxchg`/`xchg` on every spin iteration; even failures take the lock line Exclusive, so waiters thrash each other and can steal the line from the holder. Bus traffic under contention grows roughly O(N²). TTAS spins with a plain load (Shared) until the lock looks free, then attempts the atomic; on failure it returns to the read spin. For the uncontended common case, try CAS first (try-first), then fall into the read spin only on failure.
+
+```cpp
+// TTAS (try-first): one CAS when free; read-spin then CAS under contention
+void lock_ttas(std::atomic<int>& locked) {
+    int expected = 0;
+    if (locked.compare_exchange_weak(expected, 1, std::memory_order_acquire))
+        return;
+    for (;;) {
+        while (locked.load(std::memory_order_relaxed) != 0) {
+#if defined(__x86_64__)
+            _mm_pause();
+#endif
+        }
+        expected = 0;
+        if (locked.compare_exchange_weak(expected, 1, std::memory_order_acquire))
+            return;
+    }
+}
+```
+
+For higher contention and fairness, prefer MCS (implementation 2). TTAS is the necessary fix to implementation 1 under moderate contention, not the final form.
+
 
 **2. Implementation 2: MCS lock (Mellor-Crummey and Scott Lock)**
 
@@ -9565,6 +9661,14 @@ inline void signal(volatile uint32_t* flag) {
 ```
 
 + **Caveats**: depends on microarchitecture/firmware (WAITPKG, C-state policy); re-check the predicate after timeout/spurious wakeups; if HFT disables deep C-states, sleep depth may be shallow, but idle snoop traffic still drops
+
+**Other optimization: prefer rwlock / `shared_mutex` for read-heavy critical sections**
+
+`std::mutex` / `pthread_mutex` is exclusive: even read-only sections take the lock line Modified via RFO, so readers serialize each other. When reads are roughly ≥75% and writes are rare (config caches, routing tables, symbol lookups), switch to `std::shared_mutex` / `pthread_rwlock`: many readers share the lock; writers stay exclusive. On large core counts, atomic reader-count updates still cause some coherence traffic (sub-linear scaling), but usually far better than mutex serialization. Little gain when writes are long or the read/write ratio is near even—do not replace blindly.
+
+**Other optimization: condition-variable thundering herd**
+
+`notify_all()` / `pthread_cond_broadcast`, or looping `notify_one` for far more waiters than jobs, wakes more threads than can make progress: all race the mutex, most find the predicate false and sleep again—paying O(N) context switches, futex calls, and cross-core IPIs. `perf` often shows hot `futex_wake` / `try_to_wake_up` while `perf lock` hold/wait looks normal. Wake **exactly as many workers as there is work**, or move to a lock-free queue / work-stealing design instead of waking everyone then putting them back to sleep.
 
 ### 25. Bit fields and bit operations
 **Bitfield** is a special `struct` member, which allows us to precisely define the number of binary digits occupied by a variable. Its core value in HFT is:
@@ -12199,6 +12303,10 @@ unsigned int _mm_CRC32_u8(unsigned int crc, unsigned char data);
 + `crc`: The current CRC32 intermediate result (the initial value is usually `0xFFFFFFFF`, depending on the specific standard).
 + `data`: The input data to be calculated (unsigned integer corresponding to the width).
 + Return value: updated CRC32 value.
+
+**Other optimization: CRC32C throughput — multi-stream and PCLMUL fusion**
+
+A single `_mm_crc32_u64` accumulator is latency-bound (~3 cycles), so the theoretical ceiling is about 8B/3cy ≈ 2.5 GB/s per GHz. For high-throughput checksums/integrity: interleave multiple independent CRC accumulators across chunks, or use a fusion design that runs vector `PCLMULQDQ`/`VPCLMULQDQ` in parallel with scalar `crc32` on different execution ports (e.g. [corsix/fast-crc32](https://github.com/corsix/fast-crc32)), reaching tens of GB/s per core. Table-driven or single-stream hardware CRC suits short buffers; large scans should use multi-stream/fusion with CPU dispatch across AVX-512 / SSE4.2+PCLMUL / scalar fallback.
 
 
 ### 5. Core points of trading system performance measurement
