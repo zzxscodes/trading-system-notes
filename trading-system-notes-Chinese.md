@@ -1550,6 +1550,30 @@ void execute_trade(Order &order, bool dry_run)
 
 真共享问题可以通过 **std::atomic（性能不敏感）和 thread_local 解决问题。**
 
+**其他优化：热点统计计数的局部批处理与 per-CPU 分桶**
+
+热路径上对同一全局计数器做 `atomic_fetch_add` / `lock inc` 属于真共享：每次更新都要独占缓存行，核数上升时一致性流量近似线性放大，`memory_order_relaxed` 也无法消除硬件 RFO。可按场景降争用：
+
+1. **局部批处理**：循环内累加到栈上局部变量，按批或在函数出口一次性 `atomic_fetch_add` 刷入全局；纯算循环可去掉批内阈值，仅末尾刷一次。
+2. **per-CPU 分桶**：`alignas(64)` 的桶数组，用 `sched_getcpu()`（或等价）选桶写入，读侧跨桶求和；多字段统计放同一结构体以摊薄填充与取 CPU 编号开销。
+3. **TLS 回退**：共享库不便持有全局桶数组时，用 `thread_local` / `__thread` 本地计数，周期性合并到全局。
+
+```cpp
+#include <atomic>
+#include <cstdint>
+
+std::atomic<uint64_t> g_hits{0};
+
+void process_batch(const int* items, int n) {
+    uint64_t local = 0;
+    for (int i = 0; i < n; ++i) {
+        // ... 业务处理 ...
+        ++local;
+    }
+    g_hits.fetch_add(local, std::memory_order_relaxed); // 一次刷入，替代 n 次原子自增
+}
+```
+
 
 **缓存隔离**
 
@@ -6064,6 +6088,28 @@ void batchnorm_fast(float v[], int n, float mean, float var, float eps) {
 + **读后写依赖（WAR）**：如 `b[i] = c[i]; a[i] = b[i-1]`，需调整循环顺序或拆分循环；
 + **写后写依赖（WAW）**：如 `a[i] = 1; a[i] = 2`，需合并重复写操作。
 
+**其他优化：并行累加器打破归约延迟链**
+
+单变量 `sum += a[i]` 形成循环携带依赖：下一次浮点加须等上一次完成，吞吐被加法**延迟**（约 4–5 周期）卡住，而非发射吞吐。即使缓存命中、分支良好，IPC 仍可能远低于 1。用多个彼此独立的累加器（或 SIMD 向量累加）让乱序引擎重叠依赖链；加法/乘法/min/max 等可结合运算才可重排，浮点舍入顺序会变，若要求逐 bit 复现则不可用。
+
+```cpp
+// 层级 1：纯 C 多累加器（约可接近延迟吞吐比的加速）
+float sum_parallel(const float* a, int n) {
+    float s0 = 0, s1 = 0, s2 = 0, s3 = 0;
+    int i = 0;
+    for (; i + 3 < n; i += 4) {
+        s0 += a[i];
+        s1 += a[i + 1];
+        s2 += a[i + 2];
+        s3 += a[i + 3];
+    }
+    for (; i < n; ++i) s0 += a[i];
+    return (s0 + s1) + (s2 + s3);
+}
+```
+
+SIMD 路径同理：用 `__m128`/`__m256` 等向量累加后做水平归约；标量尾部也应继续用多累加器，避免尾循环重新串行化。累加器个数可按「指令延迟 ÷ 吞吐」粗估（见手写汇编技巧中的执行端口表）。
+
 
 **2. 适配硬件 SIMD 宽度：最大化并行效率**
 
@@ -8537,6 +8583,31 @@ float vector_dot_product(float* v1, float* v2, int len) {
 }
 ```
 
+**其他优化：运行时 CPU 分派（`target_clones` / `__builtin_cpu_supports`）**
+
+上文用 `cpuid` + 手工 `if` 选实现可行，但每个调用点都要分支。更稳妥的两种方式：
+
+1. **`target_clones`（GCC/Clang，纯 C/C++ 循环）**：编译器为同一函数生成多份 ISA clone，加载时经 IFUNC resolver 选最优；须配合 `noinline`，且函数不能是 `static`（否则 resolver 可能消失）。目标串用特性名（如 `"default"`、`"avx2,fma"`、`"avx512f"`），不要写不被属性接受的 `x86-64-v3` 形式。手写 `_mm*` intrinsics **不会**被自动加宽，那种情况用方式 2。
+2. **`__builtin_cpu_supports`**：首次调用检测一次，把函数指针存入 `static`，之后仅一次可预测间接调用；适合手写 AVX2/AVX-512 多版本。
+
+```cpp
+#if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+__attribute__((noinline, target_clones("default", "avx2,fma", "avx512f")))
+#endif
+void scale(float* dst, const float* src, int n) {
+    for (int i = 0; i < n; ++i) dst[i] = src[i] * 2.0f; // 编译器生成多 ISA 版本
+}
+
+// 手写多版本时：
+// using Fn = void(*)(float*, const float*, int);
+// static Fn impl = nullptr;
+// if (!impl) impl = __builtin_cpu_supports("avx512f") ? impl512
+//              : __builtin_cpu_supports("avx2") ? impl256 : impl_scalar;
+```
+
+可用 `objdump -t` 检查是否出现 `.resolver`；若无，说明函数被内联，分派已失效。
+
+
 **`_mm256_zeroupper()`**
 
 + **功能**：清零YMM寄存器的上半部分
@@ -9225,6 +9296,31 @@ void unlock() {
     - **不公平**: 线程获得锁的顺序是随机的，可能导致某些线程“饿死”（starvation）。
     - **高缓存争用 (High Cache Contention)**: 这是最大的问题。所有等待的线程都在同一个原子变量 `locked` 上自旋。在一个多核系统上，当一个线程释放锁（修改`locked`）时，会导致所有其他正在自旋的核心的缓存行（Cache Line）失效。这会引发大量的缓存一致性流量（Cache Coherence Traffic），占满内存总线，严重影响性能，尤其是在核心数很多的情况下。
 
+**其他优化：Test-and-Test-and-Set（TTAS）**
+
+裸 TAS 在自旋的每一次迭代都执行 `cmpxchg`/`xchg`，失败也会把锁行拉成独占，等待核之间互相颠簸，甚至干扰持锁核释放锁，争用下总线流量近似 O(N²)。TTAS 先用普通读（共享态）自旋到“看起来空闲”，再尝试原子获取；失败则退回读自旋。无争用路径可先试一次 CAS（try-first），失败再进入读自旋，避免空闲锁上的多余读延迟。
+
+```cpp
+// TTAS（try-first）：无争用时一次 CAS 成功；有争用时读自旋再 CAS
+void lock_ttas(std::atomic<int>& locked) {
+    int expected = 0;
+    if (locked.compare_exchange_weak(expected, 1, std::memory_order_acquire))
+        return;
+    for (;;) {
+        while (locked.load(std::memory_order_relaxed) != 0) {
+#if defined(__x86_64__)
+            _mm_pause();
+#endif
+        }
+        expected = 0;
+        if (locked.compare_exchange_weak(expected, 1, std::memory_order_acquire))
+            return;
+    }
+}
+```
+
+更高争用与公平性仍优先 MCS（实现二）；TTAS 是对实现一在中等争用下的必要修正，而非最终形态。
+
 
 **2. 实现二：MCS 锁 (Mellor-Crummey and Scott Lock)**
 
@@ -9531,6 +9627,14 @@ inline void signal(volatile uint32_t* flag) {
 ```
 
 + **注意**：依赖微架构与固件（WAITPKG、C-state 策略）；超时与虚假唤醒需在循环中重检条件；HFT 若全局禁用深 C-state，实际休眠深度可能变浅，但仍可减少空转探听
+
+**其他优化：读多写少场景用读写锁替代互斥锁**
+
+`std::mutex` / `pthread_mutex` 是独占锁：即使临界区只读，每次加锁仍经 RFO 把锁行打成 Modified，读者彼此串行。读占比约 ≥75%、写罕见（配置缓存、路由表、符号表查找）时，改用 `std::shared_mutex` / `pthread_rwlock`：多读者共享持锁，写者仍独占。高核数下读者计数原子更新仍会带来一定一致性流量，扩展为次线性，但通常远好于互斥串行。写路径长或读写比接近时收益有限，勿盲目替换。
+
+**其他优化：条件变量惊群（thundering herd）**
+
+`notify_all()` / `pthread_cond_broadcast`，或对远超任务数的等待者循环 `notify_one`，会唤醒远多于能推进工作的线程：全部争抢互斥锁，多数发现谓词已不成立再睡回——代价是 O(N) 次上下文切换、futex 与跨核 IPI。`perf` 上常见 `futex_wake` / `try_to_wake_up` 偏热，而 `perf lock` 的 hold/wait 未必异常。应按**实际可消费的工作数**精确唤醒（一次只 wake 需要的个数），或改用无锁队列/工作窃取，避免“全员唤醒再全员睡回”。
 
 ### 25. 位域与位运算
 **位域（Bitfield）** 是一种特殊的 `struct` 成员，它允许我们精确地定义一个变量占用的二进制位数。其在HFT中的核心价值在于：
@@ -12174,6 +12278,10 @@ unsigned int _mm_CRC32_u8(unsigned int crc, unsigned char data);
 + `crc`：当前的 CRC32 中间结果（初始值通常为`0xFFFFFFFF`，取决于具体标准）。
 + `data`：待计算的输入数据（对应宽度的无符号整数）。
 + 返回值：更新后的 CRC32 值。
+
+**其他优化：CRC32C 吞吐——多流与 PCLMUL 融合**
+
+单累加器反复 `_mm_crc32_u64` 受约 3 周期延迟束缚，理论上限约 8B/3cy ≈ 每 GHz 2.5 GB/s。需要校验和/完整性高吞吐时：用多个独立 CRC 累加器交错处理不同块，或采用向量 `PCLMULQDQ`/`VPCLMULQDQ` 与标量 `crc32` **并行占用不同执行端口**的融合算法（如 [corsix/fast-crc32](https://github.com/corsix/fast-crc32)），单核可达数十 GB/s 量级。朴素表驱动或单流硬件 CRC 仅适合短缓冲；大块扫描应换多流/融合实现，并用 CPU 分派选择 AVX-512 / SSE4.2+PCLMUL / 标量回退。
 
 
 ### 5. 交易系统性能衡量的核心要点
