@@ -40,6 +40,8 @@ English version：[https://github.com/zzxscodes/trading-system-notes/blob/main/t
   - [31. Linux内核调优和BIOS配置](#31-linux内核调优和bios配置)
   - [32. 延迟测量（时钟周期）](#32-延迟测量时钟周期)
   - [33. 系统设计优质文章](#33-系统设计优质文章)
+  - [34. 环缓冲就地写入减少大对象拷贝](#34-环缓冲就地写入减少大对象拷贝)
+  - [35. 共享资源容量耗尽时快速失败](#35-共享资源容量耗尽时快速失败)
 - [常见性能瓶颈与优化方向](#常见性能瓶颈与优化方向)
   - [1. roofline model](#1-roofline-model)
     - [Memory Bound优化](#memory-bound优化)
@@ -88,6 +90,15 @@ English version：[https://github.com/zzxscodes/trading-system-notes/blob/main/t
   - [16. 预序列化订单](#16-预序列化订单)
   - [17. 自适应负载丢弃器（CoDEL）](#17-自适应负载丢弃器codel)
   - [18. 多进程共享内存交易中间件（ShmDB）](#18-多进程共享内存交易中间件shmdb)
+  - [19. 交易桥双边订单号索引](#19-交易桥双边订单号索引)
+  - [20. 成交回报先于状态回报的本地缓存](#20-成交回报先于状态回报的本地缓存)
+  - [21. 关联订单元数据](#21-关联订单元数据)
+  - [22. 多档最小变动价位表](#22-多档最小变动价位表)
+  - [23. 交易日历对齐的因子存储与缺口回填](#23-交易日历对齐的因子存储与缺口回填)
+  - [24. 引擎消息路由过滤器](#24-引擎消息路由过滤器)
+  - [25. 篮子控制通道与超大执行缓冲](#25-篮子控制通道与超大执行缓冲)
+  - [26. 交易桥前置风控过滤与错误码分层](#26-交易桥前置风控过滤与错误码分层)
+  - [27. 高频因子热路径拉取](#27-高频因子热路径拉取)
 - [业务逻辑设计-计算](#业务逻辑设计-计算)
   - [1. 对数收益率(百分比非对称性)](#1-对数收益率百分比非对称性)
   - [2. 市场趋势和波动率的状态变化](#2-市场趋势和波动率的状态变化)
@@ -11611,6 +11622,80 @@ private:
 [https://mp.weixin.qq.com/s/9OH1RA8POFidgQnvape6fQ](https://mp.weixin.qq.com/s/9OH1RA8POFidgQnvape6fQ)
 
 [https://mp.weixin.qq.com/s/PuG4ZFVZ-7hijS4Db8Z5jQ](https://mp.weixin.qq.com/s/PuG4ZFVZ-7hijS4Db8Z5jQ)
+
+
+### 34. 环缓冲就地写入减少大对象拷贝
+
+订单、十档行情这类定长消息往往数百字节。先在栈上构造完整对象再赋进环槽，会多一次整对象拷贝，写路径上还容易触发寄存器溢写。更好的接口是：生产者拿到槽位引用，用回调就地填字段，填完再发布序号或推进 head。单写路径可不加锁；多写路径只对取槽加短自旋。
+
+```cpp
+template<class T, size_t N>
+class SlotRing {
+    static_assert((N & (N - 1)) == 0, "N power of two");
+    T buf_[N]{};
+    std::atomic<uint64_t> head_{0};
+    static constexpr uint64_t mask_ = N - 1;
+
+public:
+    template<class Fn>
+    void emplace_publish(Fn&& fill) {
+        const uint64_t h = head_.fetch_add(1, std::memory_order_acq_rel);
+        T& slot = buf_[h & mask_];
+        fill(slot); // 直接写槽内字段，避免 T tmp; buf=tmp;
+        // 若需多消费者可见性，可在此写配套的 seq = h + N
+    }
+
+    template<class Fn>
+    uint64_t drain_from(uint64_t cursor, uint64_t published, Fn&& on_item) {
+        while (cursor < published) {
+            on_item(buf_[cursor & mask_]);
+            ++cursor;
+        }
+        return cursor;
+    }
+};
+
+// 用法：
+// ring.emplace_publish([&](OrderMsg& m) {
+//     m.local_id = id;
+//     std::memcpy(m.symbol, sym, sizeof(m.symbol));
+//     m.qty = qty;
+// });
+```
+
+
+### 35. 共享资源容量耗尽时快速失败
+
+共享内存里的环、因子条目池、命名索引一旦写满，若继续覆盖或静默丢弃，订单与账本会进入不可预期状态。容量类错误应打致命日志并立刻中止进程，迫使运维按配置放大池子，而不是在热路径上吞掉异常。这与“队列满则阻塞等待”的在线服务模型不同：交易中间件更怕静默错账。
+
+```cpp
+template<class T>
+class FixedShmList {
+    T* data_{};
+    size_t cap_{};
+    size_t size_{};
+
+public:
+    void push_or_abort(const T& v) {
+        if (size_ >= cap_) {
+            // 生产环境接日志框架；此处示意
+            std::fprintf(stderr,
+                "FixedShmList full cap=%zu, abort to avoid silent wrap\n", cap_);
+            std::abort();
+        }
+        data_[size_++] = v;
+    }
+
+    template<class Fn>
+    void emplace_or_abort(Fn&& fill) {
+        if (size_ >= cap_) {
+            std::fprintf(stderr, "FixedShmList emplace full, abort\n");
+            std::abort();
+        }
+        fill(data_[size_++]);
+    }
+};
+```
 
 
 ## 常见性能瓶颈与优化方向
@@ -28266,6 +28351,55 @@ struct CopyableAtom {
 
 资金与持仓按产品、经纪商账户、交易员、策略等层级组成键；也需要“合并多个柜台后再看”的键变体。真正的数值放在共享内存环的原子行里；每个进程自己维护“键到环下标”的本地表，插入新行时再同步。查询有两条路：向柜台异步要数，或直接读本系统在共享内存里算好的结果。后者更快，但可能与柜台瞬时不一致，需要对账策略。
 
+```cpp
+enum class BookTier : uint8_t { Product, Broker, Trader, Strategy, MergedBroker };
+
+struct CashRow {
+    BookTier tier{};
+    char product[16]{};
+    char broker_acct[32]{};
+    char trader[32]{};
+    char strategy[32]{};
+    double available{};
+    double frozen{};
+};
+
+// 共享环存 CopyableAtom<CashRow>；本进程只缓存 key→下标
+template<class Ring>
+class LocalBookIndex {
+    Ring* rows_;
+    std::unordered_map<std::string, long> slot_;
+
+    static std::string make_key(const CashRow& r) {
+        return std::to_string(int(r.tier)) + '|' + r.product + '|' +
+               r.broker_acct + '|' + r.trader + '|' + r.strategy;
+    }
+public:
+    explicit LocalBookIndex(Ring* rows) : rows_(rows) {
+        for (long i = 0; i < rows_->end_index(); ++i)
+            slot_[make_key(rows_->at(i).load())] = i;
+    }
+
+    bool upsert(const CashRow& row) {
+        const auto k = make_key(row);
+        if (auto it = slot_.find(k); it != slot_.end()) {
+            rows_->at(it->second).store(row);
+            return true;
+        }
+        rows_->emplace([&](auto& cell) { cell.store(row); });
+        slot_[k] = rows_->latest_index();
+        return true;
+    }
+
+    bool find_local(const std::string& k, CashRow& out) const {
+        auto it = slot_.find(k);
+        if (it == slot_.end()) return false;
+        out = rows_->at(it->second).load();
+        return true;
+    }
+};
+```
+
 **5. 可重启的复合订单号前缀**
 
 线上订单号通常由几段拼成：站点编码、单据类型（外部回灌、普通单、算法单、查询、篮子等）、跨日与短时窗编码、以及全局自增序号。短时窗可以用“交易日模 10”再加“当日按十秒划分的槽位”，前提是人工重启间隔足够长，避免撞号。类型段用来区分：这笔是本系统发出的，还是同账户下外部成交回灌进来的。
@@ -28284,16 +28418,432 @@ uint64_t wire_id_prefix(int site, int kind, int day_mod10, int slot_10s) {
 
 算法单不能只套一层普通单字段。连续竞价要有自己的起止时间与追价方式；集合竞价要有独立的时间窗和基准价调整；还要约定竞价未完成的量是否转入连续、涨停卖或跌停买是否立刻停掉、稀疏 VWAP 落在首分钟、末分钟还是中间。暂停前的状态要留下来，恢复时才能接上。冲击成本可以在算法首次进入运行态时记下当时的买卖一。这些是国内现货算法落地时的结构约束，不是 VWAP 公式本身。
 
+```cpp
+enum class ChasePx : uint8_t { Unknown, Bid1, Ask1, Mid, Limit };
+enum class SparseVwapSlot : uint8_t { Front, Middle, Tail };
+
+struct EquityAlgoTicket {
+    // 普通单字段：symbol / side / target_qty / limit_px ...
+    char style[16]{};              // twap / vwap / auction / batch
+    // 连续竞价
+    int64_t cont_start_ms{};
+    int64_t cont_end_ms{};
+    ChasePx cont_chase{ChasePx::Unknown};
+    int32_t cont_slip_ticks{};
+    // 集合竞价（与连续分开存，避免字段复用）
+    int64_t auction_join_ms{};
+    ChasePx auction_chase{ChasePx::Unknown};
+    int32_t auction_slip_ticks{};
+    double auction_basis_px{};
+    bool roll_unfilled_to_cont{true};
+    bool stop_on_limit_up_sell{false};
+    bool stop_on_limit_down_buy{false};
+    int32_t reorder_lag_ms{-1};
+    SparseVwapSlot sparse_slot{SparseVwapSlot::Front};
+    // 运行态
+    uint8_t status_before_pause{};
+    double impact_bid1{};
+    double impact_ask1{};
+    char extra_json[2048]{};
+};
+```
+
 **7. 沪深 Level-2 共用结构，字段含义按交易所解释**
 
 逐笔委托可以用同一套结构携带交易所源时间、本地收包时间、业务时间以及序号。委托类别、原始订单号等字段在沪市与深市含义不同：有的表示增删，有的表示限价或市价，有的原始订单号在某一侧根本无效。委托队列还可以把某一档上的订单列表压进定长字符区。做延迟分析时，必须分清源时间与收包时间，二者不能混用。
+
+```cpp
+enum class Venue : uint8_t { SH, SZ };
+
+struct SharedL2OrderTick {
+    char symbol[32]{};
+    Venue venue{Venue::SH};
+    int64_t exch_src_us{};   // 交易所源时间
+    int64_t local_recv_us{}; // 本机收包时间
+    int64_t biz_time_us{};
+    uint64_t seq{};
+    char kind{};             // SH: 增删等；SZ: 限价/市价等——按 venue 解释
+    uint64_t raw_order_id{}; // 某一侧可能无意义，读取前先看 venue
+    double price{};
+    int64_t qty{};
+    char side{};
+};
+
+struct SharedL2QueueBand {
+    char symbol[32]{};
+    double price{};
+    char side{};
+    // 该价位上的订单量列表压成定长区，避免跨进程堆分配
+    char packed_qty_list[512]{};
+    uint16_t packed_len{};
+};
+
+int64_t wire_latency_us(const SharedL2OrderTick& t) {
+    return t.local_recv_us - t.exch_src_us; // 切勿用 biz_time 替代 src
+}
+```
 
 **8. 一套策略接口，多种运行模式**
 
 实盘、实时仿真、历史加速回放、最快回测可以共用同一套策略接口。实盘用墙钟或总线上的共享时钟；回测则注入自定义时钟，并选择即时成交或完整模拟撮合。历史行情、成交与高频因子序列可以预先放进共享内存里的向量池，避免每次回测都从磁盘重建。
 
+```cpp
+enum class RunMode : uint8_t {
+    Live, LiveSim, HistReplay, FastBacktest
+};
+enum class FillMode : uint8_t { Instant, FullMatcher };
+
+struct StrategyHost {
+    RunMode mode{RunMode::Live};
+    FillMode fill{FillMode::FullMatcher};
+    int64_t (*now_ms)() = nullptr; // Live: 墙钟或总线时钟；回测: 注入时钟
+
+    void on_quote(/*...*/) {}
+    void on_order_ack(/*...*/) {}
+    void on_signal(/*...*/) {}
+
+    void loop_once() {
+        if (mode == RunMode::FastBacktest || mode == RunMode::HistReplay) {
+            // 从预载的共享向量池推进时钟与行情，不经磁盘
+            advance_from_shm_pools();
+        } else {
+            drain_live_rings();
+        }
+    }
+};
+```
+
 
 + **注意**：共享内存布局一变，所有进程都要按版本对齐；订阅者超过 64 个时，确认位图要加宽；本系统自算账本与柜台查询不一致时，要有明确的对账办法。
+
+
+### 19. 交易桥双边订单号索引
+
+柜台回报里的订单号类型并不统一：有的是字符串，有的是 64 位整数，有的只有 32 位。交易桥需要两张表：柜台号指向本系统订单对象，以及本系统号指向柜台号。报单成功时写入两侧；撤单与成交回报用柜台号 O(1) 找回本地单；超时巡检则扫未确认集合。读写锁保护多线程 API 回调与主循环并发访问。
+
+```cpp
+#include <shared_mutex>
+#include <unordered_map>
+#include <variant>
+#include <string>
+
+using VenueOid = std::variant<std::string, uint64_t, uint32_t, int64_t>;
+
+struct WireOrder; // 共享内存中的本系统订单
+
+class BridgeOidIndex {
+    mutable std::shared_mutex mu_;
+    std::unordered_map<VenueOid, WireOrder*> venue_to_local_;
+    std::unordered_map<uint64_t, VenueOid> local_to_venue_;
+    std::unordered_map<uint64_t, WireOrder*> unacked_;
+
+public:
+    void remember_out(WireOrder* o, uint64_t local_id, VenueOid venue_id) {
+        std::unique_lock lk(mu_);
+        venue_to_local_[venue_id] = o;
+        local_to_venue_[local_id] = venue_id;
+        unacked_.erase(local_id);
+    }
+
+    void remember_pending(WireOrder* o, uint64_t local_id) {
+        std::unique_lock lk(mu_);
+        unacked_[local_id] = o;
+    }
+
+    WireOrder* by_venue(const VenueOid& venue_id) const {
+        std::shared_lock lk(mu_);
+        auto it = venue_to_local_.find(venue_id);
+        return it == venue_to_local_.end() ? nullptr : it->second;
+    }
+
+    bool venue_of(uint64_t local_id, VenueOid& out) const {
+        std::shared_lock lk(mu_);
+        auto it = local_to_venue_.find(local_id);
+        if (it == local_to_venue_.end()) return false;
+        out = it->second;
+        return true;
+    }
+};
+```
+
+
+### 20. 成交回报先于状态回报的本地缓存
+
+部分柜台会先推成交、后推状态变更。若本地单仍停在“已报”而累计成交已到，直接覆盖会把中间态弄丢。订单结构里预留三块缓存：先到的状态、先到的成交量、先到的成交额。状态回报迟到时，用缓存与正式字段合并，再推进到部分成交或全成。
+
+```cpp
+enum class OrdState : uint8_t {
+    Unknown, Sent, Acked, Partial, Filled, Canceled
+};
+
+struct LiveOrder {
+    OrdState state{OrdState::Unknown};
+    int64_t filled_qty{};
+    double filled_amt{};
+    // 成交先到、状态后到时的暂存
+    OrdState early_state{OrdState::Unknown};
+    int64_t early_filled_qty{};
+    double early_filled_amt{};
+};
+
+void on_trade_before_status(LiveOrder& o, int64_t qty, double px) {
+    o.early_filled_qty += qty;
+    o.early_filled_amt += qty * px;
+    if (o.state == OrdState::Acked || o.state == OrdState::Sent) {
+        // 正式状态未到，先不改 state，只累加缓存
+        return;
+    }
+    o.filled_qty += qty;
+    o.filled_amt += qty * px;
+}
+
+void on_status_after_trades(LiveOrder& o, OrdState s) {
+    o.state = s;
+    if (o.early_filled_qty > 0) {
+        o.filled_qty = o.early_filled_qty;
+        o.filled_amt = o.early_filled_amt;
+        o.early_filled_qty = 0;
+        o.early_filled_amt = 0.0;
+        if (o.state == OrdState::Acked)
+            o.state = OrdState::Partial;
+    }
+}
+```
+
+
+### 21. 关联订单元数据
+
+配对交易、多腿同时下发时，每条腿仍是独立报单，但需要在同一生命周期里一起观察。订单头里放关联组号、组内总腿数、本腿序号：组号为 0 表示独立单；总腿数为 1 表示无关联。策略与风控按组号聚合进度，不必另建外挂表。
+
+```cpp
+struct LinkedLegMeta {
+    uint64_t group_id{0};   // 0：独立单
+    uint32_t leg_total{1};  // 1：无关联
+    uint32_t leg_index{0};  // 本组内下发序号
+};
+
+struct LinkedOrder {
+    uint64_t order_id{};
+    LinkedLegMeta link{};
+    char symbol[32]{};
+    int64_t target_qty{};
+    int64_t filled_qty{};
+};
+
+bool group_done(const LinkedOrder* legs, size_t n, uint64_t gid) {
+    int need = -1, got = 0;
+    for (size_t i = 0; i < n; ++i) {
+        if (legs[i].link.group_id != gid) continue;
+        need = int(legs[i].link.leg_total);
+        if (legs[i].filled_qty >= legs[i].target_qty) ++got;
+    }
+    return need > 0 && got >= need;
+}
+```
+
+
+### 22. 多档最小变动价位表
+
+A 股默认 0.01，港股与部分期货按价格区间切换步长。价位表解析成“下限价 → 步长”序列，取整、上浮 N 个 tick、夹到涨跌停都走同一张表。错误取整是废单的常见来源，热路径上应缓存每标的一张表，避免每次解析字符串。
+
+```cpp
+#include <cmath>
+#include <vector>
+#include <string>
+
+struct TickBand { double from_px; double step; };
+
+class TickGrid {
+    double up_{}, down_{};
+    std::vector<TickBand> bands_;
+
+    const TickBand& band_of(double px) const {
+        // bands_ 按 from_px 升序；找最后一个 from_px <= px
+        size_t i = 0;
+        while (i + 1 < bands_.size() && bands_[i + 1].from_px <= px) ++i;
+        return bands_[i];
+    }
+public:
+    // 例："0:0.01;10:0.05;50:0.1"
+    void load(double up, double down, const std::string& spec);
+
+    double floor_px(double px) const {
+        const auto& b = band_of(px);
+        return std::floor(px / b.step) * b.step;
+    }
+    double ceil_px(double px) const {
+        const auto& b = band_of(px);
+        return std::ceil(px / b.step) * b.step;
+    }
+    double move_up(double px, int n) const {
+        px = ceil_px(px) + n * band_of(px).step;
+        return px > up_ ? up_ : (px < down_ ? down_ : px);
+    }
+};
+```
+
+
+### 23. 交易日历对齐的因子存储与缺口回填
+
+分钟因子、采样值若按稀疏 map 存，多标的对齐成本高。更好的做法是全局一张“日历时间 → 下标”表，每个因子名对应一条定长环，按下标写入。写入时若跳过了中间 bar，用调用方提供的填充函数回填缺口，并打上“已填充”标记。哨兵下标（例如 -2）区分“从未写过”和“已写到 0”，省掉额外的 bool。
+
+```cpp
+struct FactorCell { bool filled; double value; };
+
+struct FactorSeries {
+    int64_t last_write{-2}; // -2：从未写入
+    int64_t last_time{0};
+    std::vector<FactorCell> cells;
+};
+
+class CalendarFactorStore {
+    std::unordered_map<int64_t, int> time_to_idx_; // 交易日历
+    std::unordered_map<std::string, FactorSeries> series_;
+
+public:
+    template<class FillFn>
+    void write(const std::string& name, double v, int64_t t, FillFn&& fill) {
+        auto it = time_to_idx_.find(t);
+        if (it == time_to_idx_.end()) return;
+        auto& s = series_[name];
+        const int idx = it->second;
+        if (idx <= s.last_write) return;
+
+        // 例：相邻分钟标签差为 100（站点约定的紧凑时间码）
+        if (s.last_write != -2 && (t - s.last_time) != 100) {
+            double gap_v = 0;
+            fill(gap_v);
+            for (int i = s.last_write + 1; i < idx; ++i)
+                s.cells[i] = {true, gap_v};
+        }
+        if (s.cells.size() <= size_t(idx)) s.cells.resize(idx + 1);
+        s.cells[idx] = {false, v};
+        s.last_write = idx;
+        s.last_time = t;
+    }
+};
+```
+
+
+### 24. 引擎消息路由过滤器
+
+应答环里可能混着多个账户、多个算法引擎的消息。每个进程挂一条过滤规则：不过滤、按引擎 id 匹配、或按柜台+账户匹配。算法引擎还可再挂“只关心哪些 exec_type”的集合。过滤在置消费位之前完成，避免无关进程占掉确认位图。
+
+```cpp
+enum class RouteRule : uint8_t { None, ByEngine, ByCounterAccount };
+
+struct RoutePolicy {
+    RouteRule rule{RouteRule::None};
+    uint32_t engine_id{};
+    char counter[32]{};
+    char account[32]{};
+};
+
+struct AlgoInterest {
+    std::unordered_set<std::string> exec_types; // twap / vwap / pass ...
+};
+
+bool accept_order_msg(const RoutePolicy& p, uint32_t msg_engine,
+                      const char* counter, const char* account) {
+    switch (p.rule) {
+    case RouteRule::None: return true;
+    case RouteRule::ByEngine: return p.engine_id == msg_engine;
+    case RouteRule::ByCounterAccount:
+        return std::strcmp(p.counter, counter) == 0 &&
+               std::strcmp(p.account, account) == 0;
+    }
+    return false;
+}
+```
+
+
+### 25. 篮子控制通道与超大执行缓冲
+
+机构篮子不是“循环下 2000 笔普通单控制”，而是单独的控制面：创建、暂停、恢复、停止、更新。执行内容放在超大定长缓冲里（可达数 MB），承载多标的参数或回报摘要。算法进程只订阅自己的 exec_type，普通策略环不会被篮子报文撑爆。
+
+```cpp
+enum class BasketOp : uint8_t {
+    Unknown, Create, Pause, Resume, Stop, Update
+};
+
+template<size_t Cap>
+struct BasketMsg {
+    char name[64]{};
+    uint64_t basket_id{};
+    BasketOp op{BasketOp::Unknown};
+    char exec_type[16]{};          // PassControl / TwapControl / ...
+    char payload[Cap]{};           // 多标的 JSON 或紧凑二进制
+    int32_t err{};
+    char err_text[128]{};
+};
+
+using BasketReq = BasketMsg<2048 * 2000>; // 控制面专用，勿放进行情热环
+```
+
+
+### 26. 交易桥前置风控过滤与错误码分层
+
+发往柜台 API 之前，交易桥应有一次同步过滤：黑名单、单笔金额、标的/全局笔数、委撤比、每分钟流控、自成交预判、多空失衡等。拒绝时写入与柜台错误同一套字段（错误码 + 文案），策略回调无需区分来源。校验类、资金持仓类、风控类错误码分段编号，便于监控归类。挂起与告警状态留给语义不清、需人工介入的回报。
+
+```cpp
+enum class WireErr : int32_t {
+    Ok = 0,
+    // 校验
+    BadPrice = 10, BadQty, BadSymbol, DupId, AlreadyFinal,
+    // 资金持仓
+    NoCash = 40, NoPos, NoTodayPos,
+    // 风控
+    BlackSymbol = 70, OrderCashCap, TickerOrderCap, TickerCancelCap,
+    CancelOrderRatio, OrderFlowPerMin, CancelFlowPerMin, SelfTradeRisk,
+    // 外部
+    VenueApi = 100, BasketParse
+};
+
+struct OrderView {
+    char symbol[32]{};
+    double limit_px{};
+    int64_t qty{};
+    int64_t err{int64_t(WireErr::Ok)};
+    char err_text[128]{};
+};
+
+bool pre_trade_gate(OrderView& o) {
+    if (in_blacklist(o.symbol)) {
+        o.err = int64_t(WireErr::BlackSymbol);
+        std::snprintf(o.err_text, sizeof(o.err_text), "symbol blocked");
+        return false; // false：拦截
+    }
+    if (over_order_flow()) {
+        o.err = int64_t(WireErr::OrderFlowPerMin);
+        std::snprintf(o.err_text, sizeof(o.err_text), "order flow");
+        return false;
+    }
+    return true; // true：放行
+}
+```
+
+
+### 27. 高频因子热路径拉取
+
+高频因子窗口短、更新密，若走“订阅回调批量推送”，容易在策略线程上制造额外排队。更稳妥的是行情进程写入共享槽位，策略在自己的 Loop 里按标的与时间主动拉取。普通分钟因子仍可用请求/应答订阅；高频槽位保持无回调、无堆分配的定长数组。
+
+```cpp
+enum { kHfSlots = 16 };
+
+struct HfFactorSlot {
+    char symbol[32]{};
+    int64_t asof_ms{};
+    double values[kHfSlots]{}; // lead-lag / multi-factor 窗口结果
+};
+
+bool pull_hf(const char* symbol, int64_t t, HfFactorSlot& out) {
+    // 从本标的共享槽位读最新；不注册回调
+    const HfFactorSlot* p = find_hf_slot(symbol);
+    if (!p || p->asof_ms < t) return false;
+    out = *p;
+    return true;
+}
+```
 
 
 ## 业务逻辑设计-计算
