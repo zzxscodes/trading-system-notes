@@ -28220,7 +28220,7 @@ private:
 
 ### 18. Multi-process shared-memory trading middleware (ShmDB)
 
-Institutional trading systems rarely put strategy, market-data ingress, and order ingress in one process. A supervisor usually creates a shared-memory segment; each business process maps it in and exchanges fixed-size messages through typed ring buffers. The hot path avoids serialization and does not use sockets or pipes. The subsections below cover designs that show up often in this style of bus and are easy to get wrong. Type and field names are illustrative on purpose and are not aligned with any real project API.
+Institutional trading systems rarely put strategy, market-data ingress, and order ingress in one process. A supervisor usually creates a shared-memory segment; each business process maps it in and exchanges fixed-size messages through typed ring buffers. The hot path avoids serialization and does not use sockets or pipes. The subsections below cover designs that show up often in this style of bus and are easy to get wrong.
 
 **1. Route ring pools by business type**
 
