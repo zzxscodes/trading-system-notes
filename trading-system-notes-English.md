@@ -87,6 +87,7 @@
   - [15. Exchange protocol layering and sequence consistency](#15-exchange-protocol-layering-and-sequence-consistency)
   - [16. Pre-serialized orders](#16-pre-serialized-orders)
   - [17. Adaptive load shedder (CoDEL)](#17-adaptive-load-shedder-codel)
+  - [18. Multi-process shared-memory trading middleware (ShmDB)](#18-multi-process-shared-memory-trading-middleware-shmdb)
 - [Business logic design-calculation](#business-logic-design-calculation)
   - [1. Log return (percent asymmetry)](#1-log-return-percent-asymmetry)
   - [2. Changes in state of market trends and volatility](#2-changes-in-state-of-market-trends-and-volatility)
@@ -28215,6 +28216,93 @@ private:
 + **Fit**: market-data / strategy input queues; backlog protection on SPSC hot paths
 + **Tuning**: `target_` near acceptable end-to-end sojourn; too-short `interval_` oscillates drops, too-long drains slowly
 + **Caveat**: enqueue timestamps must be monotonic and trusted; dropping is lossy—monitor drop rate and recovery time
+
+
+### 18. Multi-process shared-memory trading middleware (ShmDB)
+
+Institutional trading systems rarely put strategy, market-data ingress, and order ingress in one process. A supervisor usually creates a shared-memory segment; each business process maps it in and exchanges fixed-size messages through typed ring buffers. The hot path avoids serialization and does not use sockets or pipes. The subsections below cover designs that show up often in this style of bus and are easy to get wrong. Type and field names are illustrative on purpose and are not aligned with any real project API.
+
+**1. Route ring pools by business type**
+
+Order requests and replies, cash, positions, and algo tickets each get their own pool of rings. Every strategy process or trade bridge owns one slot: it writes only into its own slot, and when reading it scans peer slots with a local cursor. Live trading and simulation can share the same call interface; the main differences are the clock source and the matcher.
+
+```cpp
+// Sketch: pools by business; names are examples only
+struct BusLayout {
+    std::atomic<int32_t> order_inbox_slots{0};
+    RingSlot order_req_pool[kMaxWorkers]; // strategy writes requests
+    RingSlot order_rsp_pool[kMaxWorkers]; // trade bridge writes replies
+    // cash, position, algo pools likewise
+};
+```
+
+**2. Bitmaps for multi-process consume tracking**
+
+One business message often must be seen by strategy, risk, and books. The header carries a confirm bitmap of up to 64 bits (one bit per subscriber) and a flag for single-consumer versus multi-consumer. On read, check whether this process’s bit is already set: if set, skip; otherwise set it and then handle. After a restart, a process can scan once without setting bits to rebuild a local view. That fits order lifecycles where several parties must observe the same record better than a plain lock-free queue alone.
+
+```cpp
+struct MsgHeader {
+    uint8_t fanout; // 0: one consumer; 1: many
+    std::atomic<uint64_t> ack_bits{0};
+};
+
+bool already_seen(const MsgHeader& m, uint64_t my_bit) {
+    return (m.ack_bits.load(std::memory_order_acquire) & my_bit) != 0;
+}
+void mark_seen(MsgHeader& m, uint64_t my_bit) {
+    m.ack_bits.fetch_or(my_bit, std::memory_order_acq_rel);
+}
+```
+
+**3. Copyable wrappers around atomic fields**
+
+Ring elements often need assignment or in-place construction, while `std::atomic` is usually non-copyable. A thin wrapper holds the atomic and copies via `load` and `store`, so ledger rows and confirm flags can live in the ring and stay atomically readable and writable.
+
+```cpp
+template<class T>
+struct CopyableAtom {
+    std::atomic<T> v{};
+    CopyableAtom() = default;
+    CopyableAtom(const CopyableAtom& o) { v.store(o.v.load()); }
+    CopyableAtom& operator=(const CopyableAtom& o) {
+        v.store(o.v.load());
+        return *this;
+    }
+};
+```
+
+**4. Hierarchical ledger keys: values in shared memory, indexes in-process**
+
+Cash and positions are keyed by product, broker account, trader, strategy, and similar layers, including variants that merge several counters first. The numbers live in atomic rows in a shared-memory ring. Each process keeps its own map from key to ring index and updates it when a new row appears. Queries take two paths: ask the broker asynchronously, or read what this system already computed in shared memory. The second path is faster but can disagree with the broker briefly, so reconciliation is required.
+
+**5. Restart-safe composite order-id prefixes**
+
+Wire order ids are usually built from several parts: a site code, a document kind (external feedback, normal, algo, query, basket, and so on), a cross-day and short-window encoding, and a global monotonic counter. A short window can be “trade day mod 10” plus a ten-second slot within the day, provided manual restarts are spaced far enough apart to avoid collisions. The kind field tells whether the id was issued by this stack or injected from external fills on the same account.
+
+```cpp
+// Sketch: digit widths are site-specific
+uint64_t wire_id_prefix(int site, int kind, int day_mod10, int slot_10s) {
+    return (uint64_t(site) * 10000000000ULL)
+         + (uint64_t(kind) * 1000000000ULL)
+         + (uint64_t(day_mod10) * 100000000ULL)
+         + (uint64_t(slot_10s) * 10000ULL);
+}
+```
+
+**6. A-share algo tickets: separate continuous and auction fields**
+
+An algo ticket is more than a normal order with a label. Continuous trading needs its own window and chase rule; the auction needs a separate window and basis adjustment. The design must also say whether unfinished auction volume rolls into continuous trading, whether a limit-up sell or limit-down buy stops immediately, and whether sparse VWAP lands in the first minute, the last minute, or the middle. Status before pause must be kept so resume can continue cleanly. Impact cost can snapshot bid1 and ask1 when the algo first becomes running. These are structural constraints for China cash-equity algos, not the VWAP formula itself.
+
+**7. Shared SH/SZ Level-2 layout, venue-specific field meaning**
+
+One tick structure can carry exchange source time, local receive time, business time, and sequence. Fields such as order kind and original order id mean different things on Shanghai versus Shenzhen: add/delete on one venue, limit versus market on the other, and an original id that may be meaningless on one side. Order queues may pack the list at a price level into a fixed char region. Latency work must keep source time and receive time apart.
+
+**8. One strategy interface, several run modes**
+
+Live trading, real-time simulation, historical accelerated replay, and fastest backtest can share one strategy interface. Live uses wall clock or a clock published on the bus; backtest injects a custom clock and chooses instant fill or a full simulated matcher. Historical quotes, trades, and high-frequency factor series can sit in shared-memory vector pools so each run does not rebuild from disk.
+
+
++ **Caveats**: every process must agree on shared-memory layout version; more than 64 subscribers need a wider confirm map; disagreement between local books and broker queries needs an explicit reconciliation policy.
 
 
 ## Business logic design-calculation
