@@ -39,9 +39,9 @@
   - [30. wait-free programming](#30-wait-free-programming)
   - [31. Linux kernel tuning and BIOS configuration](#31-linux-kernel-tuning-and-bios-configuration)
   - [32. Latency measurement (clock cycles)](#32-latency-measurement-clock-cycles)
-  - [33. High-quality articles on system design](#33-high-quality-articles-on-system-design)
-  - [34. In-place ring writes to avoid large-object copies](#34-in-place-ring-writes-to-avoid-large-object-copies)
-  - [35. Fail fast when shared capacity is exhausted](#35-fail-fast-when-shared-capacity-is-exhausted)
+  - [33. In-place ring writes to avoid large-object copies](#33-in-place-ring-writes-to-avoid-large-object-copies)
+  - [34. Fail fast when shared capacity is exhausted](#34-fail-fast-when-shared-capacity-is-exhausted)
+  - [35. High-quality articles on system design](#35-high-quality-articles-on-system-design)
 - [Common performance bottlenecks and optimization directions](#common-performance-bottlenecks-and-optimization-directions)
   - [1. roofline model](#1-roofline-model)
     - [Memory Bound optimization](#memory-bound-optimization)
@@ -11648,13 +11648,7 @@ private:
 ```
 
 
-### 33. High-quality articles on system design
-[https://mp.weixin.qq.com/s/9OH1RA8POFidgQnvape6fQ](https://mp.weixin.qq.com/s/9OH1RA8POFidgQnvape6fQ)
-
-[https://mp.weixin.qq.com/s/PuG4ZFVZ-7hijS4Db8Z5jQ](https://mp.weixin.qq.com/s/PuG4ZFVZ-7hijS4Db8Z5jQ)
-
-
-### 34. In-place ring writes to avoid large-object copies
+### 33. In-place ring writes to avoid large-object copies
 
 Fixed-size messages such as orders and ten-level quotes are often hundreds of bytes. Building a full object on the stack and then assigning it into a ring slot adds a whole-object copy and can spill registers on the write path. A better interface hands the producer a slot reference, fills fields in place through a callback, then publishes the sequence or advances head. Single-writer paths need no lock; multi-writer paths only spin briefly while claiming a slot.
 
@@ -11694,7 +11688,7 @@ public:
 ```
 
 
-### 35. Fail fast when shared capacity is exhausted
+### 34. Fail fast when shared capacity is exhausted
 
 Once a shared-memory ring, factor entry pool, or name index is full, overwriting or silently dropping leaves orders and books in an undefined state. Capacity faults should emit a fatal log and abort the process so operators enlarge the pool from config, instead of swallowing the error on the hot path. That differs from online services that block when a queue is full: trading middleware fears silent book corruption more than a crash.
 
@@ -11726,6 +11720,12 @@ public:
     }
 };
 ```
+
+
+### 35. High-quality articles on system design
+[https://mp.weixin.qq.com/s/9OH1RA8POFidgQnvape6fQ](https://mp.weixin.qq.com/s/9OH1RA8POFidgQnvape6fQ)
+
+[https://mp.weixin.qq.com/s/PuG4ZFVZ-7hijS4Db8Z5jQ](https://mp.weixin.qq.com/s/PuG4ZFVZ-7hijS4Db8Z5jQ)
 
 
 ## Common performance bottlenecks and optimization directions

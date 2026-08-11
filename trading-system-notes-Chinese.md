@@ -39,9 +39,9 @@ English version：[https://github.com/zzxscodes/trading-system-notes/blob/main/t
   - [30. wait-free编程](#30-wait-free编程)
   - [31. Linux内核调优和BIOS配置](#31-linux内核调优和bios配置)
   - [32. 延迟测量（时钟周期）](#32-延迟测量时钟周期)
-  - [33. 系统设计优质文章](#33-系统设计优质文章)
-  - [34. 环缓冲就地写入减少大对象拷贝](#34-环缓冲就地写入减少大对象拷贝)
-  - [35. 共享资源容量耗尽时快速失败](#35-共享资源容量耗尽时快速失败)
+  - [33. 环缓冲就地写入减少大对象拷贝](#33-环缓冲就地写入减少大对象拷贝)
+  - [34. 共享资源容量耗尽时快速失败](#34-共享资源容量耗尽时快速失败)
+  - [35. 系统设计优质文章](#35-系统设计优质文章)
 - [常见性能瓶颈与优化方向](#常见性能瓶颈与优化方向)
   - [1. roofline model](#1-roofline-model)
     - [Memory Bound优化](#memory-bound优化)
@@ -11618,13 +11618,7 @@ private:
 ```
 
 
-### 33. 系统设计优质文章
-[https://mp.weixin.qq.com/s/9OH1RA8POFidgQnvape6fQ](https://mp.weixin.qq.com/s/9OH1RA8POFidgQnvape6fQ)
-
-[https://mp.weixin.qq.com/s/PuG4ZFVZ-7hijS4Db8Z5jQ](https://mp.weixin.qq.com/s/PuG4ZFVZ-7hijS4Db8Z5jQ)
-
-
-### 34. 环缓冲就地写入减少大对象拷贝
+### 33. 环缓冲就地写入减少大对象拷贝
 
 订单、十档行情这类定长消息往往数百字节。先在栈上构造完整对象再赋进环槽，会多一次整对象拷贝，写路径上还容易触发寄存器溢写。更好的接口是：生产者拿到槽位引用，用回调就地填字段，填完再发布序号或推进 head。单写路径可不加锁；多写路径只对取槽加短自旋。
 
@@ -11664,7 +11658,7 @@ public:
 ```
 
 
-### 35. 共享资源容量耗尽时快速失败
+### 34. 共享资源容量耗尽时快速失败
 
 共享内存里的环、因子条目池、命名索引一旦写满，若继续覆盖或静默丢弃，订单与账本会进入不可预期状态。容量类错误应打致命日志并立刻中止进程，迫使运维按配置放大池子，而不是在热路径上吞掉异常。这与“队列满则阻塞等待”的在线服务模型不同：交易中间件更怕静默错账。
 
@@ -11696,6 +11690,12 @@ public:
     }
 };
 ```
+
+
+### 35. 系统设计优质文章
+[https://mp.weixin.qq.com/s/9OH1RA8POFidgQnvape6fQ](https://mp.weixin.qq.com/s/9OH1RA8POFidgQnvape6fQ)
+
+[https://mp.weixin.qq.com/s/PuG4ZFVZ-7hijS4Db8Z5jQ](https://mp.weixin.qq.com/s/PuG4ZFVZ-7hijS4Db8Z5jQ)
 
 
 ## 常见性能瓶颈与优化方向
