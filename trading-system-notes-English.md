@@ -40,6 +40,8 @@
   - [31. Linux kernel tuning and BIOS configuration](#31-linux-kernel-tuning-and-bios-configuration)
   - [32. Latency measurement (clock cycles)](#32-latency-measurement-clock-cycles)
   - [33. High-quality articles on system design](#33-high-quality-articles-on-system-design)
+  - [34. In-place ring writes to avoid large-object copies](#34-in-place-ring-writes-to-avoid-large-object-copies)
+  - [35. Fail fast when shared capacity is exhausted](#35-fail-fast-when-shared-capacity-is-exhausted)
 - [Common performance bottlenecks and optimization directions](#common-performance-bottlenecks-and-optimization-directions)
   - [1. roofline model](#1-roofline-model)
     - [Memory Bound optimization](#memory-bound-optimization)
@@ -88,6 +90,15 @@
   - [16. Pre-serialized orders](#16-pre-serialized-orders)
   - [17. Adaptive load shedder (CoDEL)](#17-adaptive-load-shedder-codel)
   - [18. Multi-process shared-memory trading middleware (ShmDB)](#18-multi-process-shared-memory-trading-middleware-shmdb)
+  - [19. Bilateral order-id index on the trade bridge](#19-bilateral-order-id-index-on-the-trade-bridge)
+  - [20. Local cache when fills arrive before status](#20-local-cache-when-fills-arrive-before-status)
+  - [21. Linked-order metadata](#21-linked-order-metadata)
+  - [22. Multi-band minimum tick table](#22-multi-band-minimum-tick-table)
+  - [23. Calendar-aligned factor store with gap fill](#23-calendar-aligned-factor-store-with-gap-fill)
+  - [24. Engine message route filters](#24-engine-message-route-filters)
+  - [25. Basket control channel and oversized exec buffer](#25-basket-control-channel-and-oversized-exec-buffer)
+  - [26. Pre-trade risk gate and layered error codes](#26-pre-trade-risk-gate-and-layered-error-codes)
+  - [27. Pulling high-frequency factors on the hot path](#27-pulling-high-frequency-factors-on-the-hot-path)
 - [Business logic design-calculation](#business-logic-design-calculation)
   - [1. Log return (percent asymmetry)](#1-log-return-percent-asymmetry)
   - [2. Changes in state of market trends and volatility](#2-changes-in-state-of-market-trends-and-volatility)
@@ -11643,7 +11654,82 @@ private:
 [https://mp.weixin.qq.com/s/PuG4ZFVZ-7hijS4Db8Z5jQ](https://mp.weixin.qq.com/s/PuG4ZFVZ-7hijS4Db8Z5jQ)
 
 
+### 34. In-place ring writes to avoid large-object copies
+
+Fixed-size messages such as orders and ten-level quotes are often hundreds of bytes. Building a full object on the stack and then assigning it into a ring slot adds a whole-object copy and can spill registers on the write path. A better interface hands the producer a slot reference, fills fields in place through a callback, then publishes the sequence or advances head. Single-writer paths need no lock; multi-writer paths only spin briefly while claiming a slot.
+
+```cpp
+template<class T, size_t N>
+class SlotRing {
+    static_assert((N & (N - 1)) == 0, "N power of two");
+    T buf_[N]{};
+    std::atomic<uint64_t> head_{0};
+    static constexpr uint64_t mask_ = N - 1;
+
+public:
+    template<class Fn>
+    void emplace_publish(Fn&& fill) {
+        const uint64_t h = head_.fetch_add(1, std::memory_order_acq_rel);
+        T& slot = buf_[h & mask_];
+        fill(slot); // write fields in the slot; avoid T tmp; buf=tmp;
+        // for multi-consumer visibility, publish seq = h + N here
+    }
+
+    template<class Fn>
+    uint64_t drain_from(uint64_t cursor, uint64_t published, Fn&& on_item) {
+        while (cursor < published) {
+            on_item(buf_[cursor & mask_]);
+            ++cursor;
+        }
+        return cursor;
+    }
+};
+
+// Usage:
+// ring.emplace_publish([&](OrderMsg& m) {
+//     m.local_id = id;
+//     std::memcpy(m.symbol, sym, sizeof(m.symbol));
+//     m.qty = qty;
+// });
+```
+
+
+### 35. Fail fast when shared capacity is exhausted
+
+Once a shared-memory ring, factor entry pool, or name index is full, overwriting or silently dropping leaves orders and books in an undefined state. Capacity faults should emit a fatal log and abort the process so operators enlarge the pool from config, instead of swallowing the error on the hot path. That differs from online services that block when a queue is full: trading middleware fears silent book corruption more than a crash.
+
+```cpp
+template<class T>
+class FixedShmList {
+    T* data_{};
+    size_t cap_{};
+    size_t size_{};
+
+public:
+    void push_or_abort(const T& v) {
+        if (size_ >= cap_) {
+            // production: wire a logging framework; sketch only
+            std::fprintf(stderr,
+                "FixedShmList full cap=%zu, abort to avoid silent wrap\n", cap_);
+            std::abort();
+        }
+        data_[size_++] = v;
+    }
+
+    template<class Fn>
+    void emplace_or_abort(Fn&& fill) {
+        if (size_ >= cap_) {
+            std::fprintf(stderr, "FixedShmList emplace full, abort\n");
+            std::abort();
+        }
+        fill(data_[size_++]);
+    }
+};
+```
+
+
 ## Common performance bottlenecks and optimization directions
+
 ### 1. roofline model
 <!-- 这是一张图片，ocr 内容为： -->
 ![](https://cdn.nlark.com/yuque/0/2025/png/35485470/1751353418603-3bacb410-0af1-4337-bee1-0829643af78e.png)
@@ -28275,6 +28361,55 @@ struct CopyableAtom {
 
 Cash and positions are keyed by product, broker account, trader, strategy, and similar layers, including variants that merge several counters first. The numbers live in atomic rows in a shared-memory ring. Each process keeps its own map from key to ring index and updates it when a new row appears. Queries take two paths: ask the broker asynchronously, or read what this system already computed in shared memory. The second path is faster but can disagree with the broker briefly, so reconciliation is required.
 
+```cpp
+enum class BookTier : uint8_t { Product, Broker, Trader, Strategy, MergedBroker };
+
+struct CashRow {
+    BookTier tier{};
+    char product[16]{};
+    char broker_acct[32]{};
+    char trader[32]{};
+    char strategy[32]{};
+    double available{};
+    double frozen{};
+};
+
+// Shared ring holds CopyableAtom<CashRow>; this process only caches key→index
+template<class Ring>
+class LocalBookIndex {
+    Ring* rows_;
+    std::unordered_map<std::string, long> slot_;
+
+    static std::string make_key(const CashRow& r) {
+        return std::to_string(int(r.tier)) + '|' + r.product + '|' +
+               r.broker_acct + '|' + r.trader + '|' + r.strategy;
+    }
+public:
+    explicit LocalBookIndex(Ring* rows) : rows_(rows) {
+        for (long i = 0; i < rows_->end_index(); ++i)
+            slot_[make_key(rows_->at(i).load())] = i;
+    }
+
+    bool upsert(const CashRow& row) {
+        const auto k = make_key(row);
+        if (auto it = slot_.find(k); it != slot_.end()) {
+            rows_->at(it->second).store(row);
+            return true;
+        }
+        rows_->emplace([&](auto& cell) { cell.store(row); });
+        slot_[k] = rows_->latest_index();
+        return true;
+    }
+
+    bool find_local(const std::string& k, CashRow& out) const {
+        auto it = slot_.find(k);
+        if (it == slot_.end()) return false;
+        out = rows_->at(it->second).load();
+        return true;
+    }
+};
+```
+
 **5. Restart-safe composite order-id prefixes**
 
 Wire order ids are usually built from several parts: a site code, a document kind (external feedback, normal, algo, query, basket, and so on), a cross-day and short-window encoding, and a global monotonic counter. A short window can be “trade day mod 10” plus a ten-second slot within the day, provided manual restarts are spaced far enough apart to avoid collisions. The kind field tells whether the id was issued by this stack or injected from external fills on the same account.
@@ -28293,16 +28428,432 @@ uint64_t wire_id_prefix(int site, int kind, int day_mod10, int slot_10s) {
 
 An algo ticket is more than a normal order with a label. Continuous trading needs its own window and chase rule; the auction needs a separate window and basis adjustment. The design must also say whether unfinished auction volume rolls into continuous trading, whether a limit-up sell or limit-down buy stops immediately, and whether sparse VWAP lands in the first minute, the last minute, or the middle. Status before pause must be kept so resume can continue cleanly. Impact cost can snapshot bid1 and ask1 when the algo first becomes running. These are structural constraints for China cash-equity algos, not the VWAP formula itself.
 
+```cpp
+enum class ChasePx : uint8_t { Unknown, Bid1, Ask1, Mid, Limit };
+enum class SparseVwapSlot : uint8_t { Front, Middle, Tail };
+
+struct EquityAlgoTicket {
+    // normal fields: symbol / side / target_qty / limit_px ...
+    char style[16]{};              // twap / vwap / auction / batch
+    // continuous session
+    int64_t cont_start_ms{};
+    int64_t cont_end_ms{};
+    ChasePx cont_chase{ChasePx::Unknown};
+    int32_t cont_slip_ticks{};
+    // auction (stored apart from continuous; do not reuse fields)
+    int64_t auction_join_ms{};
+    ChasePx auction_chase{ChasePx::Unknown};
+    int32_t auction_slip_ticks{};
+    double auction_basis_px{};
+    bool roll_unfilled_to_cont{true};
+    bool stop_on_limit_up_sell{false};
+    bool stop_on_limit_down_buy{false};
+    int32_t reorder_lag_ms{-1};
+    SparseVwapSlot sparse_slot{SparseVwapSlot::Front};
+    // runtime
+    uint8_t status_before_pause{};
+    double impact_bid1{};
+    double impact_ask1{};
+    char extra_json[2048]{};
+};
+```
+
 **7. Shared SH/SZ Level-2 layout, venue-specific field meaning**
 
 One tick structure can carry exchange source time, local receive time, business time, and sequence. Fields such as order kind and original order id mean different things on Shanghai versus Shenzhen: add/delete on one venue, limit versus market on the other, and an original id that may be meaningless on one side. Order queues may pack the list at a price level into a fixed char region. Latency work must keep source time and receive time apart.
+
+```cpp
+enum class Venue : uint8_t { SH, SZ };
+
+struct SharedL2OrderTick {
+    char symbol[32]{};
+    Venue venue{Venue::SH};
+    int64_t exch_src_us{};   // exchange source time
+    int64_t local_recv_us{}; // local receive time
+    int64_t biz_time_us{};
+    uint64_t seq{};
+    char kind{};             // SH: add/delete; SZ: limit/market — interpret by venue
+    uint64_t raw_order_id{}; // may be meaningless on one side; check venue first
+    double price{};
+    int64_t qty{};
+    char side{};
+};
+
+struct SharedL2QueueBand {
+    char symbol[32]{};
+    double price{};
+    char side{};
+    // pack quantities at this price into a fixed region; no cross-process heap
+    char packed_qty_list[512]{};
+    uint16_t packed_len{};
+};
+
+int64_t wire_latency_us(const SharedL2OrderTick& t) {
+    return t.local_recv_us - t.exch_src_us; // never substitute biz_time for src
+}
+```
 
 **8. One strategy interface, several run modes**
 
 Live trading, real-time simulation, historical accelerated replay, and fastest backtest can share one strategy interface. Live uses wall clock or a clock published on the bus; backtest injects a custom clock and chooses instant fill or a full simulated matcher. Historical quotes, trades, and high-frequency factor series can sit in shared-memory vector pools so each run does not rebuild from disk.
 
+```cpp
+enum class RunMode : uint8_t {
+    Live, LiveSim, HistReplay, FastBacktest
+};
+enum class FillMode : uint8_t { Instant, FullMatcher };
+
+struct StrategyHost {
+    RunMode mode{RunMode::Live};
+    FillMode fill{FillMode::FullMatcher};
+    int64_t (*now_ms)() = nullptr; // Live: wall/bus clock; backtest: injected
+
+    void on_quote(/*...*/) {}
+    void on_order_ack(/*...*/) {}
+    void on_signal(/*...*/) {}
+
+    void loop_once() {
+        if (mode == RunMode::FastBacktest || mode == RunMode::HistReplay) {
+            // advance clock and quotes from preloaded SHM pools; no disk
+            advance_from_shm_pools();
+        } else {
+            drain_live_rings();
+        }
+    }
+};
+```
+
 
 + **Caveats**: every process must agree on shared-memory layout version; more than 64 subscribers need a wider confirm map; disagreement between local books and broker queries needs an explicit reconciliation policy.
+
+
+### 19. Bilateral order-id index on the trade bridge
+
+Venue ack ids are not uniform: some are strings, some uint64, some only 32-bit. The trade bridge keeps two maps: venue id → local order object, and local id → venue id. On successful submit both sides are written; cancel and fill callbacks look up the local order in O(1) by venue id; timeout sweeps scan the unacked set. A shared mutex guards concurrent API callbacks and the main loop.
+
+```cpp
+#include <shared_mutex>
+#include <unordered_map>
+#include <variant>
+#include <string>
+
+using VenueOid = std::variant<std::string, uint64_t, uint32_t, int64_t>;
+
+struct WireOrder; // local order living in shared memory
+
+class BridgeOidIndex {
+    mutable std::shared_mutex mu_;
+    std::unordered_map<VenueOid, WireOrder*> venue_to_local_;
+    std::unordered_map<uint64_t, VenueOid> local_to_venue_;
+    std::unordered_map<uint64_t, WireOrder*> unacked_;
+
+public:
+    void remember_out(WireOrder* o, uint64_t local_id, VenueOid venue_id) {
+        std::unique_lock lk(mu_);
+        venue_to_local_[venue_id] = o;
+        local_to_venue_[local_id] = venue_id;
+        unacked_.erase(local_id);
+    }
+
+    void remember_pending(WireOrder* o, uint64_t local_id) {
+        std::unique_lock lk(mu_);
+        unacked_[local_id] = o;
+    }
+
+    WireOrder* by_venue(const VenueOid& venue_id) const {
+        std::shared_lock lk(mu_);
+        auto it = venue_to_local_.find(venue_id);
+        return it == venue_to_local_.end() ? nullptr : it->second;
+    }
+
+    bool venue_of(uint64_t local_id, VenueOid& out) const {
+        std::shared_lock lk(mu_);
+        auto it = local_to_venue_.find(local_id);
+        if (it == local_to_venue_.end()) return false;
+        out = it->second;
+        return true;
+    }
+};
+```
+
+
+### 20. Local cache when fills arrive before status
+
+Some venues push fills before status changes. If the local order is still “acked” while cumulative fills already exist, overwriting blindly loses the intermediate state. Reserve three cache fields on the order: early status, early filled qty, early filled amount. When the late status arrives, merge the cache into the official fields and advance to partial or filled.
+
+```cpp
+enum class OrdState : uint8_t {
+    Unknown, Sent, Acked, Partial, Filled, Canceled
+};
+
+struct LiveOrder {
+    OrdState state{OrdState::Unknown};
+    int64_t filled_qty{};
+    double filled_amt{};
+    // staging when fills arrive before status
+    OrdState early_state{OrdState::Unknown};
+    int64_t early_filled_qty{};
+    double early_filled_amt{};
+};
+
+void on_trade_before_status(LiveOrder& o, int64_t qty, double px) {
+    o.early_filled_qty += qty;
+    o.early_filled_amt += qty * px;
+    if (o.state == OrdState::Acked || o.state == OrdState::Sent) {
+        // official status not yet here; accumulate cache only
+        return;
+    }
+    o.filled_qty += qty;
+    o.filled_amt += qty * px;
+}
+
+void on_status_after_trades(LiveOrder& o, OrdState s) {
+    o.state = s;
+    if (o.early_filled_qty > 0) {
+        o.filled_qty = o.early_filled_qty;
+        o.filled_amt = o.early_filled_amt;
+        o.early_filled_qty = 0;
+        o.early_filled_amt = 0.0;
+        if (o.state == OrdState::Acked)
+            o.state = OrdState::Partial;
+    }
+}
+```
+
+
+### 21. Linked-order metadata
+
+Pair trades and multi-leg submits still send each leg as its own order, but they must be observed together. Put a group id, leg count, and leg index on the header: group id 0 means standalone; leg count 1 means no linkage. Strategy and risk aggregate progress by group id without a side table.
+
+```cpp
+struct LinkedLegMeta {
+    uint64_t group_id{0};   // 0: standalone
+    uint32_t leg_total{1};  // 1: no linkage
+    uint32_t leg_index{0};  // submit order within the group
+};
+
+struct LinkedOrder {
+    uint64_t order_id{};
+    LinkedLegMeta link{};
+    char symbol[32]{};
+    int64_t target_qty{};
+    int64_t filled_qty{};
+};
+
+bool group_done(const LinkedOrder* legs, size_t n, uint64_t gid) {
+    int need = -1, got = 0;
+    for (size_t i = 0; i < n; ++i) {
+        if (legs[i].link.group_id != gid) continue;
+        need = int(legs[i].link.leg_total);
+        if (legs[i].filled_qty >= legs[i].target_qty) ++got;
+    }
+    return need > 0 && got >= need;
+}
+```
+
+
+### 22. Multi-band minimum tick table
+
+A-shares default to 0.01; HK equities and some futures change step by price band. Parse the table into “from price → step” bands. Flooring, moving N ticks, and clamping to limit-up/down all use the same table. Bad rounding is a common reject cause; cache one table per symbol on the hot path instead of reparsing strings.
+
+```cpp
+#include <cmath>
+#include <vector>
+#include <string>
+
+struct TickBand { double from_px; double step; };
+
+class TickGrid {
+    double up_{}, down_{};
+    std::vector<TickBand> bands_;
+
+    const TickBand& band_of(double px) const {
+        // bands_ ascending by from_px; last band with from_px <= px
+        size_t i = 0;
+        while (i + 1 < bands_.size() && bands_[i + 1].from_px <= px) ++i;
+        return bands_[i];
+    }
+public:
+    // e.g. "0:0.01;10:0.05;50:0.1"
+    void load(double up, double down, const std::string& spec);
+
+    double floor_px(double px) const {
+        const auto& b = band_of(px);
+        return std::floor(px / b.step) * b.step;
+    }
+    double ceil_px(double px) const {
+        const auto& b = band_of(px);
+        return std::ceil(px / b.step) * b.step;
+    }
+    double move_up(double px, int n) const {
+        px = ceil_px(px) + n * band_of(px).step;
+        return px > up_ ? up_ : (px < down_ ? down_ : px);
+    }
+};
+```
+
+
+### 23. Calendar-aligned factor store with gap fill
+
+Storing minute factors in sparse maps makes multi-symbol alignment expensive. Prefer a global “calendar time → index” map and one fixed ring per factor name written by index. When a write skips intermediate bars, fill the gap with a caller-supplied function and mark cells as filled. A sentinel last-write index (e.g. -2) distinguishes “never written” from “written at 0” without an extra bool.
+
+```cpp
+struct FactorCell { bool filled; double value; };
+
+struct FactorSeries {
+    int64_t last_write{-2}; // -2: never written
+    int64_t last_time{0};
+    std::vector<FactorCell> cells;
+};
+
+class CalendarFactorStore {
+    std::unordered_map<int64_t, int> time_to_idx_; // trading calendar
+    std::unordered_map<std::string, FactorSeries> series_;
+
+public:
+    template<class FillFn>
+    void write(const std::string& name, double v, int64_t t, FillFn&& fill) {
+        auto it = time_to_idx_.find(t);
+        if (it == time_to_idx_.end()) return;
+        auto& s = series_[name];
+        const int idx = it->second;
+        if (idx <= s.last_write) return;
+
+        // e.g. adjacent minute tags differ by 100 (site-compact time code)
+        if (s.last_write != -2 && (t - s.last_time) != 100) {
+            double gap_v = 0;
+            fill(gap_v);
+            for (int i = s.last_write + 1; i < idx; ++i)
+                s.cells[i] = {true, gap_v};
+        }
+        if (s.cells.size() <= size_t(idx)) s.cells.resize(idx + 1);
+        s.cells[idx] = {false, v};
+        s.last_write = idx;
+        s.last_time = t;
+    }
+};
+```
+
+
+### 24. Engine message route filters
+
+A reply ring may mix several accounts and algo engines. Each process attaches a filter: none, match by engine id, or match by counter+account. Algo engines may also keep a set of cared-about exec_types. Filtering happens before setting the consume bit so unrelated processes do not claim confirm bits.
+
+```cpp
+enum class RouteRule : uint8_t { None, ByEngine, ByCounterAccount };
+
+struct RoutePolicy {
+    RouteRule rule{RouteRule::None};
+    uint32_t engine_id{};
+    char counter[32]{};
+    char account[32]{};
+};
+
+struct AlgoInterest {
+    std::unordered_set<std::string> exec_types; // twap / vwap / pass ...
+};
+
+bool accept_order_msg(const RoutePolicy& p, uint32_t msg_engine,
+                      const char* counter, const char* account) {
+    switch (p.rule) {
+    case RouteRule::None: return true;
+    case RouteRule::ByEngine: return p.engine_id == msg_engine;
+    case RouteRule::ByCounterAccount:
+        return std::strcmp(p.counter, counter) == 0 &&
+               std::strcmp(p.account, account) == 0;
+    }
+    return false;
+}
+```
+
+
+### 25. Basket control channel and oversized exec buffer
+
+Institutional baskets are not “loop 2000 normal-order controls”. They use a separate control plane: create, pause, resume, stop, update. Exec content sits in an oversized fixed buffer (up to a few MB) carrying multi-symbol parameters or reply digests. Algo processes subscribe only to their exec_type; ordinary strategy rings are not bloated by basket payloads.
+
+```cpp
+enum class BasketOp : uint8_t {
+    Unknown, Create, Pause, Resume, Stop, Update
+};
+
+template<size_t Cap>
+struct BasketMsg {
+    char name[64]{};
+    uint64_t basket_id{};
+    BasketOp op{BasketOp::Unknown};
+    char exec_type[16]{};          // PassControl / TwapControl / ...
+    char payload[Cap]{};           // multi-symbol JSON or compact binary
+    int32_t err{};
+    char err_text[128]{};
+};
+
+using BasketReq = BasketMsg<2048 * 2000>; // control plane only; keep off MD hot rings
+```
+
+
+### 26. Pre-trade risk gate and layered error codes
+
+Before calling the venue API, the trade bridge should run a synchronous gate: blacklist, per-order notional, per-symbol and global counts, cancel/order ratio, per-minute flow, self-trade foresight, long/short imbalance. On reject, write the same error_id and error text fields used for venue errors so strategy callbacks need not branch on source. Validation, cash/position, and risk codes live in separate numeric bands for monitoring. Hanging and warning statuses are reserved for ambiguous acks that need human ops.
+
+```cpp
+enum class WireErr : int32_t {
+    Ok = 0,
+    // validation
+    BadPrice = 10, BadQty, BadSymbol, DupId, AlreadyFinal,
+    // cash / position
+    NoCash = 40, NoPos, NoTodayPos,
+    // risk
+    BlackSymbol = 70, OrderCashCap, TickerOrderCap, TickerCancelCap,
+    CancelOrderRatio, OrderFlowPerMin, CancelFlowPerMin, SelfTradeRisk,
+    // external
+    VenueApi = 100, BasketParse
+};
+
+struct OrderView {
+    char symbol[32]{};
+    double limit_px{};
+    int64_t qty{};
+    int64_t err{int64_t(WireErr::Ok)};
+    char err_text[128]{};
+};
+
+bool pre_trade_gate(OrderView& o) {
+    if (in_blacklist(o.symbol)) {
+        o.err = int64_t(WireErr::BlackSymbol);
+        std::snprintf(o.err_text, sizeof(o.err_text), "symbol blocked");
+        return false; // false: block
+    }
+    if (over_order_flow()) {
+        o.err = int64_t(WireErr::OrderFlowPerMin);
+        std::snprintf(o.err_text, sizeof(o.err_text), "order flow");
+        return false;
+    }
+    return true; // true: allow
+}
+```
+
+
+### 27. Pulling high-frequency factors on the hot path
+
+High-frequency factor windows are short and update densely. Pushing them through subscribe callbacks adds extra queuing on the strategy thread. Prefer the MD process writing shared slots and the strategy pulling by symbol and time inside its own loop. Ordinary minute factors can still use request/reply subscribe; HF slots stay callback-free fixed arrays with no heap.
+
+```cpp
+enum { kHfSlots = 16 };
+
+struct HfFactorSlot {
+    char symbol[32]{};
+    int64_t asof_ms{};
+    double values[kHfSlots]{}; // lead-lag / multi-factor window results
+};
+
+bool pull_hf(const char* symbol, int64_t t, HfFactorSlot& out) {
+    // read latest from this symbol's shared slot; no callback registration
+    const HfFactorSlot* p = find_hf_slot(symbol);
+    if (!p || p->asof_ms < t) return false;
+    out = *p;
+    return true;
+}
+```
 
 
 ## Business logic design-calculation
