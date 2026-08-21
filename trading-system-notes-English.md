@@ -99,6 +99,9 @@
   - [25. Basket control channel and oversized exec buffer](#25-basket-control-channel-and-oversized-exec-buffer)
   - [26. Pre-trade risk gate and layered error codes](#26-pre-trade-risk-gate-and-layered-error-codes)
   - [27. Pulling high-frequency factors on the hot path](#27-pulling-high-frequency-factors-on-the-hot-path)
+  - [28. Order check-count semaphore and two-phase ledger prelock](#28-order-check-count-semaphore-and-two-phase-ledger-prelock)
+  - [29. Market-data gateway: full-sub filter, field patches, night-session day](#29-market-data-gateway-full-sub-filter-field-patches-night-session-day)
+  - [30. Short venue refs, async quota, and algo-container clock fanout](#30-short-venue-refs-async-quota-and-algo-container-clock-fanout)
 - [Business logic design-calculation](#business-logic-design-calculation)
   - [1. Log return (percent asymmetry)](#1-log-return-percent-asymmetry)
   - [2. Changes in state of market trends and volatility](#2-changes-in-state-of-market-trends-and-volatility)
@@ -28576,6 +28579,38 @@ public:
 };
 ```
 
+Some futures venues accept only a short client order reference (about a dozen characters), which cannot hold a 64-bit local id. At session start, seed a short counter from trade day and wall clock; keep a bidirectional map between local id and short ref. While unacked, index by short ref; after the venue system id arrives, switch the confirm map. Wire only the short ref on submit; decode it back on callbacks.
+
+```cpp
+uint64_t short_ref_seed(int yyyymmdd, int hh, int mm, int ss) {
+    // e.g. day*1e10 + hour*1e8 + min*1e6 + sec*1e4, then ++
+    return uint64_t(yyyymmdd % 1000000) * 10000000000ULL
+         + uint64_t(hh) * 100000000ULL
+         + uint64_t(mm) * 1000000ULL
+         + uint64_t(ss) * 10000ULL;
+}
+
+class ShortRefBridge {
+    uint64_t next_{};
+    std::unordered_map<uint64_t, uint64_t> local_to_short_;
+    std::unordered_map<uint64_t, uint64_t> short_to_local_;
+public:
+    explicit ShortRefBridge(uint64_t seed) : next_(seed) {}
+
+    uint64_t bind(uint64_t local_id) {
+        const uint64_t s = ++next_;
+        local_to_short_[local_id] = s;
+        short_to_local_[s] = local_id;
+        return s;
+    }
+
+    uint64_t local_of(uint64_t short_id) const {
+        auto it = short_to_local_.find(short_id);
+        return it == short_to_local_.end() ? 0 : it->second;
+    }
+};
+```
+
 
 ### 20. Local cache when fills arrive before status
 
@@ -28616,6 +28651,27 @@ void on_status_after_trades(LiveOrder& o, OrdState s) {
         o.early_filled_amt = 0.0;
         if (o.state == OrdState::Acked)
             o.state = OrdState::Partial;
+    }
+}
+
+// Reverse race: final status arrives before fills catch up
+void on_final_status_before_fills(LiveOrder& o, OrdState final_s,
+                                  int64_t venue_left, int64_t local_left) {
+    if (final_s != OrdState::Canceled && final_s != OrdState::Filled)
+        return;
+    if (local_left > venue_left) {
+        o.early_state = final_s; // stash until trades catch up
+        return;
+    }
+    o.state = final_s;
+}
+
+void on_trade_catch_up(LiveOrder& o, int64_t qty, double px, int64_t left) {
+    o.filled_qty += qty;
+    o.filled_amt += qty * px;
+    if (o.early_state != OrdState::Unknown && left == 0) {
+        o.state = o.early_state;
+        o.early_state = OrdState::Unknown;
     }
 }
 ```
@@ -28832,6 +28888,33 @@ bool pre_trade_gate(OrderView& o) {
 }
 ```
 
+A plain per-minute counter reset jitters at bucket edges. Prefer a pre-sized timestamp vector: slide off entries older than one second, compare the window size to the limit, and keep the peak rate for monitoring. Keep separate instances for account×market and for global flow.
+
+```cpp
+class SlideFlow1s {
+    std::vector<int64_t> ts_ms_;
+    size_t begin_{0};
+    size_t size_{0};
+    uint64_t peak_{0};
+public:
+    void reserve(size_t cap) { ts_ms_.assign(cap, 0); }
+
+    void add(int64_t now_ms) {
+        if (size_ < ts_ms_.size()) ts_ms_[size_] = now_ms;
+        else ts_ms_.push_back(now_ms);
+        ++size_;
+    }
+
+    bool allow(int64_t now_ms, uint64_t limit) {
+        const int64_t cut = now_ms - 1000;
+        while (begin_ < size_ && ts_ms_[begin_] < cut) ++begin_;
+        const uint64_t n = (size_ - begin_) + 1;
+        if (n > peak_) peak_ = n;
+        return n < limit;
+    }
+};
+```
+
 
 ### 27. Pulling high-frequency factors on the hot path
 
@@ -28852,6 +28935,179 @@ bool pull_hf(const char* symbol, int64_t t, HfFactorSlot& out) {
     if (!p || p->asof_ms < t) return false;
     out = *p;
     return true;
+}
+```
+
+### 28. Order check-count semaphore and two-phase ledger prelock
+
+A serial “risk then trade-bridge” path adds risk queueing to submit latency. A lower-latency design has the strategy write the order request once; risk and the trade bridge both see it. The bridge does not send immediately: it polls a check-passed count and a reject count on the order. Config says how many risk signers are required; only when all have passed and rejects stay zero does the bridge hit the venue. Inside risk, run every check and a prelock computation without writing the shared ledger; only then commit freezes and bump the check count, so a failed path never leaves a half-applied cash lock. For market orders the freeze price can be mid or the opposite touch; the first writer wins the freeze price/qty with atomics.
+
+```cpp
+struct WireOrder {
+    uint64_t order_id{};
+    std::atomic<uint8_t> checked{0};
+    std::atomic<uint8_t> rejected{0};
+    std::atomic<double> frozen_px{0.0};
+    std::atomic<int64_t> frozen_qty{0};
+};
+
+int g_risk_signers = 1; // published in shared config for bridge and risk
+
+bool td_may_send(const WireOrder& o) {
+    return o.rejected.load() == 0 &&
+           o.checked.load() >= uint8_t(g_risk_signers);
+}
+
+bool risk_try_pass(WireOrder& o, /*ledger*/ auto& books) {
+    // 1) sync checks + PreLock (compute only)
+    if (!books.prelock_ok(o)) {
+        o.rejected.fetch_add(1);
+        return false;
+    }
+    // 2) first writer sets freeze px/qty
+    int64_t expect = 0;
+    if (o.frozen_qty.compare_exchange_strong(expect, 1)) {
+        o.frozen_px.store(mid_or_opp_px(o));
+        o.frozen_qty.store(target_qty(o));
+    }
+    books.commit_freeze(o);
+    o.checked.fetch_add(uint8_t(g_risk_signers));
+    return true;
+}
+```
+
+
+### 29. Market-data gateway: full-sub filter, field patches, night-session day
+
+Cash L2 often subscribes the whole venue and filters in the callback against the strategy subscribe set; the hot path takes a shared read lock, or accepts everything when filtering is off. Shanghai depth snapshots often omit limit-up/down; cache them from the static instrument query and patch each snapshot. Shanghai and Shenzhen disagree on which tick field is the book index; interpret by venue before rebuilding. Futures ActionDay in the wire message is unreliable—derive it from update time: day session matches TradingDay; after 18:00 on night session subtract one or three calendar days by weekday; Monday early morning needs its own rule. After an algo parent is created, read the latest quote already in the shared ring and feed it once so the algo need not wait for the next tick.
+
+```cpp
+#include <shared_mutex>
+#include <unordered_set>
+#include <unordered_map>
+#include <string>
+
+class MdIngress {
+    bool filter_on_{true};
+    mutable std::shared_mutex mu_;
+    std::unordered_set<std::string> wanted_;
+    std::unordered_map<std::string, std::pair<double,double>> sh_limits_;
+
+public:
+    bool accept(const std::string& code) const {
+        if (!filter_on_) return true;
+        std::shared_lock lk(mu_);
+        return wanted_.count(code) != 0;
+    }
+
+    void patch_sh_limits(const std::string& code, double& up, double& down) const {
+        auto it = sh_limits_.find(code);
+        if (it == sh_limits_.end()) return;
+        if (up <= 0) up = it->second.first;
+        if (down <= 0) down = it->second.second;
+    }
+};
+
+// venue: 0=SH 1=SZ — interpret tick locating fields by venue
+uint64_t tick_index(int venue, uint64_t ord_no, uint64_t seq_no) {
+    return venue == 0 ? ord_no : seq_no;
+}
+
+int action_day_from_clock(int trading_yyyymmdd, int hhmmss, int weekday /*1=Mon*/) {
+    if (hhmmss >= 80000 && hhmmss <= 180000) return trading_yyyymmdd;
+    // night session: Mon -3 calendar days, else -1 (sketch; use a real calendar)
+    int shift = (hhmmss > 180000) ? (weekday == 1 ? 3 : 1)
+                                  : (weekday == 1 ? 2 : 1);
+    return trading_yyyymmdd; // caller applies calendar minus-days with shift
+}
+
+template<class Ring, class Algo>
+void warm_latest_quote(Ring& quotes, Algo& algo) {
+    const long end = quotes.end_index();
+    if (end <= 0) return;
+    algo.on_quote(quotes.at(end - 1)); // feed latest band right after create
+}
+```
+
+
+### 30. Short venue refs, async quota, and algo-container clock fanout
+
+Futures open/close budgets often live in the mid-desk. The trade bridge must not block forever on the API callback thread, and must not send before quota arrives. Open and close inserts request quota asynchronously and enter Wait; on grant or timeout the bridge sends or rejects. A close insert can pre-reserve one cancel credit so the first cancel skips a second round-trip; further cancels request again. External manual fills synthesize a feedback order to update risk views without releasing cancel credits.
+
+On the algo container, many parents on one symbol share each quote fanout. Execution is not quote-only: the main loop calls OnClock on every algo for tranche work, chase switches, and endgame flatten. When per-minute planned size is too sparse, collapse several minutes into fewer windows and force a strict mode to avoid jittery crumbs.
+
+```cpp
+enum class QuotaState : uint8_t { Skip, Wait, Pass, Fail };
+
+struct PendingQuota {
+    uint64_t order_id{};
+    int64_t ask_ms{};
+};
+
+class AsyncOpenQuota {
+    std::unordered_map<uint64_t, PendingQuota> waiting_;
+public:
+    QuotaState on_insert(uint64_t oid, bool needs_quota) {
+        if (!needs_quota) return QuotaState::Skip;
+        waiting_[oid] = {oid, now_ms()};
+        send_alloc_req(oid); // async control plane
+        return QuotaState::Wait;
+    }
+
+    void on_alloc_rsp(uint64_t oid, bool ok) {
+        waiting_.erase(oid);
+        if (ok) venue_insert(oid);
+        else reject_local(oid);
+    }
+
+    void poll_timeout(int64_t now, int64_t budget_ms) {
+        for (auto it = waiting_.begin(); it != waiting_.end();) {
+            if (now - it->second.ask_ms > budget_ms) {
+                reject_local(it->first);
+                it = waiting_.erase(it);
+            } else ++it;
+        }
+    }
+};
+
+class AlgoHost {
+    std::unordered_map<std::string, std::vector<uint64_t>> by_symbol_;
+    std::unordered_map<uint64_t, /*Algo**/ void*> algos_;
+public:
+    void on_quote(const char* sym, const auto& q) {
+        auto it = by_symbol_.find(sym);
+        if (it == by_symbol_.end()) return;
+        for (uint64_t id : it->second)
+            dispatch_quote(algos_[id], q);
+    }
+
+    void on_clock(int64_t now_ms) {
+        for (auto& [id, a] : algos_)
+            dispatch_clock(a, now_ms); // tranche, chase, endgame
+    }
+};
+
+struct SlicePlan {
+    int64_t start_ms{}, end_ms{};
+    int64_t planned_qty{};
+};
+
+// sparse minutes → fewer exec windows
+std::vector<SlicePlan> collapse_sparse(const std::vector<SlicePlan>& min_slices,
+                                       int64_t min_lot, double sparse_ratio) {
+    std::vector<SlicePlan> out;
+    SlicePlan cur{};
+    for (auto& s : min_slices) {
+        if (s.planned_qty < int64_t(min_lot * sparse_ratio)) {
+            if (cur.planned_qty == 0) cur = s;
+            else { cur.end_ms = s.end_ms; cur.planned_qty += s.planned_qty; }
+        } else {
+            if (cur.planned_qty) { out.push_back(cur); cur = {}; }
+            out.push_back(s);
+        }
+    }
+    if (cur.planned_qty) out.push_back(cur);
+    return out;
 }
 ```
 

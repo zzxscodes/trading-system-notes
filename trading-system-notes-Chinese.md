@@ -99,6 +99,9 @@ English version：[https://github.com/zzxscodes/trading-system-notes/blob/main/t
   - [25. 篮子控制通道与超大执行缓冲](#25-篮子控制通道与超大执行缓冲)
   - [26. 交易桥前置风控过滤与错误码分层](#26-交易桥前置风控过滤与错误码分层)
   - [27. 高频因子热路径拉取](#27-高频因子热路径拉取)
+  - [28. 订单检查计数信号量与两阶段账本预锁](#28-订单检查计数信号量与两阶段账本预锁)
+  - [29. 行情网关接入：全订过滤、字段补丁与夜盘交易日](#29-行情网关接入全订过滤字段补丁与夜盘交易日)
+  - [30. 交易桥短单号、异步配额与算法容器时钟扇出](#30-交易桥短单号异步配额与算法容器时钟扇出)
 - [业务逻辑设计-计算](#业务逻辑设计-计算)
   - [1. 对数收益率(百分比非对称性)](#1-对数收益率百分比非对称性)
   - [2. 市场趋势和波动率的状态变化](#2-市场趋势和波动率的状态变化)
@@ -28566,6 +28569,38 @@ public:
 };
 ```
 
+部分期货柜台的客户端报单引用长度只有十余字符，本系统 64 位订单号塞不进去。会话启动时用交易日与时分拼一个短序号种子，本系统号与短号双向映射；未确认阶段用短号挂起，柜台确认号到达后再切到交易所系统号。报单字段只填短号，回报解析再还原。
+
+```cpp
+uint64_t short_ref_seed(int yyyymmdd, int hh, int mm, int ss) {
+    // 例：日*1e10 + 时*1e8 + 分*1e6 + 秒*1e4，再自增
+    return uint64_t(yyyymmdd % 1000000) * 10000000000ULL
+         + uint64_t(hh) * 100000000ULL
+         + uint64_t(mm) * 1000000ULL
+         + uint64_t(ss) * 10000ULL;
+}
+
+class ShortRefBridge {
+    uint64_t next_{};
+    std::unordered_map<uint64_t, uint64_t> local_to_short_;
+    std::unordered_map<uint64_t, uint64_t> short_to_local_;
+public:
+    explicit ShortRefBridge(uint64_t seed) : next_(seed) {}
+
+    uint64_t bind(uint64_t local_id) {
+        const uint64_t s = ++next_;
+        local_to_short_[local_id] = s;
+        short_to_local_[s] = local_id;
+        return s;
+    }
+
+    uint64_t local_of(uint64_t short_id) const {
+        auto it = short_to_local_.find(short_id);
+        return it == short_to_local_.end() ? 0 : it->second;
+    }
+};
+```
+
 
 ### 20. 成交回报先于状态回报的本地缓存
 
@@ -28606,6 +28641,27 @@ void on_status_after_trades(LiveOrder& o, OrdState s) {
         o.early_filled_amt = 0.0;
         if (o.state == OrdState::Acked)
             o.state = OrdState::Partial;
+    }
+}
+
+// 反向：终态先到、成交量尚未追平
+void on_final_status_before_fills(LiveOrder& o, OrdState final_s,
+                                  int64_t venue_left, int64_t local_left) {
+    if (final_s != OrdState::Canceled && final_s != OrdState::Filled)
+        return;
+    if (local_left > venue_left) {
+        o.early_state = final_s; // 暂存，等成交补齐后再落地
+        return;
+    }
+    o.state = final_s;
+}
+
+void on_trade_catch_up(LiveOrder& o, int64_t qty, double px, int64_t left) {
+    o.filled_qty += qty;
+    o.filled_amt += qty * px;
+    if (o.early_state != OrdState::Unknown && left == 0) {
+        o.state = o.early_state;
+        o.early_state = OrdState::Unknown;
     }
 }
 ```
@@ -28822,6 +28878,33 @@ bool pre_trade_gate(OrderView& o) {
 }
 ```
 
+“每分钟流控”若只靠计数器重置，边界上会抖。更稳的做法是预分配时间戳向量，滑动丢掉一秒以前的记录，再用窗口内条数与限额比较，并记下峰值速率供监控。账户×市场与全局各挂一份实例。
+
+```cpp
+class SlideFlow1s {
+    std::vector<int64_t> ts_ms_;
+    size_t begin_{0};
+    size_t size_{0};
+    uint64_t peak_{0};
+public:
+    void reserve(size_t cap) { ts_ms_.assign(cap, 0); }
+
+    void add(int64_t now_ms) {
+        if (size_ < ts_ms_.size()) ts_ms_[size_] = now_ms;
+        else ts_ms_.push_back(now_ms);
+        ++size_;
+    }
+
+    bool allow(int64_t now_ms, uint64_t limit) {
+        const int64_t cut = now_ms - 1000;
+        while (begin_ < size_ && ts_ms_[begin_] < cut) ++begin_;
+        const uint64_t n = (size_ - begin_) + 1;
+        if (n > peak_) peak_ = n;
+        return n < limit;
+    }
+};
+```
+
 
 ### 27. 高频因子热路径拉取
 
@@ -28842,6 +28925,179 @@ bool pull_hf(const char* symbol, int64_t t, HfFactorSlot& out) {
     if (!p || p->asof_ms < t) return false;
     out = *p;
     return true;
+}
+```
+
+### 28. 订单检查计数信号量与两阶段账本预锁
+
+串行“先风控再发往交易桥”会把风控排队加进报单时延。更低延迟的做法是：策略只写一次订单请求，风控进程与交易桥同时看见；交易桥不立刻外发，而是轮询订单上的检查通过计数与拒绝计数。配置里约定需要几个风控柜台签字；全部通过且拒绝为 0 才发往券商。风控内部先做全部校验与预锁计算（不写共享账本），通过后再提交冻结并递增检查计数，避免失败路径留下半截资金占用。市价单冻结价可取中间价或对手价，首写者用原子量占住冻结价量。
+
+```cpp
+struct WireOrder {
+    uint64_t order_id{};
+    std::atomic<uint8_t> checked{0};
+    std::atomic<uint8_t> rejected{0};
+    std::atomic<double> frozen_px{0.0};
+    std::atomic<int64_t> frozen_qty{0};
+};
+
+int g_risk_signers = 1; // 写入共享配置，交易桥与风控共用
+
+bool td_may_send(const WireOrder& o) {
+    return o.rejected.load() == 0 &&
+           o.checked.load() >= uint8_t(g_risk_signers);
+}
+
+bool risk_try_pass(WireOrder& o, /*ledger*/ auto& books) {
+    // 1) 同步校验 + PreLock（只算不加账）
+    if (!books.prelock_ok(o)) {
+        o.rejected.fetch_add(1);
+        return false;
+    }
+    // 2) 首次写入冻结价量
+    int64_t expect = 0;
+    if (o.frozen_qty.compare_exchange_strong(expect, 1)) {
+        o.frozen_px.store(mid_or_opp_px(o));
+        o.frozen_qty.store(target_qty(o));
+    }
+    books.commit_freeze(o);
+    o.checked.fetch_add(uint8_t(g_risk_signers));
+    return true;
+}
+```
+
+
+### 29. 行情网关接入：全订过滤、字段补丁与夜盘交易日
+
+现货 L2 常整市场订阅再在回调里按策略订阅表过滤，热路径用共享读锁查集合，未开过滤则全部放行。沪市深度快照常缺涨跌停，需在合约静态查询时缓存后打进每笔快照。沪深逐笔序号字段含义不同，重建订单簿前必须按交易所解释。期货行情里的业务日不可盲信接口字段，应按更新时刻反推：日盘与 TradingDay 相同；夜盘 18:00 后按星期减一天或三天；周一凌晨再特殊处理。算法母单创建后可读共享环最新一档立即喂一次，不必空等下一笔行情。
+
+```cpp
+#include <shared_mutex>
+#include <unordered_set>
+#include <unordered_map>
+#include <string>
+
+class MdIngress {
+    bool filter_on_{true};
+    mutable std::shared_mutex mu_;
+    std::unordered_set<std::string> wanted_;
+    std::unordered_map<std::string, std::pair<double,double>> sh_limits_;
+
+public:
+    bool accept(const std::string& code) const {
+        if (!filter_on_) return true;
+        std::shared_lock lk(mu_);
+        return wanted_.count(code) != 0;
+    }
+
+    void patch_sh_limits(const std::string& code, double& up, double& down) const {
+        auto it = sh_limits_.find(code);
+        if (it == sh_limits_.end()) return;
+        if (up <= 0) up = it->second.first;
+        if (down <= 0) down = it->second.second;
+    }
+};
+
+// venue: 0=SH 1=SZ —— 逐笔定位字段按交易所解释
+uint64_t tick_index(int venue, uint64_t ord_no, uint64_t seq_no) {
+    return venue == 0 ? ord_no : seq_no;
+}
+
+int action_day_from_clock(int trading_yyyymmdd, int hhmmss, int weekday /*1=Mon*/) {
+    if (hhmmss >= 80000 && hhmmss <= 180000) return trading_yyyymmdd;
+    // 夜盘：周一减 3 个自然日，其余减 1（示意，实盘接交易日历）
+    int shift = (hhmmss > 180000) ? (weekday == 1 ? 3 : 1)
+                                  : (weekday == 1 ? 2 : 1);
+    return trading_yyyymmdd; // 调用方用日历 API 做减日
+}
+
+template<class Ring, class Algo>
+void warm_latest_quote(Ring& quotes, Algo& algo) {
+    const long end = quotes.end_index();
+    if (end <= 0) return;
+    algo.on_quote(quotes.at(end - 1)); // 创建后立刻吃最新一档
+}
+```
+
+
+### 30. 交易桥短单号、异步配额与算法容器时钟扇出
+
+期货开仓/平仓限额常在中台，交易桥不能在 API 回调线程里同步死等，又不能未获配额就外发。开仓与平仓插入走异步申请，状态为等待；回报或超时后再发或拒。平仓插入可预占一次撤单额度，首次撤单免再申请，第二次起再申请。外部手工成交合成回灌单时更新风险视图，但不释放撤单预占。
+
+算法容器侧，同一标的上多个母单共享一笔行情扇出；执行不只靠行情驱动，主循环按时钟调用每个算法的 OnClock，用于分时切片、追价切换与收尾强平。分钟计划量过稀时，把若干分钟收成更少的执行窗并强制严格模式，避免碎单抖动。
+
+```cpp
+enum class QuotaState : uint8_t { Skip, Wait, Pass, Fail };
+
+struct PendingQuota {
+    uint64_t order_id{};
+    int64_t ask_ms{};
+};
+
+class AsyncOpenQuota {
+    std::unordered_map<uint64_t, PendingQuota> waiting_;
+public:
+    QuotaState on_insert(uint64_t oid, bool needs_quota) {
+        if (!needs_quota) return QuotaState::Skip;
+        waiting_[oid] = {oid, now_ms()};
+        send_alloc_req(oid); // 控制面异步
+        return QuotaState::Wait;
+    }
+
+    void on_alloc_rsp(uint64_t oid, bool ok) {
+        waiting_.erase(oid);
+        if (ok) venue_insert(oid);
+        else reject_local(oid);
+    }
+
+    void poll_timeout(int64_t now, int64_t budget_ms) {
+        for (auto it = waiting_.begin(); it != waiting_.end();) {
+            if (now - it->second.ask_ms > budget_ms) {
+                reject_local(it->first);
+                it = waiting_.erase(it);
+            } else ++it;
+        }
+    }
+};
+
+class AlgoHost {
+    std::unordered_map<std::string, std::vector<uint64_t>> by_symbol_;
+    std::unordered_map<uint64_t, /*Algo**/ void*> algos_;
+public:
+    void on_quote(const char* sym, const auto& q) {
+        auto it = by_symbol_.find(sym);
+        if (it == by_symbol_.end()) return;
+        for (uint64_t id : it->second)
+            dispatch_quote(algos_[id], q);
+    }
+
+    void on_clock(int64_t now_ms) {
+        for (auto& [id, a] : algos_)
+            dispatch_clock(a, now_ms); // 分时、追价、收尾
+    }
+};
+
+struct SlicePlan {
+    int64_t start_ms{}, end_ms{};
+    int64_t planned_qty{};
+};
+
+// 稀疏分钟：合并为更少执行窗
+std::vector<SlicePlan> collapse_sparse(const std::vector<SlicePlan>& min_slices,
+                                       int64_t min_lot, double sparse_ratio) {
+    std::vector<SlicePlan> out;
+    SlicePlan cur{};
+    for (auto& s : min_slices) {
+        if (s.planned_qty < int64_t(min_lot * sparse_ratio)) {
+            if (cur.planned_qty == 0) cur = s;
+            else { cur.end_ms = s.end_ms; cur.planned_qty += s.planned_qty; }
+        } else {
+            if (cur.planned_qty) { out.push_back(cur); cur = {}; }
+            out.push_back(s);
+        }
+    }
+    if (cur.planned_qty) out.push_back(cur);
+    return out;
 }
 ```
 
