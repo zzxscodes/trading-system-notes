@@ -39,9 +39,10 @@
   - [30. wait-free programming](#30-wait-free-programming)
   - [31. Linux kernel tuning and BIOS configuration](#31-linux-kernel-tuning-and-bios-configuration)
   - [32. Latency measurement (clock cycles)](#32-latency-measurement-clock-cycles)
-  - [33. In-place ring writes to avoid large-object copies](#33-in-place-ring-writes-to-avoid-large-object-copies)
-  - [34. Fail fast when shared capacity is exhausted](#34-fail-fast-when-shared-capacity-is-exhausted)
-  - [35. High-quality articles on system design](#35-high-quality-articles-on-system-design)
+  - [33. End-to-end latency tracing layout](#33-end-to-end-latency-tracing-layout)
+  - [34. In-place ring writes to avoid large-object copies](#34-in-place-ring-writes-to-avoid-large-object-copies)
+  - [35. Fail fast when shared capacity is exhausted](#35-fail-fast-when-shared-capacity-is-exhausted)
+  - [36. High-quality articles on system design](#36-high-quality-articles-on-system-design)
 - [Common performance bottlenecks and optimization directions](#common-performance-bottlenecks-and-optimization-directions)
   - [1. roofline model](#1-roofline-model)
     - [Memory Bound optimization](#memory-bound-optimization)
@@ -11651,7 +11652,126 @@ private:
 ```
 
 
-### 33. In-place ring writes to avoid large-object copies
+### 33. End-to-end latency tracing layout
+
+Use one unified trace: every node timestamp lives in a fixed-size array indexed by enum, packed into a cheap-to-copy struct.
+
+Embed by structure risk:
+
+1. Ordinary structs (e.g. `HftFactorData`): embed a `LatencyTrace` field directly, gated by a compile flag.
+
+2. Packed structs with `#pragma pack(1)` (e.g. `HFTSignal`): append `LatencyTrace` at the end, also behind the compile flag, to minimize impact on existing layout and serialization.
+
+3. Immutable third-party or legacy structs (e.g. `snapShotStruct`): do not add a field; pass the start timestamp as a function argument and write into `LatencyTrace` when building downstream data.
+
+Timestamps then travel with the data path without ABI, serialization, or performance regressions on high-risk layouts.
+
+```cpp
+// latency_trace.h
+#pragma once
+#include <cstdint>
+#include <atomic>
+
+// runtime switch
+inline std::atomic<bool> g_latency_on{false};
+
+// compile switch
+#ifdef HFT_LATENCY
+  #define LAT_MARK(trace, node) do { \
+      if (g_latency_on.load(std::memory_order_relaxed)) \
+          (trace).ts[node] = now_ticks(); \
+  } while (0)
+#else
+  #define LAT_MARK(trace, node) do {} while (0)
+#endif
+
+// clock hook (sketch)
+inline int64_t now_ticks() { /* steady_clock impl */ }
+
+// node enum
+enum LatNode : uint8_t {
+    LAT_MD_RECV = 0,       // T0: MD callback entry
+    LAT_FEATURE_IN,        // T1: enter feature engine
+    LAT_FEATURE_DONE,      // T2: features ready
+    LAT_MODEL_DONE,        // T3: model inference done
+    LAT_SIGNAL_IN,         // T4: strategy got signal
+    LAT_ORDER_OUT,         // T5: before order send
+    LAT_NODE_COUNT
+};
+
+// unified trace: fixed array + enum index
+struct LatencyTrace {
+    int64_t ts[LAT_NODE_COUNT];  // per-node ticks
+    int64_t seq;                 // related MD seq
+};
+```
+
+**1. Ordinary struct: embed directly**
+
+```cpp
+struct HftFactorData {
+    // existing business fields...
+    double factor_value;
+    int    symbol_id;
+    // ... other fields
+
+#ifdef HFT_LATENCY
+    LatencyTrace latency;   // embed; absent unless compiled in
+#endif
+};
+```
+
+**2. Packed `pack(1)` struct: append at end + compile flag**
+
+```cpp
+#pragma pack(push, 1)
+struct HFTSignal {
+    // existing fields (order unchanged)...
+    double price;
+    int    volume;
+    char   flag;
+    // ... other existing fields
+
+#ifdef HFT_LATENCY
+    LatencyTrace latency;   // at the end; only when enabled
+#endif
+};
+#pragma pack(pop)
+```
+
+Putting the trace at the end keeps prior field offsets unchanged under `pack(1)`; with the flag off the layout matches the original struct and avoids ser/deser breaks.
+
+**3. Immutable high-risk struct: pass start time as an argument**
+
+```cpp
+// assume snapShotStruct is immutable (e.g. third-party, pack(1))
+struct snapShotStruct {
+    // ... many existing fields
+};
+
+// MD callback entry: take timestamp once
+void on_market_data(snapShotStruct* snap) {
+    int64_t recv_ts = now_ticks();          // T0
+    parse_market_data(snap, recv_ts);       // pass downstream
+}
+
+// parse: accept recv_ts, write when building factor data
+void parse_market_data(snapShotStruct* snap, int64_t recv_ts) {
+    HftFactorData factor;
+    // ... parse and fill factor business fields
+
+#ifdef HFT_LATENCY
+    factor.latency.ts[LAT_MD_RECV] = recv_ts;  // store T0 in embedded trace
+#endif
+
+    // later marks via LAT_MARK
+    LAT_MARK(factor.latency, LAT_FEATURE_IN);   // T1
+    // ... continue business work
+}
+```
+
+
+### 34. In-place ring writes to avoid large-object copies
 
 Fixed-size messages such as orders and ten-level quotes are often hundreds of bytes. Building a full object on the stack and then assigning it into a ring slot adds a whole-object copy and can spill registers on the write path. A better interface hands the producer a slot reference, fills fields in place through a callback, then publishes the sequence or advances head. Single-writer paths need no lock; multi-writer paths only spin briefly while claiming a slot.
 
@@ -11691,7 +11811,7 @@ public:
 ```
 
 
-### 34. Fail fast when shared capacity is exhausted
+### 35. Fail fast when shared capacity is exhausted
 
 Once a shared-memory ring, factor entry pool, or name index is full, overwriting or silently dropping leaves orders and books in an undefined state. Capacity faults should emit a fatal log and abort the process so operators enlarge the pool from config, instead of swallowing the error on the hot path. That differs from online services that block when a queue is full: trading middleware fears silent book corruption more than a crash.
 
@@ -11725,7 +11845,7 @@ public:
 ```
 
 
-### 35. High-quality articles on system design
+### 36. High-quality articles on system design
 [https://mp.weixin.qq.com/s/9OH1RA8POFidgQnvape6fQ](https://mp.weixin.qq.com/s/9OH1RA8POFidgQnvape6fQ)
 
 [https://mp.weixin.qq.com/s/PuG4ZFVZ-7hijS4Db8Z5jQ](https://mp.weixin.qq.com/s/PuG4ZFVZ-7hijS4Db8Z5jQ)
