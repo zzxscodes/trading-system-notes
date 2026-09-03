@@ -39,9 +39,10 @@ English version：[https://github.com/zzxscodes/trading-system-notes/blob/main/t
   - [30. wait-free编程](#30-wait-free编程)
   - [31. Linux内核调优和BIOS配置](#31-linux内核调优和bios配置)
   - [32. 延迟测量（时钟周期）](#32-延迟测量时钟周期)
-  - [33. 环缓冲就地写入减少大对象拷贝](#33-环缓冲就地写入减少大对象拷贝)
-  - [34. 共享资源容量耗尽时快速失败](#34-共享资源容量耗尽时快速失败)
-  - [35. 系统设计优质文章](#35-系统设计优质文章)
+  - [33. 全链路延时打点结构设计](#33-全链路延时打点结构设计)
+  - [34. 环缓冲就地写入减少大对象拷贝](#34-环缓冲就地写入减少大对象拷贝)
+  - [35. 共享资源容量耗尽时快速失败](#35-共享资源容量耗尽时快速失败)
+  - [36. 系统设计优质文章](#36-系统设计优质文章)
 - [常见性能瓶颈与优化方向](#常见性能瓶颈与优化方向)
   - [1. roofline model](#1-roofline-model)
     - [Memory Bound优化](#memory-bound优化)
@@ -11621,7 +11622,126 @@ private:
 ```
 
 
-### 33. 环缓冲就地写入减少大对象拷贝
+### 33. 全链路延时打点结构设计
+
+统一打点结构，所有节点时间戳存入一个定长数组，用枚举定义下标，整体是一个拷贝成本低的结构体。
+
+嵌入策略按结构风险分级：
+
+1、普通结构（如 HftFactorData）：直接内嵌 LatencyTrace 字段，编译开关控制是否存在。
+
+2、带 `#pragma pack(1)` 的结构（如 HFTSignal）：将 LatencyTrace 放在结构体末尾，并同样用编译开关隔离，最大程度降低对既有内存布局和序列化逻辑的影响。
+
+3、完全不可修改的第三方/历史结构（如 snapShotStruct）：不嵌入字段，改为函数参数透传起始时间戳，在构造下游数据时再写入 LatencyTrace。
+
+这样既实现了全链路时间戳随数据流动，又规避了修改高风险结构可能带来的 ABI、序列化或性能回归。
+
+```cpp
+// latency_trace.h
+#pragma once
+#include <cstdint>
+#include <atomic>
+
+// 运行期开关
+inline std::atomic<bool> g_latency_on{false};
+
+// 编译开关
+#ifdef HFT_LATENCY
+  #define LAT_MARK(trace, node) do { \
+      if (g_latency_on.load(std::memory_order_relaxed)) \
+          (trace).ts[node] = now_ticks(); \
+  } while (0)
+#else
+  #define LAT_MARK(trace, node) do {} while (0)
+#endif
+
+// 时钟接口（此处仅示意）
+inline int64_t now_ticks() { /* steady_clock 实现 */ }
+
+// 节点枚举
+enum LatNode : uint8_t {
+    LAT_MD_RECV = 0,       // T0: 行情回调入口
+    LAT_FEATURE_IN,        // T1: 进入因子引擎
+    LAT_FEATURE_DONE,      // T2: 因子集齐
+    LAT_MODEL_DONE,        // T3: 模型推理完成
+    LAT_SIGNAL_IN,         // T4: 策略收到信号
+    LAT_ORDER_OUT,         // T5: 报单发出前
+    LAT_NODE_COUNT
+};
+
+// 统一打点结构：定长数组 + 枚举下标
+struct LatencyTrace {
+    int64_t ts[LAT_NODE_COUNT];  // 各节点时刻（ticks）
+    int64_t seq;                 // 关联行情 seq
+};
+```
+
+**1. 普通结构：直接内嵌**
+
+```cpp
+struct HftFactorData {
+    // 原有业务字段...
+    double factor_value;
+    int    symbol_id;
+    // ... 其他字段
+
+#ifdef HFT_LATENCY
+    LatencyTrace latency;   // 直接内嵌，默认不参与编译
+#endif
+};
+```
+
+**2. 带 pack(1) 的结构：末尾追加 + 编译开关**
+
+```cpp
+#pragma pack(push, 1)
+struct HFTSignal {
+    // 原有业务字段（保持顺序不变）...
+    double price;
+    int    volume;
+    char   flag;
+    // ... 其他原有字段
+
+#ifdef HFT_LATENCY
+    LatencyTrace latency;   // 放在末尾，仅当开启时存在
+#endif
+};
+#pragma pack(pop)
+```
+
+将打点字段放在末尾，即使结构体带 `pack(1)`，开启后也仅增加末尾长度，不改变既有字段偏移；未开启时则完全等价于原始结构，避免序列化/反序列化兼容性问题。
+
+**3. 不可修改的高风险结构：函数参数透传起始时间**
+
+```cpp
+// 假设 snapShotStruct 不可修改（如第三方库定义，带 pack(1)）
+struct snapShotStruct {
+    // ... 大量既有字段
+};
+
+// 行情回调入口：在此取一次时间戳
+void on_market_data(snapShotStruct* snap) {
+    int64_t recv_ts = now_ticks();          // T0
+    parse_market_data(snap, recv_ts);       // 透传给下游
+}
+
+// 解析函数：接收 recv_ts，构造因子数据时写入
+void parse_market_data(snapShotStruct* snap, int64_t recv_ts) {
+    HftFactorData factor;
+    // ... 解析并填充 factor 的业务字段
+
+#ifdef HFT_LATENCY
+    factor.latency.ts[LAT_MD_RECV] = recv_ts;  // 将 T0 写入内嵌结构
+#endif
+
+    // 后续打点使用 LAT_MARK 宏
+    LAT_MARK(factor.latency, LAT_FEATURE_IN);   // T1
+    // ... 继续业务处理
+}
+```
+
+
+### 34. 环缓冲就地写入减少大对象拷贝
 
 订单、十档行情这类定长消息往往数百字节。先在栈上构造完整对象再赋进环槽，会多一次整对象拷贝，写路径上还容易触发寄存器溢写。更好的接口是：生产者拿到槽位引用，用回调就地填字段，填完再发布序号或推进 head。单写路径可不加锁；多写路径只对取槽加短自旋。
 
@@ -11661,7 +11781,7 @@ public:
 ```
 
 
-### 34. 共享资源容量耗尽时快速失败
+### 35. 共享资源容量耗尽时快速失败
 
 共享内存里的环、因子条目池、命名索引一旦写满，若继续覆盖或静默丢弃，订单与账本会进入不可预期状态。容量类错误应打致命日志并立刻中止进程，迫使运维按配置放大池子，而不是在热路径上吞掉异常。这与“队列满则阻塞等待”的在线服务模型不同：交易中间件更怕静默错账。
 
@@ -11695,7 +11815,7 @@ public:
 ```
 
 
-### 35. 系统设计优质文章
+### 36. 系统设计优质文章
 [https://mp.weixin.qq.com/s/9OH1RA8POFidgQnvape6fQ](https://mp.weixin.qq.com/s/9OH1RA8POFidgQnvape6fQ)
 
 [https://mp.weixin.qq.com/s/PuG4ZFVZ-7hijS4Db8Z5jQ](https://mp.weixin.qq.com/s/PuG4ZFVZ-7hijS4Db8Z5jQ)
