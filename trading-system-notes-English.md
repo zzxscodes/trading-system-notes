@@ -17,32 +17,33 @@
   - [8. Inline and inline assembly](#8-inline-and-inline-assembly)
   - [9. lock-free queue and micro-batching](#9-lock-free-queue-and-micro-batching)
   - [10. spmc shared memory lock-free queue application](#10-spmc-shared-memory-lock-free-queue-application)
-  - [11. Memory alignment and typical memory layout optimization](#11-memory-alignment-and-typical-memory-layout-optimization)
-  - [12. Branch optimization and branch prediction](#12-branch-optimization-and-branch-prediction)
-  - [13. Composition takes precedence over inheritance](#13-composition-takes-precedence-over-inheritance)
-  - [14. Compile-time polymorphism and compile-time calculation](#14-compile-time-polymorphism-and-compile-time-calculation)
-  - [15. Loop optimization](#15-loop-optimization)
-  - [16. Pointer memory access optimization](#16-pointer-memory-access-optimization)
-  - [17. Regarding potential optimizations of functions](#17-regarding-potential-optimizations-of-functions)
-  - [18. Strength weakening optimization and arithmetic optimization](#18-strength-weakening-optimization-and-arithmetic-optimization)
-  - [19. Direct manipulation of in-memory binary representations](#19-direct-manipulation-of-in-memory-binary-representations)
-  - [20. Function call optimization that cannot be inlined](#20-function-call-optimization-that-cannot-be-inlined)
-  - [21. Cache prefetch warm-up and vectorization](#21-cache-prefetch-warm-up-and-vectorization)
-  - [22. HPC auxiliary macro](#22-hpc-auxiliary-macro)
-  - [23. Double array plus atomic index to implement data update and access](#23-double-array-plus-atomic-index-to-implement-data-update-and-access)
-  - [24. Custom spin lock implementation](#24-custom-spin-lock-implementation)
-  - [25. Bit fields and bit operations](#25-bit-fields-and-bit-operations)
-  - [26. C++20 coroutine scheduling framework](#26-c20-coroutine-scheduling-framework)
-  - [27. Common design patterns](#27-common-design-patterns)
-  - [28. C++ function parameter passing issues and optimization](#28-c-function-parameter-passing-issues-and-optimization)
-  - [29. C++ bounds checking optimization technology](#29-c-bounds-checking-optimization-technology)
-  - [30. wait-free programming](#30-wait-free-programming)
-  - [31. Linux kernel tuning and BIOS configuration](#31-linux-kernel-tuning-and-bios-configuration)
-  - [32. Latency measurement (clock cycles)](#32-latency-measurement-clock-cycles)
-  - [33. End-to-end latency tracing layout](#33-end-to-end-latency-tracing-layout)
-  - [34. In-place ring writes to avoid large-object copies](#34-in-place-ring-writes-to-avoid-large-object-copies)
-  - [35. Fail fast when shared capacity is exhausted](#35-fail-fast-when-shared-capacity-is-exhausted)
-  - [36. High-quality articles on system design](#36-high-quality-articles-on-system-design)
+  - [11. Backpressure-free sequence-publish ring](#11-backpressure-free-sequence-publish-ring)
+  - [12. Memory alignment and typical memory layout optimization](#12-memory-alignment-and-typical-memory-layout-optimization)
+  - [13. Branch optimization and branch prediction](#13-branch-optimization-and-branch-prediction)
+  - [14. Composition takes precedence over inheritance](#14-composition-takes-precedence-over-inheritance)
+  - [15. Compile-time polymorphism and compile-time calculation](#15-compile-time-polymorphism-and-compile-time-calculation)
+  - [16. Loop optimization](#16-loop-optimization)
+  - [17. Pointer memory access optimization](#17-pointer-memory-access-optimization)
+  - [18. Regarding potential optimizations of functions](#18-regarding-potential-optimizations-of-functions)
+  - [19. Strength weakening optimization and arithmetic optimization](#19-strength-weakening-optimization-and-arithmetic-optimization)
+  - [20. Direct manipulation of in-memory binary representations](#20-direct-manipulation-of-in-memory-binary-representations)
+  - [21. Function call optimization that cannot be inlined](#21-function-call-optimization-that-cannot-be-inlined)
+  - [22. Cache prefetch warm-up and vectorization](#22-cache-prefetch-warm-up-and-vectorization)
+  - [23. HPC auxiliary macro](#23-hpc-auxiliary-macro)
+  - [24. Double array plus atomic index to implement data update and access](#24-double-array-plus-atomic-index-to-implement-data-update-and-access)
+  - [25. Custom spin lock implementation](#25-custom-spin-lock-implementation)
+  - [26. Bit fields and bit operations](#26-bit-fields-and-bit-operations)
+  - [27. C++20 coroutine scheduling framework](#27-c20-coroutine-scheduling-framework)
+  - [28. Common design patterns](#28-common-design-patterns)
+  - [29. C++ function parameter passing issues and optimization](#29-c-function-parameter-passing-issues-and-optimization)
+  - [30. C++ bounds checking optimization technology](#30-c-bounds-checking-optimization-technology)
+  - [31. wait-free programming](#31-wait-free-programming)
+  - [32. Linux kernel tuning and BIOS configuration](#32-linux-kernel-tuning-and-bios-configuration)
+  - [33. Latency measurement (clock cycles)](#33-latency-measurement-clock-cycles)
+  - [34. End-to-end latency tracing layout](#34-end-to-end-latency-tracing-layout)
+  - [35. In-place ring writes to avoid large-object copies](#35-in-place-ring-writes-to-avoid-large-object-copies)
+  - [36. Fail fast when shared capacity is exhausted](#36-fail-fast-when-shared-capacity-is-exhausted)
+  - [37. High-quality articles on system design](#37-high-quality-articles-on-system-design)
 - [Common performance bottlenecks and optimization directions](#common-performance-bottlenecks-and-optimization-directions)
   - [1. roofline model](#1-roofline-model)
     - [Memory Bound optimization](#memory-bound-optimization)
@@ -4011,7 +4012,51 @@ thread_sh_trans.join();
 ```
 
 
-### 11. Memory alignment and typical memory layout optimization
+### 11. Backpressure-free sequence-publish ring
+
+On a multi-producer hot path, checking consumer progress, testing full, spinning, or aborting on every publish adds a cross-core cache line and a branch. One trade-off sizes capacity so unread backlog stays far below N: the producer only claims an index, fills the slot, then publishes a sequence; if consumers lag, unread slots wrap. Payload and readability live in two arrays: write the payload first, then store `claimed + N` into that slot’s sequence; a consumer treats `cursor < slot_seq[pos]` as readable. Empty slots start as `slot_seq[i] = i`, i.e. unpublished. `claim_` is an atomic increment. Each reader drains with its own cursor: no CAS on dequeue, and slots are never marked empty. A `volatile drain_` is only for a single-reader path. Sequence and that tail are plain `volatile` stores; correctness leans on x86 TSO so a payload write on the same core cannot become visible after the sequence write. That does not hold on weaker memory models or under aggressive compiler reordering.
+
+```cpp
+template<class Msg, int Cap>
+class SeqPublishRing {
+    static_assert(Cap > 0 && (Cap & (Cap - 1)) == 0, "Cap power of two");
+    Msg payload_[Cap]{};
+    volatile long slot_seq_[Cap]{};
+    std::atomic<long> claim_{0};
+    volatile long drain_{0}; // single-reader path only
+    static constexpr long mask_ = Cap - 1;
+
+public:
+    SeqPublishRing() {
+        for (int i = 0; i < Cap; ++i)
+            slot_seq_[i] = i; // empty: seq == index, not yet published
+    }
+
+    template<class Fill>
+    void publish(Fill&& fill) {
+        const long h = claim_.fetch_add(1, std::memory_order_relaxed);
+        const long pos = h & mask_;
+        fill(payload_[pos]);          // write data first
+        slot_seq_[pos] = h + Cap;     // then publish: seq = claimed + Cap
+    }
+
+    // independent cursors: readers do not steal a shared tail
+    template<class OnMsg>
+    long drain_from(long cursor, OnMsg&& on_msg) {
+        while (true) {
+            const long pos = cursor & mask_;
+            if (cursor >= slot_seq_[pos])
+                break; // not published yet, or wrapped and not republished
+            on_msg(payload_[pos]);
+            ++cursor;
+        }
+        return cursor;
+    }
+};
+```
+
+
+### 12. Memory alignment and typical memory layout optimization
 ```cpp
 #include <iostream>
 #include <cstddef>
@@ -4641,7 +4686,7 @@ static inline size_t calculate_padding(size_t obj_size, int channels) {
 ```
 
 
-### 12. Branch optimization and branch prediction
+### 13. Branch optimization and branch prediction
 Branching is a key point in performance optimization, because incorrect branch prediction will clear the CPU's instruction pipeline, resulting in the waste of dozens of clock cycles. At the same time, more importantlyThe core logic of control flow idiom optimization is:**Computational operations are more efficient than control flow jumps**. When the processor needs to update the instruction pointer to a non-consecutive address, it will cause pipeline stalls, resulting in performance loss.
 
 Branch analysis refers to recording statistics of code paths to analyze which branch is more likely to be executed. This data can also be used in the compiler's optimization mode to help the optimizer perform "branch-aware" optimizations.
@@ -5333,7 +5378,7 @@ using ExampleStrategy = DecisionNode<
 + **Cons**: strategy changes require rebuild; very deep trees can inflate compile time and I-cache footprint
 
 
-### 13. Composition takes precedence over inheritance
+### 14. Composition takes precedence over inheritance
 ```cpp
 #include <cstdio>
 #include <vector>
@@ -5485,7 +5530,7 @@ public:
 The intended meaning of “prefer composition over inheritance” is **not to reuse concrete-class implementation via public inheritance**; when you need to replace a runtime decorator pattern based on a **virtual interface plus multiple layers of owning pointers**, mixins are a compile-time alternative that synthesizes the feature chain in types—especially suited to hot paths with extreme performance requirements.
 
 
-### 14. Compile-time polymorphism and compile-time calculation
+### 15. Compile-time polymorphism and compile-time calculation
 **1. Compile-time polymorphism**
 
 **1.1CRTP**
@@ -5950,7 +5995,7 @@ template for (constexpr auto i : 0..4) {
  Expansion Statements work based on the two-phase nature of C++ template metaprogramming. At compile time, the compiler instantiates the template and unrolls the loop body, converting the loop into a series of static codes. This unwinding process occurs inside the compiler without incurring any runtime overhead, while avoiding the instantiation bloat problem that can occur in traditional recursive templates.
 
 
-### 15. Loop optimization
+### 16. Loop optimization
 **Serial vs Parallel Loop Optimization**
 
 **1. Universal loop transformation (taking into account both serial and parallel)**
@@ -6238,7 +6283,7 @@ Loop vectorization needs to follow the priority of "prepare first, then transfor
 4. **Edge processing**: Use loop stripping to process remaining data, and use sentinel technology to eliminate boundary judgments to avoid parallel efficiency being dragged down by edge logic.
 
 
-### 16. Pointer memory access optimization
+### 17. Pointer memory access optimization
 **1.__restrict optimization**
 
 ```cpp
@@ -6806,7 +6851,7 @@ inline void copy_u64_blocks(volatile void* dst, const void* src, size_t nbytes) 
 }
 ```
 
-### 17. Regarding potential optimizations of functions
+### 18. Regarding potential optimizations of functions
 **1. Return value optimization (RVO, NRVO)**
 
 ```cpp
@@ -7045,7 +7090,7 @@ double Func2(double x) {
 | C++20 | `[[nodiscard]]` | Although pure functions are not marked directly, they can be used together with |
 
 
-### 18. Strength weakening optimization and arithmetic optimization
+### 19. Strength weakening optimization and arithmetic optimization
 
 *Hacker's Delight* covers a great many algorithms that exploit mathematical properties of binary representations and integer-arithmetic tricks, replacing costly division, floating-point operations, or branches with cheaper bit operations, shifts, and multiplications. Although modern CPUs already integrate many corresponding hardware instructions, these software implementations remain valuable; see [hacker's delight](https://www.yuque.com/bluememories/lanaff/gbcvffbztfazolyo).
 
@@ -7387,7 +7432,7 @@ static const float sqrt2 = sqrtf(2.0f);
 ```
 
 
-### 19. Direct manipulation of in-memory binary representations
+### 20. Direct manipulation of in-memory binary representations
 ```cpp
 #include <cstdio>
 #include <cstdint>
@@ -7441,7 +7486,7 @@ int main() {
 ```
 
 
-### 20. Function call optimization that cannot be inlined
+### 21. Function call optimization that cannot be inlined
 **(1) Recursion: stack overhead and cache invalidation**
 
 + **Essence of the problem**: Recursion is implemented through the function call stack. Each call needs to save parameters, local variables, and register status, which requires a large stack overhead; and too deep a recursion depth can easily cause stack overflow, destroy data locality, and lead to a decrease in cache hit rate;
@@ -7499,7 +7544,7 @@ void preorder_tail_rec(Node* root) {
     3. **Avoid unnecessary temporaries with reference parameters**: Passing constants to reference parameters (such as `process(5)`) makes the compiler create a temporary. If this happens often, overload for value parameters (such as `void process(int val)`).
 
 
-### 21. Cache prefetch warm-up and vectorization
+### 22. Cache prefetch warm-up and vectorization
 **Cache Control Directive Overview**
 
 Modern processors (SSE and subsequent instruction sets) provide specific instructions for directly operating data caches, which can be accessed through inline functions. Pay attention to prioritizing data cache layout optimization, and then consider optimization in this direction.
@@ -9025,7 +9070,7 @@ c.store(result); // Store the result
     - Seamless integration with scalar code
 
 
-### 22. HPC auxiliary macro
+### 23. HPC auxiliary macro
 ```cpp
 #pragma once
 
@@ -9079,7 +9124,7 @@ namespace hpc {
 ```
 
 
-### 23. Double array plus atomic index to implement data update and access
+### 24. Double array plus atomic index to implement data update and access
 ```cpp
 #include <atomic>
 #include <thread>
@@ -9240,7 +9285,7 @@ private:
 **Extension** "Latest quote or parameter panel only" -> **triple buffer** (adds a spare buffer beyond double buffering for more decoupled read/write and dropping intermediate updates). Reference: Ng Song Guan, [Triple Buffer: Lock-free Concurrency Primitive](https://medium.com/@sgn00/triple-buffer-lock-free-concurrency-primitive-611848627a1e)
 
 
-### 24. Custom spin lock implementation
+### 25. Custom spin lock implementation
 in the form of a lock abstractionUsed to protect shared resource operations with extremely short execution time (much shorter than the thread context switching time), such as real-time updating of order books, capturing market data snapshots, and rapid calculation of trading signals.
 
 **Atomic operation, spin lock, mutex lock implementation comparison**
@@ -9686,7 +9731,7 @@ inline void signal(volatile uint32_t* flag) {
 
 `notify_all()` / `pthread_cond_broadcast`, or looping `notify_one` for far more waiters than jobs, wakes more threads than can make progress: all race the mutex, most find the predicate false and sleep again—paying O(N) context switches, futex calls, and cross-core IPIs. `perf` often shows hot `futex_wake` / `try_to_wake_up` while `perf lock` hold/wait looks normal. Wake **exactly as many workers as there is work**, or move to a lock-free queue / work-stealing design instead of waking everyone then putting them back to sleep.
 
-### 25. Bit fields and bit operations
+### 26. Bit fields and bit operations
 **Bitfield** is a special `struct` member, which allows us to precisely define the number of binary digits occupied by a variable. Its core value in HFT is:
 
 + **Memory compression:** Pack multiple flags or small integers into a single byte or word to reduce memory usage.
@@ -9915,7 +9960,7 @@ int aussie_popcount_msvs(unsigned int x) {
 - **Hardware support**: provided by x86 architecture`POPCNT`instruction, the built-in function directly maps the instruction, and completes 32-bit statistics in a single cycle.
 ```
 
-### 26. C++20 coroutine scheduling framework
+### 27. C++20 coroutine scheduling framework
 [https://zplutor.github.io/2022/03/25/cpp-coroutine-beginner/](https://zplutor.github.io/2022/03/25/cpp-coroutine-beginner/)
 
 [https://www.cnblogs.com/RioTian/p/17755013.html](https://www.cnblogs.com/RioTian/p/17755013.html)
@@ -10287,7 +10332,7 @@ int main() {
 ```
 
 
-### 27. Common design patterns
+### 28. Common design patterns
 ```cpp
 // test.cpp
 #include <iostream>
@@ -10612,7 +10657,7 @@ int main() {
 ```
 
 
-### 28. C++ function parameter passing issues and optimization
+### 29. C++ function parameter passing issues and optimization
 **1. Temporary object**
 
 An unnamed object temporarily created during expression evaluation. The default life cycle ends at the end of the complete expression.
@@ -10768,7 +10813,7 @@ Compared to built-in arrays, span is more convenient to use because it acts more
 In terms of data members (pointers and sizes) and member functions,`std::string_view`and`std::span`Very similar. But there are differences:`std::span`The memory pointed to is mutable, while`std::string_view`Always points to constant memory.`std::string_view`Also contains string-specific functions such as`hash()`and`substr()`. Finally, in`std::span`None`compare()`function, so it is not possible to directly`std::span`Use comparison operators on objects.
 
 
-### 29. C++ bounds checking optimization technology
+### 30. C++ bounds checking optimization technology
 **1. Basic bounds checking**
 
 ```cpp
@@ -10829,7 +10874,7 @@ list[i & 15] += 1.0f; // Suitable for arrays of size 16
 + pass `i & (2^n - 1)` Ensures that the value is within the range [0, 2^n-1]
 
 
-### 30. wait-free programming
+### 31. wait-free programming
 + Definition: Each thread is completed in limited steps, and scheduling/suspension does not affect it; it is stronger than lock-free and eliminates starvation and unbounded spin.
 + Core mechanism: Helping cooperation, when threads encounter unfinished operations, they actively help complete them to avoid retry loops.
 + Status encoding: Put flag bits in the high bits (such as is_zero, helped), and one atomic read and write carries data + status.
@@ -10881,7 +10926,7 @@ struct WaitFreeCounter {
 Tip: Use high bit stealing to carry the state, and the read operation also participates in assistance; there is no loop, and the spin jitter is eliminated.
 
 
-### 31. Linux kernel tuning and BIOS configuration
+### 32. Linux kernel tuning and BIOS configuration
 **Hardware layer (BIOS) optimization**
 
 **1. Power and frequency control**
@@ -10998,7 +11043,7 @@ Tip: Use high bit stealing to carry the state, and the read operation also parti
 
 
 
-### 32. Latency measurement (clock cycles)
+### 33. Latency measurement (clock cycles)
 
 1. **Important method**
 
@@ -11652,7 +11697,7 @@ private:
 ```
 
 
-### 33. End-to-end latency tracing layout
+### 34. End-to-end latency tracing layout
 
 Use one unified trace: every node timestamp lives in a fixed-size array indexed by enum, packed into a cheap-to-copy struct.
 
@@ -11771,7 +11816,7 @@ void parse_market_data(snapShotStruct* snap, int64_t recv_ts) {
 ```
 
 
-### 34. In-place ring writes to avoid large-object copies
+### 35. In-place ring writes to avoid large-object copies
 
 Fixed-size messages such as orders and ten-level quotes are often hundreds of bytes. Building a full object on the stack and then assigning it into a ring slot adds a whole-object copy and can spill registers on the write path. A better interface hands the producer a slot reference, fills fields in place through a callback, then publishes the sequence or advances head. Single-writer paths need no lock; multi-writer paths only spin briefly while claiming a slot.
 
@@ -11811,7 +11856,7 @@ public:
 ```
 
 
-### 35. Fail fast when shared capacity is exhausted
+### 36. Fail fast when shared capacity is exhausted
 
 Once a shared-memory ring, factor entry pool, or name index is full, overwriting or silently dropping leaves orders and books in an undefined state. Capacity faults should emit a fatal log and abort the process so operators enlarge the pool from config, instead of swallowing the error on the hot path. That differs from online services that block when a queue is full: trading middleware fears silent book corruption more than a crash.
 
@@ -11845,7 +11890,7 @@ public:
 ```
 
 
-### 36. High-quality articles on system design
+### 37. High-quality articles on system design
 [https://mp.weixin.qq.com/s/9OH1RA8POFidgQnvape6fQ](https://mp.weixin.qq.com/s/9OH1RA8POFidgQnvape6fQ)
 
 [https://mp.weixin.qq.com/s/PuG4ZFVZ-7hijS4Db8Z5jQ](https://mp.weixin.qq.com/s/PuG4ZFVZ-7hijS4Db8Z5jQ)
