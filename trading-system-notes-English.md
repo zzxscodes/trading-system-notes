@@ -5978,11 +5978,72 @@ Precalculation can be completed at four nodes: "before compilation, during compi
 | When used for the first time at runtime | Lazy Evaluation, filled when used for the first time | Avoid pre-calculation and memory usage of unused data | There is a calculation delay in the first call, and thread safety control needs to be added | Backup functions for low-frequency use, dynamic input range |
 
 
+**7. Compile-time field tables and member-pointer walk**
+
+Cold-path JSON and logging need per-field access; the hot path stays fixed POD with no RTTI. Specialize a compile-time table per type: each row is a member pointer, a public name, and a type tag. Walk it with `index_sequence`, then bind `object.*pointer` onto the instance. Before C++17 fold expressions, pack expansion is a dummy `int[]` initializer: each comma expression invokes the callback, and the array is discarded. An unspecialized table is an empty tuple; `static_assert` catches a missing registration. When the JSON name differs from the member identifier, store the string in the row. Until language reflection can list members, the table is written with a macro specialization; walking it can use `template for` below.
+
+```cpp
+#include <tuple>
+#include <utility>
+#include <type_traits>
+
+enum class FieldTag : uint8_t { Plain, DateTime, Nested };
+
+template<class C, class M>
+constexpr bool is_memptr_v = false;
+template<class C, class M>
+constexpr bool is_memptr_v<M C::*> = true;
+
+template<class Fn, class Tup, size_t... I>
+constexpr void walk_tuple(Tup&& tup, Fn&& fn, std::index_sequence<I...>) {
+    using Sink = int[];
+    (void)Sink{0, ((void)fn(std::get<I>(std::forward<Tup>(tup))), 0)...};
+}
+
+template<class Fn, class Tup>
+constexpr void walk_tuple(Tup&& tup, Fn&& fn) {
+    walk_tuple(std::forward<Tup>(tup), std::forward<Fn>(fn),
+               std::make_index_sequence<std::tuple_size_v<std::decay_t<Tup>>>{});
+}
+
+template<class T>
+constexpr auto field_table() { return std::tuple{}; }
+
+#define DECLARE_FIELDS(Type, ...)                 \
+  template <>                                     \
+  constexpr auto field_table<Type>() {            \
+    using _T = Type;                              \
+    return std::make_tuple(__VA_ARGS__);          \
+  }
+
+#define FIELD(mem, tag) std::make_tuple(&_T::mem, #mem, tag)
+#define FIELD_AS(mem, name, tag) std::make_tuple(&_T::mem, name, tag)
+
+template<class T, class Fn>
+constexpr void for_each_field(T&& obj, Fn&& fn) {
+    constexpr auto table = field_table<std::decay_t<T>>();
+    static_assert(std::tuple_size_v<decltype(table)> != 0, "register fields");
+    walk_tuple(table, [&](auto&& row) {
+        using Row = std::decay_t<decltype(row)>;
+        static_assert(is_memptr_v<std::tuple_element_t<0, Row>>);
+        fn(obj.*(std::get<0>(row)), std::get<1>(row), std::get<2>(row));
+    });
+}
+
+struct QuoteTick {
+    double px{};
+    int64_t qty{};
+    int64_t exch_ms{};
+};
+DECLARE_FIELDS(QuoteTick,
+    FIELD(px, FieldTag::Plain),
+    FIELD(qty, FieldTag::Plain),
+    FIELD_AS(exch_ms, "src_time", FieldTag::DateTime));
+```
+
+
 **C++26 Expansion Statements: Compile-time loops (future support)**
-
- The core syntax form of Expansion Statements is`template for`, the compiler directly copies the loop body code N times without generating a jump instruction (jmp).
-
-Expansion Statements use a syntax similar to C++ runtime loops, but with the added`template`Keyword to indicate its compile-time characteristics. A simple compile-time loop can be written as:
+The core syntax of Expansion Statements is `template for`: the compiler copies the loop body N times and does not emit a runtime `jmp`. Compile-time sequences such as a field table or `make_index_sequence` can be walked this way, replacing dummy `int[]` pack expansion. The form is close to a runtime `for`, with `template` marking compile-time unrolling. A simple loop:
 
 ```cpp
 template for (constexpr auto i : 0..4) {
@@ -5993,6 +6054,37 @@ template for (constexpr auto i : 0..4) {
 `0..4`Represents a compile-time generated integer sequence, loop variable`i`Take values from 0 to 4 in each iteration.
 
  Expansion Statements work based on the two-phase nature of C++ template metaprogramming. At compile time, the compiler instantiates the template and unrolls the loop body, converting the loop into a series of static codes. This unwinding process occurs inside the compiler without incurring any runtime overhead, while avoiding the instantiation bloat problem that can occur in traditional recursive templates.
+
+**C++26 static reflection (future support)**
+
+`^^T` yields a compile-time reflection of type `T` (`std::meta::info`). `nonstatic_data_members_of` lists non-static data members, `identifier_of` gives the name, and `[:mem:]` splices the reflection back into an accessible member. Together with `template for`, a handwritten `DECLARE_FIELDS` table is no longer required; the hot path remains ordinary field access, and reflection only generates the walk at compile time. When a member name differs from the wire JSON key, keep a small rename map for those exceptions only.
+
+```cpp
+#include <meta>
+#include <string_view>
+
+template<class T, class Fn>
+constexpr void for_each_member(T& obj, Fn&& fn) {
+    template for (constexpr auto mem :
+                  std::meta::nonstatic_data_members_of(^^T)) {
+        fn(obj.[:mem:], std::meta::identifier_of(mem));
+    }
+}
+
+struct QuoteTick {
+    double px{};
+    int64_t qty{};
+    int64_t exch_ms{};
+};
+
+void dump_tick(QuoteTick& q) {
+    for_each_member(q, [](auto& field, std::string_view name) {
+        // cold path: write JSON / logs by name
+        (void)field;
+        (void)name;
+    });
+}
+```
 
 
 ### 16. Loop optimization

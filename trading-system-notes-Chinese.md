@@ -5972,11 +5972,72 @@ constexpr size_t f(const char* s) {
 | 运行时首次使用时 | 延迟计算（Lazy Evaluation），首次使用时填充 | 避免未使用数据的预计算与内存占用 | 首次调用有计算延迟，需加线程安全控制 | 低频使用的备用函数、动态输入范围 |
 
 
+**7. 编译期字段表与成员指针遍历**
+
+冷路径 JSON / 日志需要对结构体逐字段访问，热路径仍走定长 POD、不做 RTTI。为每个类型特化一张编译期表，表项是成员指针、对外名字、类型标签三元组；遍历时用 `index_sequence` 取出每一项，再以 `对象.*成员指针` 绑到实例。C++17 折叠表达式出现前，包展开写成哑 `int[]` 初始化：每个逗号表达式里调一次回调，数组本身丢掉。未特化的表为空 tuple，`static_assert` 拦住漏登记。对外名字与成员名不同时，表项里单独给字符串。语言级反射普及前，这张表靠宏特化手写；有反射之后可由编译器列出成员，遍历仍可用下面的 `template for`。
+
+```cpp
+#include <tuple>
+#include <utility>
+#include <type_traits>
+
+enum class FieldTag : uint8_t { Plain, DateTime, Nested };
+
+template<class C, class M>
+constexpr bool is_memptr_v = false;
+template<class C, class M>
+constexpr bool is_memptr_v<M C::*> = true;
+
+template<class Fn, class Tup, size_t... I>
+constexpr void walk_tuple(Tup&& tup, Fn&& fn, std::index_sequence<I...>) {
+    using Sink = int[];
+    (void)Sink{0, ((void)fn(std::get<I>(std::forward<Tup>(tup))), 0)...};
+}
+
+template<class Fn, class Tup>
+constexpr void walk_tuple(Tup&& tup, Fn&& fn) {
+    walk_tuple(std::forward<Tup>(tup), std::forward<Fn>(fn),
+               std::make_index_sequence<std::tuple_size_v<std::decay_t<Tup>>>{});
+}
+
+template<class T>
+constexpr auto field_table() { return std::tuple{}; }
+
+#define DECLARE_FIELDS(Type, ...)                 \
+  template <>                                     \
+  constexpr auto field_table<Type>() {            \
+    using _T = Type;                              \
+    return std::make_tuple(__VA_ARGS__);          \
+  }
+
+#define FIELD(mem, tag) std::make_tuple(&_T::mem, #mem, tag)
+#define FIELD_AS(mem, name, tag) std::make_tuple(&_T::mem, name, tag)
+
+template<class T, class Fn>
+constexpr void for_each_field(T&& obj, Fn&& fn) {
+    constexpr auto table = field_table<std::decay_t<T>>();
+    static_assert(std::tuple_size_v<decltype(table)> != 0, "register fields");
+    walk_tuple(table, [&](auto&& row) {
+        using Row = std::decay_t<decltype(row)>;
+        static_assert(is_memptr_v<std::tuple_element_t<0, Row>>);
+        fn(obj.*(std::get<0>(row)), std::get<1>(row), std::get<2>(row));
+    });
+}
+
+struct QuoteTick {
+    double px{};
+    int64_t qty{};
+    int64_t exch_ms{};
+};
+DECLARE_FIELDS(QuoteTick,
+    FIELD(px, FieldTag::Plain),
+    FIELD(qty, FieldTag::Plain),
+    FIELD_AS(exch_ms, "src_time", FieldTag::DateTime));
+```
+
+
 **C++26 Expansion Statements：编译期循环（未来支持）**
-
- Expansion Statements的核心语法形式为`template for`，编译器直接将循环体代码复制N次，不生成跳跃指令(jmp)  。
-
-Expansion Statements采用类似C++运行时循环的语法，但添加了`template`关键字以表明其编译期特性。简单的编译期循环可以写成：
+Expansion Statements 的核心语法是 `template for`：编译器把循环体复制 N 次，不生成运行期 `jmp`。字段表、`make_index_sequence` 这类编译期序列都可以用它遍历，用来替代哑 `int[]` 包展开。语法接近运行时 for，加上 `template` 标明在编译期展开。简单写法：
 
 ```cpp
 template for (constexpr auto i : 0..4) {
@@ -5987,6 +6048,37 @@ template for (constexpr auto i : 0..4) {
 `0..4`表示一个编译期生成的整数序列，循环变量`i`在每次迭代中依次取0到4的值。
 
  Expansion Statements的工作原理基于C++模板元编程的两阶段特性。在编译期，编译器会实例化模板并展开循环体，将循环转换为一系列静态代码。这种展开过程在编译器内部进行，不会产生任何运行时开销，同时避免了传统递归模板中可能出现的实例化膨胀问题。
+
+**C++26 静态反射（未来支持）**
+
+`^^T` 在编译期得到类型 `T` 的反射值（`std::meta::info`）。非静态数据成员由 `nonstatic_data_members_of` 列出，`identifier_of` 取名字，`[:mem:]` 把反射值拼回可访问的成员。与 `template for` 合用后，不必再手写 `DECLARE_FIELDS` 宏表；热路径仍是普通字段访问，反射只在编译期生成遍历代码。成员名与线上 JSON 键不一致时，仍可保留一张小的改名表，只覆盖那些例外。
+
+```cpp
+#include <meta>
+#include <string_view>
+
+template<class T, class Fn>
+constexpr void for_each_member(T& obj, Fn&& fn) {
+    template for (constexpr auto mem :
+                  std::meta::nonstatic_data_members_of(^^T)) {
+        fn(obj.[:mem:], std::meta::identifier_of(mem));
+    }
+}
+
+struct QuoteTick {
+    double px{};
+    int64_t qty{};
+    int64_t exch_ms{};
+};
+
+void dump_tick(QuoteTick& q) {
+    for_each_member(q, [](auto& field, std::string_view name) {
+        // 冷路径：按 name 写 JSON / 日志
+        (void)field;
+        (void)name;
+    });
+}
+```
 
 
 ### 16. 循环优化
