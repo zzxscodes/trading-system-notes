@@ -30,7 +30,7 @@
   - [21. Function call optimization that cannot be inlined](#21-function-call-optimization-that-cannot-be-inlined)
   - [22. Cache prefetch warm-up and vectorization](#22-cache-prefetch-warm-up-and-vectorization)
   - [23. HPC auxiliary macro](#23-hpc-auxiliary-macro)
-  - [24. Double array plus atomic index to implement data update and access](#24-double-array-plus-atomic-index-to-implement-data-update-and-access)
+  - [24. Double array plus atomic index and priority multi-buffer snapshots](#24-double-array-plus-atomic-index-and-priority-multi-buffer-snapshots)
   - [25. Custom spin lock implementation](#25-custom-spin-lock-implementation)
   - [26. Bit fields and bit operations](#26-bit-fields-and-bit-operations)
   - [27. C++20 coroutine scheduling framework](#27-c20-coroutine-scheduling-framework)
@@ -3791,6 +3791,93 @@ References:
 + [https://yukunj.github.io/blogs/double_mmap_trick](https://yukunj.github.io/blogs/double_mmap_trick)
 + [https://abhinavag.medium.com/a-fast-circular-ring-buffer-4d102ef4d4a3](https://abhinavag.medium.com/a-fast-circular-ring-buffer-4d102ef4d4a3)
 
+**Cross-NUMA batched handoff**
+
+When producer and consumer cannot share a NUMA node, enqueue-per-item is a remote store every time. Put the ring on the consumer's node so `take` is a local load. The producer fills an in-object hold array, copies a batch into the ring, then `release`-stores the write position. The consumer `acquire`-loads that position, copies out locally, and `release`-stores the consumed position every batch or when it has caught up; the producer uses that to compute free slots. Capacity is a power of two; batch size is at most half the capacity so a full hold can still fit when the ring is not packed. `T` must be trivially copyable. SPSC only. The control block (write position, consumed position) lives with the object, usually on the producer node; what you amortize is bulky payload traffic, not every atomic. A partial hold is unpublished until the caller `commit`s, otherwise the tail sits in the hold. `offer` returning false means this value never entered the hold. `commit` returning false means values already accepted into the hold are still there — do not push them again.
+
+```cpp
+#include <array>
+#include <atomic>
+#include <bit>
+#include <cstdint>
+#include <memory>
+#include <new>
+#include <numa.h>
+#include <type_traits>
+
+template <class T, std::size_t Cap, std::size_t Batch>
+class NodeHandoffPipe final {
+    static_assert(std::is_trivially_copyable_v<T>);
+    static_assert(std::has_single_bit(Cap));
+    static_assert(Batch > 0 && Batch <= Cap / 2);
+
+public:
+    static std::unique_ptr<NodeHandoffPipe> open(int sink_node) noexcept {
+        const std::size_t bytes = sizeof(T) * Cap;
+        void* p = numa_alloc_onnode(bytes, sink_node);
+        if (!p) return {};
+        auto* raw = new (std::nothrow) NodeHandoffPipe(p);
+        if (!raw) {
+            numa_free(p, bytes);
+            return {};
+        }
+        return std::unique_ptr<NodeHandoffPipe>(raw);
+    }
+
+    ~NodeHandoffPipe() {
+        if (lane_) numa_free(lane_, sizeof(T) * Cap);
+    }
+
+    NodeHandoffPipe(const NodeHandoffPipe&) = delete;
+    NodeHandoffPipe& operator=(const NodeHandoffPipe&) = delete;
+
+    bool offer(const T& value) noexcept { // producer only
+        if (src_.n == Batch && !commit()) return false;
+        hold_[src_.n++] = value;
+        if (src_.n == Batch) (void)commit();
+        return true;
+    }
+
+    bool commit() noexcept { // producer only; also call on idle for a partial batch
+        if (src_.n == 0) return true;
+        const auto acked = acked_.load(std::memory_order_acquire);
+        const auto used = src_.head - acked;
+        if (used > Cap || Cap - used < src_.n) return false;
+        for (std::size_t i = 0; i < src_.n; ++i)
+            lane_[(src_.head + i) & (Cap - 1)] = hold_[i];
+        src_.head += src_.n;
+        src_.n = 0;
+        pub_.store(src_.head, std::memory_order_release);
+        return true;
+    }
+
+    bool take(T& out) noexcept { // consumer only
+        const auto head = pub_.load(std::memory_order_acquire);
+        if (dst_.tail == head) return false;
+        out = lane_[dst_.tail & (Cap - 1)];
+        ++dst_.tail;
+        if (dst_.tail == head || dst_.tail % Batch == 0)
+            acked_.store(dst_.tail, std::memory_order_release);
+        return true;
+    }
+
+private:
+    explicit NodeHandoffPipe(void* p) noexcept : lane_(static_cast<T*>(p)) {}
+
+    struct alignas(64) Src {
+        std::uint64_t head{0};
+        std::size_t n{0};
+    } src_;
+    struct alignas(64) Dst {
+        std::uint64_t tail{0};
+    } dst_;
+
+    T* lane_{nullptr};
+    std::array<T, Batch> hold_{};
+    alignas(64) std::atomic<std::uint64_t> pub_{0};
+    alignas(64) std::atomic<std::uint64_t> acked_{0};
+};
+```
 
 ### 10. spmc shared memory lock-free queue application
 Source 1.[https://github.com/MengRao/SPMC_Queue](https://github.com/MengRao/SPMC_Queue)
@@ -9216,7 +9303,10 @@ namespace hpc {
 ```
 
 
-### 24. Double array plus atomic index to implement data update and access
+### 24. Double array plus atomic index and priority multi-buffer snapshots
+
+Multi-buffering splits write from read: readers only touch the live slot; the writer fills a complete snapshot in another slot and then swaps the index atomically, so the two sides do not share a lock. Double buffering is one slot for read and one for write; after the write finishes, the roles swap. If readers are slow the writer may have no free slot. Triple buffering adds a ready slot—“one being read, one being written, one waiting”—so the write path need not wait for readers to leave, and stale in-between updates can be dropped. A reader always sees a complete snapshot from some instant, one generation behind the newest write.
+
 ```cpp
 #include <atomic>
 #include <thread>
@@ -9374,7 +9464,143 @@ private:
 };
 ```
 
-**Extension** "Latest quote or parameter panel only" -> **triple buffer** (adds a spare buffer beyond double buffering for more decoupled read/write and dropping intermediate updates). Reference: Ng Song Guan, [Triple Buffer: Lock-free Concurrency Primitive](https://medium.com/@sgn00/triple-buffer-lock-free-concurrency-primitive-611848627a1e)
+**Extension: triple-buffer state machine and priority preemption**
+
+Slots are marked free, filling, ready, or live. With a single writer, the state array need not be atomic. High priority takes a free slot first, or else overwrites a ready or even filling normal slot, then `release`-stores the live index immediately. Normal writes can sit in ready and be published in a later flush. Lead-contract and cash snapshots use high priority; secondary symbols use normal. Multiple writers need `atomic` states and CAS. `view()` returning a reference is only safe if the reader finishes immediately: once the writer recycles the old live slot, a lingering reader sees a torn update. When readers carry the snapshot into compute, pin by slot as below.
+
+```cpp
+enum class SlotPri : uint8_t { Normal, High };
+enum class SlotSt : uint8_t { Free, Filling, Ready, Live };
+
+struct QuoteSnap {
+    char symbol[16]{};
+    double last{};
+    double bid1{};
+    double ask1{};
+    uint64_t qty{};
+    uint64_t ts_ns{};
+};
+
+template<class Snap, size_t N = 3>
+class PrioSnapBank {
+    static_assert(N >= 2, "need at least two slots");
+    Snap slots_[N]{};
+    SlotSt st_[N]{};
+    std::atomic<size_t> live_{0};
+
+    int pick(SlotPri pri) {
+        for (size_t i = 0; i < N; ++i)
+            if (st_[i] == SlotSt::Free) return int(i);
+        if (pri == SlotPri::High) {
+            for (size_t i = 0; i < N; ++i)
+                if (st_[i] == SlotSt::Ready) return int(i);
+            for (size_t i = 0; i < N; ++i)
+                if (st_[i] == SlotSt::Filling) return int(i);
+        }
+        return -1;
+    }
+
+    void flip(size_t i) {
+        st_[i] = SlotSt::Ready;
+        const size_t old = live_.load(std::memory_order_relaxed);
+        live_.store(i, std::memory_order_release);
+        if (old != i) st_[old] = SlotSt::Free;
+    }
+
+public:
+    const Snap& view() const {
+        return slots_[live_.load(std::memory_order_acquire)];
+    }
+
+    bool write(const Snap& s, SlotPri pri) {
+        const int i = pick(pri);
+        if (i < 0) return false;
+        st_[i] = SlotSt::Filling;
+        slots_[i] = s;
+        if (pri == SlotPri::High)
+            flip(size_t(i));
+        else
+            st_[i] = SlotSt::Ready;
+        return true;
+    }
+
+    void flush_ready() {
+        for (size_t i = 0; i < N; ++i) {
+            if (st_[i] == SlotSt::Ready) {
+                flip(i);
+                return;
+            }
+        }
+    }
+};
+```
+
++ **Caveat**: readers see the last published snapshot; that lag is inherent. High-priority overwrite of a filling slot drops an unfinished normal update. Reference: Ng Song Guan, [Triple Buffer: Lock-free Concurrency Primitive](https://medium.com/@sgn00/triple-buffer-lock-free-concurrency-primitive-611848627a1e)
+
+**Pin slots with a per-buffer reader count**
+
+Strategy threads copy a snapshot locally before computing. While pinned, the writer must not recycle that slot. The sequence is: `acquire` the published index → increment that slot’s reader count → load the index again; if it moved, decrement and retry → copy into `out`, record the version → decrement. The writer fills its private slot via `write_slot()`, then `publish()` `release`-stores the index and picks the next slot that is not live, not currently being filled, and has a zero reader count; if none is free it spins with `pause`/`yield`. Align each slot’s payload, version, pin counter, and the published index to a cache line to avoid false sharing. Pinning makes the copy window race-free; priority preemption must not take a slot that still has readers.
+
+```cpp
+template<class Snap, size_t N = 3>
+class PinnedSnapBank {
+    static_assert(N >= 3, "need a spare slot besides live and write");
+    static constexpr size_t kLine = 64;
+
+    alignas(kLine) Snap slots_[N]{};
+    alignas(kLine) uint64_t ver_[N]{};
+    alignas(kLine) std::atomic<size_t> pins_[N]{};
+    alignas(kLine) std::atomic<size_t> live_{0};
+    size_t fill_ = 1; // writer-private
+
+    static void spin_pause() noexcept {
+#if defined(__x86_64__) || defined(_M_X64)
+        __asm__ volatile("pause" ::: "memory");
+#elif defined(__aarch64__)
+        __asm__ volatile("yield" ::: "memory");
+#else
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+#endif
+    }
+
+    size_t next_fill() noexcept {
+        const size_t pub = live_.load(std::memory_order_relaxed);
+        for (;;) {
+            for (size_t i = 0; i < N; ++i) {
+                if (i == pub || i == fill_) continue;
+                if (pins_[i].load(std::memory_order_relaxed) == 0)
+                    return i;
+            }
+            spin_pause();
+        }
+    }
+
+public:
+    Snap& write_slot() noexcept { return slots_[fill_]; }
+
+    void publish() noexcept {
+        const size_t nxt = next_fill();
+        ++ver_[fill_];
+        live_.store(fill_, std::memory_order_release);
+        fill_ = nxt;
+    }
+
+    uint64_t copy_out(Snap& out) noexcept {
+        for (;;) {
+            const size_t i = live_.load(std::memory_order_acquire);
+            pins_[i].fetch_add(1, std::memory_order_acq_rel);
+            if (live_.load(std::memory_order_acquire) != i) {
+                pins_[i].fetch_sub(1, std::memory_order_release);
+                continue;
+            }
+            out = slots_[i];
+            const uint64_t v = ver_[i];
+            pins_[i].fetch_sub(1, std::memory_order_release);
+            return v;
+        }
+    }
+};
+```
 
 
 ### 25. Custom spin lock implementation
