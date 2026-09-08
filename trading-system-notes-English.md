@@ -567,6 +567,46 @@ Advanced scenarios (high-performance networks) are CPU, memory, Consistent with 
     - `vm.zone_reclaim_mode = 0` (Default value): When the local memory is insufficient, go to the remote node to find free memory. This is the recommended configuration in most scenarios.
     - `vm.zone_reclaim_mode = 1`: When local memory is insufficient, priority is given to recycling local inactive memory pages (such as Cache) instead of accessing remote memory. This recycling process itself may introduce delays.
 
+`malloc` / `mmap` only return a virtual range. Physical pages are taken from a node at the first page fault, according to that VMA’s mempolicy. Under the default policy, the page lands on the local node of the CPU that takes the fault: first-touch. If the main thread on node 0 `memset`s, `mlock`s, or `mmap(..., MAP_POPULATE)`s the whole range, the pages pin to node 0; workers later bound to another node then hit remote memory on the hot path. `mbind`, `numa_alloc_onnode`, and `numactl --membind` change the range or process policy, so the fault picks a node by policy, not by who writes. With the default policy unchanged, the thread that will own the data must perform the first write on the target node. Pages do not migrate when a thread moves cores, unless you `move_pages` / `migrate_pages` or unmap and allocate again. Writing one byte per page is enough to place that page; a full `memset` is also first-touch, just heavier.
+
+```cpp
+#include <cstddef>
+#include <cstring>
+#include <pthread.h>
+#include <sched.h>
+#include <sys/mman.h>
+#include <unistd.h>
+
+static void fault_in(void* p, std::size_t n) {
+    const auto page = static_cast<std::size_t>(sysconf(_SC_PAGESIZE));
+    auto* b = static_cast<volatile unsigned char*>(p);
+    for (std::size_t i = 0; i < n; i += page)
+        b[i] = 0;
+}
+
+void* open_lane_wrong(std::size_t n) {
+    void* p = mmap(nullptr, n, PROT_READ | PROT_WRITE,
+                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (p == MAP_FAILED) return nullptr;
+    std::memset(p, 0, n); // first-touch on the main thread pins to that core's node
+    return p;
+}
+
+void* open_lane_on_cpu(int cpu, std::size_t n) {
+    cpu_set_t set;
+    CPU_ZERO(&set);
+    CPU_SET(cpu, &set);
+    if (pthread_setaffinity_np(pthread_self(), sizeof(set), &set) != 0)
+        return nullptr;
+
+    void* p = mmap(nullptr, n, PROT_READ | PROT_WRITE,
+                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (p == MAP_FAILED) return nullptr;
+    fault_in(p, n); // bind first, then touch: pages land on that core's local node
+    return p;
+}
+```
+
 **3. Management and optimization tools**
 
 1. `numactl` (most commonly used): Command line tool to specify the NUMA policy of an application when starting it.
