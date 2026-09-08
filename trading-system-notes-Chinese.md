@@ -569,6 +569,46 @@ numactl --preferred=1
     - `vm.zone_reclaim_mode = 0` (默认值): 本地内存不足时，去**远程节点**寻找空闲内存，是大多数场景的推荐配置。
     - `vm.zone_reclaim_mode = 1`: 本地内存不足时，优先**回收本地**不活跃的内存页（如Cache），而不是去访问远程内存。这个回收过程本身可能引入延迟。
 
+`malloc` / `mmap` 当时只拿到虚地址。物理页要等第一次缺页，才按该区间的 mempolicy 向某个节点要页；默认策略下，缺页发生在哪颗核上，页就落在那颗核的本地节点。这就是 first-touch。主线程在 node 0 上对整段 `memset`、`mlock` 或 `mmap(..., MAP_POPULATE)`，页会钉在 node 0；工作线程再绑到别的节点，热路径全是远程访问。`mbind`、`numa_alloc_onnode`、`numactl --membind` 改的是区间或进程策略，缺页时按策略选节点，不取决于谁在写。没改策略时，必须让目标节点上的线程自己完成第一次写。页一旦落下，线程迁核不会带走物理页，除非 `move_pages` / `migrate_pages`，或解除映射后重新分配。按页写一字节就足以让该页落点；整段 `memset` 同样是 first-touch，只是更重。
+
+```cpp
+#include <cstddef>
+#include <cstring>
+#include <pthread.h>
+#include <sched.h>
+#include <sys/mman.h>
+#include <unistd.h>
+
+static void fault_in(void* p, std::size_t n) {
+    const auto page = static_cast<std::size_t>(sysconf(_SC_PAGESIZE));
+    auto* b = static_cast<volatile unsigned char*>(p);
+    for (std::size_t i = 0; i < n; i += page)
+        b[i] = 0;
+}
+
+void* open_lane_wrong(std::size_t n) {
+    void* p = mmap(nullptr, n, PROT_READ | PROT_WRITE,
+                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (p == MAP_FAILED) return nullptr;
+    std::memset(p, 0, n); // 主线程 first-touch，钉在当前核的节点
+    return p;
+}
+
+void* open_lane_on_cpu(int cpu, std::size_t n) {
+    cpu_set_t set;
+    CPU_ZERO(&set);
+    CPU_SET(cpu, &set);
+    if (pthread_setaffinity_np(pthread_self(), sizeof(set), &set) != 0)
+        return nullptr;
+
+    void* p = mmap(nullptr, n, PROT_READ | PROT_WRITE,
+                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (p == MAP_FAILED) return nullptr;
+    fault_in(p, n); // 绑到目标核后再摸，页落在该核本地节点
+    return p;
+}
+```
+
 **3. 管理与优化工具**
 
 1. **`numactl`（最常用）**：命令行工具，在启动应用时指定其NUMA策略。
