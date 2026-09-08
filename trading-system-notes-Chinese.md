@@ -30,7 +30,7 @@ English version：[https://github.com/zzxscodes/trading-system-notes/blob/main/t
   - [21. 无法内联的函数调用优化](#21-无法内联的函数调用优化)
   - [22. 缓存预取预热和向量化](#22-缓存预取预热和向量化)
   - [23. HPC辅助宏](#23-hpc辅助宏)
-  - [24. 双数组加原子索引实现数据更新和访问](#24-双数组加原子索引实现数据更新和访问)
+  - [24. 双数组加原子索引与优先多缓冲快照](#24-双数组加原子索引与优先多缓冲快照)
   - [25. 自定义自旋锁实现](#25-自定义自旋锁实现)
   - [26. 位域与位运算](#26-位域与位运算)
   - [27. C++20协程调度框架](#27-c20协程调度框架)
@@ -3798,6 +3798,93 @@ double-mmap 的思路是在虚拟地址空间里把同一块 backing 连续映�
 + [https://yukunj.github.io/blogs/double_mmap_trick](https://yukunj.github.io/blogs/double_mmap_trick)
 + [https://abhinavag.medium.com/a-fast-circular-ring-buffer-4d102ef4d4a3](https://abhinavag.medium.com/a-fast-circular-ring-buffer-4d102ef4d4a3)
 
+**跨 NUMA 节点的批量交接**
+
+生产者和消费者绑不到同一节点时，逐条入队就是每条一次远程写。把环形槽位分配在消费者节点上：出队走本地读；生产者先填对象内的暂存，凑满一批再拷进环，一次 `release` 公布写位置。消费者 `acquire` 到新位置后本地取槽，每处理完一批、或已经追平写位置时，再 `release` 回写已消费位置，生产者用它算空闲。容量取 2 的幂；一批不超过容量一半，暂存满时环里还腾得出整批空位。`T` 必须可平凡复制。只允许单生产者、单消费者。控制块（写位置、已消费位置）跟对象本身走，通常在生产者节点，远程的是大块 payload，不是每条都打原子。未满一批时要调用方自己 `commit`，否则尾部会一直停在暂存里。`offer` 返回 false：当前这条没进暂存。`commit` 返回 false：暂存里已经收下的还没进环，不能当没推过再推一遍。
+
+```cpp
+#include <array>
+#include <atomic>
+#include <bit>
+#include <cstdint>
+#include <memory>
+#include <new>
+#include <numa.h>
+#include <type_traits>
+
+template <class T, std::size_t Cap, std::size_t Batch>
+class NodeHandoffPipe final {
+    static_assert(std::is_trivially_copyable_v<T>);
+    static_assert(std::has_single_bit(Cap));
+    static_assert(Batch > 0 && Batch <= Cap / 2);
+
+public:
+    static std::unique_ptr<NodeHandoffPipe> open(int sink_node) noexcept {
+        const std::size_t bytes = sizeof(T) * Cap;
+        void* p = numa_alloc_onnode(bytes, sink_node);
+        if (!p) return {};
+        auto* raw = new (std::nothrow) NodeHandoffPipe(p);
+        if (!raw) {
+            numa_free(p, bytes);
+            return {};
+        }
+        return std::unique_ptr<NodeHandoffPipe>(raw);
+    }
+
+    ~NodeHandoffPipe() {
+        if (lane_) numa_free(lane_, sizeof(T) * Cap);
+    }
+
+    NodeHandoffPipe(const NodeHandoffPipe&) = delete;
+    NodeHandoffPipe& operator=(const NodeHandoffPipe&) = delete;
+
+    bool offer(const T& value) noexcept { // 仅生产者
+        if (src_.n == Batch && !commit()) return false;
+        hold_[src_.n++] = value;
+        if (src_.n == Batch) (void)commit();
+        return true;
+    }
+
+    bool commit() noexcept { // 仅生产者；未满批也要在空闲时调用
+        if (src_.n == 0) return true;
+        const auto acked = acked_.load(std::memory_order_acquire);
+        const auto used = src_.head - acked;
+        if (used > Cap || Cap - used < src_.n) return false;
+        for (std::size_t i = 0; i < src_.n; ++i)
+            lane_[(src_.head + i) & (Cap - 1)] = hold_[i];
+        src_.head += src_.n;
+        src_.n = 0;
+        pub_.store(src_.head, std::memory_order_release);
+        return true;
+    }
+
+    bool take(T& out) noexcept { // 仅消费者
+        const auto head = pub_.load(std::memory_order_acquire);
+        if (dst_.tail == head) return false;
+        out = lane_[dst_.tail & (Cap - 1)];
+        ++dst_.tail;
+        if (dst_.tail == head || dst_.tail % Batch == 0)
+            acked_.store(dst_.tail, std::memory_order_release);
+        return true;
+    }
+
+private:
+    explicit NodeHandoffPipe(void* p) noexcept : lane_(static_cast<T*>(p)) {}
+
+    struct alignas(64) Src {
+        std::uint64_t head{0};
+        std::size_t n{0};
+    } src_;
+    struct alignas(64) Dst {
+        std::uint64_t tail{0};
+    } dst_;
+
+    T* lane_{nullptr};
+    std::array<T, Batch> hold_{};
+    alignas(64) std::atomic<std::uint64_t> pub_{0};
+    alignas(64) std::atomic<std::uint64_t> acked_{0};
+};
+```
 
 ### 10. spmc共享内存无锁队列应用
 来源1.[https://github.com/MengRao/SPMC_Queue](https://github.com/MengRao/SPMC_Queue)
@@ -9182,7 +9269,10 @@ namespace hpc {
 ```
 
 
-### 24. 双数组加原子索引实现数据更新和访问
+### 24. 双数组加原子索引与优先多缓冲快照
+
+多缓冲把写入和读取拆开：读者只碰当前活跃槽，写者在另一槽填完整快照后再原子切换索引，读写线程不抢同一把锁。双缓冲是一份读、一份写，写完交换身份；读者偏慢时写者可能没有空闲槽。三缓冲再加一个就绪槽，形成「读一个、写一个、等一个」，写路径不必等读者离开，中间过时更新可以直接丢掉。读者拿到的永远是某一时刻的完整快照，相对最新写入会有一档滞后。
+
 ```cpp
 #include <atomic>
 #include <thread>
@@ -9340,7 +9430,143 @@ private:
 };
 ```
 
-**扩展** 只要最新行情 / 最新参数面板 -> **triple buffer**（三缓冲，在双缓冲基础上增加 spare 缓冲，读写更解耦、可丢弃中间更新）。参考：Ng Song Guan, [Triple Buffer: Lock-free Concurrency Primitive](https://medium.com/@sgn00/triple-buffer-lock-free-concurrency-primitive-611848627a1e)
+**扩展：三缓冲状态机与优先级抢占**
+
+槽位标成空闲、写入中、就绪、活跃。单写多读时状态数组不必原子。高优先先占空闲槽，没有空闲则覆盖「就绪」甚至「写入中」的普通槽；写完立刻 `release` 切换活跃下标。普通优先写完可以先停在就绪，由后续批量发布。主力合约、资金走高优先；次要标的走普通。多写时状态要改成 `atomic` 并用 CAS。`view()` 返回引用只适合读者马上用完：写者一旦把旧活跃槽标成空闲再写入，未结束的读者会看到撕裂。读者要把快照带进计算时，用下面的按槽钉住。
+
+```cpp
+enum class SlotPri : uint8_t { Normal, High };
+enum class SlotSt : uint8_t { Free, Filling, Ready, Live };
+
+struct QuoteSnap {
+    char symbol[16]{};
+    double last{};
+    double bid1{};
+    double ask1{};
+    uint64_t qty{};
+    uint64_t ts_ns{};
+};
+
+template<class Snap, size_t N = 3>
+class PrioSnapBank {
+    static_assert(N >= 2, "need at least two slots");
+    Snap slots_[N]{};
+    SlotSt st_[N]{};
+    std::atomic<size_t> live_{0};
+
+    int pick(SlotPri pri) {
+        for (size_t i = 0; i < N; ++i)
+            if (st_[i] == SlotSt::Free) return int(i);
+        if (pri == SlotPri::High) {
+            for (size_t i = 0; i < N; ++i)
+                if (st_[i] == SlotSt::Ready) return int(i);
+            for (size_t i = 0; i < N; ++i)
+                if (st_[i] == SlotSt::Filling) return int(i);
+        }
+        return -1;
+    }
+
+    void flip(size_t i) {
+        st_[i] = SlotSt::Ready;
+        const size_t old = live_.load(std::memory_order_relaxed);
+        live_.store(i, std::memory_order_release);
+        if (old != i) st_[old] = SlotSt::Free;
+    }
+
+public:
+    const Snap& view() const {
+        return slots_[live_.load(std::memory_order_acquire)];
+    }
+
+    bool write(const Snap& s, SlotPri pri) {
+        const int i = pick(pri);
+        if (i < 0) return false;
+        st_[i] = SlotSt::Filling;
+        slots_[i] = s;
+        if (pri == SlotPri::High)
+            flip(size_t(i));
+        else
+            st_[i] = SlotSt::Ready;
+        return true;
+    }
+
+    void flush_ready() {
+        for (size_t i = 0; i < N; ++i) {
+            if (st_[i] == SlotSt::Ready) {
+                flip(i);
+                return;
+            }
+        }
+    }
+};
+```
+
++ **注意**：读者看到的是上一份已发布快照，滞后是快照机制本身的代价；高优先覆盖「写入中」会丢掉未完成的普通更新。参考：Ng Song Guan, [Triple Buffer: Lock-free Concurrency Primitive](https://medium.com/@sgn00/triple-buffer-lock-free-concurrency-primitive-611848627a1e)
+
+**读者计数钉住槽位**
+
+多策略线程会把快照拷进本地再算因子，钉住期间写者不能回收该槽。流程是：`acquire` 读已发布下标 → 该槽读者计数 +1 → 再读一次下标，变了就 -1 重试 → 拷到 `out`、记下版本 → 计数 -1。写者 `write_slot()` 就地填当前私有槽，`publish()` 用 `release` 公布下标，再挑一个「非当前发布、非自己正在写、读者计数为 0」的槽作为下一笔写入；一时挑不到就 `pause`/`yield` 自旋。各槽数据、版本、计数和发布下标按缓存行对齐，避免伪共享。钉住保证拷贝窗口内无 data race；优先级抢占与钉住冲突时，高优先也不能覆盖仍有读者的槽。
+
+```cpp
+template<class Snap, size_t N = 3>
+class PinnedSnapBank {
+    static_assert(N >= 3, "need a spare slot besides live and write");
+    static constexpr size_t kLine = 64;
+
+    alignas(kLine) Snap slots_[N]{};
+    alignas(kLine) uint64_t ver_[N]{};
+    alignas(kLine) std::atomic<size_t> pins_[N]{};
+    alignas(kLine) std::atomic<size_t> live_{0};
+    size_t fill_ = 1; // 写者私有
+
+    static void spin_pause() noexcept {
+#if defined(__x86_64__) || defined(_M_X64)
+        __asm__ volatile("pause" ::: "memory");
+#elif defined(__aarch64__)
+        __asm__ volatile("yield" ::: "memory");
+#else
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+#endif
+    }
+
+    size_t next_fill() noexcept {
+        const size_t pub = live_.load(std::memory_order_relaxed);
+        for (;;) {
+            for (size_t i = 0; i < N; ++i) {
+                if (i == pub || i == fill_) continue;
+                if (pins_[i].load(std::memory_order_relaxed) == 0)
+                    return i;
+            }
+            spin_pause();
+        }
+    }
+
+public:
+    Snap& write_slot() noexcept { return slots_[fill_]; }
+
+    void publish() noexcept {
+        const size_t nxt = next_fill();
+        ++ver_[fill_];
+        live_.store(fill_, std::memory_order_release);
+        fill_ = nxt;
+    }
+
+    uint64_t copy_out(Snap& out) noexcept {
+        for (;;) {
+            const size_t i = live_.load(std::memory_order_acquire);
+            pins_[i].fetch_add(1, std::memory_order_acq_rel);
+            if (live_.load(std::memory_order_acquire) != i) {
+                pins_[i].fetch_sub(1, std::memory_order_release);
+                continue;
+            }
+            out = slots_[i];
+            const uint64_t v = ver_[i];
+            pins_[i].fetch_sub(1, std::memory_order_release);
+            return v;
+        }
+    }
+};
+```
 
 
 ### 25. 自定义自旋锁实现
