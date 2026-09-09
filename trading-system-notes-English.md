@@ -567,7 +567,11 @@ Advanced scenarios (high-performance networks) are CPU, memory, Consistent with 
     - `vm.zone_reclaim_mode = 0` (Default value): When the local memory is insufficient, go to the remote node to find free memory. This is the recommended configuration in most scenarios.
     - `vm.zone_reclaim_mode = 1`: When local memory is insufficient, priority is given to recycling local inactive memory pages (such as Cache) instead of accessing remote memory. This recycling process itself may introduce delays.
 
-`malloc` / `mmap` only return a virtual range. Physical pages are taken from a node at the first page fault, according to that VMA’s mempolicy. Under the default policy, the page lands on the local node of the CPU that takes the fault: first-touch. If the main thread on node 0 `memset`s, `mlock`s, or `mmap(..., MAP_POPULATE)`s the whole range, the pages pin to node 0; workers later bound to another node then hit remote memory on the hot path. `mbind`, `numa_alloc_onnode`, and `numactl --membind` change the range or process policy, so the fault picks a node by policy, not by who writes. With the default policy unchanged, the thread that will own the data must perform the first write on the target node. Pages do not migrate when a thread moves cores, unless you `move_pages` / `migrate_pages` or unmap and allocate again. Writing one byte per page is enough to place that page; a full `memset` is also first-touch, just heavier.
++ **First-touch placement**: `malloc` / `mmap` only return a virtual range. Physical pages are allocated at the first page fault; under the default policy, the page lands on the local node of the CPU that takes the fault.
+    - If the main thread `memset`s, `mlock`s, or `mmap(..., MAP_POPULATE)`s first, pages pin to that core’s node; workers later bound elsewhere then hit remote memory.
+    - `mbind`, `numa_alloc_onnode`, and `numactl --membind` change the range or process policy, so the fault picks a node by policy, not by who writes.
+    - With the default policy unchanged, the thread on the target node must do the first write. Pages do not move when a thread migrates, unless you `move_pages` / `migrate_pages` or unmap and allocate again.
+    - One write per page is enough to place it; a full `memset` is also first-touch, just heavier.
 
 ```cpp
 #include <cstddef>
@@ -3676,6 +3680,192 @@ namespace Common {
 
 ```
 
+Serialize on the hot path, format in the background：The idea is to split recording from rendering: the caller writes type tags and raw argument bytes into the container, and does not walk a format string or build text. Turning numbers into strings and assembling a readable line happens on the async thread. The `Logger` above only moved disk I/O off the hot path; walking `%` and `pushValue` per character is still formatting while you record.
+
++ one log line is one slot, so a line is not many enqueues;
++ `lit(...)` stores a pointer to a literal; copy transient strings such as order ids;
++ `memcpy` scalars; drop a line that does not fit; a full queue still waits in `getNextToWriteTo()`.
+
+```cpp
+#pragma once
+
+#include <cstdint>
+#include <cstring>
+#include <fstream>
+#include <string>
+#include <tuple>
+#include <type_traits>
+
+#include "macros.h"
+#include "lf_queue.h"
+#include "thread_utils.h"
+
+namespace Common {
+
+struct LogLit {
+  const char* p{};
+};
+inline LogLit lit(const char* p) noexcept { return {p}; }
+
+using WireTypes = std::tuple<
+    bool, char, unsigned char, short, unsigned short,
+    int, unsigned int, long long, unsigned long long,
+    float, double, LogLit, const char*>;
+
+template <class T, class Tuple>
+struct wire_tag;
+
+template <class T, class... Ts>
+struct wire_tag<T, std::tuple<T, Ts...>> {
+  static constexpr std::size_t value = 0;
+};
+
+template <class T, class U, class... Ts>
+struct wire_tag<T, std::tuple<U, Ts...>> {
+  static constexpr std::size_t value = 1 + wire_tag<T, std::tuple<Ts...>>::value;
+};
+
+struct PackedLine {
+  static constexpr std::size_t Cap = 256;
+  unsigned char b[Cap]{};
+  std::size_t used{1};
+  bool ok{true};
+
+  PackedLine() { b[0] = 0; }
+
+  template <class T, std::enable_if_t<std::is_arithmetic_v<std::decay_t<T>>, int> = 0>
+  void put(T v) noexcept {
+    using D = std::decay_t<T>;
+    append(wire_tag<D, WireTypes>::value, &v, sizeof(D));
+  }
+
+  void put(LogLit s) noexcept {
+    append(wire_tag<LogLit, WireTypes>::value, &s, sizeof(s));
+  }
+
+  void put(const char* s) noexcept {
+    if (!s) s = "";
+    append(wire_tag<const char*, WireTypes>::value, s, std::strlen(s) + 1);
+  }
+
+  void put(const std::string& s) noexcept { put(s.c_str()); }
+
+private:
+  void append(std::size_t tag, const void* src, std::size_t n) noexcept {
+    if (!ok || used + 1 + n > Cap || b[0] == 255) {
+      ok = false;
+      return;
+    }
+    b[used++] = static_cast<uint8_t>(tag);
+    std::memcpy(b + used, src, n);
+    used += n;
+    ++b[0];
+  }
+};
+
+class WireLogger final {
+public:
+  explicit WireLogger(const std::string& file_name)
+      : file_name_(file_name), queue_(65536) {
+    file_.open(file_name);
+    ASSERT(file_.is_open(), "Could not open log file:" + file_name);
+    logger_thread_ = Common::createAndStartThread(
+        -1, "Common/WireLogger " + file_name_, [this]() { flushQueue(); });
+    ASSERT(logger_thread_ != nullptr, "Failed to start WireLogger thread.");
+  }
+
+  ~WireLogger() {
+    while (queue_.size()) {
+      using namespace std::literals::chrono_literals;
+      std::this_thread::sleep_for(1s);
+    }
+    running_ = false;
+    logger_thread_->join();
+    file_.close();
+  }
+
+  WireLogger(const WireLogger&) = delete;
+  WireLogger& operator=(const WireLogger&) = delete;
+
+  template <class... Ts>
+  void log(Ts... xs) noexcept {
+    PackedLine rec;
+    (rec.put(xs), ...);
+    if (!rec.ok) return;
+    *queue_.getNextToWriteTo() = rec;
+    queue_.updateWriteIndex();
+  }
+
+private:
+  template <class T>
+  static void pull_pod(std::ostream& os, const unsigned char*& p) {
+    T v;
+    std::memcpy(&v, p, sizeof(T));
+    p += sizeof(T);
+    os << v;
+  }
+
+  static void dump(std::ostream& os, const PackedLine& rec) {
+    const unsigned char* p = rec.b + 1;
+    const uint8_t n = rec.b[0];
+    for (uint8_t i = 0; i < n; ++i) {
+      switch (*p++) {
+        case 0: pull_pod<bool>(os, p); break;
+        case 1: pull_pod<char>(os, p); break;
+        case 2: pull_pod<unsigned char>(os, p); break;
+        case 3: pull_pod<short>(os, p); break;
+        case 4: pull_pod<unsigned short>(os, p); break;
+        case 5: pull_pod<int>(os, p); break;
+        case 6: pull_pod<unsigned int>(os, p); break;
+        case 7: pull_pod<long long>(os, p); break;
+        case 8: pull_pod<unsigned long long>(os, p); break;
+        case 9: pull_pod<float>(os, p); break;
+        case 10: pull_pod<double>(os, p); break;
+        case 11: {
+          LogLit s{};
+          std::memcpy(&s, p, sizeof(s));
+          p += sizeof(s);
+          os << s.p;
+          break;
+        }
+        case 12: {
+          auto* s = reinterpret_cast<const char*>(p);
+          os << s;
+          p += std::strlen(s) + 1;
+          break;
+        }
+        default:
+          return;
+      }
+      os << ' ';
+    }
+    os << '\n';
+  }
+
+  auto flushQueue() noexcept {
+    while (running_) {
+      for (auto next = queue_.getNextToRead(); queue_.size() && next;
+           next = queue_.getNextToRead()) {
+        dump(file_, *next);
+        queue_.updateReadIndex();
+      }
+      file_.flush();
+      using namespace std::literals::chrono_literals;
+      std::this_thread::sleep_for(10ms);
+    }
+  }
+
+  const std::string file_name_;
+  std::ofstream file_;
+  Common::LFQueue<PackedLine> queue_;
+  std::atomic<bool> running_{true};
+  std::thread* logger_thread_{nullptr};
+};
+
+}
+
+// wire.log(lit("px="), px, lit("qty="), qty, order_id);
+```
 
 The core idea of Micro-Batching is to process multiple messages into one batch to reduce the fixed cost of single processing (message processing and calculation). However, batch processing that is too large will increase latency, and batch processing that is too small will not be able to take advantage of the batch size. Therefore, this processor **dynamically adjusts batch size** and automatically selects the optimal strategy based on the current message queue backlog:
 
@@ -3833,7 +4023,13 @@ References:
 
 **Cross-NUMA batched handoff**
 
-When producer and consumer cannot share a NUMA node, enqueue-per-item is a remote store every time. Put the ring on the consumer's node so `take` is a local load. The producer fills an in-object hold array, copies a batch into the ring, then `release`-stores the write position. The consumer `acquire`-loads that position, copies out locally, and `release`-stores the consumed position every batch or when it has caught up; the producer uses that to compute free slots. Capacity is a power of two; batch size is at most half the capacity so a full hold can still fit when the ring is not packed. `T` must be trivially copyable. SPSC only. The control block (write position, consumed position) lives with the object, usually on the producer node; what you amortize is bulky payload traffic, not every atomic. A partial hold is unpublished until the caller `commit`s, otherwise the tail sits in the hold. `offer` returning false means this value never entered the hold. `commit` returning false means values already accepted into the hold are still there — do not push them again.
+When producer and consumer cannot share a NUMA node, enqueue-per-item is a remote store every time. Put the ring on the consumer’s node so pops are local; the producer fills a hold array and copies a batch into the ring.
+
++ capacity is a power of two, batch size at most half the capacity, `T` trivially copyable, SPSC only;
++ producer `release`-stores the write position; consumer `acquire`s, copies out, and `release`-stores the consumed position every batch or when it has caught up;
++ the control block lives with the object, usually on the producer node; what you amortize is bulky payload, not every atomic;
++ a partial hold stays unpublished until the caller `commit`s;
++ `offer` false: this value never entered the hold; `commit` false: accepted values are still in the hold — do not push them again.
 
 ```cpp
 #include <array>
