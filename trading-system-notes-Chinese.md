@@ -569,7 +569,11 @@ numactl --preferred=1
     - `vm.zone_reclaim_mode = 0` (默认值): 本地内存不足时，去**远程节点**寻找空闲内存，是大多数场景的推荐配置。
     - `vm.zone_reclaim_mode = 1`: 本地内存不足时，优先**回收本地**不活跃的内存页（如Cache），而不是去访问远程内存。这个回收过程本身可能引入延迟。
 
-`malloc` / `mmap` 当时只拿到虚地址。物理页要等第一次缺页，才按该区间的 mempolicy 向某个节点要页；默认策略下，缺页发生在哪颗核上，页就落在那颗核的本地节点。这就是 first-touch。主线程在 node 0 上对整段 `memset`、`mlock` 或 `mmap(..., MAP_POPULATE)`，页会钉在 node 0；工作线程再绑到别的节点，热路径全是远程访问。`mbind`、`numa_alloc_onnode`、`numactl --membind` 改的是区间或进程策略，缺页时按策略选节点，不取决于谁在写。没改策略时，必须让目标节点上的线程自己完成第一次写。页一旦落下，线程迁核不会带走物理页，除非 `move_pages` / `migrate_pages`，或解除映射后重新分配。按页写一字节就足以让该页落点；整段 `memset` 同样是 first-touch，只是更重。
++ **首次触碰落页**：`malloc` / `mmap` 当时只有虚地址。物理页在第一次缺页时才分配；默认策略下，缺页发生在哪颗核，页就落在那颗核的本地节点。
+    - 主线程先 `memset`、`mlock` 或 `mmap(..., MAP_POPULATE)`，页会钉在启动核；工作线程再绑到别的节点，热路径就是远程访问。
+    - `mbind`、`numa_alloc_onnode`、`numactl --membind` 改的是区间或进程策略，缺页按策略选节点，不看谁在写。
+    - 没改策略时，要让目标节点上的线程自己先写一遍。页落下后迁核不会带走物理页，除非 `move_pages` / `migrate_pages`，或解除映射后重分。
+    - 按页写一字节就够落点；整段 `memset` 同样是 first-touch，只是更重。
 
 ```cpp
 #include <cstddef>
@@ -3684,6 +3688,193 @@ namespace Common {
 
 ```
 
+热路径只序列化，后台再格式化：核心思想是把“记”和“看”拆开：调用线程只把类型标签和参数的二进制写入容器，不扫格式串、不拼文本。数字变成字符串、字段拼成一行，全部交给异步线程。上面的 `Logger` 只是把写盘挪走了，扫 `%`、按字符 `pushValue` 仍在热路径上，记的时候还在做格式化。
+
++ 一条日志进一个槽，避免一行多次入队；
++ `lit(...)` 只传字面量指针；订单号等动态串才拷进槽；
++ 标量用 `memcpy`；槽装不下就丢这一行，队列满仍走 `getNextToWriteTo()`。
+
+```cpp
+#pragma once
+
+#include <cstdint>
+#include <cstring>
+#include <fstream>
+#include <string>
+#include <tuple>
+#include <type_traits>
+
+#include "macros.h"
+#include "lf_queue.h"
+#include "thread_utils.h"
+
+namespace Common {
+
+struct LogLit {
+  const char* p{};
+};
+inline LogLit lit(const char* p) noexcept { return {p}; }
+
+using WireTypes = std::tuple<
+    bool, char, unsigned char, short, unsigned short,
+    int, unsigned int, long long, unsigned long long,
+    float, double, LogLit, const char*>;
+
+template <class T, class Tuple>
+struct wire_tag;
+
+template <class T, class... Ts>
+struct wire_tag<T, std::tuple<T, Ts...>> {
+  static constexpr std::size_t value = 0;
+};
+
+template <class T, class U, class... Ts>
+struct wire_tag<T, std::tuple<U, Ts...>> {
+  static constexpr std::size_t value = 1 + wire_tag<T, std::tuple<Ts...>>::value;
+};
+
+struct PackedLine {
+  static constexpr std::size_t Cap = 256;
+  unsigned char b[Cap]{};
+  std::size_t used{1};
+  bool ok{true};
+
+  PackedLine() { b[0] = 0; }
+
+  template <class T, std::enable_if_t<std::is_arithmetic_v<std::decay_t<T>>, int> = 0>
+  void put(T v) noexcept {
+    using D = std::decay_t<T>;
+    append(wire_tag<D, WireTypes>::value, &v, sizeof(D));
+  }
+
+  void put(LogLit s) noexcept {
+    append(wire_tag<LogLit, WireTypes>::value, &s, sizeof(s));
+  }
+
+  void put(const char* s) noexcept {
+    if (!s) s = "";
+    append(wire_tag<const char*, WireTypes>::value, s, std::strlen(s) + 1);
+  }
+
+  void put(const std::string& s) noexcept { put(s.c_str()); }
+
+private:
+  void append(std::size_t tag, const void* src, std::size_t n) noexcept {
+    if (!ok || used + 1 + n > Cap || b[0] == 255) {
+      ok = false;
+      return;
+    }
+    b[used++] = static_cast<uint8_t>(tag);
+    std::memcpy(b + used, src, n);
+    used += n;
+    ++b[0];
+  }
+};
+
+class WireLogger final {
+public:
+  explicit WireLogger(const std::string& file_name)
+      : file_name_(file_name), queue_(65536) {
+    file_.open(file_name);
+    ASSERT(file_.is_open(), "Could not open log file:" + file_name);
+    logger_thread_ = Common::createAndStartThread(
+        -1, "Common/WireLogger " + file_name_, [this]() { flushQueue(); });
+    ASSERT(logger_thread_ != nullptr, "Failed to start WireLogger thread.");
+  }
+
+  ~WireLogger() {
+    while (queue_.size()) {
+      using namespace std::literals::chrono_literals;
+      std::this_thread::sleep_for(1s);
+    }
+    running_ = false;
+    logger_thread_->join();
+    file_.close();
+  }
+
+  WireLogger(const WireLogger&) = delete;
+  WireLogger& operator=(const WireLogger&) = delete;
+
+  template <class... Ts>
+  void log(Ts... xs) noexcept {
+    PackedLine rec;
+    (rec.put(xs), ...);
+    if (!rec.ok) return;
+    *queue_.getNextToWriteTo() = rec;
+    queue_.updateWriteIndex();
+  }
+
+private:
+  template <class T>
+  static void pull_pod(std::ostream& os, const unsigned char*& p) {
+    T v;
+    std::memcpy(&v, p, sizeof(T));
+    p += sizeof(T);
+    os << v;
+  }
+
+  static void dump(std::ostream& os, const PackedLine& rec) {
+    const unsigned char* p = rec.b + 1;
+    const uint8_t n = rec.b[0];
+    for (uint8_t i = 0; i < n; ++i) {
+      switch (*p++) {
+        case 0: pull_pod<bool>(os, p); break;
+        case 1: pull_pod<char>(os, p); break;
+        case 2: pull_pod<unsigned char>(os, p); break;
+        case 3: pull_pod<short>(os, p); break;
+        case 4: pull_pod<unsigned short>(os, p); break;
+        case 5: pull_pod<int>(os, p); break;
+        case 6: pull_pod<unsigned int>(os, p); break;
+        case 7: pull_pod<long long>(os, p); break;
+        case 8: pull_pod<unsigned long long>(os, p); break;
+        case 9: pull_pod<float>(os, p); break;
+        case 10: pull_pod<double>(os, p); break;
+        case 11: {
+          LogLit s{};
+          std::memcpy(&s, p, sizeof(s));
+          p += sizeof(s);
+          os << s.p;
+          break;
+        }
+        case 12: {
+          auto* s = reinterpret_cast<const char*>(p);
+          os << s;
+          p += std::strlen(s) + 1;
+          break;
+        }
+        default:
+          return;
+      }
+      os << ' ';
+    }
+    os << '\n';
+  }
+
+  auto flushQueue() noexcept {
+    while (running_) {
+      for (auto next = queue_.getNextToRead(); queue_.size() && next;
+           next = queue_.getNextToRead()) {
+        dump(file_, *next);
+        queue_.updateReadIndex();
+      }
+      file_.flush();
+      using namespace std::literals::chrono_literals;
+      std::this_thread::sleep_for(10ms);
+    }
+  }
+
+  const std::string file_name_;
+  std::ofstream file_;
+  Common::LFQueue<PackedLine> queue_;
+  std::atomic<bool> running_{true};
+  std::thread* logger_thread_{nullptr};
+};
+
+}
+
+// wire.log(lit("px="), px, lit("qty="), qty, order_id);
+```
+
 微批处理（Micro-Batching）的核心思想是：将多个消息攒成一批处理，减少单次处理的固定成本（消息处理和计算）。但批处理过大会增加延迟，过小则无法发挥批量优势。因此，这个处理器通过**动态调整批大小**，根据当前消息队列的积压量（backlog）自动选择最优策略：
 
 + 队列积压少时，用小批量减少延迟；
@@ -3840,7 +4031,13 @@ double-mmap 的思路是在虚拟地址空间里把同一块 backing 连续映�
 
 **跨 NUMA 节点的批量交接**
 
-生产者和消费者绑不到同一节点时，逐条入队就是每条一次远程写。把环形槽位分配在消费者节点上：出队走本地读；生产者先填对象内的暂存，凑满一批再拷进环，一次 `release` 公布写位置。消费者 `acquire` 到新位置后本地取槽，每处理完一批、或已经追平写位置时，再 `release` 回写已消费位置，生产者用它算空闲。容量取 2 的幂；一批不超过容量一半，暂存满时环里还腾得出整批空位。`T` 必须可平凡复制。只允许单生产者、单消费者。控制块（写位置、已消费位置）跟对象本身走，通常在生产者节点，远程的是大块 payload，不是每条都打原子。未满一批时要调用方自己 `commit`，否则尾部会一直停在暂存里。`offer` 返回 false：当前这条没进暂存。`commit` 返回 false：暂存里已经收下的还没进环，不能当没推过再推一遍。
+生产者和消费者绑不到同一节点时，逐条入队就是每条一次远程写。把环放在消费者节点上，出队走本地读；生产者先填暂存，凑满一批再拷进环。
+
++ 容量取 2 的幂，一批不超过容量一半，`T` 可平凡复制，仅 SPSC；
++ 生产者 `release` 公布写位置；消费者 `acquire` 后取槽，每处理完一批或追平时 `release` 回写已消费位置；
++ 控制块跟对象走，通常在生产者节点，摊销的是大块 payload；
++ 未满一批要调用方自己 `commit`，否则尾部停在暂存里；
++ `offer` 返回 false：当前这条没进暂存；`commit` 返回 false：已收下的还在暂存，不能再推一遍。
 
 ```cpp
 #include <array>
