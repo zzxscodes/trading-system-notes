@@ -315,6 +315,23 @@ lscpu -e=CPU,CORE,SOCKET
 taskset -c 8-15 ./strategy_engine
 ```
 
+隔离名单必须按物理核成对划走。云上 8 个 vCPU 常常是 4 物理核 × 2 超线程，兄弟关系形如 `0,4`、`1,5`、`2,6`、`3,7`。`isolcpus=4-7` 看起来划走了后一半编号，实际 4–7 正是 0–3 的孪生线程，交易核仍和系统核抢同一套 L1/L2 与执行单元。
+
++ `isolcpus` 只阻止调度器往这些核塞任务，不会把进程搬过去；交易线程还要用 `taskset`、`pthread_setaffinity_np` 或 systemd `CPUAffinity` 钉上去。
++ `nohz_full`、`rcu_nocbs`、`irqaffinity` 的集合必须和整核划分一致，不要图省事写成连续编号。
+
+```shell
+cat /sys/devices/system/cpu/cpu*/topology/thread_siblings_list | sort -u
+# 例：0,4  1,5  2,6  3,7
+# 系统核 0,1,4,5（两个整核）；交易核 2,3,6,7（另外两个整核）
+
+# 内核 ≥ 5.9 可加 domain,managed_irq，把托管 IRQ 也拽离隔离核
+GRUB_CMDLINE_LINUX_DEFAULT="isolcpus=domain,managed_irq,2,3,6,7 nohz_full=2,3,6,7 rcu_nocbs=2,3,6,7 irqaffinity=0,1,4,5"
+
+taskset -c 2,6 ./lane_alpha   # 同一物理核的一对兄弟给同一引擎
+taskset -c 3,7 ./lane_beta
+```
+
 
 **关闭 CPU 节能（C-States & P-States）**
 
@@ -485,6 +502,31 @@ cpupower frequency-info
 | `tuned`<br/> 服务 | `sudo tuned-adm profile latency-performance` | 启用极致低延迟配置，关闭节能，优化调度与中断处理 |
 | `powertop --auto-tune` | `sudo powertop --auto-tune` | 自动将所有子系统（CPU、磁盘、USB 等）设为高性能模式，适合性能压测 |
 
+虚拟机里 BIOS 锁频和 `intel_idle.max_cstate=0`、`idle=poll`、`intel_pstate=disable` 经常是空操作：KVM guest 没有 cpufreq sysfs，频率和深 C-state 由宿主持有。guest 里还能压住的，是告诉内核不要进深睡。
+
++ 打开 `/dev/cpu_dma_latency` 写入 `0`，进程退出后句柄关闭，所以要常驻一个 fd。
++ `mpstat` 的 `%steal` 才是宿主抢核；guest 里 `turbostat` 的 C-state 反映的是虚拟核。
+
+```cpp
+#include <cstdint>
+#include <fcntl.h>
+#include <unistd.h>
+
+struct DmaWakeHold {
+  int fd{-1};
+  explicit DmaWakeHold(std::int32_t usec = 0) {
+    fd = ::open("/dev/cpu_dma_latency", O_RDWR);
+    if (fd >= 0)
+      (void)::write(fd, &usec, sizeof(usec));
+  }
+  ~DmaWakeHold() {
+    if (fd >= 0)
+      ::close(fd);
+  }
+};
+
+static DmaWakeHold g_dma_wake_hold;
+```
 
 **系统的NUMA拓扑**
 
@@ -1093,7 +1135,7 @@ sudo sh -c 'echo 2 > /proc/irq/128/smp_affinity_list'
 
 **分发负载**: 对于多队列设备（如网卡），将每个队列的IRQ均匀地分发到不同的CPU核心上。
 
-**irqbalance**：自动管理中断的负载均衡，通过配置文件/etc/irqbalance.conf来调整其行为，这个会覆盖上面的精细手动控制的行为。
+**irqbalance**：自动管理中断的负载均衡，通过配置文件/etc/irqbalance.conf来调整其行为，这个会覆盖上面的精细手动控制的行为。1.9 起会读 `/sys/devices/system/cpu/isolated`，可以躲开隔离核，但落点仍会周期性重均衡。要固定每条网卡队列钉在哪颗 housekeeping 核，关掉再写 `smp_affinity_list`。1.9 以下必须禁用。
 
 **使用场景**：对于关键路径所在的CPU核心，将无关的中断请求绑定到其他核心上，减少该核心的中断处理负担。
 
@@ -1104,12 +1146,21 @@ sudo sh -c 'echo 2 > /proc/irq/128/smp_affinity_list'
 2. `nohz_full`：在隔离核心启用自适应无时钟模式，减少 / 消除时钟中断；
 3. `rcu_nocbs`：将 RCU 回调卸载到非隔离核心。最终为关键低延迟任务提供近乎独占、无内核干扰的 “静默” 运行环境。
 
-```shell
-# 修改GRUB配置
-grub_cmdline="isolcpus=8-15 nohz_full=8-15 rcu_nocbs=8-15"
+`isolcpus` 不管 IRQ。未单独绑定的中断仍可能落到交易核。引导参数 `irqaffinity=` 把默认亲和钉在 housekeeping 核，是第二道闸；`isolcpus=managed_irq,...` 再把设备托管 IRQ 拽走。
 
-# 生效配置
+RPS/RFS 会按流把 softirq 派到应用线程所在核。网卡已经用 RSS 按队列分核时，再开 RFS 会把收包处理拉进隔离核，隔离白做。
+
+```shell
+# 修改GRUB配置：隔离核与默认 IRQ 核不要重叠
+grub_cmdline="isolcpus=domain,managed_irq,2,3,6,7 nohz_full=2,3,6,7 rcu_nocbs=2,3,6,7 irqaffinity=0,1,4,5"
+
 grub2-mkconfig -o /boot/grub2/grub.cfg
+
+cat /sys/devices/system/cpu/isolated
+cat /proc/irq/default_smp_affinity
+
+# 不要开：会把 softirq 引到隔离核
+# echo 32768 > /proc/sys/net/core/rps_sock_flow_entries
 ```
 
 [中断与进程绑定 — Red Hat RHEL for Real Time 调优指南](https://docs.redhat.com/zh-cn/documentation/red_hat_enterprise_linux_for_real_time/7/html/tuning_guide/Interrupt_and_process_binding)
@@ -3873,6 +3924,18 @@ private:
 }
 
 // wire.log(lit("px="), px, lit("qty="), qty, order_id);
+```
+
+异步线程写盘仍会脏页回写、预读和电梯调度。日志文件放到 tmpfs，热路径和块设备彻底脱钩。内存盘按实际占用计，要配轮转，写满会把机器拖死。
+
++ `/tmp` 在不少发行版已经是 systemd `tmp.mount`，不必再往 fstab 塞第二份。
++ 根盘仍建议 `noatime,nodiratime`；云盘不要关写屏障，热路径本来就不该碰块设备。
+
+```shell
+# /etc/fstab
+tmpfs  /mnt/logmem  tmpfs  defaults,noatime,nodiratime,size=4G  0 0
+
+# Common::WireLogger wire("/mnt/logmem/wire.bin");
 ```
 
 微批处理（Micro-Batching）的核心思想是：将多个消息攒成一批处理，减少单次处理的固定成本（消息处理和计算）。但批处理过大会增加延迟，过小则无法发挥批量优势。因此，这个处理器通过**动态调整批大小**，根据当前消息队列的积压量（backlog）自动选择最优策略：
@@ -11472,13 +11535,15 @@ struct WaitFreeCounter {
 
 | 配置项 | 操作方式 | 是否需BIOS/重启 | 核心目的 | 注意事项 |
 | --- | --- | --- | --- | --- |
-| isolcpus=8-15 | 修改/etc/default/grub，在GRUB_CMDLINE_LINUX中添加参数，执行update-grub | 是 | 将指定CPU从内核通用调度器隔离，避免普通进程抢占 | 隔离的核心范围需与nohz_full、rcu_nocbs保持一致 |
+| isolcpus=8-15 | 修改/etc/default/grub，在GRUB_CMDLINE_LINUX中添加参数，执行update-grub | 是 | 将指定CPU从内核通用调度器隔离，避免普通进程抢占 | 必须按物理核成对划走，与 nohz_full、rcu_nocbs 一致；隔离后仍要用 taskset / CPUAffinity 钉交易线程 |
+| irqaffinity=0-7 | 同上述GRUB配置方式 | 是 | 把默认 IRQ 亲和钉在 housekeeping 核，避免未绑定中断落到隔离核 | 集合不要与 isolcpus 重叠；isolcpus 不管 IRQ |
 | nohz_full=8-15 | 同上述GRUB配置方式 | 是 | 在隔离核心禁用时钟滴答（timer tick），消除周期性时钟中断 | 需确保内核编译时开启CONFIG_NO_HZ_FULL=y |
 | rcu_nocbs=8-15 | 同上述GRUB配置方式 | 是 | 将隔离核心的RCU回调任务卸载到非隔离核心，避免RCU操作干扰 | nohz_full会隐含rcu_nocbs，但显式配置更安全 |
 | preempt=full | 同上述GRUB配置方式 | 是 | 启用完全抢占式内核，减少内核路径中的不可抢占区域 | 需内核支持 CONFIG_PREEMPT_FULL |
 | threadirqs | 同上述GRUB配置方式 | 是 | 将软中断分配到多个CPU核心，避免单核过载 | 可能增加中断处理开销，需权衡 |
 | nowatchdog | 同上述GRUB配置方式 | 是 | 禁用内核watchdog服务，消除watchdog进程带来的干扰 | 生产环境需评估风险，测试环境可放心禁用；常与 nmi_watchdog=0 配合 |
-| tsc=reliable | 同上述GRUB配置方式 | 是 | 标记TSC为可靠时间源，减少时间源验证带来的延迟 | 仅Intel CPU建议添加，AMD CPU根据实际情况选择 |
+| clocksource=tsc | 同上述GRUB配置方式 | 是 | 强制使用 TSC 时钟源，避免 clock_gettime 走不稳定源 | 云上先 `clocksource=tsc`；Nitro 上不要先挂 `tsc=reliable`，会掩盖宿主时钟缩放，dmesg 报 TSC 不稳再补 |
+| tsc=reliable | 同上述GRUB配置方式 | 是 | 标记TSC为可靠时间源，减少时间源验证带来的延迟 | 物理机、Intel 常用；虚拟机先看 dmesg，不要一上来就强制标记 |
 | mce=off | 同上述GRUB配置方式 | 是 | 禁用机器检查异常处理，避免MCE触发的中断 | 仅测试环境使用，生产环境禁用可能导致硬件故障无法检测 |
 | ipv6.disable=1 | 同上述GRUB配置方式 | 是 | 禁用IPv6协议栈，减少IPv6相关内核任务消耗 | 若系统需使用IPv6，此参数需删除 |
 | audit=0 | 同上述GRUB配置方式 | 是 | 禁用审计子系统，消除auditd和audit backlog处理带来的不确定性开销 | 可大幅减少上下文切换和软中断 |
@@ -11500,9 +11565,32 @@ struct WaitFreeCounter {
 | net.ipv4.tcp_nodelay=1 | 同上述sysctl配置方式 | 否 | 禁用Nagle算法，小数据包立即发送，减少延迟 | 适用于小数据包频繁传输的场景，如RPC调用 |
 | net.ipv4.tcp_congestion_control=bbr | 同上述sysctl配置方式 | 否 | 启用BBR拥塞控制算法，减少网络延迟 | 需内核版本≥4.9且支持BBR |
 | net.core.busy_read=50 | 同上述sysctl配置方式 | 否 | 启用繁忙轮询模式，减少网络接收路径中的延迟 | 增加CPU使用率，需根据负载调整 |
-| net.core.busy_poll=50 | 同上述sysctl配置方式 | 否 | 轮询和选择的低延迟繁忙轮询超时 | 与 busy_read 配合使用效果更佳 |
+| net.core.busy_poll=50 | 同上述sysctl配置方式 | 否 | 轮询和选择的低延迟繁忙轮询超时 | 必须与 busy_read 同时非零，且 socket 上再开 SO_BUSY_POLL，否则全局 sysctl 不生效 |
 | net.ipv4.tcp_fastopen=3 | 同上述sysctl配置方式 | 否 | 启用TCP快速打开，减少三次握手延迟 | 适用于短连接场景，如金融交易 |
+| net.ipv4.tcp_slow_start_after_idle=0 | 同上述sysctl配置方式 | 否 | 连接空闲后不把 cwnd 打回慢启动 | 长连接行情/下单通道常用 |
+| net.ipv4.tcp_no_metrics_save=1 | 同上述sysctl配置方式 | 否 | 不复用历史 TCP 度量，避免旧 cwnd 拖累新连接 | 短连接重建多时更明显 |
+| net.ipv4.udp_rmem_min / udp_wmem_min | 同上述sysctl配置方式 | 否 | 抬高 UDP socket 缓冲下限，行情突发少丢 | 不要靠放大 rmem_default，会给 TCP 引入缓冲延迟 |
+| 不要启用 RPS/RFS | 保持 rps_sock_flow_entries=0 | 否 | RSS 已按队列分核时，RFS 会把 softirq 拉进隔离核 | 仅当队列数少于 housekeeping 核、且掩码不含隔离核时才考虑 |
 
+
+`busy_poll` / `busy_read` 只是上限。socket 上还要 `SO_BUSY_POLL`，否则仍走中断唤醒。`TCP_NODELAY` 禁 Nagle；`TCP_NOTSENT_LOWAT` 压发送积压。不要把 `rmem_default` 拉到几十 MB。
+
+```cpp
+#include <netinet/tcp.h>
+#include <sys/socket.h>
+
+void tune_md_sock(int fd) {
+  int one = 1;
+  int poll_us = 50;
+  int buf = 16 * 1024 * 1024;
+  int lowat = 16384;
+  setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+  setsockopt(fd, SOL_SOCKET, SO_BUSY_POLL, &poll_us, sizeof(poll_us));
+  setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &buf, sizeof(buf));
+  setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &buf, sizeof(buf));
+  setsockopt(fd, IPPROTO_TCP, TCP_NOTSENT_LOWAT, &lowat, sizeof(lowat));
+}
+```
 
 **2. 内存优化**
 
@@ -11516,6 +11604,20 @@ struct WaitFreeCounter {
 | 禁用KSM（内核同页合并） | 执行 echo 0 > /sys/kernel/mm/ksm/run；或 systemctl stop ksm && systemctl disable ksm | 否 | 禁用内存页面去重，消除合并过程中锁定页表和触发TLB shootdown导致的不可预测内存访问延迟 | KSM仅对通过 madvise(..., MADV_MERGEABLE) 标记的页面生效；主要影响虚拟化工作负载；若需取消已合并的页面使用 echo 2 > /sys/kernel/mm/ksm/run |
 
 
+**3. 磁盘 I/O**
+
+热路径禁止同步写盘。NVMe（含云盘 EBS）走 blk-mq，电梯调度没有收益。小随机 I/O 关掉预读和合并；`nr_requests` 在部分新内核上只读，写进去 `EINVAL`。云盘不要关写屏障，持久化语义靠它。
+
+```shell
+# /etc/udev/rules.d/60-nvme-quiet.rules
+ACTION=="add|change", KERNEL=="nvme[0-9]n[0-9]", ATTR{queue/scheduler}="none", ATTR{queue/read_ahead_kb}="0", ATTR{queue/nomerges}="2"
+
+# 根盘挂载：少写 atime；commit 放宽；barrier 保持开
+# UUID=... / ext4 rw,noatime,nodiratime,commit=60,data=ordered 0 1
+
+cat /sys/block/nvme0n1/queue/scheduler
+cat /sys/block/nvme0n1/queue/read_ahead_kb
+```
 
 
 **服务与中断层优化**
@@ -11524,8 +11626,9 @@ struct WaitFreeCounter {
 
 | 配置项 | 操作方式 | 是否需BIOS/重启 | 核心目的 | 注意事项 |
 | --- | --- | --- | --- | --- |
-| 停止并禁用irqbalance | 执行 systemctl stop irqbalance 和 systemctl disable irqbalance | 否 | 防止irqbalance自动调整中断绑定，保证中断亲和性配置稳定 | 禁用后需手动维护中断绑定 |
+| 停止并禁用irqbalance | 执行 systemctl stop irqbalance 和 systemctl disable irqbalance | 否 | 防止irqbalance自动调整中断绑定，保证中断亲和性配置稳定 | 1.9 起会读 isolated，可保留但落点会变；要固定队列钉核则关掉再写 smp_affinity_list |
 | 网卡中断绑定 | 执行 echo <mask> > /proc/irq/<irq_num>/smp_affinity | 否 | 将网卡中断绑定到非关键核心，避免干扰关键任务 | 需定期检查/proc/interrupts，防止新设备中断误绑 |
+| 低延迟中断合并 | 执行 ethtool -C nic0 adaptive-rx off rx-usecs 0 tx-usecs 0；ethtool -G nic0 rx 8192 | 否 | 关自适应合并，包尽快递交；环缓冲按驱动上限拉满 | 吞吐场景才用较大 rx-usecs；部分云网卡 TX 环上限低于 RX，TSO 可能 fixed-off；开机脚本 After=network-online.target，网卡未就绪时 ethtool 会空跑 |
 | 中断合并配置 | 执行ethtool -C ethX rx-usecs 100 rx-frames 64 adaptive-rx off | 否 | 减少网卡中断频率，降低CPU中断处理开销 | 可能增加网络延迟，需根据流量场景调整 |
 | 禁用中断平衡 | 执行 echo 0 > /proc/irq/<irq_num>/smp_affinity_list | 否 | 防止中断在多个CPU核心间迁移，保持中断处理稳定性 | 需针对每个关键中断单独配置 |
 | 工作队列限制 | 执行echo 0-7 > /sys/devices/virtual/workqueue/cpumask | 否 | 限制所有通用工作队列仅在非关键CPU上运行，防止内核worker抢占 | 需root权限，系统更新后可能重置 |
@@ -11564,8 +11667,62 @@ struct WaitFreeCounter {
 | NUMA绑定 | 执行numactl --cpunodebind=0 --membind=0 ./app | 否 | 将应用绑定到特定NUMA节点，减少跨节点延迟 | 需结合numactl --show验证实际绑定结果 |
 
 
+**3. systemd 记账与日志**
+
+cgroup 资源记账在每次调度上多一次统计。交易单元关掉 Accounting，并用 `CPUAffinity` 钉核；OOM 用 `OOMScoreAdjust` 保交易进程，不必全局 `overcommit_memory=2`。journald 落盘会抢块设备，改成内存。
+
+```ini
+# /etc/systemd/system/lane.service
+[Service]
+CPUAffinity=2,3,6,7
+AllowedCPUs=2,3,6,7
+OOMScoreAdjust=-1000
+LimitMEMLOCK=infinity
+LimitRTPRIO=99
+```
+
+```ini
+# /etc/systemd/system.conf 的 [Manager]
+DefaultCPUAccounting=no
+DefaultBlockIOAccounting=no
+DefaultMemoryAccounting=no
+DefaultTasksAccounting=no
+```
+
+```ini
+# /etc/systemd/journald.conf.d/00-mem.conf
+[Journal]
+Storage=volatile
+RuntimeMaxUse=64M
+```
+
+
+**4. 虚拟化宿主抖动**
+
+共享云实例上，`isolcpus` 调尽之后 P99 仍可能冒几十微秒：那是 Hypervisor，不是 guest 调度器。
+
++ 敏感指令（`CPUID`、改 CR3）会 VM Exit，一次大约微秒级。
++ 同机其他租户刷 L3，guest 里没有 CAT 可切。
++ `%steal` 非零说明宿主把时间片分给了别人；Stop-Start 实例，让调度器换一台较空的宿主机。
++ guest 改不了 Uncore / PCIe ASPM；`idle=poll`、`intel_pstate=disable` 在没有 cpufreq sysfs 时是空操作。
++ 同区域多实例用 Cluster Placement Group，把 RTT 压在同一 ToR 上；跨机房的毫秒级延迟不是内核参数能补的。
+
+```shell
+mpstat 1
+# %steal 长期 0；偶尔 >0.5% 就换宿主机
+
+aws ec2 create-placement-group --group-name lane-cluster --strategy cluster
+```
+
 
 ### 33. 延迟测量（时钟周期）
+
+内核路径上的尾巴用 `rtla` 看隔离核噪声，不要只看 `handle()` 耗时。
+
+```shell
+sudo rtla osnoise run -c 2,3,6,7 -d 10s -q
+sudo rtla timerlat hist -c 2,3,6,7 -d 30s
+```
 
 1. **重要方法**
 
