@@ -314,6 +314,23 @@ lscpu -e=CPU,CORE,SOCKET
 taskset -c 8-15 ./strategy_engine
 ```
 
+The isolation list must take whole physical cores. Eight cloud vCPUs are often four cores × two SMT threads, siblings such as `0,4`, `1,5`, `2,6`, `3,7`. `isolcpus=4-7` looks like the upper half of the numbering; those IDs are the SMT twins of 0–3, so the trading cores still share L1/L2 and execution units with the OS.
+
++ `isolcpus` only stops the scheduler from placing tasks; it does not move your process. Pin with `taskset`, `pthread_setaffinity_np`, or systemd `CPUAffinity`.
++ `nohz_full`, `rcu_nocbs`, and `irqaffinity` must use the same whole-core sets. Do not write a consecutive range for convenience.
+
+```shell
+cat /sys/devices/system/cpu/cpu*/topology/thread_siblings_list | sort -u
+# e.g. 0,4  1,5  2,6  3,7
+# housekeeping 0,1,4,5 (two full cores); trading 2,3,6,7 (the other two)
+
+# kernel ≥ 5.9: domain,managed_irq also pulls managed IRQs off isolated CPUs
+GRUB_CMDLINE_LINUX_DEFAULT="isolcpus=domain,managed_irq,2,3,6,7 nohz_full=2,3,6,7 rcu_nocbs=2,3,6,7 irqaffinity=0,1,4,5"
+
+taskset -c 2,6 ./lane_alpha   # both siblings of one physical core to one engine
+taskset -c 3,7 ./lane_beta
+```
+
 
 **Turn off CPU power saving (C-States & P-States)**
 
@@ -482,6 +499,31 @@ cpupower frequency-info
 | `tuned`   Services | `sudo tuned-adm profile latency-performance` | Enable extreme low-latency configuration, turn off energy saving, optimize scheduling and interrupt handling |
 | `powertop --auto-tune` | `sudo powertop --auto-tune` | Automatically set all subsystems (CPU, disk, USB, etc.) to high-performance mode, suitable for performance stress testing |
 
+On a VM, BIOS frequency locks and `intel_idle.max_cstate=0`, `idle=poll`, `intel_pstate=disable` are often no-ops: a KVM guest has no cpufreq sysfs; frequency and deep C-states stay with the host. What the guest can still do is tell the kernel not to enter deep sleep.
+
++ Open `/dev/cpu_dma_latency` and write `0`. The hint lasts only while the fd is open, so keep one for the process lifetime.
++ `%steal` in `mpstat` is host preemption. `turbostat` C-states in the guest describe virtual CPUs.
+
+```cpp
+#include <cstdint>
+#include <fcntl.h>
+#include <unistd.h>
+
+struct DmaWakeHold {
+  int fd{-1};
+  explicit DmaWakeHold(std::int32_t usec = 0) {
+    fd = ::open("/dev/cpu_dma_latency", O_RDWR);
+    if (fd >= 0)
+      (void)::write(fd, &usec, sizeof(usec));
+  }
+  ~DmaWakeHold() {
+    if (fd >= 0)
+      ::close(fd);
+  }
+};
+
+static DmaWakeHold g_dma_wake_hold;
+```
 
 **NUMA topology of the system**
 
@@ -1089,23 +1131,32 @@ sudo sh -c 'echo 2 > /proc/irq/128/smp_affinity_list'
 
 **Distribute load**: For multi-queue devices (such as network cards), distribute the IRQ of each queue evenly to different CPU cores.
 
-**irqbalance**: Automatically manage interrupted load balancing, and adjust its behavior through the configuration file /etc/irqbalance.conf. This will override the fine manual control behavior above.
+**irqbalance**: Automatically manage interrupted load balancing, and adjust its behavior through the configuration file /etc/irqbalance.conf. This will override the fine manual control behavior above. From 1.9 it reads `/sys/devices/system/cpu/isolated` and can avoid those CPUs, but placements still rebalance periodically. To pin each NIC queue to a fixed housekeeping core, disable it and write `smp_affinity_list`. Below 1.9, disable it.
 
 **Usage scenario**: For the CPU core where the critical path is located, bind irrelevant interrupt requests to other cores to reduce the interrupt processing burden of the core.
 
 
-existAfter the CPU is bound, kernel threads (such as ksoftirqd, kworker) may still preempt the user-mode threads bound to the core, and clock interrupts and RCU callbacks will also cause overhead; and`isolcpus`,`nohz_full`,`rcu_nocbs`The combination of three parameters can solve this problem:
+After the CPU is bound, kernel threads (such as ksoftirqd, kworker) may still preempt the user-mode threads bound to the core, and clock interrupts and RCU callbacks will also cause overhead; and `isolcpus`, `nohz_full`, `rcu_nocbs` The combination of three parameters can solve this problem:
 
 1. `isolcpus`: Isolate the specified CPU from the kernel general scheduler, preventing most kernel threads and ordinary processes from running;
 2. `nohz_full`: Enable adaptive clockless mode on isolated cores to reduce/eliminate clock interruptions;
 3. `rcu_nocbs`: Offload RCU callbacks to non-isolated cores. The result is a near-exclusive, kernel-free "silent" operating environment for critical low-latency tasks.
 
-```shell
-# Modify GRUB configuration
-grub_cmdline="isolcpus=8-15 nohz_full=8-15 rcu_nocbs=8-15"
+`isolcpus` does not control IRQs. Unbound interrupts can still land on trading cores. The boot parameter `irqaffinity=` pins default affinity to housekeeping CPUs; `isolcpus=managed_irq,...` also pulls managed device IRQs off the isolated set.
 
-# Effective configuration
+RPS/RFS steer softirq toward the core that runs the application thread. When the NIC already splits queues with RSS, turning on RFS pulls packet processing onto isolated cores and undoes isolation.
+
+```shell
+# isolation CPUs and default IRQ CPUs must not overlap
+grub_cmdline="isolcpus=domain,managed_irq,2,3,6,7 nohz_full=2,3,6,7 rcu_nocbs=2,3,6,7 irqaffinity=0,1,4,5"
+
 grub2-mkconfig -o /boot/grub2/grub.cfg
+
+cat /sys/devices/system/cpu/isolated
+cat /proc/irq/default_smp_affinity
+
+# do not enable: steers softirq onto isolated cores
+# echo 32768 > /proc/sys/net/core/rps_sock_flow_entries
 ```
 
 [Interrupt and Process Binding — Red Hat RHEL for Real Time Tuning Guide](https://docs.redhat.com/zh-cn/documentation/red_hat_enterprise_linux_for_real_time/7/html/tuning_guide/Interrupt_and_process_binding)
@@ -3865,6 +3916,18 @@ private:
 }
 
 // wire.log(lit("px="), px, lit("qty="), qty, order_id);
+```
+
+The async thread still dirties pages, triggers read-ahead, and hits the I/O scheduler. Put the log file on tmpfs so the hot path never touches a block device. tmpfs charges actual use; rotate and cap it, or a full ramdisk can stall the machine.
+
++ `/tmp` is often already systemd `tmp.mount`; do not add a second copy in fstab.
++ Keep `noatime,nodiratime` on the root fs. Do not turn off write barriers on cloud disks; the hot path should not touch the volume.
+
+```shell
+# /etc/fstab
+tmpfs  /mnt/logmem  tmpfs  defaults,noatime,nodiratime,size=4G  0 0
+
+# Common::WireLogger wire("/mnt/logmem/wire.bin");
 ```
 
 The core idea of Micro-Batching is to process multiple messages into one batch to reduce the fixed cost of single processing (message processing and calculation). However, batch processing that is too large will increase latency, and batch processing that is too small will not be able to take advantage of the batch size. Therefore, this processor **dynamically adjusts batch size** and automatically selects the optimal strategy based on the current message queue backlog:
@@ -11504,13 +11567,15 @@ Tip: Use high bit stealing to carry the state, and the read operation also parti
 
 | Configuration items | Operation methods | Whether BIOS/reboot is required | Core purpose | Precautions |
 | --- | --- | --- | --- | --- |
-| isolcpus=8-15 | Modify /etc/default/grub, add parameters in GRUB_CMDLINE_LINUX, and execute update-grub | Yes | Isolate the specified CPU from the kernel general scheduler to avoid common process preemption | The isolated core range must be consistent with nohz_full and rcu_nocbs |
+| isolcpus=8-15 | Modify /etc/default/grub, add parameters in GRUB_CMDLINE_LINUX, and execute update-grub | Yes | Isolate the specified CPU from the kernel general scheduler to avoid common process preemption | Isolate whole physical cores; keep the set aligned with nohz_full and rcu_nocbs; still pin trading threads with taskset / CPUAffinity |
+| irqaffinity=0-7 | Same as the above GRUB configuration method | Yes | Pin default IRQ affinity to housekeeping CPUs so unbound interrupts do not hit isolated cores | Must not overlap isolcpus; isolcpus does not control IRQs |
 | nohz_full=8-15 | Same as the above GRUB configuration method | Yes | Disable timer tick in the isolated core to eliminate periodic clock interrupts | Make sure CONFIG_NO_HZ_FULL=y is turned on when compiling the kernel |
 | rcu_nocbs=8-15 | Same as the above GRUB configuration method | Yes | Offload the RCU callback tasks of the isolated core to the non-isolated core to avoid interference with RCU operations | nohz_full will imply rcu_nocbs, but explicit configuration is safer |
 | preempt=full | Same as the above GRUB configuration method | Yes | Enable fully preemptive kernel to reduce the non-preemptible area in the kernel path | The kernel needs to support CONFIG_PREEMPT_FULL |
 | threadirqs | Same as the above GRUB configuration method | Yes | Allocate soft interrupts to multiple CPU cores to avoid single core overload | May increase interrupt processing overhead, need to be weighed |
 | nowatchdog | Same as the above GRUB configuration method | Yes | Disable the kernel watchdog service to eliminate the interference caused by the watchdog process | Assess risk in production; often used with nmi_watchdog=0 |
-| tsc=reliable | Same as the above GRUB configuration method | Yes | Mark TSC as a reliable time source to reduce the delay caused by time source verification | Only Intel CPU is recommended to add it, AMD CPU is selected according to the actual situation |
+| clocksource=tsc | Same as the above GRUB configuration method | Yes | Force the TSC clocksource so clock_gettime does not fall back to an unstable source | On cloud, set `clocksource=tsc` first; do not add `tsc=reliable` on Nitro up front, it can hide host clock scaling—add it only if dmesg reports an unstable TSC |
+| tsc=reliable | Same as the above GRUB configuration method | Yes | Mark TSC as a reliable time source to reduce the delay caused by time source verification | Common on bare-metal Intel; on a VM read dmesg before forcing the flag |
 | mce=off | Same as the above GRUB configuration method | Yes | Disable machine check exception handling to avoid interruptions triggered by MCE | Only used in test environments, disabling it in production environments may cause hardware failures to be undetectable |
 | ipv6.disable=1 | Same as the above GRUB configuration method | Yes | Disable the IPv6 protocol stack to reduce the consumption of IPv6-related kernel tasks | If the system needs to use IPv6, this parameter needs to be deleted |
 | audit=0 | Same as the above GRUB configuration method | Yes | Disable the audit subsystem to eliminate the uncertainty overhead caused by auditd and audit backlog processing | Can significantly reduce context switching and soft interrupts |
@@ -11532,9 +11597,32 @@ Tip: Use high bit stealing to carry the state, and the read operation also parti
 | net.ipv4.tcp_nodelay=1 | Same as above sysctl configuration | No | Disable Nagle algorithm, small data packets are sent immediately, reducing delay | Suitable for scenarios where small data packets are frequently transmitted, such as RPC calls |
 | net.ipv4.tcp_congestion_control=bbr | Same as above sysctl configuration | No | Enable BBR congestion control algorithm to reduce network delay | Requires kernel version ≥ 4.9 and supports BBR |
 | net.core.busy_read=50 | Same as the above sysctl configuration | No | Enable busy polling mode to reduce delays in the network receiving path | Increase CPU usage, need to be adjusted according to load |
-| net.core.busy_poll=50 | Same as sysctl configuration above | No | Low-latency busy polling timeout for polling and selection | Better when used with busy_read |
+| net.core.busy_poll=50 | Same as sysctl configuration above | No | Low-latency busy polling timeout for polling and selection | Must be non-zero together with busy_read, and the socket must set SO_BUSY_POLL or the global sysctl does nothing |
 | net.ipv4.tcp_fastopen=3 | Same as above sysctl configuration | No | Enable TCP fast open to reduce three-way handshake delay | Suitable for short connection scenarios, such as financial transactions |
+| net.ipv4.tcp_slow_start_after_idle=0 | Same as above sysctl configuration | No | Do not collapse cwnd into slow start after an idle gap | Typical for long-lived market-data and order sockets |
+| net.ipv4.tcp_no_metrics_save=1 | Same as above sysctl configuration | No | Do not reuse historical TCP metrics so an old cwnd does not drag a new connection | More visible when connections are rebuilt often |
+| net.ipv4.udp_rmem_min / udp_wmem_min | Same as above sysctl configuration | No | Raise the UDP socket buffer floor so bursts drop fewer packets | Do not inflate rmem_default; that adds TCP bufferbloat |
+| Do not enable RPS/RFS | Keep rps_sock_flow_entries=0 | No | When RSS already splits queues, RFS pulls softirq onto isolated cores | Consider RPS only if queue count is below housekeeping CPUs and the mask excludes isolated cores |
 
+
+`busy_poll` / `busy_read` are only ceilings. The socket still needs `SO_BUSY_POLL`, or the path stays interrupt-driven. `TCP_NODELAY` disables Nagle; `TCP_NOTSENT_LOWAT` caps unsent bytes. Do not raise `rmem_default` into tens of megabytes.
+
+```cpp
+#include <netinet/tcp.h>
+#include <sys/socket.h>
+
+void tune_md_sock(int fd) {
+  int one = 1;
+  int poll_us = 50;
+  int buf = 16 * 1024 * 1024;
+  int lowat = 16384;
+  setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+  setsockopt(fd, SOL_SOCKET, SO_BUSY_POLL, &poll_us, sizeof(poll_us));
+  setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &buf, sizeof(buf));
+  setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &buf, sizeof(buf));
+  setsockopt(fd, IPPROTO_TCP, TCP_NOTSENT_LOWAT, &lowat, sizeof(lowat));
+}
+```
 
 **2. Memory optimization**
 
@@ -11548,6 +11636,20 @@ Tip: Use high bit stealing to carry the state, and the read operation also parti
 | Disable KSM (Kernel Samepage Merging) | Execute echo 0 > /sys/kernel/mm/ksm/run; or systemctl stop ksm && systemctl disable ksm | No | Disable memory page deduplication to eliminate unpredictable memory access latencies caused by TLB shootdowns and page table locking during the merging process | KSM only operates on pages opted in via madvise(..., MADV_MERGEABLE); primarily affects virtualization workloads; to unmerge existing shared pages use echo 2 > /sys/kernel/mm/ksm/run |
 
 
+**3. Disk I/O**
+
+The hot path must not issue synchronous disk writes. NVMe (including cloud EBS) uses blk-mq; an elevator scheduler adds no value. Turn off read-ahead and merging for small random I/O. `nr_requests` is read-only on some newer kernels (`EINVAL` if written). Do not disable write barriers on cloud volumes; durability depends on them.
+
+```shell
+# /etc/udev/rules.d/60-nvme-quiet.rules
+ACTION=="add|change", KERNEL=="nvme[0-9]n[0-9]", ATTR{queue/scheduler}="none", ATTR{queue/read_ahead_kb}="0", ATTR{queue/nomerges}="2"
+
+# root mount: skip atime; relax journal commit; keep barriers
+# UUID=... / ext4 rw,noatime,nodiratime,commit=60,data=ordered 0 1
+
+cat /sys/block/nvme0n1/queue/scheduler
+cat /sys/block/nvme0n1/queue/read_ahead_kb
+```
 
 
 **Service and Interruption Layer Optimization**
@@ -11556,8 +11658,9 @@ Tip: Use high bit stealing to carry the state, and the read operation also parti
 
 | Configuration items | Operation methods | Whether BIOS/reboot is required | Core purpose | Precautions |
 | --- | --- | --- | --- | --- |
-| Stop and disable irqbalance | Execute systemctl stop irqbalance and systemctl disable irqbalance | No | Prevent irqbalance from automatically adjusting interrupt binding to ensure stable interrupt affinity configuration | Interrupt binding needs to be maintained manually after disabling |
+| Stop and disable irqbalance | Execute systemctl stop irqbalance and systemctl disable irqbalance | No | Prevent irqbalance from automatically adjusting interrupt binding to ensure stable interrupt affinity configuration | From 1.9 it reads isolated and may be kept, but placements still move; disable and write smp_affinity_list to pin queues |
 | Network card interrupt binding | Execute echo <mask> > /proc/irq/<irq_num>/smp_affinity | No | Bind network card interrupts to non-critical cores to avoid interfering with key tasks | Regularly check /proc/interrupts to prevent new device interrupts from being accidentally bound |
+| Low-latency interrupt coalescing | Execute ethtool -C nic0 adaptive-rx off rx-usecs 0 tx-usecs 0; ethtool -G nic0 rx 8192 | No | Disable adaptive coalescing so packets are delivered immediately; grow rings to the driver cap | Larger rx-usecs is for throughput; some cloud NICs cap TX below RX, and TSO may be fixed-off; oneshot units need After=network-online.target or ethtool runs before the NIC exists |
 | Interrupt merge configuration | Execute ethtool -C ethX rx-usecs 100 rx-frames 64 adaptive-rx off | No | Reduce the frequency of network card interrupts and reduce CPU interrupt processing overhead | May increase network latency, need to be adjusted according to traffic scenarios |
 | Disable interrupt balancing | Execute echo 0 > /proc/irq/<irq_num>/smp_affinity_list | No | Prevent interrupts from migrating between multiple CPU cores and maintain interrupt processing stability | Each critical interrupt needs to be configured separately |
 | Work queue restrictions | Execute echo 0-7 > /sys/devices/virtual/workqueue/cpumask | No | Restrict all general work queues to run only on non-critical CPUs to prevent kernel worker preemption | Root privileges are required and may be reset after system updates |
@@ -11596,8 +11699,62 @@ Tip: Use high bit stealing to carry the state, and the read operation also parti
 | NUMA binding | Execute numactl --cpunodebind=0 --membind=0 ./app | No | Bind the application to a specific NUMA node to reduce cross-node delay | Use numactl --show to verify the actual binding result |
 
 
+**3. systemd accounting and journal**
+
+cgroup resource accounting adds a probe on every schedule. Turn Accounting off on the trading unit and pin with `CPUAffinity`. Prefer `OOMScoreAdjust` on that unit over a global `overcommit_memory=2`. journald writes contend for the block device; keep it in memory.
+
+```ini
+# /etc/systemd/system/lane.service
+[Service]
+CPUAffinity=2,3,6,7
+AllowedCPUs=2,3,6,7
+OOMScoreAdjust=-1000
+LimitMEMLOCK=infinity
+LimitRTPRIO=99
+```
+
+```ini
+# [Manager] in /etc/systemd/system.conf
+DefaultCPUAccounting=no
+DefaultBlockIOAccounting=no
+DefaultMemoryAccounting=no
+DefaultTasksAccounting=no
+```
+
+```ini
+# /etc/systemd/journald.conf.d/00-mem.conf
+[Journal]
+Storage=volatile
+RuntimeMaxUse=64M
+```
+
+
+**4. Hypervisor jitter**
+
+On a shared cloud instance, P99 can still jump tens of microseconds after `isolcpus` is exhausted: that is the hypervisor, not the guest scheduler.
+
++ Sensitive instructions (`CPUID`, CR3 updates) cause a VM Exit, typically microseconds.
++ Other tenants on the same socket flush L3; the guest has no CAT slice to claim.
++ Non-zero `%steal` means the host gave the timeslice away. Stop-Start the instance so it lands on a quieter host.
++ The guest cannot lock Uncore or PCIe ASPM. `idle=poll` and `intel_pstate=disable` are no-ops when cpufreq sysfs is missing.
++ Use a Cluster Placement Group for multi-instance RTT on the same ToR. Cross-datacenter milliseconds are not a kernel-parameter problem.
+
+```shell
+mpstat 1
+# %steal should stay 0; if it spikes above 0.5%, move the instance
+
+aws ec2 create-placement-group --group-name lane-cluster --strategy cluster
+```
+
 
 ### 33. Latency measurement (clock cycles)
+
+Use `rtla` for OS noise on isolated cores. Do not judge tails from `handle()` time alone.
+
+```shell
+sudo rtla osnoise run -c 2,3,6,7 -d 10s -q
+sudo rtla timerlat hist -c 2,3,6,7 -d 30s
+```
 
 1. **Important method**
 
