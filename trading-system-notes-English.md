@@ -4689,6 +4689,29 @@ struct EmployeeData {
 };
 ```
 
+Pure SoA jumps across long arrays when a loop needs several fields of the same record. AoSoA cuts the data into SIMD-width tiles that are SoA inside the tile: one field stays contiguous, and the fields of one record stay nearby.
+
+```cpp
+#include <immintrin.h>
+
+enum { kLaneW = 8 }; // AVX2: 256 bit / 32 bit
+
+struct TickLane {
+  alignas(32) float px[kLaneW];
+  alignas(32) float qty[kLaneW];
+  alignas(32) float ts[kLaneW];
+};
+
+void step_px(TickLane* lanes, int n_lane, float dt) {
+  const __m256 vdt = _mm256_set1_ps(dt);
+  for (int i = 0; i < n_lane; ++i) {
+    __m256 px = _mm256_load_ps(lanes[i].px);
+    __m256 qty = _mm256_load_ps(lanes[i].qty);
+    _mm256_store_ps(lanes[i].px, _mm256_fmadd_ps(qty, vdt, px));
+  }
+}
+```
+
 
 **AoS View + SoA Storage**
 
@@ -6586,6 +6609,21 @@ void clear_matrix_tiled(Matrix m) {
 ```
 
 **Vectorization Adaptation**: The inner loop after blocking (processing 16x16 blocks) can directly call GPU kernel functions or CPU SIMD instructions (such as AVX-512) to process multiple elements in the block at once, significantly improving throughput.
+
+Recursive divide-and-conquer does not need a hard-coded `TILE_SIZE`. A subproblem that fits the current cache level is finished there, then folded back; the same code walks L1, then L2, then L3. That is not pointer-chasing recursion with a deep call stack: the latter breaks locality, the former nests the working set into the cache hierarchy.
+
+```cpp
+float fold_px(const float* px, int lo, int hi) {
+  if (hi - lo <= 64) {
+    float s = 0.f;
+    for (int i = lo; i < hi; ++i)
+      s += px[i];
+    return s;
+  }
+  const int mid = lo + (hi - lo) / 2;
+  return fold_px(px, lo, mid) + fold_px(px, mid, hi);
+}
+```
 
 
 **3. Loop Fission: Split complex loops and support parallelism**
@@ -9519,6 +9557,51 @@ bool has_errors(__m256 result) {
 }
 ```
 
+Reshape the problem so a vector unit can eat it, then pick instructions. Intrinsics cannot fix a hostile layout.
+
++ Replace branches with compare, evaluate both sides, then select with a mask. AND/OR is often cheaper than `blendv` when the chosen values are constants. `min`/`max` already are branchless selects.
++ `pshufb` is a 16-way 4-bit table lookup. AVX2 `_mm256_shuffle_epi8` does not cross the 128-bit lane; duplicate a 16-byte table in both lanes.
++ AVX2 gather is not faster than scalar loads on older cores; scatter arrives with AVX-512. For irregular output use `mask_compressstore` instead of a permute table.
++ Denormals can stretch one vector add to tens of cycles. Turn on FTZ/DAZ on the hot path.
+
+```cpp
+#include <immintrin.h>
+#include <pmmintrin.h>
+#include <xmmintrin.h>
+
+void clip_spread(__m256 mid, __m256 ask, __m256* out) {
+  __m256 hi = _mm256_mul_ps(mid, _mm256_set1_ps(1.01f));
+  __m256 lo = _mm256_mul_ps(mid, _mm256_set1_ps(0.99f));
+  __m256 over = _mm256_cmp_ps(ask, hi, _CMP_GT_OQ);
+  *out = _mm256_blendv_ps(ask, hi, over);
+  *out = _mm256_max_ps(*out, lo);
+}
+
+__m128i nibble_popcnt(__m128i v) {
+  const __m128i lut = _mm_setr_epi8(0,1,1,2,1,2,2,3,1,2,2,3,2,3,3,4);
+  const __m128i n0f = _mm_set1_epi8(0x0F);
+  __m128i lo = _mm_and_si128(v, n0f);
+  __m128i hi = _mm_and_si128(_mm_srli_epi16(v, 4), n0f);
+  return _mm_add_epi8(_mm_shuffle_epi8(lut, lo), _mm_shuffle_epi8(lut, hi));
+}
+
+int keep_pos(const int* in, int* out, int n) {
+  int w = 0;
+  for (int i = 0; i + 16 <= n; i += 16) {
+    __m512i v = _mm512_loadu_si512(in + i);
+    __mmask16 m = _mm512_cmpgt_epi32_mask(v, _mm512_setzero_si512());
+    _mm512_mask_compressstoreu_epi32(out + w, m, v);
+    w += _mm_popcnt_u32(m);
+  }
+  return w;
+}
+
+void flush_denormals() {
+  _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
+  _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
+}
+```
+
 
 **Using Vector classes**
 
@@ -11649,6 +11732,29 @@ ACTION=="add|change", KERNEL=="nvme[0-9]n[0-9]", ATTR{queue/scheduler}="none", A
 
 cat /sys/block/nvme0n1/queue/scheduler
 cat /sys/block/nvme0n1/queue/read_ahead_kb
+```
+
+`write()` is write-back by default: it updates the page cache and returns before the bytes hit the device. A crash drops dirty pages that have not been flushed; call `fdatasync` when durability matters. Background flush starts at `dirty_background_ratio`; the writer blocks at `dirty_ratio`, which is a common source of post-session replay spikes.
+
+A sequential scan of history can evict hot pages from the active LRU. Drop the range with `POSIX_FADV_DONTNEED` when done; use `POSIX_FADV_RANDOM` to turn off readahead on random reads; use `SEQUENTIAL` only for large sequential files. If the process already has a buffer pool, open with `O_DIRECT` so the data is not cached twice.
+
+```cpp
+#include <fcntl.h>
+#include <unistd.h>
+
+void replay_tape(int fd, off_t off, off_t len) {
+  posix_fadvise(fd, off, len, POSIX_FADV_SEQUENTIAL);
+  // ... sequential read
+  posix_fadvise(fd, off, len, POSIX_FADV_DONTNEED);
+}
+
+int open_book_direct(const char* path) {
+  return ::open(path, O_RDWR | O_DIRECT);
+}
+
+void persist_fill(int fd) {
+  fdatasync(fd);
+}
 ```
 
 
