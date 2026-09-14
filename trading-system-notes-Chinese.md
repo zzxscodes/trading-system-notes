@@ -4697,6 +4697,29 @@ struct EmployeeData {
 };
 ```
 
+纯 SoA 扫同一条记录的多个字段时，会在几条长数组之间跳。AoSoA 按 SIMD 宽度切块，块内仍是 SoA：同一字段连续，同一条记录的字段也挨在一起。
+
+```cpp
+#include <immintrin.h>
+
+enum { kLaneW = 8 }; // AVX2: 256 bit / 32 bit
+
+struct TickLane {
+  alignas(32) float px[kLaneW];
+  alignas(32) float qty[kLaneW];
+  alignas(32) float ts[kLaneW];
+};
+
+void step_px(TickLane* lanes, int n_lane, float dt) {
+  const __m256 vdt = _mm256_set1_ps(dt);
+  for (int i = 0; i < n_lane; ++i) {
+    __m256 px = _mm256_load_ps(lanes[i].px);
+    __m256 qty = _mm256_load_ps(lanes[i].qty);
+    _mm256_store_ps(lanes[i].px, _mm256_fmadd_ps(qty, vdt, px));
+  }
+}
+```
+
 
 **AoS 视图 + SoA 存储**
 
@@ -6581,6 +6604,21 @@ void clear_matrix_tiled(Matrix m) {
 ```
 
 **向量化适配**：分块后的内层循环（处理 16x16 块）可直接调用 GPU 核函数或 CPU SIMD 指令（如 AVX-512），一次性处理块内多个元素，吞吐量提升显著。
+
+递归分治不必写死 `TILE_SIZE`。子问题小到能进当前这一级缓存就停在那里算完，再拼回去；同一套代码会依次吃到 L1、L2、L3。这和指针乱跳、深度很大的调用栈递归不是一回事：后者打散局部性，前者让工作集自然嵌进缓存层级。
+
+```cpp
+float fold_px(const float* px, int lo, int hi) {
+  if (hi - lo <= 64) {
+    float s = 0.f;
+    for (int i = lo; i < hi; ++i)
+      s += px[i];
+    return s;
+  }
+  const int mid = lo + (hi - lo) / 2;
+  return fold_px(px, lo, mid) + fold_px(px, mid, hi);
+}
+```
 
 
 **3. 循环分裂（Loop Fission）：拆分复杂循环，支持并行**
@@ -9486,6 +9524,51 @@ bool has_errors(__m256 result) {
 }
 ```
 
+SIMD 先把问题变成向量能吃的形状，再选指令。布局不对，intrinsic 补不回来。
+
++ 分支改成比较、两侧都算、再用 mask 选。常量结果用 and/or 往往比 `blendv` 便宜。`min`/`max` 本身就是无分支选择。
++ `pshufb` 是 16 路 4-bit 查表；AVX2 的 `_mm256_shuffle_epi8` 不跨 128-bit lane，16 字节表要在两个 lane 各放一份。
++ AVX2 gather 在老微架构上并不比拆成标量加载快；scatter 要到 AVX-512。不规则输出用 `mask_compressstore`，不要手写 permute 表。
++ 次正规数会把一条向量加拖到几十周期。热路径打开 FTZ/DAZ。
+
+```cpp
+#include <immintrin.h>
+#include <pmmintrin.h>
+#include <xmmintrin.h>
+
+void clip_spread(__m256 mid, __m256 ask, __m256* out) {
+  __m256 hi = _mm256_mul_ps(mid, _mm256_set1_ps(1.01f));
+  __m256 lo = _mm256_mul_ps(mid, _mm256_set1_ps(0.99f));
+  __m256 over = _mm256_cmp_ps(ask, hi, _CMP_GT_OQ);
+  *out = _mm256_blendv_ps(ask, hi, over);
+  *out = _mm256_max_ps(*out, lo);
+}
+
+__m128i nibble_popcnt(__m128i v) {
+  const __m128i lut = _mm_setr_epi8(0,1,1,2,1,2,2,3,1,2,2,3,2,3,3,4);
+  const __m128i n0f = _mm_set1_epi8(0x0F);
+  __m128i lo = _mm_and_si128(v, n0f);
+  __m128i hi = _mm_and_si128(_mm_srli_epi16(v, 4), n0f);
+  return _mm_add_epi8(_mm_shuffle_epi8(lut, lo), _mm_shuffle_epi8(lut, hi));
+}
+
+int keep_pos(const int* in, int* out, int n) {
+  int w = 0;
+  for (int i = 0; i + 16 <= n; i += 16) {
+    __m512i v = _mm512_loadu_si512(in + i);
+    __mmask16 m = _mm512_cmpgt_epi32_mask(v, _mm512_setzero_si512());
+    _mm512_mask_compressstoreu_epi32(out + w, m, v);
+    w += _mm_popcnt_u32(m);
+  }
+  return w;
+}
+
+void flush_denormals() {
+  _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
+  _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
+}
+```
+
 
 **使用向量类（Vector classes）**
 
@@ -11617,6 +11700,29 @@ ACTION=="add|change", KERNEL=="nvme[0-9]n[0-9]", ATTR{queue/scheduler}="none", A
 
 cat /sys/block/nvme0n1/queue/scheduler
 cat /sys/block/nvme0n1/queue/read_ahead_kb
+```
+
+`write()` 默认走回写：先改页缓存就返回，数据还没上盘。崩溃会丢尚未回写的脏页，要持久化就 `fdatasync`。脏页到 `dirty_background_ratio` 后台刷；到 `dirty_ratio` 写进程卡住，这就是盘后回放突然毛刺的常见来源。
+
+顺序扫历史会挤掉活跃 LRU 里的热页。扫完用 `POSIX_FADV_DONTNEED` 丢掉；随机读用 `POSIX_FADV_RANDOM` 关预读；顺序大文件才 `SEQUENTIAL`。应用自己有缓冲池时开 `O_DIRECT`，避免和页缓存各存一份。
+
+```cpp
+#include <fcntl.h>
+#include <unistd.h>
+
+void replay_tape(int fd, off_t off, off_t len) {
+  posix_fadvise(fd, off, len, POSIX_FADV_SEQUENTIAL);
+  // ... 顺序读完
+  posix_fadvise(fd, off, len, POSIX_FADV_DONTNEED);
+}
+
+int open_book_direct(const char* path) {
+  return ::open(path, O_RDWR | O_DIRECT);
+}
+
+void persist_fill(int fd) {
+  fdatasync(fd);
+}
 ```
 
 
