@@ -29922,6 +29922,40 @@ void on_venue_note(std::unordered_map<uint64_t, OpenOrder>& book, uint64_t seq,
 }
 ```
 
+A status push can arrive before the insert confirmation. When the system-id index does not yet hold the order, find it in the unconfirmed set by the short reference. Once the system id is non-empty, move the order into that index so later fills hit by system id. If the system id is still empty and the status is already terminal, write it back as a reject, release the open prelock, and drop it from the unconfirmed set. When the local order is already fully filled, a second fully-filled status is discarded.
+
+```cpp
+struct EarlyBook {
+    std::unordered_map<uint64_t, OpenOrder*> by_ref;
+    std::unordered_map<uint64_t, OpenOrder*> by_sys;
+};
+
+void on_status_before_ack(EarlyBook& book, uint64_t ref, uint64_t sys, OrdState st) {
+    OpenOrder* row = nullptr;
+    if (sys != 0) {
+        auto known = book.by_sys.find(sys);
+        if (known != book.by_sys.end()) row = known->second;
+    }
+    if (!row) {
+        auto it = book.by_ref.find(ref);
+        if (it == book.by_ref.end()) return;
+        row = it->second;
+        if (sys != 0) {
+            book.by_sys.emplace(sys, row);
+            book.by_ref.erase(it);
+        } else if (ended(st)) {
+            release_open_hold(*row);
+            publish(*row);
+            book.by_ref.erase(it);
+            return;
+        }
+    }
+    if (row->state == OrdState::Filled && st == OrdState::Filled) return;
+    row->state = st;
+    publish(*row);
+}
+```
+
 
 ### 21. Linked-order metadata
 
@@ -30222,6 +30256,48 @@ bool risk_try_pass(WireOrder& o, /*ledger*/ auto& books) {
 }
 ```
 
+Open and close do not share one quota. An open prelocks position size and a cancel credit; a close takes neither. A successful cancel returns only the unfilled size of an open order. A reject that is already terminal before a system id exists also returns the cancel credit, because that cancel never reached the exchange. A full fill returns the cancel credit. A fill from outside the account updates the risk view and does not return the cancel credit. When the risk reply passes its time budget, treat it as a failed open or a failed cancel and erase the waiting item, so the hot path stops polling that order.
+
+```cpp
+struct OpenQuota {
+    int64_t lots_left{};
+    int cancel_left{};
+};
+
+struct Inflight {
+    uint64_t id{};
+    bool opening{false};
+    int64_t qty{};
+    int64_t done{};
+    int64_t asked_ms{};
+};
+
+void on_cancel_settled(OpenQuota& q, const Inflight& w, bool rejected_here) {
+    if (!w.opening) return;
+    const int64_t rest = w.qty - w.done;
+    if (rest > 0) q.lots_left += rest;
+    if (rejected_here) q.cancel_left += 1;
+}
+
+void on_all_done(OpenQuota& q, const Inflight& w, bool outside) {
+    if (outside) return;
+    if (w.opening && w.done >= w.qty) q.cancel_left += 1;
+}
+
+void drop_late(std::unordered_map<uint64_t, Inflight>& wait, int64_t now, int64_t budget_ms,
+               OpenQuota& q) {
+    for (auto it = wait.begin(); it != wait.end();) {
+        if (now - it->second.asked_ms <= budget_ms) {
+            ++it;
+            continue;
+        }
+        if (it->second.opening) q.lots_left += it->second.qty - it->second.done;
+        else q.cancel_left += 1;
+        it = wait.erase(it);
+    }
+}
+```
+
 
 ### 29. Market-data gateway: full-sub filter, field patches, night-session day
 
@@ -30272,6 +30348,43 @@ void warm_latest_quote(Ring& quotes, Algo& algo) {
     const long end = quotes.end_index();
     if (end <= 0) return;
     algo.on_quote(quotes.at(end - 1)); // feed latest band right after create
+}
+```
+
+Prices in a vendor snapshot are integers, and the scale is fixed at compile time. Divide once while writing the shared slot; the ring stores doubles, and the strategy does not scale again. One callback passes a base pointer and a count. Walk the pointer forward and fill each slot in place, without allocating a temporary array first. A tick whose tag marks a session or trading-state change is skipped. Three times are stored apart: the exchange business time, the server time passed into the callback, and the local time taken on entry.
+
+```cpp
+constexpr int64_t kPxScale = 10000;
+
+struct WireSnap {
+    int64_t px;
+    int64_t qty;
+    int exch_tod;
+    char tag;
+};
+
+struct BookSlot {
+    double px;
+    int64_t qty;
+    int64_t exch_us;
+    int64_t desk_us;
+    int64_t recv_us;
+};
+
+template<class Ring>
+void take_batch(Ring& ring, const WireSnap* first, int n, int desk_tod, int64_t recv_us) {
+    const WireSnap* p = first;
+    const WireSnap* end = first + n;
+    for (; p != end; ++p) {
+        if (p->tag == 'S') continue;
+        ring.write([&](BookSlot& s) {
+            s.px = static_cast<double>(p->px) / static_cast<double>(kPxScale);
+            s.qty = p->qty;
+            s.exch_us = p->exch_tod;
+            s.desk_us = desk_tod;
+            s.recv_us = recv_us;
+        });
+    }
 }
 ```
 

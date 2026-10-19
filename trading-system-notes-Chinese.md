@@ -29913,6 +29913,40 @@ void on_venue_note(std::unordered_map<uint64_t, OpenOrder>& book, uint64_t seq,
 }
 ```
 
+状态推送可以早于报单确认。系统号索引里还没有这张单时，用短引用在未确认集合里找。系统号已经非空，就把单挪进系统号索引，后面的成交按系统号命中。系统号仍为空且状态已是终态，按拒单写回并释放开仓预锁，再从未确认集合删除。本地单已经是全部成交时，再来一条全部成交的状态直接丢掉。
+
+```cpp
+struct EarlyBook {
+    std::unordered_map<uint64_t, OpenOrder*> by_ref;
+    std::unordered_map<uint64_t, OpenOrder*> by_sys;
+};
+
+void on_status_before_ack(EarlyBook& book, uint64_t ref, uint64_t sys, OrdState st) {
+    OpenOrder* row = nullptr;
+    if (sys != 0) {
+        auto known = book.by_sys.find(sys);
+        if (known != book.by_sys.end()) row = known->second;
+    }
+    if (!row) {
+        auto it = book.by_ref.find(ref);
+        if (it == book.by_ref.end()) return;
+        row = it->second;
+        if (sys != 0) {
+            book.by_sys.emplace(sys, row);
+            book.by_ref.erase(it);
+        } else if (ended(st)) {
+            release_open_hold(*row);
+            publish(*row);
+            book.by_ref.erase(it);
+            return;
+        }
+    }
+    if (row->state == OrdState::Filled && st == OrdState::Filled) return;
+    row->state = st;
+    publish(*row);
+}
+```
+
 
 ### 21. 关联订单元数据
 
@@ -30213,6 +30247,48 @@ bool risk_try_pass(WireOrder& o, /*ledger*/ auto& books) {
 }
 ```
 
+开仓和平仓不要共用同一笔额度。开仓预锁持仓数量和撤单次数，平仓不占。撤单成功只把开仓单里尚未成交的数量还回去。系统号还没生成、状态已经终态的拒单，撤单次数也要还，这次并没有打到交易所。全部成交后退还撤单次数。账户外的成交只改风险视图，不退撤单次数。风控应答超过时限，按开仓失败或撤单失败处理，并把等待项从缓存删掉，热路径上不再轮询这张单。
+
+```cpp
+struct OpenQuota {
+    int64_t lots_left{};
+    int cancel_left{};
+};
+
+struct Inflight {
+    uint64_t id{};
+    bool opening{false};
+    int64_t qty{};
+    int64_t done{};
+    int64_t asked_ms{};
+};
+
+void on_cancel_settled(OpenQuota& q, const Inflight& w, bool rejected_here) {
+    if (!w.opening) return;
+    const int64_t rest = w.qty - w.done;
+    if (rest > 0) q.lots_left += rest;
+    if (rejected_here) q.cancel_left += 1;
+}
+
+void on_all_done(OpenQuota& q, const Inflight& w, bool outside) {
+    if (outside) return;
+    if (w.opening && w.done >= w.qty) q.cancel_left += 1;
+}
+
+void drop_late(std::unordered_map<uint64_t, Inflight>& wait, int64_t now, int64_t budget_ms,
+               OpenQuota& q) {
+    for (auto it = wait.begin(); it != wait.end();) {
+        if (now - it->second.asked_ms <= budget_ms) {
+            ++it;
+            continue;
+        }
+        if (it->second.opening) q.lots_left += it->second.qty - it->second.done;
+        else q.cancel_left += 1;
+        it = wait.erase(it);
+    }
+}
+```
+
 
 ### 29. 行情网关接入：全订过滤、字段补丁与夜盘交易日
 
@@ -30263,6 +30339,43 @@ void warm_latest_quote(Ring& quotes, Algo& algo) {
     const long end = quotes.end_index();
     if (end <= 0) return;
     algo.on_quote(quotes.at(end - 1)); // 创建后立刻吃最新一档
+}
+```
+
+供应商快照里的价格是整数，比例在编译期固定。只在写入共享槽时除一次，环里存双精度，策略侧不再缩放。一次回调给出首地址和条数，指针逐条后移，就地填槽，不先分配临时数组。逐笔里表示交易状态或会话切换的记录直接跳过。三个时间分开写：交易所业务时间、回调参数里的服务器时间、进入函数时取的本机时间。
+
+```cpp
+constexpr int64_t kPxScale = 10000;
+
+struct WireSnap {
+    int64_t px;
+    int64_t qty;
+    int exch_tod;
+    char tag;
+};
+
+struct BookSlot {
+    double px;
+    int64_t qty;
+    int64_t exch_us;
+    int64_t desk_us;
+    int64_t recv_us;
+};
+
+template<class Ring>
+void take_batch(Ring& ring, const WireSnap* first, int n, int desk_tod, int64_t recv_us) {
+    const WireSnap* p = first;
+    const WireSnap* end = first + n;
+    for (; p != end; ++p) {
+        if (p->tag == 'S') continue;
+        ring.write([&](BookSlot& s) {
+            s.px = static_cast<double>(p->px) / static_cast<double>(kPxScale);
+            s.qty = p->qty;
+            s.exch_us = p->exch_tod;
+            s.desk_us = desk_tod;
+            s.recv_us = recv_us;
+        });
+    }
 }
 ```
 
