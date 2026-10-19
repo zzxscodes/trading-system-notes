@@ -19343,6 +19343,49 @@ During maintenance, data or policies can be updated individually without disrupt
 1. Separation model: Session state machine: connection, login, heartbeat, disconnection and reconnection, sequence recovery. Order status machine: order placement, confirmation, partial transaction, order cancellation, order rejection, and completion.
 2. Reconnection recovery strategy: Restore the session and sequence first, then restore the in-transit order status. Within the recovery window, the policy only allows downgrade actions (for example, only withdraw but not suspend).
 
+After a drop, clear the connected flag with a memory fence before sleeping and connecting again, so orders are not sent on the stale session. The wait in seconds is three times the current step plus the lower bound. Past the upper bound, the step returns to 1 and the wait returns to the lower bound. A lower bound of 4 seconds or less, and an upper bound of 5 seconds or less, are discarded. A private flow cannot be unsubscribed. A cancel request is rewritten to resume from the last sequence. An unchanged communication phase keeps the local flow file. A changed phase zeros the count and rebuilds the file. If the phase is not newer than the one in the file, back the file up first.
+
+```cpp
+struct Link {
+    int step{};
+    bool up{false};
+    uint16_t phase{};
+    uint32_t flow_count{};
+};
+
+int next_wait(Link& k, int lo, int hi) {
+    if (lo <= 4) lo = 5;
+    if (hi <= 5) hi = 6;
+    const int gap = k.step * 3 + lo;
+    if (gap > hi) {
+        k.step = 1;
+        return lo;
+    }
+    k.step += 1;
+    return gap;
+}
+
+void on_drop(Link& k, int lo, int hi) {
+    k.up = false;
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+    sleep_sec(next_wait(k, lo, hi));
+}
+
+enum class Replay : uint8_t { Restart, Resume, Quick, Off };
+
+Replay private_replay(Replay r) {
+    return r == Replay::Off ? Replay::Resume : r;
+}
+
+void on_phase(Link& k, uint16_t phase, bool older) {
+    if (phase == k.phase) return;
+    if (older) backup_flow();
+    k.phase = phase;
+    k.flow_count = 0;
+    reopen_flow();
+}
+```
+
 
 1.5 Idempotent and out-of-order return processing of order state machine
 
@@ -30567,6 +30610,24 @@ void take_batch(Ring& ring, const WireSnap* first, int n, int desk_tod, int64_t 
             s.recv_us = recv_us;
         });
     }
+}
+```
+
+A market-data link has defaults for the heartbeat interval, the missed-heartbeat count, and the per-packet timeout while opening. A zero argument falls back to 10 seconds, 2 misses, and 30 seconds. Heartbeat send mode accepts only 0, 1, and 2. A larger value is cleared to 0. Write these before the connection opens. The callback thread does not change them.
+
+```cpp
+struct MdLink {
+    int beat_sec{10};
+    int miss_max{2};
+    int open_sec{30};
+    int beat_mode{};
+};
+
+void set_link(MdLink& m, int kind, int v) {
+    if (kind == 0) m.beat_sec = v == 0 ? 10 : v;
+    else if (kind == 1) m.miss_max = v == 0 ? 2 : v;
+    else if (kind == 2) m.open_sec = v == 0 ? 30 : v;
+    else if (kind == 4) m.beat_mode = v > 2 ? 0 : v;
 }
 ```
 

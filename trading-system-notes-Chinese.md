@@ -19335,6 +19335,49 @@ MarketMakingSystem (根状态)
 
     在恢复窗口内，策略只允许降级动作（例如只撤不挂）。
 
+断线之后先用内存屏障清掉已连接标记，再睡再连，避免旧会话上继续发单。等待秒数等于三倍当前档加上下限，超过上限就把档回到 1、等待回到下限。下限不大于 4 秒、上限不大于 5 秒的配置直接丢掉。私有流不允许取消订阅，传入取消会被改成从上次序号续传。通信时段号不变就留着本地流文件。时段号变了先把条数清零再重建文件；时段号不比文件里的新，就先备份再重建。
+
+```cpp
+struct Link {
+    int step{};
+    bool up{false};
+    uint16_t phase{};
+    uint32_t flow_count{};
+};
+
+int next_wait(Link& k, int lo, int hi) {
+    if (lo <= 4) lo = 5;
+    if (hi <= 5) hi = 6;
+    const int gap = k.step * 3 + lo;
+    if (gap > hi) {
+        k.step = 1;
+        return lo;
+    }
+    k.step += 1;
+    return gap;
+}
+
+void on_drop(Link& k, int lo, int hi) {
+    k.up = false;
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+    sleep_sec(next_wait(k, lo, hi));
+}
+
+enum class Replay : uint8_t { Restart, Resume, Quick, Off };
+
+Replay private_replay(Replay r) {
+    return r == Replay::Off ? Replay::Resume : r;
+}
+
+void on_phase(Link& k, uint16_t phase, bool older) {
+    if (phase == k.phase) return;
+    if (older) backup_flow();
+    k.phase = phase;
+    k.flow_count = 0;
+    reopen_flow();
+}
+```
+
 
 1.5 订单状态机的幂等与乱序回报处理
 1.幂等处理原则
@@ -30558,6 +30601,24 @@ void take_batch(Ring& ring, const WireSnap* first, int n, int desk_tod, int64_t 
             s.recv_us = recv_us;
         });
     }
+}
+```
+
+行情链路的心跳间隔、丢失心跳次数和建连单包超时都有默认值。传入 0 时分别落到 10 秒、2 次和 30 秒。心跳发送方式只接受 0、1、2，更大的值被清成 0。这些值在打开连接前写好，回调线程里不再改。
+
+```cpp
+struct MdLink {
+    int beat_sec{10};
+    int miss_max{2};
+    int open_sec{30};
+    int beat_mode{};
+};
+
+void set_link(MdLink& m, int kind, int v) {
+    if (kind == 0) m.beat_sec = v == 0 ? 10 : v;
+    else if (kind == 1) m.miss_max = v == 0 ? 2 : v;
+    else if (kind == 2) m.open_sec = v == 0 ? 30 : v;
+    else if (kind == 4) m.beat_mode = v > 2 ? 0 : v;
 }
 ```
 
