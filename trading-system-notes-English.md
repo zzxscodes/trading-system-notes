@@ -1641,6 +1641,35 @@ struct alignas(CACHE_LINE_SIZE) CacheLineAligned : public T {
 // This method is more concise and ensures that the structure is aligned in memory to meet the cache line size requirements.
 ```
 
+A helper core that writes results into its own L1 leaves those lines Modified. When the main core harvests them, a local miss snoops the helper and flushes the dirty line: tens of nanoseconds to read, more if the main core then writes. Keep intermediate state on the helper; send back only a small hit list. For lines that must move, the helper issues `clwb` after the store so the shared L3 already has the data and the helper keeps its copy. `clflush` would invalidate the line and miss on the next use.
+
+```cpp
+#include <atomic>
+#include <cstdint>
+#include <immintrin.h>
+
+struct FillNote {
+  alignas(64) std::atomic<std::uint32_t> ready{0};
+  std::uint32_t hits{0};
+  std::uint32_t ids[8];
+};
+
+void helper_publish(FillNote* note, std::uint32_t n, const std::uint32_t* ids) {
+  note->hits = n;
+  for (std::uint32_t i = 0; i < n && i < 8; ++i)
+    note->ids[i] = ids[i];
+  _mm_clwb(note);
+  note->ready.store(1, std::memory_order_release);
+}
+
+bool main_take(FillNote* note, std::uint32_t* hits) {
+  if (note->ready.load(std::memory_order_acquire) == 0)
+    return false;
+  *hits = note->hits;
+  return true;
+}
+```
+
 **Inverse use: dry-run dual copy + false-sharing warm-up + branchless index**
 
 For multi-threaded contention, use alignment to isolate unrelated variables on the same cache line. Single-threaded dry-run can flip this: keep two copies per hot-path counter, `[0]` live and `[1]` dry-run placeholder, **deliberately no** `alignas` so both sit on one cache line; a dry-run write to `[1]` loads `[0]` into cache without changing it. Cast `bool dry_run` to `0/1` for branchless indexing; dry-run runs everything except the actual order submit. Suitable for single-threaded warm-up of L1/L2 cache; no impact on multi-threaded L3 cache.
@@ -8103,6 +8132,29 @@ Modern processors (SSE and subsequent instruction sets) provide specific instruc
 
 **Memory-Level Parallelism (MLP) and Pointer Chasing Optimization**: The CPU's Line Fill Buffers (LFB, Intel terminology) / Miss Status Holding Registers (MSHR) can track multiple outstanding cache miss requests simultaneously (modern Intel cores have ~12 LFB entries), allowing independent memory accesses to proceed in parallel. However, pointer chasing patterns (e.g. linked list traversal `node = node->next`) create serial dependency chains — each load must wait for the previous load to complete before obtaining the next address, leaving only 1 outstanding miss in the LFB and wasting the remaining parallel slots. Optimization approaches: **Batch Prefetching (Software Pipelining)** — issue prefetch instructions for the next N nodes while processing the current node, converting serial dependencies into parallel requests; **Data Structure Restructuring** — replace linked lists with array indices or cache-friendly structures like B+ trees; **Interleaved Processing** — interleave multiple independent data streams in the same loop (e.g. traversing two independent trees simultaneously), allowing cache misses from different streams to fill LFB entries in parallel ([whichisfaster.dev/async](https://whichisfaster.dev/q/async.html)).
 
+Independent objects still serialize if each iteration loads, computes, then moves on. Touch a small batch of addresses first so misses enter the LFB, then compute. Do not issue more outstanding misses than the core's LFB slots (a dozen or so). A batch of tens fills the buffer and stalls the core.
+
+```cpp
+struct ContractSlot {
+  float px;
+  float iv;
+  float fee;
+  char pad[52];
+};
+
+void price_batch(ContractSlot* slots, int n, float spot) {
+  enum { D = 4 };
+  float hold[D];
+  for (int i = 0; i < n; i += D) {
+    const int m = n - i < D ? n - i : D;
+    for (int k = 0; k < m; ++k)
+      hold[k] = slots[i + k].px;
+    for (int k = 0; k < m; ++k)
+      slots[i + k].fee = hold[k] * spot * slots[i + k].iv;
+  }
+}
+```
+
 **Nontemporal Writes**
 
 + Solve the high overhead problem of cache misses in write operations
@@ -8184,6 +8236,40 @@ void process_array(int *data, int n) {
 ```
 
 The key here is to choose the right `PREFETCH_DISTANCE`. This distance needs to be large enough to ensure that the CPU processes the current `i` arrive `i+PREFETCH_DISTANCE` between elements, the memory prefetch operation has enough time to complete.
+
+A normal `load` has a destination register. Until the data arrives it sits in the ROB and can stall issue. `_mm_prefetch` has no destination; it retires as soon as it is sent, a note to the memory controller. A dummy `load` used as a prefetch brings the stall back. Contract metadata reused on the next tick wants `_MM_HINT_T0`; `NTA` evicts those hot lines too soon.
+
+A one-shot event line (the current tick in a ring) looks hot to hardware and crowds out contract metadata. After the math, evict it with `clflushopt`. That instruction also occupies an LFB slot; do not fire it when the buffer is already full.
+
+```cpp
+#include <cstdint>
+#include <immintrin.h>
+
+struct TickWire {
+  std::uint64_t seq;
+  float px;
+  char body[176];
+};
+
+void price_ahead(ContractSlot* slots, int n) {
+  enum { Ahead = 4 };
+  for (int i = 0; i < n; ++i) {
+    if (i + Ahead < n) {
+      const char* p = reinterpret_cast<const char*>(&slots[i + Ahead]);
+      _mm_prefetch(p, _MM_HINT_T0);
+      _mm_prefetch(p + 64, _MM_HINT_T0);
+    }
+    slots[i].fee = slots[i].px * slots[i].iv;
+  }
+}
+
+void retire_tick(TickWire* e) {
+  auto* p = reinterpret_cast<char*>(e);
+  _mm_clflushopt(p);
+  _mm_clflushopt(p + 64);
+  _mm_clflushopt(p + 128);
+}
+```
 
 
 **Intel C++ Compiler (ICL/ICX)**
