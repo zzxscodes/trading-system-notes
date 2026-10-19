@@ -19862,6 +19862,58 @@ int main() {
   ID: 1001 | Active: No
 ```
 
+撮合结果只由本分片已定序的命令和内存快照决定。计算过程不读墙钟，不靠容器的无序遍历，也不去远端查余额。业务时间是命令里的字段。同一条命令可以算出多条事件，对外只发布一份。第二份执行只用来对内容，内容不一致就停掉这个分片，不取先写成功的那份。四条水位分开记：已执行、已落盘、已发布、已投影。连续落盘水位没到，不对外发布。快照只用来缩短重放起点，不能据此删掉事件。网关超时只表示结果未知，先按命令号查询，再决定要不要重放。
+
+```cpp
+struct Cmd {
+    uint64_t lsn{};
+    uint64_t cmd_id{};
+    int64_t logic_us{};
+    uint8_t kind{};
+};
+
+struct Ev {
+    uint64_t lsn{};
+    uint64_t entity{};
+    uint8_t kind{};
+    int64_t qty{};
+};
+
+struct Marks {
+    uint64_t applied{};
+    uint64_t durable{};
+    uint64_t published{};
+    uint64_t projected{};
+};
+
+bool same_fact(const Ev& a, const Ev& b) {
+    return a.lsn == b.lsn && a.entity == b.entity && a.kind == b.kind && a.qty == b.qty;
+}
+
+void apply_one(const Cmd& c, Marks& m, bool first_writer, const Ev* prior) {
+    Ev ev = fold(c); // 只用命令和本地快照
+    if (!first_writer) {
+        if (!prior || !same_fact(*prior, ev)) {
+            isolate_shard();
+            return;
+        }
+    } else {
+        persist(ev);
+    }
+    m.applied = c.lsn;
+    m.durable = c.lsn;
+    if (m.durable == m.applied) {
+        publish(ev);
+        m.published = c.lsn;
+    }
+}
+
+bool replay_after_timeout(uint64_t cmd_id) {
+    if (find_event(cmd_id)) return false;
+    return resubmit(cmd_id);
+}
+```
+
 
 ### 2. 订单簿设计
 **方案1：向量订单簿 (Vector-based LOB)**
