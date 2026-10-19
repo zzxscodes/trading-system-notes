@@ -104,6 +104,7 @@ English version：[https://github.com/zzxscodes/trading-system-notes/blob/main/t
   - [28. 订单检查计数信号量与两阶段账本预锁](#28-订单检查计数信号量与两阶段账本预锁)
   - [29. 行情网关接入：全订过滤、字段补丁与夜盘交易日](#29-行情网关接入全订过滤字段补丁与夜盘交易日)
   - [30. 交易桥短单号、异步配额与算法容器时钟扇出](#30-交易桥短单号异步配额与算法容器时钟扇出)
+  - [31. 报单入库前的开平与方向规整](#31-报单入库前的开平与方向规整)
 - [业务逻辑设计-计算](#业务逻辑设计-计算)
   - [1. 对数收益率(百分比非对称性)](#1-对数收益率百分比非对称性)
   - [2. 市场趋势和波动率的状态变化](#2-市场趋势和波动率的状态变化)
@@ -12727,6 +12728,50 @@ public:
 //     std::memcpy(m.symbol, sym, sizeof(m.symbol));
 //     m.qty = qty;
 // });
+```
+
+委托、资金这类环的长度来自配置，常见值是十二万、六万，不是 2 的幂，位与会算错槽。下标用除法余数。空环上的游标可能是负数哨兵，C++ 里负数取模的符号跟被除数走，要先改成非负余数再取槽。
+
+单写路径把定长报文拷进槽，派生字段在槽里改完，再把 `head` 加一。读者只比较自己的游标和 `head`。多写只在拷贝加发布这一小段上加自旋锁，锁不住消费循环。行情通常只有一个写者，这段锁会把十档拷贝的时间送去别的核。
+
+```cpp
+template<class T>
+class ModuloRing {
+    std::vector<T> buf_;
+    volatile long head_{0};
+    uint64_t cap_{};
+    Spin head_lock_{};
+
+    static long wrap(long i, uint64_t cap) {
+        long r = i % static_cast<long>(cap);
+        return r < 0 ? r + static_cast<long>(cap) : r;
+    }
+public:
+    explicit ModuloRing(uint64_t cap) : buf_(cap), cap_(cap) {}
+
+    template<class Fill>
+    void write(Fill&& fill) {
+        T& slot = buf_[wrap(head_, cap_)];
+        fill(slot);   // 槽内字段完整之后才发布
+        head_++;
+    }
+
+    template<class Fill>
+    void write_locked(Fill&& fill) {
+        Guard g(head_lock_);
+        write(std::forward<Fill>(fill));
+    }
+
+    template<class Fn>
+    long drain(long cursor, Fn&& fn) {
+        const long end = head_;
+        while (cursor < end) {
+            fn(buf_[wrap(cursor, cap_)]);
+            ++cursor;
+        }
+        return cursor;
+    }
+};
 ```
 
 
@@ -29585,6 +29630,49 @@ struct StrategyHost {
 };
 ```
 
+**9. 浅槽按标的、深槽给全市场，策略只扫已订阅名字**
+
+每个标的的十档环只留很短的一段，给按名字取最近若干笔的策略用。全市场扫描另走一条深得多的混合环，避免把十几万个浅槽都扫一遍。行情进程更新某个标的时，按编译期已知的长度整段拷进该标的的槽，在槽里改掉不能拿零价当对手价的字段，再把 `head` 加一。策略循环里每个已订阅名字自带游标，没订阅的名字不读。循环先收订单应答，再收这些行情，然后才是算法单、资金和持仓。进程名只在启动时做一次 32 位哈希，过滤和认槽都用这个整数。名字到槽号的表在第一次注册时写入共享索引，之后写请求直接定位，不再线性找空槽。心跳放在同一条循环里，间隔未到就返回，不为监控再开线程。
+
+```cpp
+struct BookTick {
+    char raw[640]{};
+    double last_px{};
+    double ask1{};
+    double bid1{};
+    double touch{}; // 槽内派生，发布前写完
+};
+
+class NameBook {
+    ModuloRing<BookTick>* mine_{nullptr};
+    double prev_close_{0};
+public:
+    void on_tick(const BookTick& in) {
+        mine_->write([&](BookTick& slot) {
+            slot = in;
+            double ref = slot.last_px > 1e-8 ? slot.last_px : prev_close_;
+            if (slot.ask1 <= 0) slot.touch = slot.bid1 > 0 ? slot.bid1 : ref;
+            else if (slot.bid1 <= 0) slot.touch = slot.ask1;
+            else slot.touch = ref;
+        });
+    }
+};
+
+class DeskLoop {
+    std::unordered_map<std::string, long> quote_cur_;
+    uint32_t self_id_{}; // hash(process name), once at start
+public:
+    void spin() {
+        drain_order_acks();
+        for (auto& [name, cur] : quote_cur_)
+            cur = book_of(name)->drain(cur, [&](const BookTick& t) { on_quote(name, t); });
+        drain_algo();
+        drain_cash_pos();
+        if (beat_due()) emit_beat(self_id_);
+    }
+};
+```
+
 
 + **注意**：共享内存布局一变，所有进程都要按版本对齐；订阅者超过 64 个时，确认位图要加宽；本系统自算账本与柜台查询不一致时，要有明确的对账办法。
 
@@ -30167,6 +30255,82 @@ std::vector<SlicePlan> collapse_sparse(const std::vector<SlicePlan>& min_slices,
     }
     if (cur.planned_qty) out.push_back(cur);
     return out;
+}
+```
+
+母单的执行时长不能用墙钟直接相加。午休、夜盘结束到日盘开盘都不算交易时间。时段表分三层：标的覆盖品种，品种覆盖市场。当天展开成开盘集合竞价、若干段连续竞价、收盘集合竞价。给母单加一段时长时，只在连续竞价区间里往前走，碰到区间尾就跳到下一段起点。两个时点相减同样跳过空隙，否则分时切片会把午休算进去。夜盘时点属于下一个交易日，周一凌晨再按节假日表回退，不能直接用自然日。
+
+```cpp
+struct SessionSpan { int64_t begin_ms; int64_t end_ms; };
+
+int64_t add_session_ms(int64_t t, int64_t dur, const SessionSpan* cont, int n) {
+    if (dur <= 0 || n <= 0) return t;
+    int i = 0;
+    while (i < n && t >= cont[i].end_ms) ++i;
+    if (i == n) return cont[n - 1].end_ms;
+    if (t < cont[i].begin_ms) t = cont[i].begin_ms;
+    while (dur > 0 && i < n) {
+        const int64_t room = cont[i].end_ms - t;
+        if (dur <= room) return t + dur;
+        dur -= room;
+        if (++i == n) return cont[n - 1].end_ms;
+        t = cont[i].begin_ms;
+    }
+    return t;
+}
+```
+
+
+### 31. 报单入库前的开平与方向规整
+
+现货没有平今、平昨。入库前若标的类型仍未知，用代码解析一次并写回，后面不再拆字符串。股票、债券、基金、指数把开平强制写成开仓，避免柜台收到无意义的平今。期货和期权才保留平仓：多数交易所把平今、平昨收成普通平仓；少数把今仓和昨仓分开结算的交易所，把普通平仓改成平昨，今仓留给平今。方向由买卖方向映射。映射失败时在写环之前填错误码和短文案，单不到柜台。价格已经给出、价格类型仍未知时，收成限价，避免算法单带着未知价型出去。
+
+```cpp
+enum class Off : int8_t { Open, Close, CloseToday, CloseYday };
+enum class Kind : int8_t { Cash, Future, Option, Other };
+enum class CloseStyle : int8_t { Plain, SplitYday };
+
+struct Ticket {
+    Kind kind{Kind::Other};
+    Off off{Off::Open};
+    int side{0};
+    int dir{0};
+    int px_kind{-1};
+    double px{0};
+    int err{0};
+    char err_text[32]{};
+    char symbol[32]{};
+};
+
+Kind kind_of(const char* symbol);
+CloseStyle close_style_of(const char* symbol);
+
+int side_to_dir(int side) {
+    if (side == 1) return 0; // buy
+    if (side == 2) return 1; // sell
+    return -1;
+}
+
+bool normalize_ticket(Ticket& t) {
+    if (t.kind == Kind::Other)
+        t.kind = kind_of(t.symbol);
+    if (t.kind == Kind::Cash) {
+        t.off = Off::Open;
+    } else if (t.off == Off::Close || t.off == Off::CloseToday || t.off == Off::CloseYday) {
+        if (close_style_of(t.symbol) == CloseStyle::SplitYday && t.off == Off::Close)
+            t.off = Off::CloseYday;
+        else if (close_style_of(t.symbol) == CloseStyle::Plain)
+            t.off = Off::Close;
+    }
+    t.dir = side_to_dir(t.side);
+    if (t.dir < 0) {
+        t.err = 11;
+        std::snprintf(t.err_text, sizeof(t.err_text), "bad side");
+        return false;
+    }
+    if (t.px_kind < 0 && t.px > 1e-6)
+        t.px_kind = 0;
+    return true;
 }
 ```
 

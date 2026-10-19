@@ -104,6 +104,7 @@
   - [28. Order check-count semaphore and two-phase ledger prelock](#28-order-check-count-semaphore-and-two-phase-ledger-prelock)
   - [29. Market-data gateway: full-sub filter, field patches, night-session day](#29-market-data-gateway-full-sub-filter-field-patches-night-session-day)
   - [30. Short venue refs, async quota, and algo-container clock fanout](#30-short-venue-refs-async-quota-and-algo-container-clock-fanout)
+  - [31. Normalize offset and direction before the order hits the ring](#31-normalize-offset-and-direction-before-the-order-hits-the-ring)
 - [Business logic design-calculation](#business-logic-design-calculation)
   - [1. Log return (percent asymmetry)](#1-log-return-percent-asymmetry)
   - [2. Changes in state of market trends and volatility](#2-changes-in-state-of-market-trends-and-volatility)
@@ -12756,6 +12757,50 @@ public:
 //     std::memcpy(m.symbol, sym, sizeof(m.symbol));
 //     m.qty = qty;
 // });
+```
+
+Order and cash rings take their length from configuration. Values such as 120000 or 60000 are not powers of two, so a bitmask indexes the wrong slot. Use the division remainder. A cursor on an empty ring may be a negative sentinel, and C++ modulo keeps the sign of the dividend, so convert that remainder to non-negative before indexing.
+
+On a single-writer path, copy the fixed message into the slot, patch derived fields there, then increment `head`. A reader only compares its cursor with `head`. Multiple writers take a spinlock only around that copy-and-publish, not around the consume loop. Market data usually has one writer; holding the lock across a ten-level copy exports that latency to other cores.
+
+```cpp
+template<class T>
+class ModuloRing {
+    std::vector<T> buf_;
+    volatile long head_{0};
+    uint64_t cap_{};
+    Spin head_lock_{};
+
+    static long wrap(long i, uint64_t cap) {
+        long r = i % static_cast<long>(cap);
+        return r < 0 ? r + static_cast<long>(cap) : r;
+    }
+public:
+    explicit ModuloRing(uint64_t cap) : buf_(cap), cap_(cap) {}
+
+    template<class Fill>
+    void write(Fill&& fill) {
+        T& slot = buf_[wrap(head_, cap_)];
+        fill(slot);   // publish only after the slot is complete
+        head_++;
+    }
+
+    template<class Fill>
+    void write_locked(Fill&& fill) {
+        Guard g(head_lock_);
+        write(std::forward<Fill>(fill));
+    }
+
+    template<class Fn>
+    long drain(long cursor, Fn&& fn) {
+        const long end = head_;
+        while (cursor < end) {
+            fn(buf_[wrap(cursor, cap_)]);
+            ++cursor;
+        }
+        return cursor;
+    }
+};
 ```
 
 
@@ -29594,6 +29639,49 @@ struct StrategyHost {
 };
 ```
 
+**9. Shallow per-name books, one deep tape for the whole market**
+
+Each name keeps a short ten-level ring for strategies that only want the latest prints on names they follow. A market-wide scan uses a much deeper mixed ring, so nobody walks hundreds of thousands of shallow slots. When the market-data process updates a name, it copies a compile-time byte count into that name’s slot, patches fields that must not treat a zero price as the opposite side, then increments `head`. The strategy loop stores a cursor per subscribed name and does not read anything else. The loop drains order acks first, then those quotes, then algo tickets, cash, and positions. The process name is hashed to 32 bits once at startup; filters and slot lookup use that integer. The name-to-slot table is written into the shared index on first registration, so later writes address the slot directly instead of scanning for a free one. The heartbeat stays on this same loop and returns immediately until its interval elapses, with no extra monitor thread.
+
+```cpp
+struct BookTick {
+    char raw[640]{};
+    double last_px{};
+    double ask1{};
+    double bid1{};
+    double touch{}; // derived in-slot, before publish
+};
+
+class NameBook {
+    ModuloRing<BookTick>* mine_{nullptr};
+    double prev_close_{0};
+public:
+    void on_tick(const BookTick& in) {
+        mine_->write([&](BookTick& slot) {
+            slot = in;
+            double ref = slot.last_px > 1e-8 ? slot.last_px : prev_close_;
+            if (slot.ask1 <= 0) slot.touch = slot.bid1 > 0 ? slot.bid1 : ref;
+            else if (slot.bid1 <= 0) slot.touch = slot.ask1;
+            else slot.touch = ref;
+        });
+    }
+};
+
+class DeskLoop {
+    std::unordered_map<std::string, long> quote_cur_;
+    uint32_t self_id_{}; // hash(process name), once at start
+public:
+    void spin() {
+        drain_order_acks();
+        for (auto& [name, cur] : quote_cur_)
+            cur = book_of(name)->drain(cur, [&](const BookTick& t) { on_quote(name, t); });
+        drain_algo();
+        drain_cash_pos();
+        if (beat_due()) emit_beat(self_id_);
+    }
+};
+```
+
 
 + **Caveats**: every process must agree on shared-memory layout version; more than 64 subscribers need a wider confirm map; disagreement between local books and broker queries needs an explicit reconciliation policy.
 
@@ -30176,6 +30264,82 @@ std::vector<SlicePlan> collapse_sparse(const std::vector<SlicePlan>& min_slices,
     }
     if (cur.planned_qty) out.push_back(cur);
     return out;
+}
+```
+
+A parent order’s execution length is not wall-clock addition. Lunch, and the gap from the night close to the day open, are not trading time. The session table has three layers: a name overrides its product, and a product overrides the market. The day expands into an opening auction, several continuous segments, and a closing auction. Adding a duration walks only inside continuous segments and jumps to the next segment’s start at each end. Subtracting two timestamps skips the same gaps, otherwise time slices count lunch. A night-session timestamp belongs to the next trade date; early Monday is rolled back with the holiday table, not the calendar date.
+
+```cpp
+struct SessionSpan { int64_t begin_ms; int64_t end_ms; };
+
+int64_t add_session_ms(int64_t t, int64_t dur, const SessionSpan* cont, int n) {
+    if (dur <= 0 || n <= 0) return t;
+    int i = 0;
+    while (i < n && t >= cont[i].end_ms) ++i;
+    if (i == n) return cont[n - 1].end_ms;
+    if (t < cont[i].begin_ms) t = cont[i].begin_ms;
+    while (dur > 0 && i < n) {
+        const int64_t room = cont[i].end_ms - t;
+        if (dur <= room) return t + dur;
+        dur -= room;
+        if (++i == n) return cont[n - 1].end_ms;
+        t = cont[i].begin_ms;
+    }
+    return t;
+}
+```
+
+
+### 31. Normalize offset and direction before the order hits the ring
+
+Cash names have no close-today or close-yesterday. If the instrument kind is still unknown, parse it from the symbol once and store it; later inserts do not split the string again. Stocks, bonds, funds, and indexes force offset to open, so the broker never sees a meaningless close-today. Futures and options keep close semantics: most venues collapse close-today and close-yesterday into a plain close; venues that settle today’s inventory apart from yesterday’s rewrite a plain close into close-yesterday and leave today’s lots for the close-today fee. Direction is mapped from buy or sell. A failed map fills an error code and a short text before the ring write, and the ticket never reaches the broker. When a price is present and the price kind is still unknown, snap the kind to limit so an algo ticket does not leave with an unset price kind.
+
+```cpp
+enum class Off : int8_t { Open, Close, CloseToday, CloseYday };
+enum class Kind : int8_t { Cash, Future, Option, Other };
+enum class CloseStyle : int8_t { Plain, SplitYday };
+
+struct Ticket {
+    Kind kind{Kind::Other};
+    Off off{Off::Open};
+    int side{0};
+    int dir{0};
+    int px_kind{-1};
+    double px{0};
+    int err{0};
+    char err_text[32]{};
+    char symbol[32]{};
+};
+
+Kind kind_of(const char* symbol);
+CloseStyle close_style_of(const char* symbol);
+
+int side_to_dir(int side) {
+    if (side == 1) return 0; // buy
+    if (side == 2) return 1; // sell
+    return -1;
+}
+
+bool normalize_ticket(Ticket& t) {
+    if (t.kind == Kind::Other)
+        t.kind = kind_of(t.symbol);
+    if (t.kind == Kind::Cash) {
+        t.off = Off::Open;
+    } else if (t.off == Off::Close || t.off == Off::CloseToday || t.off == Off::CloseYday) {
+        if (close_style_of(t.symbol) == CloseStyle::SplitYday && t.off == Off::Close)
+            t.off = Off::CloseYday;
+        else if (close_style_of(t.symbol) == CloseStyle::Plain)
+            t.off = Off::Close;
+    }
+    t.dir = side_to_dir(t.side);
+    if (t.dir < 0) {
+        t.err = 11;
+        std::snprintf(t.err_text, sizeof(t.err_text), "bad side");
+        return false;
+    }
+    if (t.px_kind < 0 && t.px > 1e-6)
+        t.px_kind = 0;
+    return true;
 }
 ```
 
