@@ -19871,6 +19871,58 @@ int main() {
   ID: 1001 | Active: No
 ```
 
+A match result is decided only by the sequenced commands of this shard and the in-memory snapshot. The calculation does not read the wall clock, does not depend on unordered container walks, and does not query a remote balance. Business time is a field on the command. One command may produce several events, and only one copy is published. A second execution only compares content. If the content differs, stop the shard. Do not keep whichever write landed first. Four marks stay separate: applied, durable, published, and projected. Nothing is published until the durable mark is continuous. A snapshot only shortens the replay start. It does not authorize deleting the events. A gateway timeout means the result is unknown. Look up the command id before deciding whether to replay it.
+
+```cpp
+struct Cmd {
+    uint64_t lsn{};
+    uint64_t cmd_id{};
+    int64_t logic_us{};
+    uint8_t kind{};
+};
+
+struct Ev {
+    uint64_t lsn{};
+    uint64_t entity{};
+    uint8_t kind{};
+    int64_t qty{};
+};
+
+struct Marks {
+    uint64_t applied{};
+    uint64_t durable{};
+    uint64_t published{};
+    uint64_t projected{};
+};
+
+bool same_fact(const Ev& a, const Ev& b) {
+    return a.lsn == b.lsn && a.entity == b.entity && a.kind == b.kind && a.qty == b.qty;
+}
+
+void apply_one(const Cmd& c, Marks& m, bool first_writer, const Ev* prior) {
+    Ev ev = fold(c); // command and local snapshot only
+    if (!first_writer) {
+        if (!prior || !same_fact(*prior, ev)) {
+            isolate_shard();
+            return;
+        }
+    } else {
+        persist(ev);
+    }
+    m.applied = c.lsn;
+    m.durable = c.lsn;
+    if (m.durable == m.applied) {
+        publish(ev);
+        m.published = c.lsn;
+    }
+}
+
+bool replay_after_timeout(uint64_t cmd_id) {
+    if (find_event(cmd_id)) return false;
+    return resubmit(cmd_id);
+}
+```
+
 
 ### 2. Order book design
 **Option 1: Vector-based LOB**
