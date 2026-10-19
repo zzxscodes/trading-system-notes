@@ -12720,6 +12720,22 @@ void parse_market_data(snapShotStruct* snap, int64_t recv_ts) {
 }
 ```
 
+The counter login reply carries the server date and time. Do not treat the whole gap between local milliseconds and server milliseconds as clock skew. Keep half of it, and leave the other half to the round trip. After that offset is stored in one integer, a revised timestamp on the hot path is a local add or subtract. The counter is not asked for the time again.
+
+```cpp
+struct DeskClock {
+    int64_t skew_ms{};
+};
+
+void sample_skew(DeskClock& c, int64_t local_ms, int64_t desk_ms) {
+    c.skew_ms = (desk_ms - local_ms) / 2;
+}
+
+int64_t revised_ms(const DeskClock& c, int64_t local_ms) {
+    return local_ms + c.skew_ms;
+}
+```
+
 
 ### 35. In-place ring writes to avoid large-object copies
 
@@ -12802,6 +12818,41 @@ public:
         return cursor;
     }
 };
+```
+
+Appends on a counter private flow do not take the flow lock. The high 16 bits of the sequence select a page of 65536 slots, and the low 16 bits select the slot. The slot stores a pointer and a length. The body is not copied into the index. When the memory window is full, drop the oldest record before writing. A spill onto the durable flow underneath stays lock-free. The reader thread is woken with a signal, so the append path does not take a mutex.
+
+```cpp
+struct FlowSlot {
+    void* body;
+    int len;
+};
+
+struct FlowWin {
+    static constexpr uint32_t kPage = 65536;
+    FlowSlot* pages[20480]{};
+    uint32_t tail{};
+    uint32_t head{};
+    uint32_t window{};
+    bool spill{false};
+    int reader{-1};
+};
+
+FlowSlot& claim(FlowWin& w) {
+    if (w.window != 0 && w.tail - w.head >= w.window) ++w.head;
+    const uint32_t i = w.tail++;
+    const uint32_t page = i >> 16;
+    if (!w.pages[page]) w.pages[page] = new FlowSlot[FlowWin::kPage];
+    return w.pages[page][i & (FlowWin::kPage - 1)];
+}
+
+void push_flow(FlowWin& w, void* body, int len) {
+    FlowSlot& s = claim(w);
+    s.body = body;
+    s.len = len;
+    if (w.spill) spill_under(w, w.tail - 1);
+    if (w.reader >= 0) pthread_kill(w.reader, SIGUSR1);
+}
 ```
 
 

@@ -12691,6 +12691,22 @@ void parse_market_data(snapShotStruct* snap, int64_t recv_ts) {
 }
 ```
 
+柜台登录应答里带服务器日期和时间。本地毫秒和服务器毫秒的差不要整段当成时钟偏差，只取一半，另一半留给链路往返。偏移写进一个整数之后，热路径取修正时间只做一次本地毫秒加减，不再向柜台问时间。
+
+```cpp
+struct DeskClock {
+    int64_t skew_ms{};
+};
+
+void sample_skew(DeskClock& c, int64_t local_ms, int64_t desk_ms) {
+    c.skew_ms = (desk_ms - local_ms) / 2;
+}
+
+int64_t revised_ms(const DeskClock& c, int64_t local_ms) {
+    return local_ms + c.skew_ms;
+}
+```
+
 
 ### 35. 环缓冲就地写入减少大对象拷贝
 
@@ -12773,6 +12789,41 @@ public:
         return cursor;
     }
 };
+```
+
+柜台私有流的追加不加流锁。序号高 16 位选一页，一页 65536 个槽；低 16 位定位槽。槽里只放指针和长度，正文不拷进索引。内存窗满了先丢掉最老的一条再写入。要落到下层持久流时仍走无锁同步。读者线程用信号叫醒，追加路径上不拿互斥量。
+
+```cpp
+struct FlowSlot {
+    void* body;
+    int len;
+};
+
+struct FlowWin {
+    static constexpr uint32_t kPage = 65536;
+    FlowSlot* pages[20480]{};
+    uint32_t tail{};
+    uint32_t head{};
+    uint32_t window{};
+    bool spill{false};
+    int reader{-1};
+};
+
+FlowSlot& claim(FlowWin& w) {
+    if (w.window != 0 && w.tail - w.head >= w.window) ++w.head;
+    const uint32_t i = w.tail++;
+    const uint32_t page = i >> 16;
+    if (!w.pages[page]) w.pages[page] = new FlowSlot[FlowWin::kPage];
+    return w.pages[page][i & (FlowWin::kPage - 1)];
+}
+
+void push_flow(FlowWin& w, void* body, int len) {
+    FlowSlot& s = claim(w);
+    s.body = body;
+    s.len = len;
+    if (w.spill) spill_under(w, w.tail - 1);
+    if (w.reader >= 0) pthread_kill(w.reader, SIGUSR1);
+}
 ```
 
 
