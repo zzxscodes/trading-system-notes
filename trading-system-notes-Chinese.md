@@ -29601,6 +29601,47 @@ int64_t wire_latency_us(const SharedL2OrderTick& t) {
 }
 ```
 
+成交流和委托流在写入共享槽之前，把供应商字符收成固定字母，订单簿后面不再解释原始码。成交字符为 F 记成成交，为 4 记成撤单，其余记成无关。委托方向 1 记成买，2 记成卖。委托类别用编译期跳转表：1 和 U 记成市价，2 记成限价，A 记成新增，D 记成删除，表外记成未知。交易所代码为 1 时，委托序号和申报序号分开放进两个槽；代码为 2 时，把申报序号整段写进委托序号槽。槽填完再把游标加一。
+
+```cpp
+enum class TickRole : uint8_t { None, Trade, Cancel };
+enum class BookKind : uint8_t { Unknown, Market, Limit, Add, Drop };
+
+TickRole role_of(char flag) {
+    if (flag == 'F') return TickRole::Trade;
+    if (flag == '4') return TickRole::Cancel;
+    return TickRole::None;
+}
+
+BookKind kind_of(char tag) {
+    switch (tag) {
+    case '1':
+    case 'U': return BookKind::Market;
+    case '2': return BookKind::Limit;
+    case 'A': return BookKind::Add;
+    case 'D': return BookKind::Drop;
+    default: return BookKind::Unknown;
+    }
+}
+
+struct LaneTick {
+    uint64_t order_no{};
+    uint64_t appl_no{};
+    char side{};
+    BookKind kind{BookKind::Unknown};
+    TickRole role{TickRole::None};
+};
+
+void place_ids(LaneTick& t, char exch, uint64_t order_src, uint64_t appl_src) {
+    if (exch == '1') {
+        t.order_no = order_src;
+        t.appl_no = appl_src;
+    } else if (exch == '2') {
+        t.order_no = appl_src;
+    }
+}
+```
+
 **8. 一套策略接口，多种运行模式**
 
 实盘、实时仿真、历史加速回放、最快回测可以共用同一套策略接口。实盘用墙钟或总线上的共享时钟；回测则注入自定义时钟，并选择即时成交或完整模拟撮合。历史行情、成交与高频因子序列可以预先放进共享内存里的向量池，避免每次回测都从磁盘重建。
@@ -29944,6 +29985,44 @@ void on_status_before_ack(EarlyBook& book, uint64_t ref, uint64_t sys, OrdState 
     if (row->state == OrdState::Filled && st == OrdState::Filled) return;
     row->state = st;
     publish(*row);
+}
+```
+
+集中柜台把撤单、废单、内部撤单和撤单废单放进成交回调，类型码落在 2 到 5。这时数量是撤掉或废掉的数量。先把最近一笔成交量和成交价清成 0，避免被记成成交。柜台错误码非零时先附上错误文本，数量判断照旧。数量不大于 0 时，早到缓存记成全部成交，缓存成交量写成原委托量。数量小于当前剩余量，说明成交还没把剩余量减下来：正式状态不动，早到状态记成部分撤销或全部撤销，早到成交量写成原委托量减去这笔数量。剩余量已经不大于这笔数量，直接改正式状态再发布。
+
+```cpp
+enum class Cut : uint8_t { None, Part, All, FullFill };
+
+struct DeskOrder {
+    OrdState state{OrdState::Unknown};
+    int64_t target{};
+    int64_t left{};
+    int64_t last_qty{};
+    double last_px{};
+    Cut early_cut{Cut::None};
+    int64_t early_filled{};
+    Cut live_cut{Cut::None};
+};
+
+void on_cut_tape(DeskOrder& o, int kind, int64_t qty, int err) {
+    if (kind < 2 || kind > 5) return;
+    o.last_qty = 0;
+    o.last_px = 0.0;
+    if (err != 0) note_venue_error(o);
+    if (qty <= 0) {
+        o.early_cut = Cut::FullFill;
+        o.early_filled = o.target;
+        publish(o);
+        return;
+    }
+    Cut mark = qty >= o.target ? Cut::All : Cut::Part;
+    if (o.left > qty) {
+        o.early_cut = mark;
+        o.early_filled = o.target - qty;
+    } else {
+        o.live_cut = mark;
+    }
+    publish(o);
 }
 ```
 
