@@ -1643,6 +1643,35 @@ struct alignas(CACHE_LINE_SIZE) CacheLineAligned : public T {
 // 这种方式更加简洁，并且可以确保结构体在内存中的对齐符合缓存行的大小要求。
 ```
 
+辅核把结果写在自己的 L1 里，行是 Modified。主核再去收割，本地 miss 后要嗅探辅核、刷脏行，一次读是几十纳秒，再写会更贵。主核只收命中列表这类小信标，中间状态留在辅核。必须交过去的行，辅核算完用 `clwb` 写回共享 L3，本地副本还在；`clflush` 会把行失效，下次辅核再用又缺。
+
+```cpp
+#include <atomic>
+#include <cstdint>
+#include <immintrin.h>
+
+struct FillNote {
+  alignas(64) std::atomic<std::uint32_t> ready{0};
+  std::uint32_t hits{0};
+  std::uint32_t ids[8];
+};
+
+void helper_publish(FillNote* note, std::uint32_t n, const std::uint32_t* ids) {
+  note->hits = n;
+  for (std::uint32_t i = 0; i < n && i < 8; ++i)
+    note->ids[i] = ids[i];
+  _mm_clwb(note);
+  note->ready.store(1, std::memory_order_release);
+}
+
+bool main_take(FillNote* note, std::uint32_t* hits) {
+  if (note->ready.load(std::memory_order_acquire) == 0)
+    return false;
+  *hits = note->hits;
+  return true;
+}
+```
+
 **反用：干跑双副本 + 伪共享预热 + 无分支索引**
 
 针对多线程争用，用对齐隔离同一缓存行内的无关变量。单线程干跑场景可反其道行之：热路径统计量维护两份副本，`[0]` 实时、`[1]` 干跑占位，**故意不用** `alignas`，让二者落在同一缓存行；干跑时写 `[1]` 会把 `[0]` 一并载入缓存而不改其值。`bool dry_run` 转为 `0/1` 作数组索引，一行无分支更新；干跑执行除实际下单外的全部逻辑。适合L1、L2 cache的单线程预热，L3 cache多线程无影响。
@@ -8091,6 +8120,29 @@ void preorder_tail_rec(Node* root) {
 
 **Memory-Level Parallelism (MLP) 与指针追逐优化**：CPU 的 Line Fill Buffer（LFB，Intel 术语）/ Miss Status Holding Register（MSHR）允许同时追踪多个未完成的 cache miss 请求（现代 Intel 核约 12 个 LFB 条目），使多个独立的内存访问可以并行进行。但指针追逐模式（如链表遍历 `node = node->next`）天然形成串行依赖链——每次 load 必须等前一次 load 完成才能获取下一个地址，导致 LFB 中同时只有 1 个 outstanding miss，浪费了其余并行槽位。优化方式：**批量预取（Software Pipelining）**——在遍历当前节点时，对后续 N 个节点提前发射 prefetch 指令，将串行依赖转化为并行请求；**数据结构重构**——将链表改为数组索引或 B+ 树等缓存友好结构；**交错处理**——在同一循环中交错处理多个独立的数据流（如同时遍历两棵独立的树），让不同流的 cache miss 可以并行填充 LFB（[whichisfaster.dev/async](https://whichisfaster.dev/q/async.html)）。
 
+对象彼此独立时，一次 load、立刻算完、再下一笔，缺失仍然串行。先摸一批地址把 miss 送进 LFB，再集中算，让在途请求重叠。批次不要超过本核 LFB 槽数（常见十几个）；一口气摸几十个，第十七个会堵在满槽上，核心硬停。
+
+```cpp
+struct ContractSlot {
+  float px;
+  float iv;
+  float fee;
+  char pad[52];
+};
+
+void price_batch(ContractSlot* slots, int n, float spot) {
+  enum { D = 4 };
+  float hold[D];
+  for (int i = 0; i < n; i += D) {
+    const int m = n - i < D ? n - i : D;
+    for (int k = 0; k < m; ++k)
+      hold[k] = slots[i + k].px;
+    for (int k = 0; k < m; ++k)
+      slots[i + k].fee = hold[k] * spot * slots[i + k].iv;
+  }
+}
+```
+
 **非临时写入 (Nontemporal Writes)**
 
 + 解决写入操作缓存未命中的高开销问题
@@ -8160,6 +8212,40 @@ void process_array(int *data, int n) {
 ```
 
 这里的关键是选择合适的 `PREFETCH_DISTANCE`。这个距离需要足够大，以保证在CPU处理当前 `i` 到 `i+PREFETCH_DISTANCE` 之间的元素时，内存预取操作有足够的时间完成。
+
+普通 `load` 有目的寄存器，数据没到就赖在 ROB 里，窗口塞满后面发不出去。`_mm_prefetch` 没有目的寄存器，发出去就算退了，只是给内存控制器一张便条。用假 `load` 冒充预取，停顿会回来。下一笔行情还会再用的合约元数据用 `_MM_HINT_T0`；`NTA` 会提前踢走热行。
+
+用过即弃的事件行（环形缓冲里当前 tick）硬件当热数据留着，会挤期权/合约元数据。算完用 `clflushopt` 赶出去。它自己也占 LFB 槽，槽满时别发。
+
+```cpp
+#include <cstdint>
+#include <immintrin.h>
+
+struct TickWire {
+  std::uint64_t seq;
+  float px;
+  char body[176];
+};
+
+void price_ahead(ContractSlot* slots, int n) {
+  enum { Ahead = 4 };
+  for (int i = 0; i < n; ++i) {
+    if (i + Ahead < n) {
+      const char* p = reinterpret_cast<const char*>(&slots[i + Ahead]);
+      _mm_prefetch(p, _MM_HINT_T0);
+      _mm_prefetch(p + 64, _MM_HINT_T0);
+    }
+    slots[i].fee = slots[i].px * slots[i].iv;
+  }
+}
+
+void retire_tick(TickWire* e) {
+  auto* p = reinterpret_cast<char*>(e);
+  _mm_clflushopt(p);
+  _mm_clflushopt(p + 64);
+  _mm_clflushopt(p + 128);
+}
+```
 
 
 **Intel C++ Compiler (ICL/ICX)**
