@@ -29610,6 +29610,47 @@ int64_t wire_latency_us(const SharedL2OrderTick& t) {
 }
 ```
 
+Trade and order streams are folded into fixed letters before the shared slot is written, so the book does not interpret vendor codes later. A trade flag of F becomes a trade, 4 becomes a cancel, and anything else is ignored. Order side 1 becomes bid and 2 becomes ask. Order kind uses a compile-time jump table: 1 and U become market, 2 becomes limit, A becomes an add, D becomes a delete, and anything off the table becomes unknown. When the exchange code is 1, the order index and the application index go into two separate slots. When the code is 2, the application index is written whole into the order-index slot. The cursor advances only after the slot is filled.
+
+```cpp
+enum class TickRole : uint8_t { None, Trade, Cancel };
+enum class BookKind : uint8_t { Unknown, Market, Limit, Add, Drop };
+
+TickRole role_of(char flag) {
+    if (flag == 'F') return TickRole::Trade;
+    if (flag == '4') return TickRole::Cancel;
+    return TickRole::None;
+}
+
+BookKind kind_of(char tag) {
+    switch (tag) {
+    case '1':
+    case 'U': return BookKind::Market;
+    case '2': return BookKind::Limit;
+    case 'A': return BookKind::Add;
+    case 'D': return BookKind::Drop;
+    default: return BookKind::Unknown;
+    }
+}
+
+struct LaneTick {
+    uint64_t order_no{};
+    uint64_t appl_no{};
+    char side{};
+    BookKind kind{BookKind::Unknown};
+    TickRole role{TickRole::None};
+};
+
+void place_ids(LaneTick& t, char exch, uint64_t order_src, uint64_t appl_src) {
+    if (exch == '1') {
+        t.order_no = order_src;
+        t.appl_no = appl_src;
+    } else if (exch == '2') {
+        t.order_no = appl_src;
+    }
+}
+```
+
 **8. One strategy interface, several run modes**
 
 Live trading, real-time simulation, historical accelerated replay, and fastest backtest can share one strategy interface. Live uses wall clock or a clock published on the bus; backtest injects a custom clock and chooses instant fill or a full simulated matcher. Historical quotes, trades, and high-frequency factor series can sit in shared-memory vector pools so each run does not rebuild from disk.
@@ -29953,6 +29994,44 @@ void on_status_before_ack(EarlyBook& book, uint64_t ref, uint64_t sys, OrdState 
     if (row->state == OrdState::Filled && st == OrdState::Filled) return;
     row->state = st;
     publish(*row);
+}
+```
+
+A centralized counter delivers cancel, abolish, internal cancel, and cancel-abolish on the trade callback, with type codes 2 through 5. The quantity is then the size cancelled or abolished. Clear the latest trade size and price first, so the report is not booked as a fill. A non-zero counter error is attached as text, and the quantity check still runs. When the quantity is not positive, the early cache records a full fill and the cached traded size is the original order size. When the quantity is smaller than the current leaves, fills have not yet reduced the leaves: the live state stays put, the early state records a partial or full cancel, and the early traded size is the original size minus this quantity. Once leaves are already no larger than this quantity, update the live state and publish.
+
+```cpp
+enum class Cut : uint8_t { None, Part, All, FullFill };
+
+struct DeskOrder {
+    OrdState state{OrdState::Unknown};
+    int64_t target{};
+    int64_t left{};
+    int64_t last_qty{};
+    double last_px{};
+    Cut early_cut{Cut::None};
+    int64_t early_filled{};
+    Cut live_cut{Cut::None};
+};
+
+void on_cut_tape(DeskOrder& o, int kind, int64_t qty, int err) {
+    if (kind < 2 || kind > 5) return;
+    o.last_qty = 0;
+    o.last_px = 0.0;
+    if (err != 0) note_venue_error(o);
+    if (qty <= 0) {
+        o.early_cut = Cut::FullFill;
+        o.early_filled = o.target;
+        publish(o);
+        return;
+    }
+    Cut mark = qty >= o.target ? Cut::All : Cut::Part;
+    if (o.left > qty) {
+        o.early_cut = mark;
+        o.early_filled = o.target - qty;
+    } else {
+        o.live_cut = mark;
+    }
+    publish(o);
 }
 ```
 
