@@ -105,6 +105,7 @@
   - [29. Market-data gateway: full-sub filter, field patches, night-session day](#29-market-data-gateway-full-sub-filter-field-patches-night-session-day)
   - [30. Short venue refs, async quota, and algo-container clock fanout](#30-short-venue-refs-async-quota-and-algo-container-clock-fanout)
   - [31. Normalize offset and direction before the order hits the ring](#31-normalize-offset-and-direction-before-the-order-hits-the-ring)
+  - [32. Position queries leave the order thread and resume by cursor](#32-position-queries-leave-the-order-thread-and-resume-by-cursor)
 - [Business logic design-calculation](#business-logic-design-calculation)
   - [1. Log return (percent asymmetry)](#1-log-return-percent-asymmetry)
   - [2. Changes in state of market trends and volatility](#2-changes-in-state-of-market-trends-and-volatility)
@@ -29767,6 +29768,39 @@ public:
 };
 ```
 
+After a send, two records are written: the venue sequence to the local ticket, and the ticket into the set that has not yet seen a push. Each record has its own lock. The callback removes the ticket from the unconfirmed set first, then looks it up by sequence. If the writer still holds the ticket-table lock while taking the unconfirmed lock, the two acquire orders cross and the callback stalls when fills are dense. Release the ticket-table lock, then record the unconfirmed ticket.
+
+```cpp
+struct Ticket { uint64_t local_id; };
+
+class TicketBook {
+    std::shared_mutex table_mu_;
+    std::mutex pending_mu_;
+    std::unordered_map<uint64_t, Ticket*> by_seq_;
+    std::unordered_map<uint64_t, Ticket*> pending_;
+
+public:
+    void note_sent(Ticket* t, uint64_t seq) {
+        {
+            std::unique_lock lk(table_mu_);
+            by_seq_[seq] = t;
+        }
+        std::lock_guard lk(pending_mu_);
+        pending_[t->local_id] = t;
+    }
+
+    Ticket* take_pending_then_find(uint64_t local_id, uint64_t seq) {
+        {
+            std::lock_guard lk(pending_mu_);
+            pending_.erase(local_id);
+        }
+        std::shared_lock lk(table_mu_);
+        auto it = by_seq_.find(seq);
+        return it == by_seq_.end() ? nullptr : it->second;
+    }
+};
+```
+
 
 ### 20. Local cache when fills arrive before status
 
@@ -29828,6 +29862,62 @@ void on_trade_catch_up(LiveOrder& o, int64_t qty, double px, int64_t left) {
     if (o.early_state != OrdState::Unknown && left == 0) {
         o.state = o.early_state;
         o.early_state = OrdState::Unknown;
+    }
+}
+```
+
+The async API splits “the front accepted the call” from “the exchange pushed a state”. A negative return is a send failure. A non-negative return only means the call was taken, and the order state stays as it was. The cancel function’s own callback only means the cancel was handed off; whether the order is cancelled still comes on the later order push. An order already in a terminal state is not cancelled again. A failed cancel send is recorded on that cancel, and the original order state is left unchanged. Creation, repo, and ordinary orders use different cancel functions and the same client sequence, which the push uses to find the local order.
+
+When a push does not match a local order, only fills are kept. Write this print’s quantity and price, leave the cumulative fields empty, and assign a separate external id.
+
+```cpp
+enum class VenueNote : uint8_t { FrontOk, FrontFail, Reject, CancelEcho, Print };
+
+struct OpenOrder {
+    uint64_t id{};
+    OrdState state{OrdState::Unknown};
+    int64_t last_qty{};
+    double last_px{};
+    int err{};
+};
+
+bool ended(OrdState s) {
+    return s == OrdState::Filled || s == OrdState::Canceled;
+}
+
+void on_front_result(OpenOrder& o, int code, bool cancel_call) {
+    if (code >= 0) return;
+    o.err = code;
+    if (!cancel_call) o.state = OrdState::Unknown;
+}
+
+uint64_t send_cancel(const OpenOrder& o, int product_lane) {
+    if (ended(o.state)) return 0;
+    if (product_lane == 1) return cancel_create(o.id);
+    if (product_lane == 2) return cancel_repo(o.id);
+    return cancel_cash(o.id);
+}
+
+void on_venue_note(std::unordered_map<uint64_t, OpenOrder>& book, uint64_t seq,
+                   VenueNote kind, int64_t qty, double px) {
+    auto it = book.find(seq);
+    if (it == book.end()) {
+        if (kind != VenueNote::Print) return;
+        OpenOrder ext;
+        ext.id = mint_external_id();
+        ext.last_qty = qty;
+        ext.last_px = px;
+        ext.state = OrdState::Partial;
+        publish(ext);
+        return;
+    }
+    OpenOrder& o = it->second;
+    if (kind == VenueNote::Print) {
+        o.last_qty = qty;
+        o.last_px = px;
+    } else if (kind == VenueNote::Reject) {
+        o.state = OrdState::Unknown;
+        o.err = 1;
     }
 }
 ```
@@ -30341,6 +30431,76 @@ bool normalize_ticket(Ticket& t) {
         t.px_kind = 0;
     return true;
 }
+```
+
+
+### 32. Position queries leave the order thread and resume by cursor
+
+On many cash brokers a position query is synchronous and returns a few hundred rows a page. Running it on the order thread places later orders behind the whole query. The order thread only enqueues the request by fund account and keeps the latest request from each engine. The query thread then issues one broker call for every engine waiting on that account, and writes each row back to each waiting request.
+
+The next page starts at the previous page’s last browse index plus one. When the API returns a locator string, that string replaces the index. The continuation keeps the original request id so the reply still matches the local request. The end mark is set only on the last row of the last page. A few seconds separate rounds. One fund account has a shareholder id on each of Shanghai and Shenzhen; orders and queries pick it from the symbol suffix. A dual-center account uses the shareholder id of the center being queried.
+
+```cpp
+struct HoldAsk {
+    uint32_t engine{};
+    char account[32]{};
+};
+
+struct HoldLine {
+    int64_t browse{};
+    char symbol[32]{};
+    int64_t qty{};
+};
+
+const char* holder_for(const char* symbol, const char* sh, const char* sz) {
+    const char* dot = std::strrchr(symbol, '.');
+    if (dot && std::strcmp(dot, ".SZ") == 0) return sz;
+    return sh;
+}
+
+class HoldPump {
+    std::mutex mu_;
+    std::unordered_map<std::string, std::unordered_map<uint32_t, HoldAsk>> wait_;
+
+    std::vector<HoldLine> fetch(const std::string& acct, int64_t cursor, int rows);
+    void emit(const HoldAsk& ask, const HoldLine& line, bool end_mark);
+
+    auto steal() {
+        std::lock_guard lk(mu_);
+        return std::exchange(wait_, {});
+    }
+
+public:
+    void enqueue(HoldAsk ask) {
+        std::lock_guard lk(mu_);
+        wait_[ask.account][ask.engine] = ask;
+    }
+
+    void run() {
+        for (;;) {
+            auto batch = steal();
+            for (auto& [acct, group] : batch) {
+                int64_t cursor = 0;
+                bool saw = false;
+                HoldLine tail{};
+                for (;;) {
+                    auto page = fetch(acct, cursor, 200);
+                    if (page.empty()) break;
+                    saw = true;
+                    tail = page.back();
+                    for (const auto& line : page)
+                        for (const auto& ask : group)
+                            emit(ask.second, line, false);
+                    cursor = tail.browse + 1;
+                }
+                if (saw)
+                    for (const auto& ask : group)
+                        emit(ask.second, tail, true);
+            }
+            std::this_thread::sleep_for(std::chrono::seconds(3));
+        }
+    }
+};
 ```
 
 

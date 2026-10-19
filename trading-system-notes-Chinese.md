@@ -105,6 +105,7 @@ English version：[https://github.com/zzxscodes/trading-system-notes/blob/main/t
   - [29. 行情网关接入：全订过滤、字段补丁与夜盘交易日](#29-行情网关接入全订过滤字段补丁与夜盘交易日)
   - [30. 交易桥短单号、异步配额与算法容器时钟扇出](#30-交易桥短单号异步配额与算法容器时钟扇出)
   - [31. 报单入库前的开平与方向规整](#31-报单入库前的开平与方向规整)
+  - [32. 持仓查询移出报单线程并按游标续页](#32-持仓查询移出报单线程并按游标续页)
 - [业务逻辑设计-计算](#业务逻辑设计-计算)
   - [1. 对数收益率(百分比非对称性)](#1-对数收益率百分比非对称性)
   - [2. 市场趋势和波动率的状态变化](#2-市场趋势和波动率的状态变化)
@@ -29758,6 +29759,39 @@ public:
 };
 ```
 
+报单发出后要记两处：柜台流水到本地单，以及尚未收到任何推送的未确认集合。两处各用一把锁。回调先从未确认集合里摘掉，再按流水查本地单。写侧若拿着订单表的锁再去锁未确认集合，两把锁的获取顺序交叉，成交密集时会卡住。订单表锁放开之后，再登记未确认。
+
+```cpp
+struct Ticket { uint64_t local_id; };
+
+class TicketBook {
+    std::shared_mutex table_mu_;
+    std::mutex pending_mu_;
+    std::unordered_map<uint64_t, Ticket*> by_seq_;
+    std::unordered_map<uint64_t, Ticket*> pending_;
+
+public:
+    void note_sent(Ticket* t, uint64_t seq) {
+        {
+            std::unique_lock lk(table_mu_);
+            by_seq_[seq] = t;
+        }
+        std::lock_guard lk(pending_mu_);
+        pending_[t->local_id] = t;
+    }
+
+    Ticket* take_pending_then_find(uint64_t local_id, uint64_t seq) {
+        {
+            std::lock_guard lk(pending_mu_);
+            pending_.erase(local_id);
+        }
+        std::shared_lock lk(table_mu_);
+        auto it = by_seq_.find(seq);
+        return it == by_seq_.end() ? nullptr : it->second;
+    }
+};
+```
+
 
 ### 20. 成交回报先于状态回报的本地缓存
 
@@ -29819,6 +29853,62 @@ void on_trade_catch_up(LiveOrder& o, int64_t qty, double px, int64_t left) {
     if (o.early_state != OrdState::Unknown && left == 0) {
         o.state = o.early_state;
         o.early_state = OrdState::Unknown;
+    }
+}
+```
+
+异步接口把“前置收下请求”和“交易所推送”分成两次回调。前一次返回码为负，才是发送失败；非负只表示调用被收下，订单状态保持不动。撤单函数自己的回调同样只说明撤单请求已发出，是否撤销仍看后面的订单推送。原单已经终态就不再发撤。撤单发送失败只记在这次撤单上，原单状态不改。申赎、回购和普通买卖的撤单函数不同，客户流水号用同一个，推送靠它找回本地单。
+
+推送里对不上本地单时，只吃成交。写这一笔的数量和价格，累计成交留空，另外编一个外部单号。
+
+```cpp
+enum class VenueNote : uint8_t { FrontOk, FrontFail, Reject, CancelEcho, Print };
+
+struct OpenOrder {
+    uint64_t id{};
+    OrdState state{OrdState::Unknown};
+    int64_t last_qty{};
+    double last_px{};
+    int err{};
+};
+
+bool ended(OrdState s) {
+    return s == OrdState::Filled || s == OrdState::Canceled;
+}
+
+void on_front_result(OpenOrder& o, int code, bool cancel_call) {
+    if (code >= 0) return;
+    o.err = code;
+    if (!cancel_call) o.state = OrdState::Unknown;
+}
+
+uint64_t send_cancel(const OpenOrder& o, int product_lane) {
+    if (ended(o.state)) return 0;
+    if (product_lane == 1) return cancel_create(o.id);
+    if (product_lane == 2) return cancel_repo(o.id);
+    return cancel_cash(o.id);
+}
+
+void on_venue_note(std::unordered_map<uint64_t, OpenOrder>& book, uint64_t seq,
+                   VenueNote kind, int64_t qty, double px) {
+    auto it = book.find(seq);
+    if (it == book.end()) {
+        if (kind != VenueNote::Print) return;
+        OpenOrder ext;
+        ext.id = mint_external_id();
+        ext.last_qty = qty;
+        ext.last_px = px;
+        ext.state = OrdState::Partial;
+        publish(ext);
+        return;
+    }
+    OpenOrder& o = it->second;
+    if (kind == VenueNote::Print) {
+        o.last_qty = qty;
+        o.last_px = px;
+    } else if (kind == VenueNote::Reject) {
+        o.state = OrdState::Unknown;
+        o.err = 1;
     }
 }
 ```
@@ -30332,6 +30422,76 @@ bool normalize_ticket(Ticket& t) {
         t.px_kind = 0;
     return true;
 }
+```
+
+
+### 32. 持仓查询移出报单线程并按游标续页
+
+现货柜台的持仓查询常常是同步的，一页几百行。放在报单线程里，后面的委托会排在整次查询之后。报单线程只按资金账号把请求放进队列，同一引擎对同一账号只留最后一次。查询线程取出后，把这个账号上各引擎的请求合成一次柜台调用，每一行写回每一个等待中的请求。
+
+下一页从上一页最后一条的浏览序号加一开始；接口给定位串时，用这串代替序号。续页沿用第一次的请求号，返回才能对上原始请求。结束标记只打在最后一页的最后一行。两轮之间空几秒。同一资金账号在沪、深各有股东号，报单和查询都按代码后缀选取；双中心账户带当前中心的那个股东号。
+
+```cpp
+struct HoldAsk {
+    uint32_t engine{};
+    char account[32]{};
+};
+
+struct HoldLine {
+    int64_t browse{};
+    char symbol[32]{};
+    int64_t qty{};
+};
+
+const char* holder_for(const char* symbol, const char* sh, const char* sz) {
+    const char* dot = std::strrchr(symbol, '.');
+    if (dot && std::strcmp(dot, ".SZ") == 0) return sz;
+    return sh;
+}
+
+class HoldPump {
+    std::mutex mu_;
+    std::unordered_map<std::string, std::unordered_map<uint32_t, HoldAsk>> wait_;
+
+    std::vector<HoldLine> fetch(const std::string& acct, int64_t cursor, int rows);
+    void emit(const HoldAsk& ask, const HoldLine& line, bool end_mark);
+
+    auto steal() {
+        std::lock_guard lk(mu_);
+        return std::exchange(wait_, {});
+    }
+
+public:
+    void enqueue(HoldAsk ask) {
+        std::lock_guard lk(mu_);
+        wait_[ask.account][ask.engine] = ask;
+    }
+
+    void run() {
+        for (;;) {
+            auto batch = steal();
+            for (auto& [acct, group] : batch) {
+                int64_t cursor = 0;
+                bool saw = false;
+                HoldLine tail{};
+                for (;;) {
+                    auto page = fetch(acct, cursor, 200);
+                    if (page.empty()) break;
+                    saw = true;
+                    tail = page.back();
+                    for (const auto& line : page)
+                        for (const auto& ask : group)
+                            emit(ask.second, line, false);
+                    cursor = tail.browse + 1;
+                }
+                if (saw)
+                    for (const auto& ask : group)
+                        emit(ask.second, tail, true);
+            }
+            std::this_thread::sleep_for(std::chrono::seconds(3));
+        }
+    }
+};
 ```
 
 
