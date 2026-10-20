@@ -3564,6 +3564,49 @@ public:
 };
 ```
 
+**Construct the slot only after the push is accepted**
+
+The slots above are default-constructed when the queue is created, and a write is an assignment. Another single-producer single-consumer queue allocates raw storage aligned for `T`, constructs in the slot only after the push is accepted, and destroys the object as soon as the pop has taken it. Full and empty still use the monotonic indexes from the previous section. A full queue returns immediately and does not construct. If the constructor throws, the publish index does not advance, and the same slot can be retried. After the consumer destroys the object it publishes the recycled index with `release`; the producer overwrites that slot only after it `acquire`s that progress.
+
+```cpp
+template<class T, uint64_t N>
+class RawSlotSpsc {
+    static_assert((N & (N - 1)) == 0, "N power of two");
+    static_assert(N <= (uint64_t(1) << 63), "N <= half the index range");
+    T* slot_;
+    static constexpr uint64_t mask_ = N - 1;
+    alignas(64) std::atomic<uint64_t> head_{0};
+    uint64_t cached_tail_{0};
+    alignas(64) std::atomic<uint64_t> tail_{0};
+    uint64_t cached_head_{0};
+public:
+    RawSlotSpsc()
+        : slot_(static_cast<T*>(::operator new(sizeof(T) * N, std::align_val_t{alignof(T)}))) {}
+    bool try_emplace(auto&&... args) {
+        uint64_t t = tail_.load(std::memory_order_relaxed);
+        if (t - cached_head_ == N) {
+            cached_head_ = head_.load(std::memory_order_acquire);
+            if (t - cached_head_ == N) return false;
+        }
+        new (slot_ + (t & mask_)) T(std::forward<decltype(args)>(args)...);
+        tail_.store(t + 1, std::memory_order_release);
+        return true;
+    }
+    bool try_pop(T& out) {
+        uint64_t h = head_.load(std::memory_order_relaxed);
+        if (h == cached_tail_) {
+            cached_tail_ = tail_.load(std::memory_order_acquire);
+            if (h == cached_tail_) return false;
+        }
+        T& s = slot_[h & mask_];
+        out = std::move(s);
+        s.~T();
+        head_.store(h + 1, std::memory_order_release);
+        return true;
+    }
+};
+```
+
 
 Log service based on this
 
@@ -17535,6 +17578,54 @@ Implement the "middle price calculation" logic to eliminate the interference of 
 Code formula: $ \hat{q}_{t_{m}}^{m}=\frac{1}{2}\left(q_{t_{a}}^{a}+q_{t_{b}}^{b}\right) $, where $ t_{m} $ takes the "time stamp of the latest bid/ask price (whoever updates it)" to ensure that the middle price synchronizes market changes in real time;
 Advanced: If you need to consider the weight of order volume, the code implements size-weighted middle price $ \tilde{q}_{t}^{s}=\frac{q_{t_{b}}^{b} s_{t_{a}}^{a}+q_{t_{a}}^{a} s_{t_{b}}^{b}}{s_{t_{a}}^{a}+s_{t_{b}}^{b}} $ ($ s $ is the order volume corresponding to the buying/selling price).
 
+**4. Recover per-price volume from two snapshots**
+
+A depth snapshot carries cumulative volume and cumulative turnover, not the lots traded at each price on this tick. Keep the previous snapshot per instrument. This tick’s lots are the difference of the two cumulative volumes, and the turnover difference is their notional. A non-positive difference produces no trade, covering the first snapshot and a cumulative reset. The price key adds a tiny amount, multiplies by 1000, and truncates toward zero, so `1.2 * 1000` does not land on `1199.999`. Zhengzhou turnover is not used for this recovery: the whole volume delta is booked at last price. Other venues convert turnover back to a sum of prices with the contract multiplier. A one-lot tick is priced at the turnover delta divided by the multiplier; within a tenth of a tick of last it is booked at last, otherwise at the solved price. With several lots, one lot is placed at last and the remaining lots take the price solved from the leftover turnover. Both ends are then snapped to an integer number of ticks and clamped between bid1 and ask1. While price times lots is still short of this tick’s turnover, move one lot up by one tick.
+
+```cpp
+int64_t px_key(double px) {
+    return (int64_t)((px + 1e-12) * 1000.0);
+}
+
+void infer_tick(std::map<int64_t, int64_t>& out,
+                int64_t prev_vol, int64_t vol,
+                double prev_turnover, double turnover,
+                double last, double bid1, double ask1,
+                double tick, double vm, bool czce) {
+    int64_t dv = vol - prev_vol;
+    if (dv <= 0) return;
+    if (czce) { out[px_key(last)] += dv; return; }
+    double notional = (turnover - prev_turnover) / vm;
+    double tol = tick / 10.0;
+    if (dv == 1) {
+        int64_t k = std::fabs(notional - last) < tol ? px_key(last) : px_key(notional);
+        out[k] += 1;
+        return;
+    }
+    double rest = (notional - last) / (double)(dv - 1);
+    double lo = std::max(bid1, std::min(last, rest));
+    double hi = std::min(ask1, std::max(last, rest));
+    int64_t step = px_key(tick);
+    int64_t klo = px_key(lo);
+    int64_t khi = px_key(hi);
+    if (khi <= klo) { out[px_key(last)] += dv; return; }
+    double a = (hi * (double)dv - notional) / (hi - lo);
+    int64_t n_lo = std::llround(a);
+    if (n_lo < 0) n_lo = 0;
+    if (n_lo > dv) n_lo = dv;
+    out[klo] += n_lo;
+    out[khi] += dv - n_lo;
+    double got = (klo / 1000.0) * n_lo + (khi / 1000.0) * (dv - n_lo);
+    while (got + tol < notional && n_lo > 0) {
+        out[klo] -= 1;
+        out[klo + step] += 1;
+        klo += step;
+        n_lo -= 1;
+        got += tick;
+    }
+}
+```
+
 
 ### 6. Task Six (Order Timing Competition Analysis)
 In transactions, requests (orders) issued by programs on different servers arrive at the exchange in order, and high-frequency transactions
@@ -20234,6 +20325,8 @@ bool replay_after_timeout(uint64_t cmd_id) {
 + Pre-allocate large memory - 30 million elements need to be allocated by default
 + Memory waste - Sparse order books waste a lot of space
 + Limited price range
+
+If orders at one price are linked by pointers, the container that owns them must not move a live object on insert or erase. Growing a `vector` invalidates those pointers. The price point below stores an index into the order pool. The other approach keeps orders in blocks: erased slots form a free chain, a skip field jumps a run of erased slots, and the address of a live order stays put.
 
 ```cpp
 #include <optional>
@@ -31197,6 +31290,42 @@ bool normalize_ticket(Ticket& t) {
     if (t.px_kind < 0 && t.px > 1e-6)
         t.px_kind = 0;
     return true;
+}
+```
+
+**Split one size by position**
+
+The previous section only rewrites the offset flag. Futures also split the size the strategy asked for into several orders. A positive size is a buy and a negative size is a sell; a buy closes shorts and a sell closes longs. Free today is today’s position minus resting close-today on that side. Free yesterday is total minus today, then minus resting plain-close and close-yesterday on that side. Each slice is the smallest positive of free position, remaining size, and the limit-order maximum; a slice below the minimum is not sent.
+
+Close today, then close yesterday, then open whatever of the request is still uncovered. Open-only has no close slice: the remainder is cut by the maximum until it is sent. Close-only does not open the remainder, and the size stays within the position that can still be closed. Close-yesterday-then-open does not close today; while yesterday is still open it sends only the close-yesterday, and the open waits for a later call after yesterday is flat, so this call can send fewer lots than requested. Prefer-yesterday-or-open and close-yesterday-then-today have no send path; the call returns. The entry that returns one order sends only the first slice. The entry that returns several orders subtracts each slice from the remainder and continues.
+
+```cpp
+struct Pos { int total; int today; };
+struct Pend { int close_td; int close_yd; };
+
+int clip_lot(int n, int max_lot, int min_lot) {
+    if (n <= 0) return 0;
+    if (max_lot > 0 && min_lot > 0) {
+        n = std::min(n, max_lot);
+        if (n < min_lot) return 0;
+    }
+    return n;
+}
+
+void close_td_then_yd(int want, Pos pos, Pend pend, int max_lot, int min_lot,
+                      auto&& send) {
+    int left = want;
+    int td = clip_lot(std::min(std::max(pos.today - pend.close_td, 0), left), max_lot, min_lot);
+    if (td > 0) { send(Off::CloseToday, td); left -= td; }
+    int yd_free = (pos.total - pos.today) - pend.close_yd;
+    int yd = clip_lot(std::min(std::max(yd_free, 0), left), max_lot, min_lot);
+    if (yd > 0) { send(Off::CloseYday, yd); left -= yd; }
+    while (left > 0) {
+        int n = clip_lot(left, max_lot, min_lot);
+        if (n <= 0) break;
+        send(Off::Open, n);
+        left -= n;
+    }
 }
 ```
 
