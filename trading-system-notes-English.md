@@ -31407,6 +31407,29 @@ bool pace_ok(Band& b, double time_frac, double done_frac, int64_t now) {
 }
 ```
 
+A two-sided unlock parent may post both bid and ask children at once. Before pulling one side to reprice, compute the new limit. Absolute value below 1e-6 leaves the resting child alone. Only when the new limit is more aggressive than that child’s price (higher for a buy, lower for a sell; a gap under 1e-6 does not count) does the parent look at the opposite side’s non-final child. If the new limit would cross that opposite cap (a buy not below the resting ask, a sell not above the resting bid, equality within 1e-6 included), it does not cancel. Otherwise it cancels the local side so a new order can replace it. This is a guard between the two children of one parent, not exchange self-trade prevention.
+
+```cpp
+bool px_eq(double a, double b) { return std::abs(a - b) < 1e-6; }
+
+bool more_agg(bool buy, double neu, double old) {
+    if (px_eq(neu, old)) return false;
+    return buy ? neu > old : neu < old;
+}
+
+bool crosses_opp(bool buy, double neu, double opp_cap) {
+    if (px_eq(neu, opp_cap)) return true;
+    return buy ? neu >= opp_cap : neu <= opp_cap;
+}
+
+bool should_pull(bool buy, double neu, double old, bool opp_live, double opp_cap) {
+    if (std::abs(neu) < 1e-6) return false;
+    if (!more_agg(buy, neu, old)) return false;
+    if (opp_live && crosses_opp(buy, neu, opp_cap)) return false;
+    return true;
+}
+```
+
 **Child pricing and the tail of a slice**
 
 The execution grain is greater than 0 and at most 100. Start and end are clamped into the trading session. The executor is not created when the start is after the end, the end is before the current time, or the latest tolerate time is before the end. A limit-up book does not sell. A limit-down book does not buy. A buy at the limit-up price and a sell at the limit-down price may be posted in one order.

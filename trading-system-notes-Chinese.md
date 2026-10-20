@@ -31396,6 +31396,29 @@ bool pace_ok(Band& b, double time_frac, double done_frac, int64_t now) {
 }
 ```
 
+双侧解锁母单可同时挂买卖两侧。改挂本侧前先算新价：绝对值小于 1e-6 则不动。新价相对本侧在途限价更激进（买更高、卖更低；差小于 1e-6 不算）时，再查对侧未完结子单的限价。新价会穿越对侧（买不低于对侧卖限、卖不高于对侧买限，含 1e-6 相等）则不撤不改，否则才撤本侧以便重挂。这是同一母单双侧子单之间的防护，不是交易所自成交保护。
+
+```cpp
+bool px_eq(double a, double b) { return std::abs(a - b) < 1e-6; }
+
+bool more_agg(bool buy, double neu, double old) {
+    if (px_eq(neu, old)) return false;
+    return buy ? neu > old : neu < old;
+}
+
+bool crosses_opp(bool buy, double neu, double opp_cap) {
+    if (px_eq(neu, opp_cap)) return true;
+    return buy ? neu >= opp_cap : neu <= opp_cap;
+}
+
+bool should_pull(bool buy, double neu, double old, bool opp_live, double opp_cap) {
+    if (std::abs(neu) < 1e-6) return false;
+    if (!more_agg(buy, neu, old)) return false;
+    if (opp_live && crosses_opp(buy, neu, opp_cap)) return false;
+    return true;
+}
+```
+
 **子单定价与尾盘处理**
 
 执行粒度大于 0，且不超过 100。开始时刻和结束时刻先夹进交易时段。开始晚于结束、结束早于当前时刻、最大容忍时刻早于结束，执行器不创建。涨停不卖出，跌停不买入。涨停价上的买入和跌停价上的卖出可以一次挂完。
