@@ -13929,6 +13929,26 @@ perf深入剖析参考：[https://xie.infoq.cn/article/d86b3a3ca106449cb3f369a0f
 | 终点：发送交易订单（trade发出系统） | `Common::TCPSocket::send()`（市场参与者客户端的TCP发送函数） | 经过风险检查后，订单网关通过TCP套接字将订单请求发送给交易所，完成“trade”的发出 |
 
 
+**无人值守的性能闭环**
+
+人先把评测封成一条命令，Agent 只在这条命令上试错。实现代码可以改。正确性测试、基准输入、打分程序、构建脚本和评测脚本保持不动。来源：[https://github.com/intel/intel-performance-skills](https://github.com/intel/intel-performance-skills)。
+
+命令内部顺序固定：按同一优化档编译，正确性测试必须全过，再把同一基准跑多次，全程只用同一个统计量做决定。延迟用上面的中位数。绑核、核心隔离和实时优先级用来压低环境噪声，决策仍看这一个数。
+
+干净工作区先跑出基线 B。之后每一轮只提出一个假设，只改实现，再跑同一条命令。编译、正确性或打分失败时先做短修，短时修不好就回滚。全部通过但指标没有严格好于 B，同样回滚。全部通过且严格好于 B，才提交，并把 B 换成新值。留下和丢弃都在实验日志里记一行。版本库负责隔离：留下就是提交，丢弃就是还原。
+
+```cpp
+enum class Verdict { Keep, Discard };
+
+bool better(double now, double base); // 整段实验固定同一个比较方向
+
+Verdict step(double& B, bool correct, double metric) {
+    if (!correct || !better(metric, B)) return Verdict::Discard;
+    B = metric;
+    return Verdict::Keep;
+}
+```
+
 ## 简单实践
 ### 1. **实现线程安全的缓存**
 来源：[https://github.com/byrnexu/betterquant2](https://github.com/byrnexu/betterquant2)

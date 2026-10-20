@@ -13956,6 +13956,26 @@ Perf in-depth analysis reference:[https://xie.infoq.cn/article/d86b3a3ca106449cb
 | End point: Send trading order (trade issuing system) | `Common::TCPSocket::send()`(TCP sending function of market participant client) | After risk check, the order gateway sends the order request to the exchange through the TCP socket to complete the issuance of "trade" |
 
 
+**Unattended performance loop**
+
+A person first seals evaluation into one command. The agent only experiments through that command. Implementation code may change. Correctness tests, benchmark inputs, the scorer, the build script, and the evaluation script stay fixed. Source: [https://github.com/intel/intel-performance-skills](https://github.com/intel/intel-performance-skills).
+
+The command always runs in the same order: compile at one optimization level, require every correctness test to pass, then run the same benchmark several times. The whole run keeps a single statistic for the decision. For latency that statistic is the median above. Core pinning, core isolation, and realtime priority reduce environmental noise. The decision still reads that one number.
+
+A clean workspace first records baseline B. Each round states one hypothesis and edits only the implementation, then runs the same command. A compile, correctness, or scoring failure gets a short repair. If that repair does not land quickly, the round is rolled back. A fully passing round whose metric is not strictly better than B is rolled back as well. A fully passing round that is strictly better is committed, and B becomes the new value. Both kept and discarded rounds append one line to the experiment log. Version control is the isolator: keep means commit, discard means restore.
+
+```cpp
+enum class Verdict { Keep, Discard };
+
+bool better(double now, double base); // one comparison direction for the whole run
+
+Verdict step(double& B, bool correct, double metric) {
+    if (!correct || !better(metric, B)) return Verdict::Discard;
+    B = metric;
+    return Verdict::Keep;
+}
+```
+
 ## Simple practice
 ### 1. Implement thread-safe caching
 source:[https://github.com/byrnexu/betterquant2](https://github.com/byrnexu/betterquant2)
