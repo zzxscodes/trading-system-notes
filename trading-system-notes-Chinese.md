@@ -43,7 +43,8 @@ English version：[https://github.com/zzxscodes/trading-system-notes/blob/main/t
   - [34. 全链路延时打点结构设计](#34-全链路延时打点结构设计)
   - [35. 环缓冲就地写入减少大对象拷贝](#35-环缓冲就地写入减少大对象拷贝)
   - [36. 共享资源容量耗尽时快速失败](#36-共享资源容量耗尽时快速失败)
-  - [37. 系统设计优质文章](#37-系统设计优质文章)
+  - [37. 用户态网卡收发与旁路有序交接](#37-用户态网卡收发与旁路有序交接)
+  - [38. 系统设计优质文章](#38-系统设计优质文章)
 - [常见性能瓶颈与优化方向](#常见性能瓶颈与优化方向)
   - [1. roofline model](#1-roofline-model)
     - [Memory Bound优化](#memory-bound优化)
@@ -12861,7 +12862,109 @@ public:
 ```
 
 
-### 37. 系统设计优质文章
+### 37. 用户态网卡收发与旁路有序交接
+
+极速行情和极速报单不把热路径放在内核套接字上。收包在用户态轮询网卡事件队列：过滤器按本地地址或完整四元组建好，无关报文进不了队列。每条报文带硬件时间戳和时钟同步标志，下游用这个时间，不在回调里再取一次时钟。
+
+发包按代价分档。最省的是把已经填好的报文整块写进网卡上的可编程发送缓冲。下一档是切分发送，硬件没有接住就退回普通发送。交易连接还可以先向栈预留一段发送窗口，把报文体放进备用队列，真正发出前对单包做一次预热，让缓存和发送描述符先就位。预热不是发出。预热失败要取消预留，不能把半包留在线上。
+
+反应堆先按配置的次数空转，把已经到达的事件处理完；次数用尽仍然没有待办，再进入等待。空转外面加一把用户态自旋锁，避免两个线程同时碰同一条栈。登录、查询、日志这些控制连接明确不进加速栈。交易栈单独起名，和机器上其他进程的栈分开。加速库在运行时打开，打不开就退回内核 TCP，关掉 Nagle，并把套接字绑到加速网卡的地址上。
+
+网卡线程不直接调用策略。报文先放进编译期定长的共享块池，块数、块长、池长都是模板参数。载荷写成固定长度，再对齐到更大的槽，避免一条报文跨缓存行被撕开。发送线程只负责入池。另一条修复线程按序号补缺口，序号连续才交给上游。
+
+```cpp
+enum class TxKind : uint8_t { Pio, Cut, Plain };
+
+struct NicEv {
+    const uint8_t* bytes;
+    int len;
+    uint64_t hw_ns;
+    bool clock_ok;
+};
+
+struct Staged {
+    uint8_t body[256]{};
+    int len{};
+    bool armed{};
+};
+
+class UserNic {
+    int spins_{64};
+    bool accel_{false};
+
+    int drain(NicEv* out, int cap);
+    int wait_drain(NicEv* out, int cap);
+    bool pio_copy(const Staged& p);
+    bool cut_send(const Staged& p);
+    bool plain_send(const Staged& p);
+    bool reserve(int n);
+    bool stage(Staged& p);
+    void cancel_reserve();
+
+public:
+    // 运行时打开加速栈。失败则走内核 TCP：关闭 Nagle，绑到指定网卡地址。
+    bool open(const char* stack_name);
+    void keep_slow(int fd); // 登录、查询不进加速栈
+
+    int poll(NicEv* out, int cap) {
+        int n = 0;
+        for (int i = 0; i < spins_ && n == 0; ++i)
+            n = drain(out, cap);
+        if (n == 0) n = wait_drain(out, cap);
+        return n;
+    }
+
+    bool send(const Staged& p) {
+        if (pio_copy(p)) return true;
+        if (cut_send(p)) return true;
+        return plain_send(p);
+    }
+
+    bool warm(Staged& p) {
+        if (!reserve(p.len)) return false;
+        p.armed = stage(p);
+        if (!p.armed) cancel_reserve();
+        return p.armed;
+    }
+};
+
+struct Cell {
+    uint32_t seq;
+    uint16_t nbytes;
+    uint16_t flags;
+    uint8_t body[640];
+    uint8_t tail[1024 - 8 - 640];
+};
+static_assert(sizeof(Cell) == 1024, "one cell, one aligned slot");
+
+template<uint32_t kBlocks, uint32_t kBlock, uint32_t kPool>
+struct BlockPool {
+    static_assert(kBlocks * kBlock <= kPool, "pool covers every block");
+    Cell cells[kBlocks];
+};
+
+struct InOrder {
+    uint32_t expect{1};
+    BlockPool<4096, 4096, 16 * 1024 * 1024>* pool{};
+
+    void on_packet(uint32_t seq, const uint8_t* p, int n) {
+        if (seq == expect) {
+            publish(p, n);
+            ++expect;
+            drain_saved();
+        } else if (seq > expect) {
+            save_for_repair(seq, p, n); // 修复线程补洞，发送线程不在这里等
+        }
+    }
+
+    void publish(const uint8_t* p, int n);
+    void drain_saved();
+    void save_for_repair(uint32_t seq, const uint8_t* p, int n);
+};
+```
+
+
+### 38. 系统设计优质文章
 [https://mp.weixin.qq.com/s/9OH1RA8POFidgQnvape6fQ](https://mp.weixin.qq.com/s/9OH1RA8POFidgQnvape6fQ)
 
 [https://mp.weixin.qq.com/s/PuG4ZFVZ-7hijS4Db8Z5jQ](https://mp.weixin.qq.com/s/PuG4ZFVZ-7hijS4Db8Z5jQ)
@@ -30622,6 +30725,53 @@ void set_link(MdLink& m, int kind, int v) {
 }
 ```
 
+进程起来时，最近价不等第一笔行情。启动阶段把库里每个标的的最后一笔成交价灌进共享表，每个工作线程再把自己会碰到的标的抄进线程局部槽。热路径只改这份局部槽。这一笔被丢掉，或者线程刚接手该标的时，用槽里的上一笔顶上，不在回调里加锁查全局表。
+
+```cpp
+struct BootPx { uint32_t key; double px; };
+
+class BootBook {
+    std::vector<BootPx> rows_; // 启动时灌入，之后只读
+public:
+    void load(const BootPx* p, int n) { rows_.assign(p, p + n); }
+    double find(uint32_t key) const {
+        for (auto& r : rows_) if (r.key == key) return r.px;
+        return 0;
+    }
+};
+
+struct LocalPx { uint32_t key; double px; };
+
+struct Tape {
+    LocalPx slot[64]{};
+    int n{};
+
+    LocalPx* lookup(uint32_t key) {
+        for (int i = 0; i < n; ++i)
+            if (slot[i].key == key) return &slot[i];
+        return nullptr;
+    }
+
+    void seed(const BootBook& boot, uint32_t key) {
+        if (lookup(key) || n >= 64) return;
+        double px = boot.find(key);
+        if (px > 0) slot[n++] = {key, px};
+    }
+
+    double on_tick(uint32_t key, double px, bool keep) {
+        LocalPx* s = lookup(key);
+        if (!keep || px <= 0) return s ? s->px : 0;
+        if (!s && n < 64) s = &slot[n++];
+        if (!s) return px;
+        s->key = key;
+        s->px = px;
+        return px;
+    }
+};
+
+thread_local Tape tls_tape;
+```
+
 
 ### 30. 交易桥短单号、异步配额与算法容器时钟扇出
 
@@ -30723,6 +30873,65 @@ int64_t add_session_ms(int64_t t, int64_t dur, const SessionSpan* cont, int n) {
         t = cont[i].begin_ms;
     }
     return t;
+}
+```
+
+母单执行状态比时钟切片更细。空闲时不发子单。挂着表示簿上已有被动单。被动等待和主动等待都看预测信号再决定留下或切走。打对手价时直接打对侧一档。暂停时只收尾，不新开。在途子单的撤销分三种：价格偏离超过阈值、成交数量偏离计划、到点强制收尾。剩余量小于最小委托量时单独开一轮，不塞进正常切片。进度用两条带：完成比例落后于时间比例超过给定值就追，超前超过给定值就停。从停到再开要经过一段解锁延迟，避免在带边上来回撤挂。
+
+```cpp
+enum class Phase : uint8_t {
+    Idle, Resting, WaitMake, WaitTake, Cross, Held
+};
+
+enum class Pull : uint8_t { Drift, Size, Deadline };
+
+struct Child {
+    double px{};
+    int64_t planned{};
+    int64_t filled{};
+    int64_t live{};
+    bool crumb{};
+};
+
+struct Band {
+    double behind{0.25};
+    double ahead{0.15};
+    int64_t release_ms{50};
+    int64_t held_since{0};
+};
+
+Phase look(Phase cur, int bias) {
+    if (cur == Phase::WaitMake && bias > 0) return Phase::Cross;
+    if (cur == Phase::WaitTake && bias < 0) return Phase::WaitMake;
+    return cur;
+}
+
+void cancel_child(Child& c);
+
+void pull_live(std::vector<Child>& live, Pull why, double mid, double tol) {
+    for (auto& c : live) {
+        bool hit = why == Pull::Deadline
+            || (why == Pull::Drift && std::abs(c.px - mid) > tol)
+            || (why == Pull::Size && c.filled + c.live != c.planned);
+        if (hit) cancel_child(c);
+    }
+}
+
+int64_t next_qty(int64_t left, int64_t slice, int64_t min_lot, bool* crumb) {
+    if (left < min_lot) { *crumb = true; return left; }
+    *crumb = false;
+    return std::min(slice, left);
+}
+
+bool pace_ok(Band& b, double time_frac, double done_frac, int64_t now) {
+    if (done_frac + b.behind < time_frac) return true;
+    if (done_frac > time_frac + b.ahead) {
+        if (b.held_since == 0) b.held_since = now;
+        return false;
+    }
+    if (b.held_since && now - b.held_since < b.release_ms) return false;
+    b.held_since = 0;
+    return true;
 }
 ```
 
