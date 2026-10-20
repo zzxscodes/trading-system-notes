@@ -3537,6 +3537,40 @@ bool dequeue(T& item) {
 + `release` 发布写入槽位数据，`acquire` 读取对端发布进度；
 + `alignas(64)` 与该优化配合使用，能进一步降低 false sharing。
 
+**不留空槽的判满**
+
+上面把下标按掩码折回，用 `(write + 1) & mask == read` 判满，容量里要空出一格，否则空和满都表现为两个下标按掩码相等。另一种写法让 `head`、`tail` 只增不减，掩码只用于取数组下标。`head == tail` 为空，`head - tail == capacity` 为满，分配的槽全部可用。无符号相减要分开这两个距离，容量不能超过下标类型取值范围的一半：32 位下标最多 `2^31` 个槽。
+
+```cpp
+template<class T, uint32_t N>
+class FullSlotSpsc {
+    static_assert((N & (N - 1)) == 0, "N power of two");
+    static_assert(N <= (uint32_t(1) << 31), "N <= half the index range");
+    T buf_[N]{};
+    std::atomic<uint32_t> head_{0};
+    std::atomic<uint32_t> tail_{0};
+    static constexpr uint32_t mask_ = N - 1;
+public:
+    T* try_write() {
+        uint32_t h = head_.load(std::memory_order_relaxed);
+        uint32_t t = tail_.load(std::memory_order_acquire);
+        if (h - t == N) return nullptr;
+        return &buf_[h & mask_];
+    }
+    void publish() {
+        head_.store(head_.load(std::memory_order_relaxed) + 1, std::memory_order_release);
+    }
+    const T* try_read() const {
+        uint32_t t = tail_.load(std::memory_order_relaxed);
+        uint32_t h = head_.load(std::memory_order_acquire);
+        if (t == h) return nullptr;
+        return &buf_[t & mask_];
+    }
+    void consume() {
+        tail_.store(tail_.load(std::memory_order_relaxed) + 1, std::memory_order_release);
+    }
+};
+```
 
 
 基于此的日志服务
@@ -12733,6 +12767,17 @@ int64_t revised_ms(const DeskClock& c, int64_t local_ms) {
 }
 ```
 
+一帧日志上也可以只带两个时间，不必为每个处理节点留数组。`gen_ns` 是这条记录写进页的时刻，`trigger_ns` 是触发它的上游事件时刻，两者相减就是这一跳。多跳路径仍用上面的定长数组；这两个字段跟着记录走，换页之后还能按时间找回。页的布局见第 18 节。
+
+```cpp
+struct FrameStamp {
+    int64_t gen_ns;
+    int64_t trigger_ns;
+};
+
+int64_t hop_ns(const FrameStamp& s) { return s.gen_ns - s.trigger_ns; }
+```
+
 
 ### 35. 环缓冲就地写入减少大对象拷贝
 
@@ -12849,6 +12894,28 @@ void push_flow(FlowWin& w, void* body, int len) {
     s.len = len;
     if (w.spill) spill_under(w, w.tail - 1);
     if (w.reader >= 0) pthread_kill(w.reader, SIGUSR1);
+}
+```
+
+页式日志把正文写在帧头后面的同一块映射里，游标是页头记下的末帧起点。取到的地址就是槽，字段直接填在帧头之后，填完再把末帧起点改成这一帧。这和上面的槽引用是同一件事，槽从环下标换成页内偏移。页头和帧头见第 18 节。
+
+```cpp
+struct FrameHeader {
+    uint32_t frame_bytes;
+    uint32_t header_bytes;
+    int64_t gen_ns;
+    int64_t trigger_ns;
+};
+
+template<class Fill>
+bool write_frame(uint8_t* frame, uint32_t nbytes, int64_t trigger_ns, Fill fill) {
+    auto* h = reinterpret_cast<FrameHeader*>(frame);
+    h->header_bytes = uint32_t(sizeof(FrameHeader));
+    h->frame_bytes = h->header_bytes + nbytes;
+    h->trigger_ns = trigger_ns;
+    fill(frame + h->header_bytes);
+    h->gen_ns = now_ns();
+    return true;
 }
 ```
 
@@ -25093,6 +25160,33 @@ private:
 + **总权益**：总权益 = 现金余额 + 所有持仓的市值
 + **总盈亏**：总盈亏 = 总权益 - 初始资金 = 已实现盈亏 + 未实现盈亏
 
+**柜台账本对齐**
+
+按成交增量维护的持仓、现金和保证金，会在漏回报、外部成交或日切之后和柜台快照岔开。对齐时不要在原行上改数字：用柜台快照生成新账，留下旧账，再整本换成新账，并通知还拿着旧持仓、旧资金、旧保证金的订阅者。订阅者用新旧两本的差补自己的视图，而不是把柜台数量再加到已经累计过的行上。
+
+```cpp
+struct BookSnap {
+    int64_t pos;
+    double cash;
+    double margin;
+};
+
+struct Book {
+    BookSnap live{};
+};
+
+struct BookReset {
+    BookSnap before;
+    BookSnap after;
+};
+
+BookReset realign(Book& book, const BookSnap& desk) {
+    BookReset ev{book.live, desk};
+    book.live = desk;
+    return ev;
+}
+```
+
 
 **RMS - 风险管理系统 (Risk Management System)**
 
@@ -29992,16 +30086,58 @@ public:
 
 + **注意**：共享内存布局一变，所有进程都要按版本对齐；订阅者超过 64 个时，确认位图要加宽；本系统自算账本与柜台查询不一致时，要有明确的对账办法。
 
+**6. 单写者页式日志**
+
+分池环和确认位图适合多方都要看见同一条记录。另一种落地是每个目的地一条只追加的日志：文件按固定页映射进来，页头记下页长和最后一帧的起点。帧头带产生时间、触发时间、消息类型、来源和目的地，正文紧跟帧头。写者写完一帧，把页头里的末帧起点改到这一帧；读者从自己记住的页号和偏移往前扫。来源和目的地用来路由。页写满就换下一页。
+
+```cpp
+struct PageHeader {
+    uint32_t page_bytes;
+    uint32_t header_bytes;
+    uint64_t last_frame; // 0 表示还没有帧
+};
+
+struct FrameHeader {
+    uint32_t frame_bytes;
+    uint32_t header_bytes;
+    int64_t gen_ns;
+    int64_t trigger_ns;
+    int32_t msg_type;
+    uint32_t source;
+    uint32_t dest;
+};
+
+struct Page {
+    PageHeader* hdr;
+    uint8_t* base;
+
+    uint8_t* claim(uint32_t nbytes) {
+        uint64_t off = hdr->header_bytes;
+        if (hdr->last_frame != 0) {
+            auto* prev = reinterpret_cast<FrameHeader*>(base + hdr->last_frame);
+            off = hdr->last_frame + prev->frame_bytes;
+        }
+        if (off + nbytes > hdr->page_bytes) return nullptr;
+        return base + off;
+    }
+
+    void commit(uint8_t* frame) {
+        hdr->last_frame = uint64_t(frame - base);
+    }
+};
+```
+
 
 ### 19. 交易桥双边订单号索引
 
-柜台回报里的订单号类型并不统一：有的是字符串，有的是 64 位整数，有的只有 32 位。交易桥把柜台号和本系统号收成两张定长槽。回报线程只把一条短记录写进自己的环并发布序号，桥线程按序号改槽。报单成功时写入两侧；撤单与成交回报用柜台号在开放寻址槽里找回本地单；超时巡检扫状态仍为未确认的槽。环满时这一笔直接失败返回。
+柜台回报里的订单号类型并不统一：有的是字符串，有的是 64 位整数，有的只有 32 位。同一柜台号还会从不同接口会话回来，键上再带一段固定长度的接口名。交易桥把柜台号和本系统号收成两张定长槽。回报线程只把一条短记录写进自己的环并发布序号，桥线程按序号改槽。报单成功时写入两侧；撤单与成交回报用柜台号在开放寻址槽里找回本地单；超时巡检扫状态仍为未确认的槽。环满时这一笔直接失败返回。
 
 ```cpp
 struct VenueKey {
     uint64_t num;
     uint32_t kind; // 0 数值，1 文本
     char text[24];
+    char api[16]; // 接口名
 };
 
 struct WireOrder;
@@ -30041,6 +30177,7 @@ struct NoteRing {
 
 bool same_key(const VenueKey& a, const VenueKey& b) {
     if (a.kind != b.kind) return false;
+    if (std::memcmp(a.api, b.api, 16) != 0) return false;
     if (a.kind == 1) return std::memcmp(a.text, b.text, 24) == 0;
     return a.num == b.num;
 }
@@ -30048,6 +30185,7 @@ bool same_key(const VenueKey& a, const VenueKey& b) {
 uint32_t mix_key(const VenueKey& k) {
     uint64_t x = k.num ^ (uint64_t(k.kind) << 32);
     for (int i = 0; i < 24; ++i) x = x * 131 + uint8_t(k.text[i]);
+    for (int i = 0; i < 16; ++i) x = x * 131 + uint8_t(k.api[i]);
     return uint32_t(x);
 }
 

@@ -3529,6 +3529,40 @@ Implementation notes:
 - `release` publishes slot writes, `acquire` observes peer progress;
 - combine with `alignas(64)` to further reduce false sharing.
 
+**Full capacity without a spare slot**
+
+The versions above fold indexes with a mask and treat the queue as full when `(write + 1) & mask == read`. One slot stays unused, because empty and full would otherwise both look like equal masked indexes. Another version keeps `head` and `tail` as monotonically increasing counters and applies the mask only when indexing the array. `head == tail` is empty, and `head - tail == capacity` is full, so every allocated slot is usable. Unsigned subtraction can tell those two distances apart only when capacity is at most half the range of the index type: a 32-bit index holds at most `2^31` slots.
+
+```cpp
+template<class T, uint32_t N>
+class FullSlotSpsc {
+    static_assert((N & (N - 1)) == 0, "N power of two");
+    static_assert(N <= (uint32_t(1) << 31), "N <= half the index range");
+    T buf_[N]{};
+    std::atomic<uint32_t> head_{0};
+    std::atomic<uint32_t> tail_{0};
+    static constexpr uint32_t mask_ = N - 1;
+public:
+    T* try_write() {
+        uint32_t h = head_.load(std::memory_order_relaxed);
+        uint32_t t = tail_.load(std::memory_order_acquire);
+        if (h - t == N) return nullptr;
+        return &buf_[h & mask_];
+    }
+    void publish() {
+        head_.store(head_.load(std::memory_order_relaxed) + 1, std::memory_order_release);
+    }
+    const T* try_read() const {
+        uint32_t t = tail_.load(std::memory_order_relaxed);
+        uint32_t h = head_.load(std::memory_order_acquire);
+        if (t == h) return nullptr;
+        return &buf_[t & mask_];
+    }
+    void consume() {
+        tail_.store(tail_.load(std::memory_order_relaxed) + 1, std::memory_order_release);
+    }
+};
+```
 
 
 Log service based on this
@@ -12762,6 +12796,17 @@ int64_t revised_ms(const DeskClock& c, int64_t local_ms) {
 }
 ```
 
+A journal frame can carry only two timestamps, without an array slot per processing node. `gen_ns` is when the record was written into the page, and `trigger_ns` is the upstream event that caused it. Their difference is this hop. Multi-hop paths still use the fixed array above. These two fields travel with the record and can be found again by time after a page change. The page layout is in section 18.
+
+```cpp
+struct FrameStamp {
+    int64_t gen_ns;
+    int64_t trigger_ns;
+};
+
+int64_t hop_ns(const FrameStamp& s) { return s.gen_ns - s.trigger_ns; }
+```
+
 
 ### 35. In-place ring writes to avoid large-object copies
 
@@ -12878,6 +12923,28 @@ void push_flow(FlowWin& w, void* body, int len) {
     s.len = len;
     if (w.spill) spill_under(w, w.tail - 1);
     if (w.reader >= 0) pthread_kill(w.reader, SIGUSR1);
+}
+```
+
+A paged journal writes the body in the same mapping, immediately after the frame header. The cursor is the start of the last frame stored in the page header. The address returned is the slot: fields are filled after the header, and the last-frame start is then moved to this frame. This is the same idea as the slot reference above, with a page offset instead of a ring index. The page and frame headers are in section 18.
+
+```cpp
+struct FrameHeader {
+    uint32_t frame_bytes;
+    uint32_t header_bytes;
+    int64_t gen_ns;
+    int64_t trigger_ns;
+};
+
+template<class Fill>
+bool write_frame(uint8_t* frame, uint32_t nbytes, int64_t trigger_ns, Fill fill) {
+    auto* h = reinterpret_cast<FrameHeader*>(frame);
+    h->header_bytes = uint32_t(sizeof(FrameHeader));
+    h->frame_bytes = h->header_bytes + nbytes;
+    h->trigger_ns = trigger_ns;
+    fill(frame + h->header_bytes);
+    h->gen_ns = now_ns();
+    return true;
 }
 ```
 
@@ -25099,6 +25166,33 @@ private:
 + **Total Equity**: Total Equity = Cash Balance + Market Value of All Positions
 + **Total Profit and Loss**: Total Profit and Loss = Total Equity - Initial Capital = Realized Profit and Loss + Unrealized Profit and Loss
 
+**Reconciling the book with the counter**
+
+Positions, cash, and margin maintained from fills diverge from a counter snapshot after a missed report, an external trade, or a day roll. Do not patch the live row in place. Build a new book from the snapshot, keep the old one, swap the whole book, and notify subscribers still holding the old position, cash, or margin. They apply the difference between the two books. They do not add the counter quantity onto a row that has already been accumulated.
+
+```cpp
+struct BookSnap {
+    int64_t pos;
+    double cash;
+    double margin;
+};
+
+struct Book {
+    BookSnap live{};
+};
+
+struct BookReset {
+    BookSnap before;
+    BookSnap after;
+};
+
+BookReset realign(Book& book, const BookSnap& desk) {
+    BookReset ev{book.live, desk};
+    book.live = desk;
+    return ev;
+}
+```
+
 
 **RMS - Risk Management System**
 
@@ -30002,16 +30096,58 @@ public:
 
 + **Caveats**: every process must agree on shared-memory layout version; more than 64 subscribers need a wider confirm map; disagreement between local books and broker queries needs an explicit reconciliation policy.
 
+**6. Single-writer paged journal**
+
+A pool of rings plus a confirm bitmap fits records that several processes must all observe. Another layout is one append-only journal per destination. The file is mapped in fixed pages. The page header stores the page length and the start of the last frame. The frame header carries generation time, trigger time, message type, source, and destination, and the body follows the header. After a frame is written, the last-frame start in the page header moves to that frame. A reader scans forward from the page id and offset it remembers. Source and destination do the routing. A full page is followed by the next page.
+
+```cpp
+struct PageHeader {
+    uint32_t page_bytes;
+    uint32_t header_bytes;
+    uint64_t last_frame; // 0 means no frame yet
+};
+
+struct FrameHeader {
+    uint32_t frame_bytes;
+    uint32_t header_bytes;
+    int64_t gen_ns;
+    int64_t trigger_ns;
+    int32_t msg_type;
+    uint32_t source;
+    uint32_t dest;
+};
+
+struct Page {
+    PageHeader* hdr;
+    uint8_t* base;
+
+    uint8_t* claim(uint32_t nbytes) {
+        uint64_t off = hdr->header_bytes;
+        if (hdr->last_frame != 0) {
+            auto* prev = reinterpret_cast<FrameHeader*>(base + hdr->last_frame);
+            off = hdr->last_frame + prev->frame_bytes;
+        }
+        if (off + nbytes > hdr->page_bytes) return nullptr;
+        return base + off;
+    }
+
+    void commit(uint8_t* frame) {
+        hdr->last_frame = uint64_t(frame - base);
+    }
+};
+```
+
 
 ### 19. Bilateral order-id index on the trade bridge
 
-Venue ack ids are not uniform: some are strings, some uint64, some only 32-bit. The trade bridge keeps venue ids and local ids in two fixed slot tables. The callback thread writes one short note into its own ring and publishes the index; the bridge thread applies notes in order. On successful submit both sides are written; cancel and fill callbacks find the local order by open-addressing the venue id; timeout sweeps scan slots still marked unacked. A full ring fails that note immediately.
+Venue ack ids are not uniform: some are strings, some uint64, some only 32-bit. The same venue id can also come back on a different API session, so the key carries a fixed-length API name as well. The trade bridge keeps venue ids and local ids in two fixed slot tables. The callback thread writes one short note into its own ring and publishes the index; the bridge thread applies notes in order. On successful submit both sides are written; cancel and fill callbacks find the local order by open-addressing the venue id; timeout sweeps scan slots still marked unacked. A full ring fails that note immediately.
 
 ```cpp
 struct VenueKey {
     uint64_t num;
     uint32_t kind; // 0 numeric, 1 text
     char text[24];
+    char api[16]; // API name
 };
 
 struct WireOrder;
@@ -30051,6 +30187,7 @@ struct NoteRing {
 
 bool same_key(const VenueKey& a, const VenueKey& b) {
     if (a.kind != b.kind) return false;
+    if (std::memcmp(a.api, b.api, 16) != 0) return false;
     if (a.kind == 1) return std::memcmp(a.text, b.text, 24) == 0;
     return a.num == b.num;
 }
@@ -30058,6 +30195,7 @@ bool same_key(const VenueKey& a, const VenueKey& b) {
 uint32_t mix_key(const VenueKey& k) {
     uint64_t x = k.num ^ (uint64_t(k.kind) << 32);
     for (int i = 0; i < 24; ++i) x = x * 131 + uint8_t(k.text[i]);
+    for (int i = 0; i < 16; ++i) x = x * 131 + uint8_t(k.api[i]);
     return uint32_t(x);
 }
 
