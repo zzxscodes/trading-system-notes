@@ -3572,6 +3572,49 @@ public:
 };
 ```
 
+**槽位延迟构造**
+
+上面的槽在队列创建时就默认构造，写入是赋值。另一类单生产者单消费者队列只申请按 `T` 对齐的原始内存，接受入队之后才在槽上构造，出队把对象取走后立刻析构。判满仍用上一节的单调下标。满的时候函数直接返回，不在槽上构造。构造函数抛出时不推进发布序号，这块槽可以再试。消费者析构之后用 `release` 发布回收，生产者 `acquire` 到这个进度才覆盖同一槽。
+
+```cpp
+template<class T, uint64_t N>
+class RawSlotSpsc {
+    static_assert((N & (N - 1)) == 0, "N power of two");
+    static_assert(N <= (uint64_t(1) << 63), "N <= half the index range");
+    T* slot_;
+    static constexpr uint64_t mask_ = N - 1;
+    alignas(64) std::atomic<uint64_t> head_{0};
+    uint64_t cached_tail_{0};
+    alignas(64) std::atomic<uint64_t> tail_{0};
+    uint64_t cached_head_{0};
+public:
+    RawSlotSpsc()
+        : slot_(static_cast<T*>(::operator new(sizeof(T) * N, std::align_val_t{alignof(T)}))) {}
+    bool try_emplace(auto&&... args) {
+        uint64_t t = tail_.load(std::memory_order_relaxed);
+        if (t - cached_head_ == N) {
+            cached_head_ = head_.load(std::memory_order_acquire);
+            if (t - cached_head_ == N) return false;
+        }
+        new (slot_ + (t & mask_)) T(std::forward<decltype(args)>(args)...);
+        tail_.store(t + 1, std::memory_order_release);
+        return true;
+    }
+    bool try_pop(T& out) {
+        uint64_t h = head_.load(std::memory_order_relaxed);
+        if (h == cached_tail_) {
+            cached_tail_ = tail_.load(std::memory_order_acquire);
+            if (h == cached_tail_) return false;
+        }
+        T& s = slot_[h & mask_];
+        out = std::move(s);
+        s.~T();
+        head_.store(h + 1, std::memory_order_release);
+        return true;
+    }
+};
+```
+
 
 基于此的日志服务
 
@@ -17507,6 +17550,54 @@ private:
 代码公式：$ \hat{q}_{t_{m}}^{m}=\frac{1}{2}\left(q_{t_{a}}^{a}+q_{t_{b}}^{b}\right) $，其中$ t_{m} $取“最新买价/卖价的时间戳（谁更新取谁）”，确保中间价实时同步市场变化；
 进阶：若需考虑订单量权重，代码实现size-weighted中间价$ \tilde{q}_{t}^{s}=\frac{q_{t_{b}}^{b} s_{t_{a}}^{a}+q_{t_{a}}^{a} s_{t_{b}}^{b}}{s_{t_{a}}^{a}+s_{t_{b}}^{b}} $（$ s $为买/卖价对应的订单量）。
 
+**4. 两笔快照还原各价成交**
+
+深度行情给的是累计成交量和累计成交额，没有这一跳在每个价上的手数。按合约留下上一笔快照。这一跳的手数是两笔累计成交量之差，成交额之差是这些手数的名义金额。差不是正数时不产生成交，包括第一笔和累计值回绕。价格收成整数键：先加上一个极小量再乘 1000，向零截断，避免 `1.2 * 1000` 落在 `1199.999`。郑商所的成交额不参与还原，这一跳的手数全部记在最新价。其它交易所用合约乘数把成交额换回价格和。只有一手时，成交价等于成交额差除以乘数；它离最新价不到最小变动的十分之一，就记在最新价，否则记在算出来的价格。多手时先认定一手在最新价，其余手数的价格由剩下的成交额解出，再把两端收到最小变动的整数倍上，并夹在买一和卖一之间。价格乘手数仍少于这一跳的成交额时，从低价搬一手到高一个最小变动，直到名义金额盖住成交额。
+
+```cpp
+int64_t px_key(double px) {
+    return (int64_t)((px + 1e-12) * 1000.0);
+}
+
+void infer_tick(std::map<int64_t, int64_t>& out,
+                int64_t prev_vol, int64_t vol,
+                double prev_turnover, double turnover,
+                double last, double bid1, double ask1,
+                double tick, double vm, bool czce) {
+    int64_t dv = vol - prev_vol;
+    if (dv <= 0) return;
+    if (czce) { out[px_key(last)] += dv; return; }
+    double notional = (turnover - prev_turnover) / vm;
+    double tol = tick / 10.0;
+    if (dv == 1) {
+        int64_t k = std::fabs(notional - last) < tol ? px_key(last) : px_key(notional);
+        out[k] += 1;
+        return;
+    }
+    double rest = (notional - last) / (double)(dv - 1);
+    double lo = std::max(bid1, std::min(last, rest));
+    double hi = std::min(ask1, std::max(last, rest));
+    int64_t step = px_key(tick);
+    int64_t klo = px_key(lo);
+    int64_t khi = px_key(hi);
+    if (khi <= klo) { out[px_key(last)] += dv; return; }
+    double a = (hi * (double)dv - notional) / (hi - lo);
+    int64_t n_lo = std::llround(a);
+    if (n_lo < 0) n_lo = 0;
+    if (n_lo > dv) n_lo = dv;
+    out[klo] += n_lo;
+    out[khi] += dv - n_lo;
+    double got = (klo / 1000.0) * n_lo + (khi / 1000.0) * (dv - n_lo);
+    while (got + tol < notional && n_lo > 0) {
+        out[klo] -= 1;
+        out[klo + step] += 1;
+        klo += step;
+        n_lo -= 1;
+        got += tick;
+    }
+}
+```
+
 
 ### 6. 任务六(报单时序竞争分析)
 
@@ -20225,6 +20316,7 @@ bool replay_after_timeout(uint64_t cmd_id) {
 + 内存浪费 - 稀疏订单簿浪费大量空间
 + 价格范围受限
 
+同一价位上的订单若用指针串起来，存订单的容器就不能在插入、删除时搬移还活着的对象，`vector` 扩容会让这些指针失效。下面的价格点存的是订单池下标。另一种做法是按块存放：删掉的槽位串成空闲链，用跳过表跳过一段已删槽，活着的订单地址不变。
 
 ```cpp
 #include <optional>
@@ -31187,6 +31279,42 @@ bool normalize_ticket(Ticket& t) {
     if (t.px_kind < 0 && t.px > 1e-6)
         t.px_kind = 0;
     return true;
+}
+```
+
+**按持仓把一笔手数拆开**
+
+上一节只改开平标志。期货还要把策略给出的手数拆成几张单。正数是买，负数是卖；买去平空头，卖去平多头。今仓可平等于今仓减去同方向未成的平今，昨仓可平等于总仓减今仓，再减去同方向未成的平仓和平昨。每一段的手数取可平仓、剩余请求、限价单最大手数里的最小正数，小于最小手数的这一段不发。
+
+先平今，再平昨，请求里还没被平掉的手数开仓。只开仓没有可平的段，剩余手数按最大手数连续切开，直到发完。只平仓不开剩余，手数不超过还能平的仓。先平昨再开时不平今；昨仓还在就只发平昨，开仓留到昨仓平完的下一次，所以这一次的手数可以少于请求。优先平昨同时开仓、先平昨再平今两种没有发单实现，调用直接返回。一次只返回一张单的入口发当前第一段；要一次拿齐各段，用返回多张单的入口，每发出一段就把剩余手数减去这一段。
+
+```cpp
+struct Pos { int total; int today; };
+struct Pend { int close_td; int close_yd; };
+
+int clip_lot(int n, int max_lot, int min_lot) {
+    if (n <= 0) return 0;
+    if (max_lot > 0 && min_lot > 0) {
+        n = std::min(n, max_lot);
+        if (n < min_lot) return 0;
+    }
+    return n;
+}
+
+void close_td_then_yd(int want, Pos pos, Pend pend, int max_lot, int min_lot,
+                      auto&& send) {
+    int left = want;
+    int td = clip_lot(std::min(std::max(pos.today - pend.close_td, 0), left), max_lot, min_lot);
+    if (td > 0) { send(Off::CloseToday, td); left -= td; }
+    int yd_free = (pos.total - pos.today) - pend.close_yd;
+    int yd = clip_lot(std::min(std::max(yd_free, 0), left), max_lot, min_lot);
+    if (yd > 0) { send(Off::CloseYday, yd); left -= yd; }
+    while (left > 0) {
+        int n = clip_lot(left, max_lot, min_lot);
+        if (n <= 0) break;
+        send(Off::Open, n);
+        left -= n;
+    }
 }
 ```
 
