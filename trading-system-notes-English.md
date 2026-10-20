@@ -43,7 +43,8 @@
   - [34. End-to-end latency tracing layout](#34-end-to-end-latency-tracing-layout)
   - [35. In-place ring writes to avoid large-object copies](#35-in-place-ring-writes-to-avoid-large-object-copies)
   - [36. Fail fast when shared capacity is exhausted](#36-fail-fast-when-shared-capacity-is-exhausted)
-  - [37. High-quality articles on system design](#37-high-quality-articles-on-system-design)
+  - [37. User-space NIC I/O and in-order bypass handoff](#37-user-space-nic-io-and-in-order-bypass-handoff)
+  - [38. High-quality articles on system design](#38-high-quality-articles-on-system-design)
 - [Common performance bottlenecks and optimization directions](#common-performance-bottlenecks-and-optimization-directions)
   - [1. roofline model](#1-roofline-model)
     - [Memory Bound optimization](#memory-bound-optimization)
@@ -12890,7 +12891,110 @@ public:
 ```
 
 
-### 37. High-quality articles on system design
+### 37. User-space NIC I/O and in-order bypass handoff
+
+Fast market data and fast order entry do not put the hot path on a kernel socket. Receive polls the NIC event queue in user space. The filter is installed for a local address or a full 4-tuple, so unrelated packets never enter the queue. Each packet carries a hardware timestamp and a clock-sync flag. Downstream uses that time instead of taking another clock sample inside the callback.
+
+Transmit is tiered by cost. The cheapest path copies an already filled packet into the NIC's programmed send buffer. The next tier is cut-through send, falling back to an ordinary send when the hardware does not accept it. An order connection can also reserve a send window on the stack, park the body on an alternate queue, and warm a single packet before the real send so the cache and the transmit descriptor are already in place. A warm is not a send. If the warm fails, the reservation is cancelled. A half packet must not stay on the wire.
+
+The reactor first spins a configured number of times and drains events that have already arrived. Only when that budget is spent and nothing is pending does it sleep. A user-space spin lock wraps the spin so two threads never touch the same stack. Login, query, and log sockets stay off the accelerated stack. The trading stack has its own name, separate from every other stack on the machine. The acceleration library is opened at runtime. If it does not open, the path falls back to kernel TCP, Nagle is turned off, and the socket is bound to the address of the accelerated NIC.
+
+The NIC thread does not call the strategy. Packets land in a shared block pool whose block count, block size, and pool size are template parameters. The payload is a fixed length, then aligned up to a larger slot, so one message is not torn across cache lines. The send thread only enqueues. A repair thread fills sequence holes, and a packet is handed upstream only when its sequence is contiguous.
+
+```cpp
+enum class TxKind : uint8_t { Pio, Cut, Plain };
+
+struct NicEv {
+    const uint8_t* bytes;
+    int len;
+    uint64_t hw_ns;
+    bool clock_ok;
+};
+
+struct Staged {
+    uint8_t body[256]{};
+    int len{};
+    bool armed{};
+};
+
+class UserNic {
+    int spins_{64};
+    bool accel_{false};
+
+    int drain(NicEv* out, int cap);
+    int wait_drain(NicEv* out, int cap);
+    bool pio_copy(const Staged& p);
+    bool cut_send(const Staged& p);
+    bool plain_send(const Staged& p);
+    bool reserve(int n);
+    bool stage(Staged& p);
+    void cancel_reserve();
+
+public:
+    // Open the accelerated stack at runtime. On failure use kernel TCP:
+    // Nagle off, bound to the NIC address.
+    bool open(const char* stack_name);
+    void keep_slow(int fd); // login and query stay off the accelerated stack
+
+    int poll(NicEv* out, int cap) {
+        int n = 0;
+        for (int i = 0; i < spins_ && n == 0; ++i)
+            n = drain(out, cap);
+        if (n == 0) n = wait_drain(out, cap);
+        return n;
+    }
+
+    bool send(const Staged& p) {
+        if (pio_copy(p)) return true;
+        if (cut_send(p)) return true;
+        return plain_send(p);
+    }
+
+    bool warm(Staged& p) {
+        if (!reserve(p.len)) return false;
+        p.armed = stage(p);
+        if (!p.armed) cancel_reserve();
+        return p.armed;
+    }
+};
+
+struct Cell {
+    uint32_t seq;
+    uint16_t nbytes;
+    uint16_t flags;
+    uint8_t body[640];
+    uint8_t tail[1024 - 8 - 640];
+};
+static_assert(sizeof(Cell) == 1024, "one cell, one aligned slot");
+
+template<uint32_t kBlocks, uint32_t kBlock, uint32_t kPool>
+struct BlockPool {
+    static_assert(kBlocks * kBlock <= kPool, "pool covers every block");
+    Cell cells[kBlocks];
+};
+
+struct InOrder {
+    uint32_t expect{1};
+    BlockPool<4096, 4096, 16 * 1024 * 1024>* pool{};
+
+    void on_packet(uint32_t seq, const uint8_t* p, int n) {
+        if (seq == expect) {
+            publish(p, n);
+            ++expect;
+            drain_saved();
+        } else if (seq > expect) {
+            save_for_repair(seq, p, n); // repair thread fills the hole; send does not wait here
+        }
+    }
+
+    void publish(const uint8_t* p, int n);
+    void drain_saved();
+    void save_for_repair(uint32_t seq, const uint8_t* p, int n);
+};
+```
+
+
+### 38. High-quality articles on system design
 [https://mp.weixin.qq.com/s/9OH1RA8POFidgQnvape6fQ](https://mp.weixin.qq.com/s/9OH1RA8POFidgQnvape6fQ)
 
 [https://mp.weixin.qq.com/s/PuG4ZFVZ-7hijS4Db8Z5jQ](https://mp.weixin.qq.com/s/PuG4ZFVZ-7hijS4Db8Z5jQ)
@@ -30631,6 +30735,53 @@ void set_link(MdLink& m, int kind, int v) {
 }
 ```
 
+At process start the last price does not wait for the first live tick. Boot copies each symbol's last trade from the store into a shared table. Each worker then copies the symbols it will touch into a thread-local slot. The hot path only updates that slot. When a tick is dropped, or the thread has just taken the symbol, the previous price in the slot stands in. The callback does not lock a global table.
+
+```cpp
+struct BootPx { uint32_t key; double px; };
+
+class BootBook {
+    std::vector<BootPx> rows_; // filled at boot, read-only after that
+public:
+    void load(const BootPx* p, int n) { rows_.assign(p, p + n); }
+    double find(uint32_t key) const {
+        for (auto& r : rows_) if (r.key == key) return r.px;
+        return 0;
+    }
+};
+
+struct LocalPx { uint32_t key; double px; };
+
+struct Tape {
+    LocalPx slot[64]{};
+    int n{};
+
+    LocalPx* lookup(uint32_t key) {
+        for (int i = 0; i < n; ++i)
+            if (slot[i].key == key) return &slot[i];
+        return nullptr;
+    }
+
+    void seed(const BootBook& boot, uint32_t key) {
+        if (lookup(key) || n >= 64) return;
+        double px = boot.find(key);
+        if (px > 0) slot[n++] = {key, px};
+    }
+
+    double on_tick(uint32_t key, double px, bool keep) {
+        LocalPx* s = lookup(key);
+        if (!keep || px <= 0) return s ? s->px : 0;
+        if (!s && n < 64) s = &slot[n++];
+        if (!s) return px;
+        s->key = key;
+        s->px = px;
+        return px;
+    }
+};
+
+thread_local Tape tls_tape;
+```
+
 
 ### 30. Short venue refs, async quota, and algo-container clock fanout
 
@@ -30732,6 +30883,65 @@ int64_t add_session_ms(int64_t t, int64_t dur, const SessionSpan* cont, int n) {
         t = cont[i].begin_ms;
     }
     return t;
+}
+```
+
+A parent’s execution phase is finer than the clock slice. Idle sends nothing. Resting means a passive child is already on the book. Make-wait and take-wait both read a forecast signal before they stay or switch. Cross hits the opposite touch. Held only finishes what is live and opens nothing new. Live children are pulled for three reasons: price drift past a tolerance, filled size off the plan, or a deadline that forces the end. When the remainder is below the minimum order size it runs as its own round and is not stuffed into a normal slice. Pace uses two bands. If completion lags the time fraction by more than a set amount, chase. If it leads by more than a set amount, stop. Leaving the stop requires a release delay, so the parent does not cancel and re-peg on the band edge.
+
+```cpp
+enum class Phase : uint8_t {
+    Idle, Resting, WaitMake, WaitTake, Cross, Held
+};
+
+enum class Pull : uint8_t { Drift, Size, Deadline };
+
+struct Child {
+    double px{};
+    int64_t planned{};
+    int64_t filled{};
+    int64_t live{};
+    bool crumb{};
+};
+
+struct Band {
+    double behind{0.25};
+    double ahead{0.15};
+    int64_t release_ms{50};
+    int64_t held_since{0};
+};
+
+Phase look(Phase cur, int bias) {
+    if (cur == Phase::WaitMake && bias > 0) return Phase::Cross;
+    if (cur == Phase::WaitTake && bias < 0) return Phase::WaitMake;
+    return cur;
+}
+
+void cancel_child(Child& c);
+
+void pull_live(std::vector<Child>& live, Pull why, double mid, double tol) {
+    for (auto& c : live) {
+        bool hit = why == Pull::Deadline
+            || (why == Pull::Drift && std::abs(c.px - mid) > tol)
+            || (why == Pull::Size && c.filled + c.live != c.planned);
+        if (hit) cancel_child(c);
+    }
+}
+
+int64_t next_qty(int64_t left, int64_t slice, int64_t min_lot, bool* crumb) {
+    if (left < min_lot) { *crumb = true; return left; }
+    *crumb = false;
+    return std::min(slice, left);
+}
+
+bool pace_ok(Band& b, double time_frac, double done_frac, int64_t now) {
+    if (done_frac + b.behind < time_frac) return true;
+    if (done_frac > time_frac + b.ahead) {
+        if (b.held_since == 0) b.held_since = now;
+        return false;
+    }
+    if (b.held_since && now - b.held_since < b.release_ms) return false;
+    b.held_since = 0;
+    return true;
 }
 ```
 
