@@ -5197,6 +5197,25 @@ A loop is essentially a branch that jumps backwards at the end of each iteration
 + **Example:** `result = (input> threshold) ? value1 : value2;`
 + **Notice:**  High compiler optimization levels (O2 and above). When the expression within the branch has **side effects** (function calls, I/O operations) or when the calculation logic is complex, the compiler may not generate conditional move instructions.
 
+A mispredict costs more than the compare: the core drops unretired μops after the branch, restores the register alias table to the fork point, flushes the front end, and redirects fetch—about a 15–20 cycle bubble. With a hit `if`, later work can speculate while the condition is still in flight. `cmov` forces a data dependency: the result register waits for flags and both operands. Both sides are also evaluated first; a discarded side that touches memory still pulls cache lines.
+
+```cpp
+// mostly-valid packets: keep the branch so body parsing can speculate
+bool hdr_ok(const uint8_t* p, int n);
+int parse_body(const uint8_t* p, int n, int* out);
+
+int ingest_wire(const uint8_t* p, int n, int* out) {
+  if (!hdr_ok(p, n))
+    return -1;
+  return parse_body(p, n, out);
+}
+
+// both sides already in registers and misses are high → select is fine
+int pick_side(int take_a, int a, int b) {
+  return take_a ? a : b; // often becomes cmov
+}
+```
+
 
 **5. Look-up table method to replace branch**
 
@@ -5230,6 +5249,11 @@ void process_order(const Order& order) {
 Use arithmetic and bit operations to replace conditional judgments and completely eliminate branches. Suitable for numerical calculations.
 
 **Note: branchless is not always faster**. When a branch is well-predicted (e.g., sorted data where branch direction forms long consecutive runs), the branched version allows the CPU to skip unnecessary work entirely, making it actually faster. The branchless version always computes the conditional index and does the store, which is more work per iteration. Use `perf stat -e branch-misses,branches` to confirm the branch prediction hit rate before deciding to eliminate branches.
+
++ Miss rate under about 1%–2%: the predictor is comfortable; do not rewrite to `cmov` for “branchless.”
++ Miss rate steady above about 15%–20%, and both sides are registers or a step or two of ALU: `cmov` / masks can pay.
++ Either side has a deep dependency or a load that may miss: keep the branch and let speculation hide the latency.
++ What matters is data entropy and temporal locality, not which branch looks “more important” in the business logic.
 
 + [https://whichisfaster.dev/q/well_predicted.html](https://whichisfaster.dev/q/well_predicted.html)
 
@@ -5550,7 +5574,7 @@ if (ptr != nullptr) [[likely]] {
 }
 ```
 
-+ **Notice:** Modern CPU branch predictors are already very smart and can often learn branch patterns autonomously. These hints are most effective in certain critical hot paths or patterns that are difficult for the predictor to learn.
++ **Notice:** `[[likely]]` / `__builtin_expect` never reach the runtime TAGE / BTB. The compiler only rearranges basic blocks: the hot path falls through after the test, cold code moves to the function end or `.text.unlikely`, which densifies L1I / μop cache and limits cold-path inlining. Sticking `[[likely]]` on high-entropy random input does not stop mispredicts. Use it for extreme skew you cannot remove—null checks, rare error codes. Ordinary business branches with even odds can stay as they are.
 
 Other compiler hints related to branch prediction
 
