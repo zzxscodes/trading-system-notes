@@ -25279,6 +25279,20 @@ BookReset realign(Book& book, const BookSnap& desk) {
 }
 ```
 
+**旧快照不覆盖新账**
+
+整本替换之前先比时间。内存里的账更新，进来的快照更旧，就留下内存里的账，不通知订阅者。时间相同或更新，才按上一节整本换上。持仓和资金走同一条规则。
+
+```cpp
+bool take_snap(Book& book, int64_t& book_time, const BookSnap& desk,
+               int64_t desk_time, BookReset& ev) {
+    if (desk_time < book_time) return false;
+    ev = realign(book, desk);
+    book_time = desk_time;
+    return true;
+}
+```
+
 
 **RMS - 风险管理系统 (Risk Management System)**
 
@@ -30384,6 +30398,38 @@ struct TicketBook {
 };
 ```
 
+**未确认与在途撤单超时挂起**
+
+未确认链表和撤单链表分开计时。上限按秒配置，比较时换成微秒。未确认单用报单创建时间，已经挂起的跳过。撤单链表只处理动作已是 Stop、状态还不是终态、也还没挂起的单；终态包括部分撤、已撤、全成、告警和错误。撤单计时从撤单请求起算，不从原报单的创建时间起算。超过上限就把状态写成挂起，带上短错误文案，再把这张单作为订单应答写回。这一步不向柜台再发撤单。
+
+```cpp
+enum class Act : int8_t { Create, Pause, Resume, Stop };
+
+struct Live {
+    int st{0};
+    Act act{Act::Create};
+    int64_t create_us{0};
+    int64_t cancel_us{0};
+};
+
+bool is_final(int st); // 部分撤、已撤、全成、告警、错误
+void hang(Live& o, const char* why);
+
+void sweep_timeouts(const std::vector<Live*>& unacked, const std::vector<Live*>& cancels,
+                    int64_t now_us, int unacked_sec, int cancel_sec) {
+    const int64_t u = int64_t(unacked_sec) * 1000000;
+    const int64_t c = int64_t(cancel_sec) * 1000000;
+    for (Live* o : unacked) {
+        if (o->st == 9) continue; // 已挂起
+        if (now_us - o->create_us > u) hang(*o, "ack timeout");
+    }
+    for (Live* o : cancels) {
+        if (o->act != Act::Stop || o->st == 9 || is_final(o->st)) continue;
+        if (now_us - o->cancel_us > c) hang(*o, "cancel timeout");
+    }
+}
+```
+
 
 ### 20. 成交回报先于状态回报的本地缓存
 
@@ -30611,10 +30657,11 @@ bool group_done(const LinkedOrder* legs, size_t n, uint64_t gid) {
 
 ### 22. 多档最小变动价位表
 
-A 股默认 0.01，港股与部分期货按价格区间切换步长。价位表解析成“下限价 → 步长”序列，取整、上浮 N 个 tick、夹到涨跌停都走同一张表。错误取整是废单的常见来源，热路径上应缓存每标的一张表，避免每次解析字符串。
+A 股默认 0.01，港股与部分期货按价格区间切换步长。价位表解析成“起点价 → 步长”序列，最多十档，取整、逐 tick 上浮或下移、夹到涨跌停都走同一张表。上浮或下移 N 个 tick 时，每走一步都用当前档的步长；价格达到下一档起点后，后面的 tick 改用新档。定位时价格正好等于下一档起点，仍留在当前档；向下走且价格正好压在本档起点，第一步改用更低一档。取整把价格和步长乘 100000 再加 0.5，截成整数后做除法，已经落在格子上的价格保持原值。结果夹在跌停和涨停之间，向下移动时先把负价格抬到 0。错误取整是废单的常见来源，热路径上缓存每标的一张表和当前档下标，避免每次解析字符串。
 
 ```cpp
 #include <cmath>
+#include <cstdint>
 #include <vector>
 #include <string>
 
@@ -30623,28 +30670,66 @@ struct TickBand { double from_px; double step; };
 class TickGrid {
     double up_{}, down_{};
     std::vector<TickBand> bands_;
+    mutable int cursor_{0};
 
-    const TickBand& band_of(double px) const {
-        // bands_ 按 from_px 升序；找最后一个 from_px <= px
-        size_t i = 0;
-        while (i + 1 < bands_.size() && bands_[i + 1].from_px <= px) ++i;
-        return bands_[i];
+    static int64_t snap(double x) {
+        return static_cast<int64_t>(std::trunc(x * 100000.0 + 0.5));
+    }
+    int band_at(double px) const {
+        int i = cursor_;
+        int n = static_cast<int>(bands_.size());
+        if (i < 0 || i >= n) i = 0;
+        if (bands_[i].from_px > px) {
+            while (i > 0 && bands_[i].from_px > px) --i;
+        } else {
+            while (i + 1 < n && px > bands_[i + 1].from_px) ++i;
+        }
+        return i;
+    }
+    double clamp(double px) const {
+        if (px < down_) px = down_;
+        if (px > up_) px = up_;
+        return px;
     }
 public:
-    // 例："0:0.01;10:0.05;50:0.1"
+    // 例："0:0.01;10:0.05;50:0.1"，分号分段，冒号分开起点和步长，最多十档
     void load(double up, double down, const std::string& spec);
 
     double floor_px(double px) const {
-        const auto& b = band_of(px);
-        return std::floor(px / b.step) * b.step;
+        int64_t step = snap(bands_[band_at(px)].step);
+        int64_t p = snap(px);
+        int64_t r = p % step;
+        double y = r > 0 ? double((p / step) * step) / 100000.0 : px;
+        return clamp(y);
     }
     double ceil_px(double px) const {
-        const auto& b = band_of(px);
-        return std::ceil(px / b.step) * b.step;
+        int64_t step = snap(bands_[band_at(px)].step);
+        int64_t p = snap(px);
+        int64_t q = p / step;
+        int64_t r = p % step;
+        double y = r > 0 ? double((q + 1) * step) / 100000.0 : px;
+        return clamp(y);
     }
     double move_up(double px, int n) const {
-        px = ceil_px(px) + n * band_of(px).step;
-        return px > up_ ? up_ : (px < down_ ? down_ : px);
+        int i = band_at(px);
+        int last = static_cast<int>(bands_.size()) - 1;
+        for (int k = 0; k < n; ++k) {
+            px += bands_[i].step;
+            if (i < last && px >= bands_[i + 1].from_px) ++i;
+        }
+        cursor_ = i;
+        return clamp(px);
+    }
+    double move_down(double px, int n) const {
+        int i = band_at(px);
+        if (i > 0 && px == bands_[i].from_px) --i;
+        for (int k = 0; k < n; ++k) {
+            px -= bands_[i].step;
+            if (i > 0 && px <= bands_[i].from_px) --i;
+        }
+        cursor_ = i;
+        if (px < 0) px = 0;
+        return clamp(px);
     }
 };
 ```
@@ -31231,7 +31316,7 @@ bool pace_ok(Band& b, double time_frac, double done_frac, int64_t now) {
 
 ### 31. 报单入库前的开平与方向规整
 
-现货没有平今、平昨。入库前若标的类型仍未知，用代码解析一次并写回，后面不再拆字符串。股票、债券、基金、指数把开平强制写成开仓，避免柜台收到无意义的平今。期货和期权才保留平仓：多数交易所把平今、平昨收成普通平仓；少数把今仓和昨仓分开结算的交易所，把普通平仓改成平昨，今仓留给平今。方向由买卖方向映射。映射失败时在写环之前填错误码和短文案，单不到柜台。价格已经给出、价格类型仍未知时，收成限价，避免算法单带着未知价型出去。
+现货没有平今、平昨。入库前若标的类型仍未知，用代码解析一次并写回，后面不再拆字符串。股票、债券、基金、指数、回购把开平强制写成开仓，避免柜台收到无意义的平今。期货和期权才保留平仓：上期所（SHF）和能源中心（INE）把普通平仓改成平昨，平今保持不变；其余交易所把平今、平昨收成普通平仓。方向由买卖方向映射：买入、融资买入、买券还券、申购记为多头，卖出、融券卖出、卖券还款、赎回记为空头。映射失败时在写环之前填错误码和短文案，单不到柜台。价格已经给出、价格类型仍未知、且价格大于 0 时，收成限价，避免算法单带着未知价型出去。限价类型已经写上、价格绝对值仍小于 1e-6 时直接拒单。
 
 ```cpp
 enum class Off : int8_t { Open, Close, CloseToday, CloseYday };
@@ -31254,8 +31339,10 @@ Kind kind_of(const char* symbol);
 CloseStyle close_style_of(const char* symbol);
 
 int side_to_dir(int side) {
-    if (side == 1) return 0; // buy
-    if (side == 2) return 1; // sell
+    // 0 买，2 融资买入，5 买券还券，6 申购 → 多头
+    if (side == 0 || side == 2 || side == 5 || side == 6) return 0;
+    // 1 卖，3 融券卖出，4 卖券还款，7 赎回 → 空头
+    if (side == 1 || side == 3 || side == 4 || side == 7) return 1;
     return -1;
 }
 
@@ -31265,6 +31352,7 @@ bool normalize_ticket(Ticket& t) {
     if (t.kind == Kind::Cash) {
         t.off = Off::Open;
     } else if (t.off == Off::Close || t.off == Off::CloseToday || t.off == Off::CloseYday) {
+        // SHF、INE 为 SplitYday：普通平仓改平昨；其余交易所把平今、平昨收成普通平仓
         if (close_style_of(t.symbol) == CloseStyle::SplitYday && t.off == Off::Close)
             t.off = Off::CloseYday;
         else if (close_style_of(t.symbol) == CloseStyle::Plain)
@@ -31274,6 +31362,11 @@ bool normalize_ticket(Ticket& t) {
     if (t.dir < 0) {
         t.err = 11;
         std::snprintf(t.err_text, sizeof(t.err_text), "bad side");
+        return false;
+    }
+    if (t.px_kind == 0 && t.px < 1e-6 && t.px > -1e-6) {
+        t.err = 11;
+        std::snprintf(t.err_text, sizeof(t.err_text), "bad price");
         return false;
     }
     if (t.px_kind < 0 && t.px > 1e-6)

@@ -25286,6 +25286,20 @@ BookReset realign(Book& book, const BookSnap& desk) {
 }
 ```
 
+**An older snapshot does not replace a newer book**
+
+Compare timestamps before the whole-book swap. If the in-memory book is newer than the incoming snapshot, keep the in-memory book and do not notify subscribers. A snapshot with the same time or a later time replaces the book as above. Position and cash use the same rule.
+
+```cpp
+bool take_snap(Book& book, int64_t& book_time, const BookSnap& desk,
+               int64_t desk_time, BookReset& ev) {
+    if (desk_time < book_time) return false;
+    ev = realign(book, desk);
+    book_time = desk_time;
+    return true;
+}
+```
+
 
 **RMS - Risk Management System**
 
@@ -30395,6 +30409,38 @@ struct TicketBook {
 };
 ```
 
+**Hang unacked orders and in-flight cancels on timeout**
+
+The unacked list and the cancel list use separate clocks. The limit is configured in seconds and compared in microseconds. An unacked order uses its create time; an order already hanging is skipped. The cancel list only handles orders whose action is already Stop, whose status is not final, and which are not hanging yet. Final statuses are partial-cancel, cancelled, filled, warning, and error. The cancel clock starts at the cancel request, not at the original create time. Past the limit, the status becomes hanging, a short error text is stored, and the order is published again as an order response. This step does not send another cancel to the broker.
+
+```cpp
+enum class Act : int8_t { Create, Pause, Resume, Stop };
+
+struct Live {
+    int st{0};
+    Act act{Act::Create};
+    int64_t create_us{0};
+    int64_t cancel_us{0};
+};
+
+bool is_final(int st); // partial-cancel, cancelled, filled, warning, error
+void hang(Live& o, const char* why);
+
+void sweep_timeouts(const std::vector<Live*>& unacked, const std::vector<Live*>& cancels,
+                    int64_t now_us, int unacked_sec, int cancel_sec) {
+    const int64_t u = int64_t(unacked_sec) * 1000000;
+    const int64_t c = int64_t(cancel_sec) * 1000000;
+    for (Live* o : unacked) {
+        if (o->st == 9) continue; // already hanging
+        if (now_us - o->create_us > u) hang(*o, "ack timeout");
+    }
+    for (Live* o : cancels) {
+        if (o->act != Act::Stop || o->st == 9 || is_final(o->st)) continue;
+        if (now_us - o->cancel_us > c) hang(*o, "cancel timeout");
+    }
+}
+```
+
 
 ### 20. Local cache when fills arrive before status
 
@@ -30622,10 +30668,11 @@ bool group_done(const LinkedOrder* legs, size_t n, uint64_t gid) {
 
 ### 22. Multi-band minimum tick table
 
-A-shares default to 0.01; HK equities and some futures change step by price band. Parse the table into “from price → step” bands. Flooring, moving N ticks, and clamping to limit-up/down all use the same table. Bad rounding is a common reject cause; cache one table per symbol on the hot path instead of reparsing strings.
+A-shares default to 0.01; HK equities and some futures change step by price band. Parse the table into “from price → step” bands, at most ten of them. Flooring, moving one tick at a time, and clamping to limit-up/down all use the same table. A move of N ticks uses the current band’s step for each step; once the price reaches the next band’s start, later ticks use the new step. A lookup that lands exactly on the next start stays on the current band. A downward move that is already exactly on the current start takes the first step from the lower band. Rounding multiplies price and step by 100000, adds 0.5, truncates to integers, then divides; a price already on the grid keeps its original value. Clamp the result to the down and up limits, and lift a negative price to 0 before the downward clamp. Bad rounding is a common reject cause; cache one table per symbol and the current band index on the hot path instead of reparsing strings.
 
 ```cpp
 #include <cmath>
+#include <cstdint>
 #include <vector>
 #include <string>
 
@@ -30634,28 +30681,66 @@ struct TickBand { double from_px; double step; };
 class TickGrid {
     double up_{}, down_{};
     std::vector<TickBand> bands_;
+    mutable int cursor_{0};
 
-    const TickBand& band_of(double px) const {
-        // bands_ ascending by from_px; last band with from_px <= px
-        size_t i = 0;
-        while (i + 1 < bands_.size() && bands_[i + 1].from_px <= px) ++i;
-        return bands_[i];
+    static int64_t snap(double x) {
+        return static_cast<int64_t>(std::trunc(x * 100000.0 + 0.5));
+    }
+    int band_at(double px) const {
+        int i = cursor_;
+        int n = static_cast<int>(bands_.size());
+        if (i < 0 || i >= n) i = 0;
+        if (bands_[i].from_px > px) {
+            while (i > 0 && bands_[i].from_px > px) --i;
+        } else {
+            while (i + 1 < n && px > bands_[i + 1].from_px) ++i;
+        }
+        return i;
+    }
+    double clamp(double px) const {
+        if (px < down_) px = down_;
+        if (px > up_) px = up_;
+        return px;
     }
 public:
-    // e.g. "0:0.01;10:0.05;50:0.1"
+    // e.g. "0:0.01;10:0.05;50:0.1": ';' separates bands, ':' separates start and step, at most ten bands
     void load(double up, double down, const std::string& spec);
 
     double floor_px(double px) const {
-        const auto& b = band_of(px);
-        return std::floor(px / b.step) * b.step;
+        int64_t step = snap(bands_[band_at(px)].step);
+        int64_t p = snap(px);
+        int64_t r = p % step;
+        double y = r > 0 ? double((p / step) * step) / 100000.0 : px;
+        return clamp(y);
     }
     double ceil_px(double px) const {
-        const auto& b = band_of(px);
-        return std::ceil(px / b.step) * b.step;
+        int64_t step = snap(bands_[band_at(px)].step);
+        int64_t p = snap(px);
+        int64_t q = p / step;
+        int64_t r = p % step;
+        double y = r > 0 ? double((q + 1) * step) / 100000.0 : px;
+        return clamp(y);
     }
     double move_up(double px, int n) const {
-        px = ceil_px(px) + n * band_of(px).step;
-        return px > up_ ? up_ : (px < down_ ? down_ : px);
+        int i = band_at(px);
+        int last = static_cast<int>(bands_.size()) - 1;
+        for (int k = 0; k < n; ++k) {
+            px += bands_[i].step;
+            if (i < last && px >= bands_[i + 1].from_px) ++i;
+        }
+        cursor_ = i;
+        return clamp(px);
+    }
+    double move_down(double px, int n) const {
+        int i = band_at(px);
+        if (i > 0 && px == bands_[i].from_px) --i;
+        for (int k = 0; k < n; ++k) {
+            px -= bands_[i].step;
+            if (i > 0 && px <= bands_[i].from_px) --i;
+        }
+        cursor_ = i;
+        if (px < 0) px = 0;
+        return clamp(px);
     }
 };
 ```
@@ -31242,7 +31327,7 @@ bool pace_ok(Band& b, double time_frac, double done_frac, int64_t now) {
 
 ### 31. Normalize offset and direction before the order hits the ring
 
-Cash names have no close-today or close-yesterday. If the instrument kind is still unknown, parse it from the symbol once and store it; later inserts do not split the string again. Stocks, bonds, funds, and indexes force offset to open, so the broker never sees a meaningless close-today. Futures and options keep close semantics: most venues collapse close-today and close-yesterday into a plain close; venues that settle today’s inventory apart from yesterday’s rewrite a plain close into close-yesterday and leave today’s lots for the close-today fee. Direction is mapped from buy or sell. A failed map fills an error code and a short text before the ring write, and the ticket never reaches the broker. When a price is present and the price kind is still unknown, snap the kind to limit so an algo ticket does not leave with an unset price kind.
+Cash names have no close-today or close-yesterday. If the instrument kind is still unknown, parse it from the symbol once and store it; later inserts do not split the string again. Stocks, bonds, funds, indexes, and repos force offset to open, so the broker never sees a meaningless close-today. Futures and options keep close semantics: SHFE (SHF) and INE rewrite a plain close into close-yesterday and leave close-today unchanged; every other venue collapses close-today and close-yesterday into a plain close. Direction folds the side into long or short: buy, margin buy, repay-stock, and subscribe are long; sell, short-sell, repay-margin, and redeem are short. A failed map fills an error code and a short text before the ring write, and the ticket never reaches the broker. When a price is present, the price is greater than 0, and the price kind is still unknown, snap the kind to limit so an algo ticket does not leave with an unset price kind. A limit kind whose absolute price is still below 1e-6 is rejected.
 
 ```cpp
 enum class Off : int8_t { Open, Close, CloseToday, CloseYday };
@@ -31265,8 +31350,10 @@ Kind kind_of(const char* symbol);
 CloseStyle close_style_of(const char* symbol);
 
 int side_to_dir(int side) {
-    if (side == 1) return 0; // buy
-    if (side == 2) return 1; // sell
+    // 0 buy, 2 margin buy, 5 repay stock, 6 subscribe → long
+    if (side == 0 || side == 2 || side == 5 || side == 6) return 0;
+    // 1 sell, 3 short sell, 4 repay margin, 7 redeem → short
+    if (side == 1 || side == 3 || side == 4 || side == 7) return 1;
     return -1;
 }
 
@@ -31276,6 +31363,7 @@ bool normalize_ticket(Ticket& t) {
     if (t.kind == Kind::Cash) {
         t.off = Off::Open;
     } else if (t.off == Off::Close || t.off == Off::CloseToday || t.off == Off::CloseYday) {
+        // SHF and INE are SplitYday: a plain close becomes close-yesterday; other venues collapse close-today and close-yesterday to a plain close
         if (close_style_of(t.symbol) == CloseStyle::SplitYday && t.off == Off::Close)
             t.off = Off::CloseYday;
         else if (close_style_of(t.symbol) == CloseStyle::Plain)
@@ -31285,6 +31373,11 @@ bool normalize_ticket(Ticket& t) {
     if (t.dir < 0) {
         t.err = 11;
         std::snprintf(t.err_text, sizeof(t.err_text), "bad side");
+        return false;
+    }
+    if (t.px_kind == 0 && t.px < 1e-6 && t.px > -1e-6) {
+        t.err = 11;
+        std::snprintf(t.err_text, sizeof(t.err_text), "bad price");
         return false;
     }
     if (t.px_kind < 0 && t.px > 1e-6)
