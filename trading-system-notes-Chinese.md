@@ -107,6 +107,7 @@ English version：[https://github.com/zzxscodes/trading-system-notes/blob/main/t
   - [30. 交易桥短单号、异步配额与算法容器时钟扇出](#30-交易桥短单号异步配额与算法容器时钟扇出)
   - [31. 报单入库前的开平与方向规整](#31-报单入库前的开平与方向规整)
   - [32. 持仓查询移出报单线程并按游标续页](#32-持仓查询移出报单线程并按游标续页)
+  - [33. 信号窗口驱动自动母单](#33-信号窗口驱动自动母单)
 - [业务逻辑设计-计算](#业务逻辑设计-计算)
   - [1. 对数收益率(百分比非对称性)](#1-对数收益率百分比非对称性)
   - [2. 市场趋势和波动率的状态变化](#2-市场趋势和波动率的状态变化)
@@ -29970,49 +29971,90 @@ public:
 
 ### 19. 交易桥双边订单号索引
 
-柜台回报里的订单号类型并不统一：有的是字符串，有的是 64 位整数，有的只有 32 位。交易桥需要两张表：柜台号指向本系统订单对象，以及本系统号指向柜台号。报单成功时写入两侧；撤单与成交回报用柜台号 O(1) 找回本地单；超时巡检则扫未确认集合。读写锁保护多线程 API 回调与主循环并发访问。
+柜台回报里的订单号类型并不统一：有的是字符串，有的是 64 位整数，有的只有 32 位。交易桥把柜台号和本系统号收成两张定长槽。回报线程只把一条短记录写进自己的环并发布序号，桥线程按序号改槽。报单成功时写入两侧；撤单与成交回报用柜台号在开放寻址槽里找回本地单；超时巡检扫状态仍为未确认的槽。环满时这一笔直接失败返回。
 
 ```cpp
-#include <shared_mutex>
-#include <unordered_map>
-#include <variant>
-#include <string>
+struct VenueKey {
+    uint64_t num;
+    uint32_t kind; // 0 数值，1 文本
+    char text[24];
+};
 
-using VenueOid = std::variant<std::string, uint64_t, uint32_t, int64_t>;
+struct WireOrder;
 
-struct WireOrder; // 共享内存中的本系统订单
+struct OidSlot {
+    VenueKey key;
+    WireOrder* local;
+    uint64_t local_id;
+    uint8_t state; // 0 空，1 未确认，2 已关联
+};
 
-class BridgeOidIndex {
-    mutable std::shared_mutex mu_;
-    std::unordered_map<VenueOid, WireOrder*> venue_to_local_;
-    std::unordered_map<uint64_t, VenueOid> local_to_venue_;
-    std::unordered_map<uint64_t, WireOrder*> unacked_;
+struct RspNote {
+    VenueKey key;
+    WireOrder* local;
+    uint64_t local_id;
+    uint8_t op; // 0 挂起，1 关联，2 摘掉
+};
 
-public:
-    void remember_out(WireOrder* o, uint64_t local_id, VenueOid venue_id) {
-        std::unique_lock lk(mu_);
-        venue_to_local_[venue_id] = o;
-        local_to_venue_[local_id] = venue_id;
-        unacked_.erase(local_id);
+struct NoteRing {
+    RspNote* slot;
+    uint32_t mask;
+    alignas(64) std::atomic<uint32_t> w{0};
+    alignas(64) std::atomic<uint32_t> r{0};
+
+    RspNote* claim() {
+        uint32_t wr = w.load(std::memory_order_relaxed);
+        uint32_t rd = r.load(std::memory_order_acquire);
+        if (((wr + 1) & mask) == (rd & mask)) return nullptr;
+        return &slot[wr & mask];
     }
 
-    void remember_pending(WireOrder* o, uint64_t local_id) {
-        std::unique_lock lk(mu_);
-        unacked_[local_id] = o;
+    void publish() {
+        uint32_t wr = w.load(std::memory_order_relaxed);
+        w.store(wr + 1, std::memory_order_release);
+    }
+};
+
+bool same_key(const VenueKey& a, const VenueKey& b) {
+    if (a.kind != b.kind) return false;
+    if (a.kind == 1) return std::memcmp(a.text, b.text, 24) == 0;
+    return a.num == b.num;
+}
+
+uint32_t mix_key(const VenueKey& k) {
+    uint64_t x = k.num ^ (uint64_t(k.kind) << 32);
+    for (int i = 0; i < 24; ++i) x = x * 131 + uint8_t(k.text[i]);
+    return uint32_t(x);
+}
+
+struct BridgeIndex {
+    OidSlot* by_local;
+    OidSlot* venue;
+    uint32_t mask;
+
+    void apply(const RspNote& n) {
+        OidSlot& row = by_local[n.local_id & mask];
+        if (n.op == 2) { row.state = 0; return; }
+        row.local = n.local;
+        row.local_id = n.local_id;
+        row.key = n.key;
+        row.state = n.op == 0 ? 1 : 2;
+        if (n.op != 1) return;
+        uint32_t i = mix_key(n.key) & mask;
+        for (uint32_t k = 0; k <= mask; ++k) {
+            OidSlot& s = venue[(i + k) & mask];
+            if (s.state == 0 || s.local_id == n.local_id) { s = row; return; }
+        }
     }
 
-    WireOrder* by_venue(const VenueOid& venue_id) const {
-        std::shared_lock lk(mu_);
-        auto it = venue_to_local_.find(venue_id);
-        return it == venue_to_local_.end() ? nullptr : it->second;
-    }
-
-    bool venue_of(uint64_t local_id, VenueOid& out) const {
-        std::shared_lock lk(mu_);
-        auto it = local_to_venue_.find(local_id);
-        if (it == local_to_venue_.end()) return false;
-        out = it->second;
-        return true;
+    WireOrder* by_venue(const VenueKey& key) const {
+        uint32_t i = mix_key(key) & mask;
+        for (uint32_t k = 0; k <= mask; ++k) {
+            const OidSlot& s = venue[(i + k) & mask];
+            if (s.state == 0) return nullptr;
+            if (s.state == 2 && same_key(s.key, key)) return s.local;
+        }
+        return nullptr;
     }
 };
 ```
@@ -30049,35 +30091,41 @@ public:
 };
 ```
 
-报单发出后要记两处：柜台流水到本地单，以及尚未收到任何推送的未确认集合。两处各用一把锁。回调先从未确认集合里摘掉，再按流水查本地单。写侧若拿着订单表的锁再去锁未确认集合，两把锁的获取顺序交叉，成交密集时会卡住。订单表锁放开之后，再登记未确认。
+报单发出后要记两处：柜台流水到本地单，以及尚未收到任何推送的未确认标记。两处都写在桥线程持有的同一条记录上。回调只发布一条短记录，桥线程先清掉未确认标记，再按流水取本地单。更新顺序固定在这一个线程里。
 
 ```cpp
-struct Ticket { uint64_t local_id; };
+struct Ticket {
+    uint64_t local_id;
+    uint64_t seq;
+    uint8_t pending;
+};
 
-class TicketBook {
-    std::shared_mutex table_mu_;
-    std::mutex pending_mu_;
-    std::unordered_map<uint64_t, Ticket*> by_seq_;
-    std::unordered_map<uint64_t, Ticket*> pending_;
+struct TicketBook {
+    Ticket* row;
+    Ticket* by_seq;
+    uint32_t mask;
 
-public:
-    void note_sent(Ticket* t, uint64_t seq) {
-        {
-            std::unique_lock lk(table_mu_);
-            by_seq_[seq] = t;
+    void note_sent(uint32_t local_id, uint64_t seq) {
+        Ticket& t = row[local_id & mask];
+        t.local_id = local_id;
+        t.seq = seq;
+        t.pending = 1;
+        uint32_t i = uint32_t(seq) & mask;
+        for (uint32_t k = 0; k <= mask; ++k) {
+            Ticket& s = by_seq[(i + k) & mask];
+            if (s.local_id == 0 || s.local_id == t.local_id) { s = t; return; }
         }
-        std::lock_guard lk(pending_mu_);
-        pending_[t->local_id] = t;
     }
 
-    Ticket* take_pending_then_find(uint64_t local_id, uint64_t seq) {
-        {
-            std::lock_guard lk(pending_mu_);
-            pending_.erase(local_id);
+    Ticket* take_pending_then_find(uint32_t local_id, uint64_t seq) {
+        row[local_id & mask].pending = 0;
+        uint32_t i = uint32_t(seq) & mask;
+        for (uint32_t k = 0; k <= mask; ++k) {
+            Ticket& s = by_seq[(i + k) & mask];
+            if (s.local_id == 0) return nullptr;
+            if (s.seq == seq) return &s;
         }
-        std::shared_lock lk(table_mu_);
-        auto it = by_seq_.find(seq);
-        return it == by_seq_.end() ? nullptr : it->second;
+        return nullptr;
     }
 };
 ```
@@ -30620,32 +30668,23 @@ void drop_late(std::unordered_map<uint64_t, Inflight>& wait, int64_t now, int64_
 
 ### 29. 行情网关接入：全订过滤、字段补丁与夜盘交易日
 
-现货 L2 常整市场订阅再在回调里按策略订阅表过滤，热路径用共享读锁查集合，未开过滤则全部放行。沪市深度快照常缺涨跌停，需在合约静态查询时缓存后打进每笔快照。沪深逐笔序号字段含义不同，重建订单簿前必须按交易所解释。期货行情里的业务日不可盲信接口字段，应按更新时刻反推：日盘与 TradingDay 相同；夜盘 18:00 后按星期减一天或三天；周一凌晨再特殊处理。算法母单创建后可读共享环最新一档立即喂一次，不必空等下一笔行情。
+现货 L2 常整市场订阅，开盘前把订阅收成按下标排列的字节，回调读这一字节决定放行，未开过滤则全部放行。沪市深度快照常缺涨跌停，静态查询时按下标写入平行数组，快照缺字段时用同一下标补上。沪深逐笔序号字段含义不同，重建订单簿前必须按交易所解释。期货行情里的业务日不可盲信接口字段，应按更新时刻反推：日盘与 TradingDay 相同；夜盘 18:00 后按星期减一天或三天；周一凌晨再特殊处理。算法母单创建后可读共享环最新一档立即喂一次，不必空等下一笔行情。
 
 ```cpp
-#include <shared_mutex>
-#include <unordered_set>
-#include <unordered_map>
-#include <string>
+struct LimitPx { double up, down; };
 
-class MdIngress {
-    bool filter_on_{true};
-    mutable std::shared_mutex mu_;
-    std::unordered_set<std::string> wanted_;
-    std::unordered_map<std::string, std::pair<double,double>> sh_limits_;
+struct MdIngress {
+    uint8_t* wanted;
+    LimitPx* sh;
+    uint8_t filter_on;
 
-public:
-    bool accept(const std::string& code) const {
-        if (!filter_on_) return true;
-        std::shared_lock lk(mu_);
-        return wanted_.count(code) != 0;
+    bool accept(uint32_t id) const {
+        return !filter_on || wanted[id];
     }
 
-    void patch_sh_limits(const std::string& code, double& up, double& down) const {
-        auto it = sh_limits_.find(code);
-        if (it == sh_limits_.end()) return;
-        if (up <= 0) up = it->second.first;
-        if (down <= 0) down = it->second.second;
+    void patch_sh(uint32_t id, double& up, double& down) const {
+        if (up <= 0) up = sh[id].up;
+        if (down <= 0) down = sh[id].down;
     }
 };
 
@@ -30992,16 +31031,11 @@ bool normalize_ticket(Ticket& t) {
 
 ### 32. 持仓查询移出报单线程并按游标续页
 
-现货柜台的持仓查询常常是同步的，一页几百行。放在报单线程里，后面的委托会排在整次查询之后。报单线程只按资金账号把请求放进队列，同一引擎对同一账号只留最后一次。查询线程取出后，把这个账号上各引擎的请求合成一次柜台调用，每一行写回每一个等待中的请求。
+现货柜台的持仓查询常常是同步的，一页几百行。放在报单线程里，后面的委托会排在整次查询之后。每个引擎只写自己的一条环，槽里放下标，同一账号后写的请求在查询线程折合时盖住前写。查询线程把这个账号上各引擎的槽合成一次柜台调用，每一行写回每一个等待中的请求。环满时这一笔直接失败返回。
 
 下一页从上一页最后一条的浏览序号加一开始；接口给定位串时，用这串代替序号。续页沿用第一次的请求号，返回才能对上原始请求。结束标记只打在最后一页的最后一行。两轮之间空几秒。同一资金账号在沪、深各有股东号，报单和查询都按代码后缀选取；双中心账户带当前中心的那个股东号。
 
 ```cpp
-struct HoldAsk {
-    uint32_t engine{};
-    char account[32]{};
-};
-
 struct HoldLine {
     int64_t browse{};
     char symbol[32]{};
@@ -31014,49 +31048,356 @@ const char* holder_for(const char* symbol, const char* sh, const char* sz) {
     return sh;
 }
 
-class HoldPump {
-    std::mutex mu_;
-    std::unordered_map<std::string, std::unordered_map<uint32_t, HoldAsk>> wait_;
+struct HoldNote { uint32_t acct; };
 
-    std::vector<HoldLine> fetch(const std::string& acct, int64_t cursor, int rows);
-    void emit(const HoldAsk& ask, const HoldLine& line, bool end_mark);
+struct HoldRing {
+    HoldNote* slot;
+    uint32_t mask;
+    alignas(64) std::atomic<uint32_t> w{0};
+    alignas(64) std::atomic<uint32_t> r{0};
 
-    auto steal() {
-        std::lock_guard lk(mu_);
-        return std::exchange(wait_, {});
+    bool push(uint32_t acct) {
+        uint32_t wr = w.load(std::memory_order_relaxed);
+        uint32_t rd = r.load(std::memory_order_acquire);
+        if (((wr + 1) & mask) == (rd & mask)) return false;
+        slot[wr & mask].acct = acct;
+        w.store(wr + 1, std::memory_order_release);
+        return true;
+    }
+};
+
+struct HoldPump {
+    HoldRing* ring;          // 每个引擎一条，只有该引擎写
+    uint8_t* wait;           // 查询线程私有，下标 engine * accts + acct
+    uint32_t engines;
+    uint32_t accts;
+
+    std::vector<HoldLine> fetch(uint32_t acct, int64_t cursor, int rows);
+    void emit(uint32_t engine, uint32_t acct, const HoldLine& line, bool end_mark);
+
+    void fold() {
+        for (uint32_t e = 0; e < engines; ++e) {
+            HoldRing& g = ring[e];
+            uint32_t end = g.w.load(std::memory_order_acquire);
+            while (g.r.load(std::memory_order_relaxed) != end) {
+                uint32_t rd = g.r.load(std::memory_order_relaxed);
+                uint32_t a = g.slot[rd & g.mask].acct;
+                wait[e * accts + a] = 1;
+                g.r.store(rd + 1, std::memory_order_release);
+            }
+        }
     }
 
 public:
-    void enqueue(HoldAsk ask) {
-        std::lock_guard lk(mu_);
-        wait_[ask.account][ask.engine] = ask;
-    }
+    bool enqueue(uint32_t engine, uint32_t acct) { return ring[engine].push(acct); }
 
     void run() {
         for (;;) {
-            auto batch = steal();
-            for (auto& [acct, group] : batch) {
+            fold();
+            for (uint32_t a = 0; a < accts; ++a) {
+                bool any = false;
+                for (uint32_t e = 0; e < engines; ++e) any |= wait[e * accts + a];
+                if (!any) continue;
                 int64_t cursor = 0;
                 bool saw = false;
                 HoldLine tail{};
                 for (;;) {
-                    auto page = fetch(acct, cursor, 200);
+                    auto page = fetch(a, cursor, 200);
                     if (page.empty()) break;
                     saw = true;
                     tail = page.back();
                     for (const auto& line : page)
-                        for (const auto& ask : group)
-                            emit(ask.second, line, false);
+                        for (uint32_t e = 0; e < engines; ++e)
+                            if (wait[e * accts + a]) emit(e, a, line, false);
                     cursor = tail.browse + 1;
                 }
                 if (saw)
-                    for (const auto& ask : group)
-                        emit(ask.second, tail, true);
+                    for (uint32_t e = 0; e < engines; ++e)
+                        if (wait[e * accts + a]) emit(e, a, tail, true);
+                for (uint32_t e = 0; e < engines; ++e) wait[e * accts + a] = 0;
             }
             std::this_thread::sleep_for(std::chrono::seconds(3));
         }
     }
 };
+```
+
+
+### 33. 信号窗口驱动自动母单
+
+自动策略每个时钟按开盘前收好的下标把新行情收进本地带，再跑决策。基类时钟会扫委托、算法回报、资金、持仓四条链。自动簿只走行情订阅的那段下标，拉行情和逐笔，再收母单回报。资金查询挂在保证金需要复核的时候，不进每一拍。行情回调按下标写入槽位。订阅名单在开盘前收成一段连续下标，时钟顺着它取行情。母单直接写进算法环的空槽：先核对单号基数，把买卖收成多空，限价缺失时用对手价补上，生成唯一母单号，字段写完再发布写序号。这条环只有策略时钟一个写者，环满时这一笔直接失败返回。子单由执行进程按母单上的算法类型继续拆。策略基类另外提供三条信号订阅名，`SignalReq`、`HighFreqFactor`、`NonstructSignal`，自动簿的买卖决策读的是开盘前信号书和盘中行情带。
+
+```cpp
+struct Parent {
+    uint64_t id;
+    uint32_t name;
+    int32_t side;
+    int32_t dir;
+    double px;
+    double opp;
+    int64_t qty;
+    uint8_t live;
+};
+
+struct TapeSlot {
+    double last, bid, ask, high, low;
+    double inv_high, inv_low, inv_anchor;
+    double anchor;
+    int64_t exch_ms;
+};
+
+struct ParentRing {
+    Parent* slot;
+    uint32_t mask;
+    alignas(64) std::atomic<uint32_t> w{0};
+    alignas(64) std::atomic<uint32_t> r{0};
+
+    Parent* claim() {
+        uint32_t wr = w.load(std::memory_order_relaxed);
+        uint32_t rd = r.load(std::memory_order_acquire);
+        if (((wr + 1) & mask) == (rd & mask)) return nullptr;
+        return &slot[wr & mask];
+    }
+
+    void publish() {
+        uint32_t wr = w.load(std::memory_order_relaxed);
+        w.store(wr + 1, std::memory_order_release);
+    }
+};
+
+struct BookRunner {
+    TapeSlot* tape;
+    uint32_t* watch;
+    uint32_t watch_n;
+    ParentRing* parents;
+    uint8_t need_margin;
+
+    void on_quote(uint32_t id, double last, double bid, double ask,
+                  double high, double low, int64_t exch_ms) {
+        TapeSlot& s = tape[id];
+        s.last = last;
+        s.bid = bid;
+        s.ask = ask;
+        s.exch_ms = exch_ms;
+        if (high > 0 && high != s.high) { s.high = high; s.inv_high = 1.0 / high; }
+        if (low  > 0 && low  != s.low)  { s.low  = low;  s.inv_low  = 1.0 / low; }
+    }
+
+    void on_clock(void* ctx) {
+        for (uint32_t i = 0; i < watch_n; ++i) {
+            uint32_t id = watch[i];
+            pull_quote(ctx, id);
+            pull_print(ctx, id);
+        }
+        pull_parent_rsp(ctx);
+        if (need_margin) pull_cash(ctx);
+        decide();
+    }
+
+    bool emit(uint32_t name, int side, double px, double opp, int64_t qty) {
+        Parent* p = parents->claim();
+        if (!p) return false;
+        p->name = name;
+        p->side = side;
+        p->px = px;
+        p->opp = opp;
+        p->qty = qty;
+        if (!id_base_ok(*p)) return false;
+        p->dir = side == 1 ? 0 : 1;
+        if (p->px <= 1e-6) p->px = p->opp;
+        p->id = next_parent_id();
+        p->live = 1;
+        parents->publish();
+        return true;
+    }
+};
+```
+
+信号书开盘前一次读完。股票池给出候选和池权重，篮子给出上限和候选列表，每个标的有向上、向下、卖出三条波幅。总表写规模和收盘目标比例。固定窗口自带起止、目标比例和方向，开盘即有效。重复窗口自带方向、持续秒数、最多重复次数和目标比例，默认无效，等合成指数满足条件再盖上起止时间。现金账户把书里的规模当作可用资金。信用账户再看担保品占比、维持担保比例和杠杆上限。池子、篮子和波幅在开盘前写成按下标对齐的数组，盘中不再按代码查表。
+
+```cpp
+struct NameBand { double up, down, sell; };
+
+struct ClockWin {
+    int64_t begin_ms, end_ms;
+    int64_t span_sec;
+    double target;
+    double each;          // 窗口开始时算好的均匀份额
+    int32_t dir;          // 0 买, 1 卖
+    uint8_t curve;
+    uint8_t live;
+};
+
+struct RepeatWin {
+    int32_t dir;
+    int32_t hold_sec;
+    int32_t times;
+    int32_t used;
+    double target;
+    uint8_t curve;
+    uint8_t live;
+};
+
+struct Book {
+    double nav;
+    double close_target;
+    NameBand* band;       // 下标为标的号
+    uint32_t* sleeve_of;
+    double* sleeve_w;
+    uint16_t* basket_a;
+    uint16_t* basket_b;
+    double* basket_cap;   // 两级编号摊平后的下标
+    ClockWin* clocks;
+    RepeatWin* repeats;
+    uint32_t clock_n, repeat_n, name_n;
+};
+```
+
+连续竞价里先取这一拍的权重，再选标的。均匀份额在窗口开始时用交易时段秒数除以检查间隔算好，每拍相同。曲线把累计目标做成逻辑函数，系数 -0.0034，窗口开始时写入累计表，目标权重变动时重算。每一拍只取相邻两项的差，小于零就发零，开盘段更重。
+
+时钟窗口按池子和昨仓排成清单，发出分时母单。行情窗口在带上选名字：从高点回落超过该标的向下波幅，记为回落触发；从低点上涨超过向上波幅，记为脉冲触发。同一标的当天保留先出现的一种。买向重复窗口要等指数从低点反弹超过 0.3%，且离低点不超过 1000 秒；卖向要等指数从高点回落超过 0.3%，且离高点不超过 1200 秒。指数相对开盘下跌超过 0.1% 时停止买入。最新价离涨跌停不足 2% 不买。指数均价相对开盘的波幅过大时，把当前重复窗口标成无效。
+
+涨停不卖名单里的名字留着。14:35 仍有未完成母单时，不排收盘补齐窗口；过了这个时点，固定窗口全部作废。控制消息可以改收盘目标比例，或追加一个窗口。
+
+```cpp
+double slice_even(double target, int64_t win_sec, int64_t step_sec) {
+    if (step_sec <= 0 || win_sec < step_sec) return 0;
+    return target / double(win_sec / step_sec);
+}
+
+struct CurveTable {
+    double cum[4096];
+    int n;
+
+    void build(double target, int slices) {
+        n = slices < 4095 ? slices : 4095;
+        cum[0] = 0;
+        for (int i = 1; i <= n; ++i) {
+            double e = std::exp(-0.0034 * i);
+            cum[i] = (1.0 / (1.0 + e) - 0.5) * (2.0 * target);
+        }
+    }
+
+    double slice(int i) const {
+        if (i <= 0 || i > n) return 0;
+        double d = cum[i] - cum[i - 1];
+        return d > 0 ? d : 0;
+    }
+};
+
+struct IndexTape {
+    double last, open, high, low;
+    double inv_open, inv_high, inv_low;
+    int64_t high_ms, low_ms;
+};
+
+bool index_opens_window(const IndexTape& ix, int64_t now, int dir) {
+    if (ix.last <= 0 || ix.open <= 0) return false;
+    if (dir == 0 && ix.last * ix.inv_open - 1.0 < -0.001) return false;
+    if (dir == 0) {
+        if (now - ix.low_ms > 1000000) return false;
+        return ix.low > 0 && ix.last * ix.inv_low - 1.0 > 0.003;
+    }
+    if (now - ix.high_ms > 1200000) return false;
+    return ix.high > 0 && ix.last * ix.inv_high - 1.0 < -0.003;
+}
+
+enum class Hit : uint8_t { None, FromHigh, FromLow };
+
+Hit name_hit(const NameBand& b, const TapeSlot& s) {
+    if (s.high > 0 && s.last * s.inv_high - 1.0 < -b.down) return Hit::FromHigh;
+    if (s.low  > 0 && s.last * s.inv_low  - 1.0 >  b.up)   return Hit::FromLow;
+    return Hit::None;
+}
+```
+
+合成指数是成分股收益率的平均再加一。每只用最新价乘昨收的倒数再减一，相加后除以有效只数。昨收倒数在开盘前写入槽位。行情时间与当前时间相差超过一分钟的标的不进这一拍。有效只数不到信号书标的数的一半，这一拍作废。午休清掉指数的最高、最低和均价，下午重新锚定。
+
+```cpp
+struct Idx { double level; int valid; };
+
+Idx fold_index(const TapeSlot* tape, const uint32_t* watch, uint32_t n,
+               int book_n, int64_t now) {
+    double sum = 0;
+    int k = 0;
+    for (uint32_t i = 0; i < n; ++i) {
+        const TapeSlot& s = tape[watch[i]];
+        if (s.anchor <= 0 || now - s.exch_ms > 60000) continue;
+        sum += s.last * s.inv_anchor - 1.0;
+        ++k;
+    }
+    Idx ix{0, 0};
+    if (k < book_n / 2) return ix;
+    ix.valid = k;
+    ix.level = 1.0 + sum / double(k);
+    return ix;
+}
+```
+
+可买权重取三层剩余的最小值。单名剩余是目标减已成减在途，回落触发、脉冲触发和截面窗口各用自己的目标。股票池和篮子同样用目标减已成减在途，篮子按两级编号各记一笔。任一剩余不大于零就不发。同一标的买入母单满 10 笔后停止。委托金额超过该标的目标权重的两倍也不发。股数按交易所手数取整。
+
+现金够、并且标的在担保品表里，母单标成担保品买入。否则看融资。不在两融表里的标的不计入保证金。维保是现金加证券市值再除以融资负债，高于 3 时记为 3。维保不低于配置下限、杠杆不高于上限、担保品占比不高于上限时，母单标成融资买入。两边都不够则跳过。
+
+在途母单按标的收在定长槽里。限价落到买一和卖一之外就撤。方向反过来时，先撤掉另一侧还挂着的母单，再发新的。
+
+```cpp
+struct Layer { double target, done, reserved; };
+
+double room(const Layer& L) { return L.target - L.done - L.reserved; }
+
+double buy_room_at(const Layer* name, const Layer* sleeve, const Layer* basket,
+                   uint32_t id, uint32_t sid, uint32_t ba, uint32_t bb) {
+    double r = room(name[id]);
+    double a = room(sleeve[sid]); if (a < r) r = a;
+    a = room(basket[ba]); if (a < r) r = a;
+    a = room(basket[bb]); if (a < r) r = a;
+    return r;
+}
+
+enum class CashSide : uint8_t { Skip, Own, Margin };
+
+CashSide cash_side(uint8_t pledged, double cash, double need,
+                   double keep, double keep_min,
+                   double lev, double lev_max,
+                   double pledge_share, double pledge_max) {
+    if (pledged && cash >= need) return CashSide::Own;
+    if (keep >= keep_min && lev <= lev_max && pledge_share <= pledge_max)
+        return CashSide::Margin;
+    return CashSide::Skip;
+}
+
+double upkeep(double cash, double mkt, double debt) {
+    if (debt <= 1e-6) return 3;
+    double r = (cash + mkt) / debt;
+    return r < 3.0 ? r : 3.0;
+}
+
+bool outside_spread(double px, double bid, double ask) {
+    return px < bid || px > ask;
+}
+
+bool allow_buy(int sent, double notional, double name_cash) {
+    return sent < 10 && notional <= 2.0 * name_cash;
+}
+
+int64_t to_lot(double notional, double px, int64_t lot) {
+    if (px <= 0 || lot <= 0) return 0;
+    return (int64_t(notional / px) / lot) * lot;
+}
+
+struct Live {
+    Parent row[8];
+    uint8_t n;
+};
+
+void cancel_other_side(int dir, Live& live) {
+    uint8_t w = 0;
+    for (uint8_t i = 0; i < live.n; ++i) {
+        if (live.row[i].dir != dir) cancel_parent(live.row[i]);
+        else live.row[w++] = live.row[i];
+    }
+    live.n = w;
+}
 ```
 
 
