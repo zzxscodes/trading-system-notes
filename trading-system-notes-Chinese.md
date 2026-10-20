@@ -27362,8 +27362,60 @@ int main() {
 }
 ```
 
+**按行情回放撮合**
 
-### 8. k线生成器
+回放撮合按历史行情和外部成交来吃单。订单先过校验：时间为空、单号为 0、数量不大于 0、方向不是买或卖、单号重复，都直接拒绝。通过后状态记为已报，成交量和成交额清零。生效时间是报单时间加上一段模拟延迟。九点半之前延迟为 0；之后按下面八段取配置的毫秒数，乘 1000 后加到以微秒计的报单时间上：[09:30, 10:00)、[10:00, 10:30)、[10:30, 11:00)、[11:00, 11:30)、[11:30, 13:30)、[13:30, 14:00)、[14:00, 14:30)，十四点半及以后用最后一档。订单上若还记着一个尚未到来的时刻，这一拍跳过。
+
+买方向在行情价不高于限价时成交，卖方向在行情价不低于限价时成交，两边价差小于 1e-6 视为相等。成交量取剩余量和该档数量的较小值，两边同时扣减，均价按成交量加权。剩余量为 0 记全成，否则记部成。
+
+外部成交另走一条。成交时间早于订单时间的打印丢掉。刚性开关关闭时，买单吃不高于限价的打印，卖单吃不低于限价的打印。开关打开时，买单的限价先减去标的上的价格偏移，卖单先加上，再做同样的比较。成交量同样取较小值。打印上买序号更大则买方是后到的主动方，卖序号更大则卖方是主动方。主动方与本单同向时按打印价成交，否则按本单限价成交。
+
+```cpp
+struct BtOrder {
+    int64_t t_us{};
+    uint64_t id{};
+    int dir{}; // 0 买, 1 卖
+    double px{};
+    int64_t qty{};
+    int64_t filled{};
+    double avg{};
+    int st{3};
+};
+
+inline bool near_px(double a, double b) { return std::abs(a - b) < 1e-6; }
+
+int64_t match_delay_us(int hhmm, const double* ms8) {
+    if (hhmm < 930) return 0;
+    const int edge[] = {1000, 1030, 1100, 1130, 1330, 1400, 1430};
+    int i = 7;
+    for (int k = 0; k < 7; ++k) if (hhmm < edge[k]) { i = k; break; }
+    return int64_t(ms8[i] * 1000.0);
+}
+
+int64_t take_level(BtOrder& o, double qpx, int64_t qsz) {
+    bool hit = o.dir == 0 ? (near_px(qpx, o.px) || qpx <= o.px)
+                          : (near_px(qpx, o.px) || o.px <= qpx);
+    int64_t left = o.qty - o.filled;
+    if (!hit || left <= 0 || qsz <= 0) return 0;
+    int64_t n = std::min(left, qsz);
+    o.avg = (o.avg * double(o.filled) + qpx * double(n)) / double(o.filled + n);
+    o.filled += n;
+    o.st = o.filled >= o.qty ? 7 : 6;
+    return n;
+}
+
+bool ext_hit(const BtOrder& o, double tpx, double slip, bool rigid) {
+    double lim = o.px + (rigid ? (o.dir == 0 ? -slip : slip) : 0);
+    if (near_px(tpx, lim)) return true;
+    return o.dir == 0 ? tpx <= lim : lim <= tpx;
+}
+
+double ext_fill_px(const BtOrder& o, double tpx, int64_t buy_no, int64_t sell_no) {
+    bool aggressor = o.dir == 0 ? buy_no > sell_no : sell_no > buy_no;
+    return aggressor ? tpx : o.px;
+}
+```
+
 ```cpp
 #ifndef BAR_GENERATOR_H
 #define BAR_GENERATOR_H
@@ -31313,8 +31365,105 @@ bool pace_ok(Band& b, double time_frac, double done_frac, int64_t now) {
 }
 ```
 
+**分时子单的取价和收尾**
 
-### 31. 报单入库前的开平与方向规整
+执行粒度要落在 (0, 100]。开始时间和结束时间先收到交易时段里面。开始晚于结束、结束早于当前时间、或最大容忍时间早于结束时间，都不建执行器。涨停不卖，跌停不买。涨停上的买和跌停上的卖可以配成一次性挂出。
+
+子单基准价有五种。对侧一、二、三档：买取卖一、卖二或卖三，卖取买一、买二或买三；开关打开时二档和三档收回一档。本侧一档：买取买一，卖取卖一。中间价是买一和卖一的平均，缺一边就用剩下的一边，两边都空则没有价。选中的价格绝对值小于 1e-6、且该侧允许回退时，改用另一侧的一档。融券卖出在对侧档和中间价上直接用最新价。
+
+账户分片落后超过给定时间后，把剩余量一次挂出，并把结束时间往后改。剩余量连同在途仍不足一手时，单独做一笔碎股，之后不再为这笔剩余撤单。只等回报的阶段同样把结束时间往后推。
+
+```cpp
+enum class PxMode : int8_t { Opp1, Opp2, Opp3, Same1, Mid };
+
+struct L5 { double bid[3]; double ask[3]; double last; };
+
+double pre_px(PxMode m, int dir, int side, const L5& q, bool fold_deep, bool fallback) {
+    auto ok = [](double p) { return std::abs(p) >= 1e-6; };
+    if (side == 3 && m != PxMode::Same1) return q.last;
+    if (m == PxMode::Mid) {
+        if (ok(q.bid[0]) && ok(q.ask[0])) return 0.5 * (q.bid[0] + q.ask[0]);
+        return ok(q.bid[0]) ? q.bid[0] : q.ask[0];
+    }
+    int lv = m == PxMode::Opp3 ? 2 : m == PxMode::Opp2 ? 1 : 0;
+    if (fold_deep && lv > 0) lv = 0;
+    bool buy = dir == 0;
+    double px = m == PxMode::Same1 ? (buy ? q.bid[0] : q.ask[0])
+                                   : (buy ? q.ask[lv] : q.bid[lv]);
+    if (!ok(px) && fallback)
+        px = m == PxMode::Same1 ? (buy ? q.ask[0] : q.bid[0])
+                                : (buy ? q.bid[0] : q.ask[0]);
+    return px;
+}
+
+enum class TwapEnd : int8_t { Keep, AllIn, OddLot };
+
+TwapEnd finish_slice(int64_t left, int64_t lot, bool behind_expired) {
+    if (left < lot) return TwapEnd::OddLot;
+    if (behind_expired) return TwapEnd::AllIn;
+    return TwapEnd::Keep;
+}
+```
+
+**双边先挂再追**
+
+挂单价从己方一档往价差里面走，但不超过价差的一半。配置档数大于 0，并且严格小于 (卖一 − 买一) / 最小变动价位 的一半时，买单从买一上移这么多档，卖单从卖一下移这么多档。档数已经到达或越过中点时，停在己方一档。
+
+追价先选基准。对侧：买用卖一，卖用买一。本侧：买用买一，卖用卖一。指定价直接用行情上带来的价格，绝对值小于 1e-6 时不追。档数的符号决定方向：正数沿更主动的方向移动，买上移、卖下移；负数反向。移动后再按最小变动价位取整，余数达到半个价位就进一档。
+
+```cpp
+double move_up(double px, int n);
+double move_down(double px, int n);
+
+double post_px(int dir, double bid, double ask, double tick, int ticks) {
+    double half = 0.5 * (ask - bid) / tick;
+    int n = std::abs(ticks);
+    if (!(n > 0 && double(n) + 1e-6 < half)) n = 0;
+    return dir == 0 ? move_up(bid, n) : move_down(ask, n);
+}
+
+double chase_px(int dir, int mode, double bid, double ask, double specified,
+                 double tick, int ticks) {
+    double base = mode == 0 ? (dir == 0 ? ask : bid)
+                : mode == 1 ? (dir == 0 ? bid : ask)
+                            : specified;
+    if (std::abs(base) < 1e-6) return 0;
+    int n = std::abs(ticks);
+    double px = ticks > 0 ? (dir == 0 ? move_up(base, n) : move_down(base, n))
+                          : (dir == 0 ? move_down(base, n) : move_up(base, n));
+    double q = std::trunc(px / tick);
+    if (px - q * tick + 1e-6 >= 0.5 * tick) q += 1;
+    return q * tick;
+}
+```
+
+**按档位上的大单定价**
+
+在限价还能打到的档位里，取挂单量最大的那一档作为大单价。买单跳过高于限价的档，卖单跳过低于限价的档，价差小于 1e-6 算打到。买把大单价乘上 (1 + 浮动比例)，卖乘上 (1 − 浮动比例)。再按最小变动价位取整，余数达到半个价位就进一档。
+
+```cpp
+double big_px(int dir, double limit, const double* px, const int64_t* sz, int n) {
+    int64_t best = -1;
+    double out = 0;
+    for (int i = 0; i < n; ++i) {
+        bool reach = dir == 0 ? px[i] <= limit + 1e-6 : px[i] + 1e-6 >= limit;
+        if (reach && sz[i] > best) { best = sz[i]; out = px[i]; }
+    }
+    return out;
+}
+
+double snap_half_up(double px, double tick) {
+    double q = std::trunc(px / tick);
+    if (px - q * tick + 1e-6 >= 0.5 * tick) q += 1;
+    return q * tick;
+}
+
+double thresh_px(int dir, double big, double ratio, double tick) {
+    double px = dir == 0 ? big * (1.0 + ratio) : big * (1.0 - ratio);
+    return snap_half_up(px, tick);
+}
+```
+
 
 现货没有平今、平昨。入库前若标的类型仍未知，用代码解析一次并写回，后面不再拆字符串。股票、债券、基金、指数、回购把开平强制写成开仓，避免柜台收到无意义的平今。期货和期权才保留平仓：上期所（SHF）和能源中心（INE）把普通平仓改成平昨，平今保持不变；其余交易所把平今、平昨收成普通平仓。方向由买卖方向映射：买入、融资买入、买券还券、申购记为多头，卖出、融券卖出、卖券还款、赎回记为空头。映射失败时在写环之前填错误码和短文案，单不到柜台。价格已经给出、价格类型仍未知、且价格大于 0 时，收成限价，避免算法单带着未知价型出去。限价类型已经写上、价格绝对值仍小于 1e-6 时直接拒单。
 

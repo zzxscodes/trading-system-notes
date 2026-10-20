@@ -27370,8 +27370,60 @@ int main() {
 }
 ```
 
+**Replay match against quotes and prints**
 
-### 8. k line generator
+A replay match fills from historical quotes and external prints. An order is rejected when its time is empty, its id is 0, its quantity is not positive, its direction is neither buy nor sell, or the id is already in the book. An accepted order is marked new, and its filled quantity and amount are cleared. Its effective time is the order time plus a simulated delay. Before 09:30 the delay is 0. After that, one of eight configured millisecond values is multiplied by 1000 and added to the order time in microseconds. The buckets are [09:30, 10:00), [10:00, 10:30), [10:30, 11:00), [11:00, 11:30), [11:30, 13:30), [13:30, 14:00), [14:00, 14:30), and 14:30 onward for the last slot. An order that still carries a timer in the future is skipped for this pass.
+
+A buy fills when the quote price is at or below the limit, and a sell fills when the quote price is at or above the limit. A gap smaller than 1e-6 counts as equal. The fill size is the minimum of the remaining quantity and the level size. Both sides are reduced, and the average price is the volume-weighted price of the fills. Zero remaining is a full fill; anything left is a partial fill.
+
+External prints take a second path. A print older than the order is dropped. With the rigid switch off, a buy takes a print at or below the limit and a sell takes a print at or above the limit. With the switch on, the buy limit is first reduced by the instrument's price offset and the sell limit is increased by it. The fill size is again the minimum. On the print, the larger of the buy sequence and the sell sequence is the later aggressor. When that aggressor is this order's side, the fill price is the print price; otherwise it is this order's limit.
+
+```cpp
+struct BtOrder {
+    int64_t t_us{};
+    uint64_t id{};
+    int dir{}; // 0 buy, 1 sell
+    double px{};
+    int64_t qty{};
+    int64_t filled{};
+    double avg{};
+    int st{3};
+};
+
+inline bool near_px(double a, double b) { return std::abs(a - b) < 1e-6; }
+
+int64_t match_delay_us(int hhmm, const double* ms8) {
+    if (hhmm < 930) return 0;
+    const int edge[] = {1000, 1030, 1100, 1130, 1330, 1400, 1430};
+    int i = 7;
+    for (int k = 0; k < 7; ++k) if (hhmm < edge[k]) { i = k; break; }
+    return int64_t(ms8[i] * 1000.0);
+}
+
+int64_t take_level(BtOrder& o, double qpx, int64_t qsz) {
+    bool hit = o.dir == 0 ? (near_px(qpx, o.px) || qpx <= o.px)
+                          : (near_px(qpx, o.px) || o.px <= qpx);
+    int64_t left = o.qty - o.filled;
+    if (!hit || left <= 0 || qsz <= 0) return 0;
+    int64_t n = std::min(left, qsz);
+    o.avg = (o.avg * double(o.filled) + qpx * double(n)) / double(o.filled + n);
+    o.filled += n;
+    o.st = o.filled >= o.qty ? 7 : 6;
+    return n;
+}
+
+bool ext_hit(const BtOrder& o, double tpx, double slip, bool rigid) {
+    double lim = o.px + (rigid ? (o.dir == 0 ? -slip : slip) : 0);
+    if (near_px(tpx, lim)) return true;
+    return o.dir == 0 ? tpx <= lim : lim <= tpx;
+}
+
+double ext_fill_px(const BtOrder& o, double tpx, int64_t buy_no, int64_t sell_no) {
+    bool aggressor = o.dir == 0 ? buy_no > sell_no : sell_no > buy_no;
+    return aggressor ? tpx : o.px;
+}
+```
+
 ```cpp
 #ifndef BAR_GENERATOR_H
 #define BAR_GENERATOR_H
@@ -31324,8 +31376,105 @@ bool pace_ok(Band& b, double time_frac, double done_frac, int64_t now) {
 }
 ```
 
+**Child price and the end of a time slice**
 
-### 31. Normalize offset and direction before the order hits the ring
+The execution grain has to sit in (0, 100]. Start and end are pulled back into the trading session. The executor is not created when the start is after the end, the end is before now, or the maximum tolerate time is before the end. A limit-up book does not sell, and a limit-down book does not buy. A buy at limit-up and a sell at limit-down can be posted as a single resting order.
+
+The child base price has five choices. Opposite levels one, two, and three: a buy reads ask one, two, or three, and a sell reads bid one, two, or three. A switch folds levels two and three back to level one. Same-side level one: a buy reads bid one and a sell reads ask one. The mid is the average of bid one and ask one; if one side is missing the other side is used, and if both are missing there is no price. When the chosen price has absolute value below 1e-6 and that side allows a fallback, the other side's first level is used instead. A short-sell uses the last price on the opposite levels and on the mid.
+
+Once an account slice has stayed behind schedule past the given time, the whole remainder is posted at once and the end time is moved later. When the remainder, including size still live, is below one lot, it is sent as its own odd-lot slice and that remainder is not cancelled again. The wait-only phase moves the end time later as well.
+
+```cpp
+enum class PxMode : int8_t { Opp1, Opp2, Opp3, Same1, Mid };
+
+struct L5 { double bid[3]; double ask[3]; double last; };
+
+double pre_px(PxMode m, int dir, int side, const L5& q, bool fold_deep, bool fallback) {
+    auto ok = [](double p) { return std::abs(p) >= 1e-6; };
+    if (side == 3 && m != PxMode::Same1) return q.last;
+    if (m == PxMode::Mid) {
+        if (ok(q.bid[0]) && ok(q.ask[0])) return 0.5 * (q.bid[0] + q.ask[0]);
+        return ok(q.bid[0]) ? q.bid[0] : q.ask[0];
+    }
+    int lv = m == PxMode::Opp3 ? 2 : m == PxMode::Opp2 ? 1 : 0;
+    if (fold_deep && lv > 0) lv = 0;
+    bool buy = dir == 0;
+    double px = m == PxMode::Same1 ? (buy ? q.bid[0] : q.ask[0])
+                                   : (buy ? q.ask[lv] : q.bid[lv]);
+    if (!ok(px) && fallback)
+        px = m == PxMode::Same1 ? (buy ? q.ask[0] : q.bid[0])
+                                : (buy ? q.bid[0] : q.ask[0]);
+    return px;
+}
+
+enum class TwapEnd : int8_t { Keep, AllIn, OddLot };
+
+TwapEnd finish_slice(int64_t left, int64_t lot, bool behind_expired) {
+    if (left < lot) return TwapEnd::OddLot;
+    if (behind_expired) return TwapEnd::AllIn;
+    return TwapEnd::Keep;
+}
+```
+
+**Post on both sides, then chase**
+
+The post price walks from the near touch into the spread and stops at the midpoint. When the configured tick count is positive and strictly below half of (ask one − bid one) / tick, a buy moves up from bid one by that many ticks and a sell moves down from ask one by that many ticks. Once the count reaches or passes the midpoint, the order stays on its own touch.
+
+A chase starts from a base. Opposite: a buy uses ask one and a sell uses bid one. Same side: a buy uses bid one and a sell uses ask one. Specified uses the price carried on the quote, and a value whose absolute size is below 1e-6 does not chase. The sign of the tick count picks the direction. A positive count moves the aggressive way, up for a buy and down for a sell. A negative count moves the other way. The result is then snapped to the tick, and a remainder of at least half a tick rounds up one tick.
+
+```cpp
+double move_up(double px, int n);
+double move_down(double px, int n);
+
+double post_px(int dir, double bid, double ask, double tick, int ticks) {
+    double half = 0.5 * (ask - bid) / tick;
+    int n = std::abs(ticks);
+    if (!(n > 0 && double(n) + 1e-6 < half)) n = 0;
+    return dir == 0 ? move_up(bid, n) : move_down(ask, n);
+}
+
+double chase_px(int dir, int mode, double bid, double ask, double specified,
+                 double tick, int ticks) {
+    double base = mode == 0 ? (dir == 0 ? ask : bid)
+                : mode == 1 ? (dir == 0 ? bid : ask)
+                            : specified;
+    if (std::abs(base) < 1e-6) return 0;
+    int n = std::abs(ticks);
+    double px = ticks > 0 ? (dir == 0 ? move_up(base, n) : move_down(base, n))
+                          : (dir == 0 ? move_down(base, n) : move_up(base, n));
+    double q = std::trunc(px / tick);
+    if (px - q * tick + 1e-6 >= 0.5 * tick) q += 1;
+    return q * tick;
+}
+```
+
+**Price from the largest displayed size**
+
+Among the levels the limit can still reach, the level with the largest displayed size is the big-order price. A buy skips levels above the limit and a sell skips levels below it. A gap under 1e-6 still counts as reached. A buy multiplies that price by (1 + float ratio) and a sell multiplies it by (1 − float ratio). The result is snapped to the tick, and a remainder of at least half a tick rounds up one tick.
+
+```cpp
+double big_px(int dir, double limit, const double* px, const int64_t* sz, int n) {
+    int64_t best = -1;
+    double out = 0;
+    for (int i = 0; i < n; ++i) {
+        bool reach = dir == 0 ? px[i] <= limit + 1e-6 : px[i] + 1e-6 >= limit;
+        if (reach && sz[i] > best) { best = sz[i]; out = px[i]; }
+    }
+    return out;
+}
+
+double snap_half_up(double px, double tick) {
+    double q = std::trunc(px / tick);
+    if (px - q * tick + 1e-6 >= 0.5 * tick) q += 1;
+    return q * tick;
+}
+
+double thresh_px(int dir, double big, double ratio, double tick) {
+    double px = dir == 0 ? big * (1.0 + ratio) : big * (1.0 - ratio);
+    return snap_half_up(px, tick);
+}
+```
+
 
 Cash names have no close-today or close-yesterday. If the instrument kind is still unknown, parse it from the symbol once and store it; later inserts do not split the string again. Stocks, bonds, funds, indexes, and repos force offset to open, so the broker never sees a meaningless close-today. Futures and options keep close semantics: SHFE (SHF) and INE rewrite a plain close into close-yesterday and leave close-today unchanged; every other venue collapses close-today and close-yesterday into a plain close. Direction folds the side into long or short: buy, margin buy, repay-stock, and subscribe are long; sell, short-sell, repay-margin, and redeem are short. A failed map fills an error code and a short text before the ring write, and the ticket never reaches the broker. When a price is present, the price is greater than 0, and the price kind is still unknown, snap the kind to limit so an algo ticket does not leave with an unset price kind. A limit kind whose absolute price is still below 1e-6 is rejected.
 
