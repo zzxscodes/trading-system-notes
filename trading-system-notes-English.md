@@ -107,6 +107,7 @@
   - [30. Short venue refs, async quota, and algo-container clock fanout](#30-short-venue-refs-async-quota-and-algo-container-clock-fanout)
   - [31. Normalize offset and direction before the order hits the ring](#31-normalize-offset-and-direction-before-the-order-hits-the-ring)
   - [32. Position queries leave the order thread and resume by cursor](#32-position-queries-leave-the-order-thread-and-resume-by-cursor)
+  - [33. Signal windows that emit parent orders](#33-signal-windows-that-emit-parent-orders)
 - [Business logic design-calculation](#business-logic-design-calculation)
   - [1. Log return (percent asymmetry)](#1-log-return-percent-asymmetry)
   - [2. Changes in state of market trends and volatility](#2-changes-in-state-of-market-trends-and-volatility)
@@ -29980,49 +29981,90 @@ public:
 
 ### 19. Bilateral order-id index on the trade bridge
 
-Venue ack ids are not uniform: some are strings, some uint64, some only 32-bit. The trade bridge keeps two maps: venue id → local order object, and local id → venue id. On successful submit both sides are written; cancel and fill callbacks look up the local order in O(1) by venue id; timeout sweeps scan the unacked set. A shared mutex guards concurrent API callbacks and the main loop.
+Venue ack ids are not uniform: some are strings, some uint64, some only 32-bit. The trade bridge keeps venue ids and local ids in two fixed slot tables. The callback thread writes one short note into its own ring and publishes the index; the bridge thread applies notes in order. On successful submit both sides are written; cancel and fill callbacks find the local order by open-addressing the venue id; timeout sweeps scan slots still marked unacked. A full ring fails that note immediately.
 
 ```cpp
-#include <shared_mutex>
-#include <unordered_map>
-#include <variant>
-#include <string>
+struct VenueKey {
+    uint64_t num;
+    uint32_t kind; // 0 numeric, 1 text
+    char text[24];
+};
 
-using VenueOid = std::variant<std::string, uint64_t, uint32_t, int64_t>;
+struct WireOrder;
 
-struct WireOrder; // local order living in shared memory
+struct OidSlot {
+    VenueKey key;
+    WireOrder* local;
+    uint64_t local_id;
+    uint8_t state; // 0 empty, 1 unacked, 2 linked
+};
 
-class BridgeOidIndex {
-    mutable std::shared_mutex mu_;
-    std::unordered_map<VenueOid, WireOrder*> venue_to_local_;
-    std::unordered_map<uint64_t, VenueOid> local_to_venue_;
-    std::unordered_map<uint64_t, WireOrder*> unacked_;
+struct RspNote {
+    VenueKey key;
+    WireOrder* local;
+    uint64_t local_id;
+    uint8_t op; // 0 pending, 1 link, 2 drop
+};
 
-public:
-    void remember_out(WireOrder* o, uint64_t local_id, VenueOid venue_id) {
-        std::unique_lock lk(mu_);
-        venue_to_local_[venue_id] = o;
-        local_to_venue_[local_id] = venue_id;
-        unacked_.erase(local_id);
+struct NoteRing {
+    RspNote* slot;
+    uint32_t mask;
+    alignas(64) std::atomic<uint32_t> w{0};
+    alignas(64) std::atomic<uint32_t> r{0};
+
+    RspNote* claim() {
+        uint32_t wr = w.load(std::memory_order_relaxed);
+        uint32_t rd = r.load(std::memory_order_acquire);
+        if (((wr + 1) & mask) == (rd & mask)) return nullptr;
+        return &slot[wr & mask];
     }
 
-    void remember_pending(WireOrder* o, uint64_t local_id) {
-        std::unique_lock lk(mu_);
-        unacked_[local_id] = o;
+    void publish() {
+        uint32_t wr = w.load(std::memory_order_relaxed);
+        w.store(wr + 1, std::memory_order_release);
+    }
+};
+
+bool same_key(const VenueKey& a, const VenueKey& b) {
+    if (a.kind != b.kind) return false;
+    if (a.kind == 1) return std::memcmp(a.text, b.text, 24) == 0;
+    return a.num == b.num;
+}
+
+uint32_t mix_key(const VenueKey& k) {
+    uint64_t x = k.num ^ (uint64_t(k.kind) << 32);
+    for (int i = 0; i < 24; ++i) x = x * 131 + uint8_t(k.text[i]);
+    return uint32_t(x);
+}
+
+struct BridgeIndex {
+    OidSlot* by_local;
+    OidSlot* venue;
+    uint32_t mask;
+
+    void apply(const RspNote& n) {
+        OidSlot& row = by_local[n.local_id & mask];
+        if (n.op == 2) { row.state = 0; return; }
+        row.local = n.local;
+        row.local_id = n.local_id;
+        row.key = n.key;
+        row.state = n.op == 0 ? 1 : 2;
+        if (n.op != 1) return;
+        uint32_t i = mix_key(n.key) & mask;
+        for (uint32_t k = 0; k <= mask; ++k) {
+            OidSlot& s = venue[(i + k) & mask];
+            if (s.state == 0 || s.local_id == n.local_id) { s = row; return; }
+        }
     }
 
-    WireOrder* by_venue(const VenueOid& venue_id) const {
-        std::shared_lock lk(mu_);
-        auto it = venue_to_local_.find(venue_id);
-        return it == venue_to_local_.end() ? nullptr : it->second;
-    }
-
-    bool venue_of(uint64_t local_id, VenueOid& out) const {
-        std::shared_lock lk(mu_);
-        auto it = local_to_venue_.find(local_id);
-        if (it == local_to_venue_.end()) return false;
-        out = it->second;
-        return true;
+    WireOrder* by_venue(const VenueKey& key) const {
+        uint32_t i = mix_key(key) & mask;
+        for (uint32_t k = 0; k <= mask; ++k) {
+            const OidSlot& s = venue[(i + k) & mask];
+            if (s.state == 0) return nullptr;
+            if (s.state == 2 && same_key(s.key, key)) return s.local;
+        }
+        return nullptr;
     }
 };
 ```
@@ -30059,35 +30101,41 @@ public:
 };
 ```
 
-After a send, two records are written: the venue sequence to the local ticket, and the ticket into the set that has not yet seen a push. Each record has its own lock. The callback removes the ticket from the unconfirmed set first, then looks it up by sequence. If the writer still holds the ticket-table lock while taking the unconfirmed lock, the two acquire orders cross and the callback stalls when fills are dense. Release the ticket-table lock, then record the unconfirmed ticket.
+After a send, two records are written: the venue sequence to the local ticket, and the mark that no push has arrived yet. Both live on one record owned by the bridge thread. The callback only publishes a short note. The bridge thread clears the unacked mark first, then finds the local ticket by sequence. That order stays inside the one thread.
 
 ```cpp
-struct Ticket { uint64_t local_id; };
+struct Ticket {
+    uint64_t local_id;
+    uint64_t seq;
+    uint8_t pending;
+};
 
-class TicketBook {
-    std::shared_mutex table_mu_;
-    std::mutex pending_mu_;
-    std::unordered_map<uint64_t, Ticket*> by_seq_;
-    std::unordered_map<uint64_t, Ticket*> pending_;
+struct TicketBook {
+    Ticket* row;
+    Ticket* by_seq;
+    uint32_t mask;
 
-public:
-    void note_sent(Ticket* t, uint64_t seq) {
-        {
-            std::unique_lock lk(table_mu_);
-            by_seq_[seq] = t;
+    void note_sent(uint32_t local_id, uint64_t seq) {
+        Ticket& t = row[local_id & mask];
+        t.local_id = local_id;
+        t.seq = seq;
+        t.pending = 1;
+        uint32_t i = uint32_t(seq) & mask;
+        for (uint32_t k = 0; k <= mask; ++k) {
+            Ticket& s = by_seq[(i + k) & mask];
+            if (s.local_id == 0 || s.local_id == t.local_id) { s = t; return; }
         }
-        std::lock_guard lk(pending_mu_);
-        pending_[t->local_id] = t;
     }
 
-    Ticket* take_pending_then_find(uint64_t local_id, uint64_t seq) {
-        {
-            std::lock_guard lk(pending_mu_);
-            pending_.erase(local_id);
+    Ticket* take_pending_then_find(uint32_t local_id, uint64_t seq) {
+        row[local_id & mask].pending = 0;
+        uint32_t i = uint32_t(seq) & mask;
+        for (uint32_t k = 0; k <= mask; ++k) {
+            Ticket& s = by_seq[(i + k) & mask];
+            if (s.local_id == 0) return nullptr;
+            if (s.seq == seq) return &s;
         }
-        std::shared_lock lk(table_mu_);
-        auto it = by_seq_.find(seq);
-        return it == by_seq_.end() ? nullptr : it->second;
+        return nullptr;
     }
 };
 ```
@@ -30630,32 +30678,23 @@ void drop_late(std::unordered_map<uint64_t, Inflight>& wait, int64_t now, int64_
 
 ### 29. Market-data gateway: full-sub filter, field patches, night-session day
 
-Cash L2 often subscribes the whole venue and filters in the callback against the strategy subscribe set; the hot path takes a shared read lock, or accepts everything when filtering is off. Shanghai depth snapshots often omit limit-up/down; cache them from the static instrument query and patch each snapshot. Shanghai and Shenzhen disagree on which tick field is the book index; interpret by venue before rebuilding. Futures ActionDay in the wire message is unreliable—derive it from update time: day session matches TradingDay; after 18:00 on night session subtract one or three calendar days by weekday; Monday early morning needs its own rule. After an algo parent is created, read the latest quote already in the shared ring and feed it once so the algo need not wait for the next tick.
+Cash L2 often subscribes the whole venue. Before the open the subscribe set is flattened into a byte per name id, and the callback reads that byte, accepting everything when filtering is off. Shanghai depth snapshots often omit limit-up/down; the static instrument query writes a parallel array by the same id, and a snapshot missing the field is patched from that slot. Shanghai and Shenzhen disagree on which tick field is the book index; interpret by venue before rebuilding. Futures ActionDay in the wire message is unreliable—derive it from update time: day session matches TradingDay; after 18:00 on night session subtract one or three calendar days by weekday; Monday early morning needs its own rule. After an algo parent is created, read the latest quote already in the shared ring and feed it once so the algo need not wait for the next tick.
 
 ```cpp
-#include <shared_mutex>
-#include <unordered_set>
-#include <unordered_map>
-#include <string>
+struct LimitPx { double up, down; };
 
-class MdIngress {
-    bool filter_on_{true};
-    mutable std::shared_mutex mu_;
-    std::unordered_set<std::string> wanted_;
-    std::unordered_map<std::string, std::pair<double,double>> sh_limits_;
+struct MdIngress {
+    uint8_t* wanted;
+    LimitPx* sh;
+    uint8_t filter_on;
 
-public:
-    bool accept(const std::string& code) const {
-        if (!filter_on_) return true;
-        std::shared_lock lk(mu_);
-        return wanted_.count(code) != 0;
+    bool accept(uint32_t id) const {
+        return !filter_on || wanted[id];
     }
 
-    void patch_sh_limits(const std::string& code, double& up, double& down) const {
-        auto it = sh_limits_.find(code);
-        if (it == sh_limits_.end()) return;
-        if (up <= 0) up = it->second.first;
-        if (down <= 0) down = it->second.second;
+    void patch_sh(uint32_t id, double& up, double& down) const {
+        if (up <= 0) up = sh[id].up;
+        if (down <= 0) down = sh[id].down;
     }
 };
 
@@ -31002,16 +31041,11 @@ bool normalize_ticket(Ticket& t) {
 
 ### 32. Position queries leave the order thread and resume by cursor
 
-On many cash brokers a position query is synchronous and returns a few hundred rows a page. Running it on the order thread places later orders behind the whole query. The order thread only enqueues the request by fund account and keeps the latest request from each engine. The query thread then issues one broker call for every engine waiting on that account, and writes each row back to each waiting request.
+On many cash brokers a position query is synchronous and returns a few hundred rows a page. Running it on the order thread places later orders behind the whole query. Each engine writes only its own ring, storing an account id in the slot. When the query thread folds a batch, a later request for the same account overwrites the earlier one. It then issues one broker call for every engine waiting on that account, and writes each row back to each waiting request. A full ring fails that request immediately.
 
 The next page starts at the previous page’s last browse index plus one. When the API returns a locator string, that string replaces the index. The continuation keeps the original request id so the reply still matches the local request. The end mark is set only on the last row of the last page. A few seconds separate rounds. One fund account has a shareholder id on each of Shanghai and Shenzhen; orders and queries pick it from the symbol suffix. A dual-center account uses the shareholder id of the center being queried.
 
 ```cpp
-struct HoldAsk {
-    uint32_t engine{};
-    char account[32]{};
-};
-
 struct HoldLine {
     int64_t browse{};
     char symbol[32]{};
@@ -31024,49 +31058,356 @@ const char* holder_for(const char* symbol, const char* sh, const char* sz) {
     return sh;
 }
 
-class HoldPump {
-    std::mutex mu_;
-    std::unordered_map<std::string, std::unordered_map<uint32_t, HoldAsk>> wait_;
+struct HoldNote { uint32_t acct; };
 
-    std::vector<HoldLine> fetch(const std::string& acct, int64_t cursor, int rows);
-    void emit(const HoldAsk& ask, const HoldLine& line, bool end_mark);
+struct HoldRing {
+    HoldNote* slot;
+    uint32_t mask;
+    alignas(64) std::atomic<uint32_t> w{0};
+    alignas(64) std::atomic<uint32_t> r{0};
 
-    auto steal() {
-        std::lock_guard lk(mu_);
-        return std::exchange(wait_, {});
+    bool push(uint32_t acct) {
+        uint32_t wr = w.load(std::memory_order_relaxed);
+        uint32_t rd = r.load(std::memory_order_acquire);
+        if (((wr + 1) & mask) == (rd & mask)) return false;
+        slot[wr & mask].acct = acct;
+        w.store(wr + 1, std::memory_order_release);
+        return true;
+    }
+};
+
+struct HoldPump {
+    HoldRing* ring;          // one ring per engine, written only by that engine
+    uint8_t* wait;           // private to the query thread, index engine * accts + acct
+    uint32_t engines;
+    uint32_t accts;
+
+    std::vector<HoldLine> fetch(uint32_t acct, int64_t cursor, int rows);
+    void emit(uint32_t engine, uint32_t acct, const HoldLine& line, bool end_mark);
+
+    void fold() {
+        for (uint32_t e = 0; e < engines; ++e) {
+            HoldRing& g = ring[e];
+            uint32_t end = g.w.load(std::memory_order_acquire);
+            while (g.r.load(std::memory_order_relaxed) != end) {
+                uint32_t rd = g.r.load(std::memory_order_relaxed);
+                uint32_t a = g.slot[rd & g.mask].acct;
+                wait[e * accts + a] = 1;
+                g.r.store(rd + 1, std::memory_order_release);
+            }
+        }
     }
 
 public:
-    void enqueue(HoldAsk ask) {
-        std::lock_guard lk(mu_);
-        wait_[ask.account][ask.engine] = ask;
-    }
+    bool enqueue(uint32_t engine, uint32_t acct) { return ring[engine].push(acct); }
 
     void run() {
         for (;;) {
-            auto batch = steal();
-            for (auto& [acct, group] : batch) {
+            fold();
+            for (uint32_t a = 0; a < accts; ++a) {
+                bool any = false;
+                for (uint32_t e = 0; e < engines; ++e) any |= wait[e * accts + a];
+                if (!any) continue;
                 int64_t cursor = 0;
                 bool saw = false;
                 HoldLine tail{};
                 for (;;) {
-                    auto page = fetch(acct, cursor, 200);
+                    auto page = fetch(a, cursor, 200);
                     if (page.empty()) break;
                     saw = true;
                     tail = page.back();
                     for (const auto& line : page)
-                        for (const auto& ask : group)
-                            emit(ask.second, line, false);
+                        for (uint32_t e = 0; e < engines; ++e)
+                            if (wait[e * accts + a]) emit(e, a, line, false);
                     cursor = tail.browse + 1;
                 }
                 if (saw)
-                    for (const auto& ask : group)
-                        emit(ask.second, tail, true);
+                    for (uint32_t e = 0; e < engines; ++e)
+                        if (wait[e * accts + a]) emit(e, a, tail, true);
+                for (uint32_t e = 0; e < engines; ++e) wait[e * accts + a] = 0;
             }
             std::this_thread::sleep_for(std::chrono::seconds(3));
         }
     }
 };
+```
+
+
+### 33. Signal windows that emit parent orders
+
+On each clock the automatic book walks the id array built before the open, pulls fresh quotes into a local tape, then decides. The base clock scans four chains: orders, algo responses, cash, and positions. The automatic book walks only the quote-subscription ids, pulls quotes and prints, then collects parent responses. A cash query runs when margin must be rechecked, and stays off the every-tick path. The quote callback writes a slot by integer id. The subscription list is flattened into a dense id array before the open, and the clock walks that array. A parent is written straight into a free algo-ring slot: check the id base, map buy and sell onto long and short, fill a missing limit with the opposite touch, mint a unique parent id, then publish the write index. The strategy clock is the only writer of this ring. A full ring fails that parent immediately. Child slicing stays in the execution process, using the algo type stamped on the parent. The strategy base also accepts three signal subscription names, `SignalReq`, `HighFreqFactor`, and `NonstructSignal`. The automatic book’s buy and sell decision reads the pre-open signal file and the intraday tape.
+
+```cpp
+struct Parent {
+    uint64_t id;
+    uint32_t name;
+    int32_t side;
+    int32_t dir;
+    double px;
+    double opp;
+    int64_t qty;
+    uint8_t live;
+};
+
+struct TapeSlot {
+    double last, bid, ask, high, low;
+    double inv_high, inv_low, inv_anchor;
+    double anchor;
+    int64_t exch_ms;
+};
+
+struct ParentRing {
+    Parent* slot;
+    uint32_t mask;
+    alignas(64) std::atomic<uint32_t> w{0};
+    alignas(64) std::atomic<uint32_t> r{0};
+
+    Parent* claim() {
+        uint32_t wr = w.load(std::memory_order_relaxed);
+        uint32_t rd = r.load(std::memory_order_acquire);
+        if (((wr + 1) & mask) == (rd & mask)) return nullptr;
+        return &slot[wr & mask];
+    }
+
+    void publish() {
+        uint32_t wr = w.load(std::memory_order_relaxed);
+        w.store(wr + 1, std::memory_order_release);
+    }
+};
+
+struct BookRunner {
+    TapeSlot* tape;
+    uint32_t* watch;
+    uint32_t watch_n;
+    ParentRing* parents;
+    uint8_t need_margin;
+
+    void on_quote(uint32_t id, double last, double bid, double ask,
+                  double high, double low, int64_t exch_ms) {
+        TapeSlot& s = tape[id];
+        s.last = last;
+        s.bid = bid;
+        s.ask = ask;
+        s.exch_ms = exch_ms;
+        if (high > 0 && high != s.high) { s.high = high; s.inv_high = 1.0 / high; }
+        if (low  > 0 && low  != s.low)  { s.low  = low;  s.inv_low  = 1.0 / low; }
+    }
+
+    void on_clock(void* ctx) {
+        for (uint32_t i = 0; i < watch_n; ++i) {
+            uint32_t id = watch[i];
+            pull_quote(ctx, id);
+            pull_print(ctx, id);
+        }
+        pull_parent_rsp(ctx);
+        if (need_margin) pull_cash(ctx);
+        decide();
+    }
+
+    bool emit(uint32_t name, int side, double px, double opp, int64_t qty) {
+        Parent* p = parents->claim();
+        if (!p) return false;
+        p->name = name;
+        p->side = side;
+        p->px = px;
+        p->opp = opp;
+        p->qty = qty;
+        if (!id_base_ok(*p)) return false;
+        p->dir = side == 1 ? 0 : 1;
+        if (p->px <= 1e-6) p->px = p->opp;
+        p->id = next_parent_id();
+        p->live = 1;
+        parents->publish();
+        return true;
+    }
+};
+```
+
+The signal file is loaded once before the open. Each sleeve carries candidates and a sleeve weight. Each group carries a cap and a candidate list. Each name carries three bands: up, down, and sell. The summary block holds the book size and the closing target ratio. A fixed window carries start, end, target ratio, and direction, and is live at the open. A repeating window carries direction, hold seconds, a repeat limit, and a target ratio. It stays inactive until the synthetic index meets its condition, which then stamps the start and end. A cash account treats the file’s book size as spendable cash. A credit account also checks collateral share, maintenance margin, and the leverage cap. Sleeves, baskets, and bands are stored in parallel arrays keyed by integer id before the open. The session does not look up names by text.
+
+```cpp
+struct NameBand { double up, down, sell; };
+
+struct ClockWin {
+    int64_t begin_ms, end_ms;
+    int64_t span_sec;
+    double target;
+    double each;          // even share, computed when the window opens
+    int32_t dir;          // 0 buy, 1 sell
+    uint8_t curve;
+    uint8_t live;
+};
+
+struct RepeatWin {
+    int32_t dir;
+    int32_t hold_sec;
+    int32_t times;
+    int32_t used;
+    double target;
+    uint8_t curve;
+    uint8_t live;
+};
+
+struct Book {
+    double nav;
+    double close_target;
+    NameBand* band;       // indexed by name id
+    uint32_t* sleeve_of;
+    double* sleeve_w;
+    uint16_t* basket_a;
+    uint16_t* basket_b;
+    double* basket_cap;   // flattened from the two basket indexes
+    ClockWin* clocks;
+    RepeatWin* repeats;
+    uint32_t clock_n, repeat_n, name_n;
+};
+```
+
+During continuous trading the clock reads this tick’s weight, then picks names. The even share is the window’s session seconds divided by the check interval, computed once when the window opens, so every tick gets the same share. A curve turns the cumulative target into a logistic with coefficient -0.0034. The cumulative table is filled when the window opens and rebuilt when the target weight changes. The tick reads the difference of two adjacent entries, sends zero when that difference is negative, and the open is heavier.
+
+Fixed windows build a list from the sleeves and yesterday’s book, and emit paced parents. Tape windows pick names off the tape: a fall from the high beyond the name’s down band is a fade trigger, a rise from the low beyond the up band is an impulse trigger. A name keeps whichever trigger appears first that day. A buy repeating window waits until the index has rebounded more than 0.3% from its low, and the low is no older than 1000 seconds. A sell window waits until the index has fallen more than 0.3% from its high, and the high is no older than 1200 seconds. Buys stop when the index is more than 0.1% below the open. A last price within 2% of either limit is not bought. A large move of the index average versus the open marks the current repeating window inactive.
+
+Names on the limit-up hold list are kept. At 14:35 a flatten window is skipped while any parent is still working. After that time every fixed window is void. A control message can rewrite the closing target ratio or append a window.
+
+```cpp
+double slice_even(double target, int64_t win_sec, int64_t step_sec) {
+    if (step_sec <= 0 || win_sec < step_sec) return 0;
+    return target / double(win_sec / step_sec);
+}
+
+struct CurveTable {
+    double cum[4096];
+    int n;
+
+    void build(double target, int slices) {
+        n = slices < 4095 ? slices : 4095;
+        cum[0] = 0;
+        for (int i = 1; i <= n; ++i) {
+            double e = std::exp(-0.0034 * i);
+            cum[i] = (1.0 / (1.0 + e) - 0.5) * (2.0 * target);
+        }
+    }
+
+    double slice(int i) const {
+        if (i <= 0 || i > n) return 0;
+        double d = cum[i] - cum[i - 1];
+        return d > 0 ? d : 0;
+    }
+};
+
+struct IndexTape {
+    double last, open, high, low;
+    double inv_open, inv_high, inv_low;
+    int64_t high_ms, low_ms;
+};
+
+bool index_opens_window(const IndexTape& ix, int64_t now, int dir) {
+    if (ix.last <= 0 || ix.open <= 0) return false;
+    if (dir == 0 && ix.last * ix.inv_open - 1.0 < -0.001) return false;
+    if (dir == 0) {
+        if (now - ix.low_ms > 1000000) return false;
+        return ix.low > 0 && ix.last * ix.inv_low - 1.0 > 0.003;
+    }
+    if (now - ix.high_ms > 1200000) return false;
+    return ix.high > 0 && ix.last * ix.inv_high - 1.0 < -0.003;
+}
+
+enum class Hit : uint8_t { None, FromHigh, FromLow };
+
+Hit name_hit(const NameBand& b, const TapeSlot& s) {
+    if (s.high > 0 && s.last * s.inv_high - 1.0 < -b.down) return Hit::FromHigh;
+    if (s.low  > 0 && s.last * s.inv_low  - 1.0 >  b.up)   return Hit::FromLow;
+    return Hit::None;
+}
+```
+
+The synthetic index is one plus the average constituent return. Each name contributes last price times the reciprocal of the previous close, minus one. That reciprocal is stored in the slot before the open. Names whose exchange time is more than one minute from now are left out of the tick. If the valid count is below half the names in the signal file, the tick is discarded. The lunch break clears the index high, low, and average, and the afternoon anchors them again.
+
+```cpp
+struct Idx { double level; int valid; };
+
+Idx fold_index(const TapeSlot* tape, const uint32_t* watch, uint32_t n,
+               int book_n, int64_t now) {
+    double sum = 0;
+    int k = 0;
+    for (uint32_t i = 0; i < n; ++i) {
+        const TapeSlot& s = tape[watch[i]];
+        if (s.anchor <= 0 || now - s.exch_ms > 60000) continue;
+        sum += s.last * s.inv_anchor - 1.0;
+        ++k;
+    }
+    Idx ix{0, 0};
+    if (k < book_n / 2) return ix;
+    ix.valid = k;
+    ix.level = 1.0 + sum / double(k);
+    return ix;
+}
+```
+
+Buyable weight is the minimum of three remaining layers. A name’s remainder is target minus filled minus reserved. A fade trigger, an impulse trigger, and a clock window each keep their own target. A sleeve and a basket use the same target minus filled minus reserved. A basket keeps one ledger for each of its two indexes. A non-positive remainder sends nothing. A name stops after 10 buy parents. An order whose notional exceeds twice the name’s target weight is not sent. Quantity is rounded to the venue lot.
+
+When cash covers the order and the name is on the pledge list, the parent is marked as a pledge buy. Otherwise the book looks at margin. Names absent from the margin table are left out of the margin sum. Upkeep is cash plus market value, divided by margin debt, and is stored as 3 when the result is higher. The parent is marked as a margin buy when upkeep stays at or above the configured floor, leverage stays at or below its cap, and the pledge share stays at or below its cap. If neither cash nor margin can carry the order, the name is skipped.
+
+Working parents sit in a fixed slot array per name. A limit that falls outside the bid and the ask is cancelled. When the direction reverses, the book cancels working parents on the other side before it emits the new one.
+
+```cpp
+struct Layer { double target, done, reserved; };
+
+double room(const Layer& L) { return L.target - L.done - L.reserved; }
+
+double buy_room_at(const Layer* name, const Layer* sleeve, const Layer* basket,
+                   uint32_t id, uint32_t sid, uint32_t ba, uint32_t bb) {
+    double r = room(name[id]);
+    double a = room(sleeve[sid]); if (a < r) r = a;
+    a = room(basket[ba]); if (a < r) r = a;
+    a = room(basket[bb]); if (a < r) r = a;
+    return r;
+}
+
+enum class CashSide : uint8_t { Skip, Own, Margin };
+
+CashSide cash_side(uint8_t pledged, double cash, double need,
+                   double keep, double keep_min,
+                   double lev, double lev_max,
+                   double pledge_share, double pledge_max) {
+    if (pledged && cash >= need) return CashSide::Own;
+    if (keep >= keep_min && lev <= lev_max && pledge_share <= pledge_max)
+        return CashSide::Margin;
+    return CashSide::Skip;
+}
+
+double upkeep(double cash, double mkt, double debt) {
+    if (debt <= 1e-6) return 3;
+    double r = (cash + mkt) / debt;
+    return r < 3.0 ? r : 3.0;
+}
+
+bool outside_spread(double px, double bid, double ask) {
+    return px < bid || px > ask;
+}
+
+bool allow_buy(int sent, double notional, double name_cash) {
+    return sent < 10 && notional <= 2.0 * name_cash;
+}
+
+int64_t to_lot(double notional, double px, int64_t lot) {
+    if (px <= 0 || lot <= 0) return 0;
+    return (int64_t(notional / px) / lot) * lot;
+}
+
+struct Live {
+    Parent row[8];
+    uint8_t n;
+};
+
+void cancel_other_side(int dir, Live& live) {
+    uint8_t w = 0;
+    for (uint8_t i = 0; i < live.n; ++i) {
+        if (live.row[i].dir != dir) cancel_parent(live.row[i]);
+        else live.row[w++] = live.row[i];
+    }
+    live.n = w;
+}
 ```
 
 
