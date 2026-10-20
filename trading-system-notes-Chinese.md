@@ -13929,23 +13929,23 @@ perf深入剖析参考：[https://xie.infoq.cn/article/d86b3a3ca106449cb3f369a0f
 | 终点：发送交易订单（trade发出系统） | `Common::TCPSocket::send()`（市场参与者客户端的TCP发送函数） | 经过风险检查后，订单网关通过TCP套接字将订单请求发送给交易所，完成“trade”的发出 |
 
 
-**无人值守的性能闭环**
+**自主优化的评测闭环**
 
-人先把评测封成一条命令，Agent 只在这条命令上试错。实现代码可以改。正确性测试、基准输入、打分程序、构建脚本和评测脚本保持不动。来源：[https://github.com/intel/intel-performance-skills](https://github.com/intel/intel-performance-skills)。
+人把评测收成一条命令。实现代码可以改。正确性测试、基准输入、打分程序、构建脚本和评测脚本保持不动。来源：[https://github.com/intel/intel-performance-skills](https://github.com/intel/intel-performance-skills)。
 
-命令内部顺序固定：按同一优化档编译，正确性测试必须全过，再把同一基准跑多次，全程只用同一个统计量做决定。延迟用上面的中位数。绑核、核心隔离和实时优先级用来压低环境噪声，决策仍看这一个数。
+命令的顺序固定。先按同一个优化档编译，再要求正确性测试全部通过，然后把同一份基准负载跑多次。整段实验只用一个数做取舍。延迟用这多次运行的中位数，数值更小才算变好，比较方向中途不换。绑核、核心隔离和实时优先级用来压低机器噪声。
 
-干净工作区先跑出基线 B。之后每一轮只提出一个假设，只改实现，再跑同一条命令。编译、正确性或打分失败时先做短修，短时修不好就回滚。全部通过但指标没有严格好于 B，同样回滚。全部通过且严格好于 B，才提交，并把 B 换成新值。留下和丢弃都在实验日志里记一行。版本库负责隔离：留下就是提交，丢弃就是还原。
+干净目录先跑出基线。每一轮只改一类实现，然后重跑同一条命令。编译失败、测试失败或打分失败时，先做短时间修复，修不好就还原工作区。测试全部通过但中位数没有严格变好，同样还原。测试全部通过且中位数严格变好，才提交，基线改成这次的中位数。提交和还原各在实验日志里记一行。
 
 ```cpp
-enum class Verdict { Keep, Discard };
+enum class Round { Commit, Revert };
 
-bool better(double now, double base); // 整段实验固定同一个比较方向
+bool strictly_faster(double median_us, double base_us);
 
-Verdict step(double& B, bool correct, double metric) {
-    if (!correct || !better(metric, B)) return Verdict::Discard;
-    B = metric;
-    return Verdict::Keep;
+Round judge(double& base_us, bool built, bool tests_ok, double median_us) {
+    if (!built || !tests_ok || !strictly_faster(median_us, base_us)) return Round::Revert;
+    base_us = median_us;
+    return Round::Commit;
 }
 ```
 
@@ -27382,60 +27382,71 @@ int main() {
 }
 ```
 
-**按行情回放撮合**
+**历史行情回放成交**
 
-回放撮合按历史行情和外部成交来吃单。订单先过校验：时间为空、单号为 0、数量不大于 0、方向不是买或卖、单号重复，都直接拒绝。通过后状态记为已报，成交量和成交额清零。生效时间是报单时间加上一段模拟延迟。九点半之前延迟为 0；之后按下面八段取配置的毫秒数，乘 1000 后加到以微秒计的报单时间上：[09:30, 10:00)、[10:00, 10:30)、[10:30, 11:00)、[11:00, 11:30)、[11:30, 13:30)、[13:30, 14:00)、[14:00, 14:30)，十四点半及以后用最后一档。订单上若还记着一个尚未到来的时刻，这一拍跳过。
+回放撮合用历史盘口和逐笔成交给已接受的订单成交。报单时刻无效、单号为 0、数量不大于 0、方向超出买卖、单号已经存在，订单作废。接受后记为已报，已成数量和成交金额清零。生效时刻等于报单时刻加上模拟延迟。九点半之前延迟为 0。九点半到十点、十点到十点半、十点半到十一点、十一点到十一点半、十一点半到十三点半、十三点半到十四点、十四点到十四点半，各取一档配置的毫秒数，十四点半以后取最后一档。毫秒数乘 1000，加到以微秒计的报单时刻上。订单上还记着一个更晚的时刻时，这一轮不参与撮合。
 
-买方向在行情价不高于限价时成交，卖方向在行情价不低于限价时成交，两边价差小于 1e-6 视为相等。成交量取剩余量和该档数量的较小值，两边同时扣减，均价按成交量加权。剩余量为 0 记全成，否则记部成。
+盘口侧，买单在行情价不高于限价时成交，卖单在行情价不低于限价时成交。两价之差小于 1e-6 视为同一价格。成交数量取剩余量和档位量的较小值，订单和档位一起减少，均价按成交数量加权。剩余量为 0 记全成，否则记部成。
 
-外部成交另走一条。成交时间早于订单时间的打印丢掉。刚性开关关闭时，买单吃不高于限价的打印，卖单吃不低于限价的打印。开关打开时，买单的限价先减去标的上的价格偏移，卖单先加上，再做同样的比较。成交量同样取较小值。打印上买序号更大则买方是后到的主动方，卖序号更大则卖方是主动方。主动方与本单同向时按打印价成交，否则按本单限价成交。
+逐笔侧，早于订单时刻的成交丢掉。未收紧限价时，买单接受不高于限价的成交价，卖单接受不低于限价的成交价。收紧之后，买单限价先减去标的上的价格偏移，卖单限价先加上该偏移。成交数量同样取较小值。成交上买序号大于卖序号时买方后到，卖序号大于买序号时卖方后到。后到一侧与本单方向相同，成交价取逐笔价格，否则取本单限价。
 
 ```cpp
-struct BtOrder {
-    int64_t t_us{};
-    uint64_t id{};
-    int dir{}; // 0 买, 1 卖
-    double px{};
-    int64_t qty{};
-    int64_t filled{};
-    double avg{};
-    int st{3};
+struct OpenTicket {
+    int64_t stamp_us{0};
+    uint64_t token{0};
+    bool bid{true};
+    double cap{0};
+    int64_t shares{0};
+    int64_t done{0};
+    double cash{0};
+    int8_t mark{1};
+    int64_t ready_us{0};
 };
 
-inline bool near_px(double a, double b) { return std::abs(a - b) < 1e-6; }
-
-int64_t match_delay_us(int hhmm, const double* ms8) {
-    if (hhmm < 930) return 0;
-    const int edge[] = {1000, 1030, 1100, 1130, 1330, 1400, 1430};
-    int i = 7;
-    for (int k = 0; k < 7; ++k) if (hhmm < edge[k]) { i = k; break; }
-    return int64_t(ms8[i] * 1000.0);
+int64_t replay_lag_us(int minute, const double* slot_ms) {
+    if (minute < 9 * 60 + 30) return 0;
+    const int cut_min[] = {
+        10 * 60, 10 * 60 + 30, 11 * 60, 11 * 60 + 30,
+        13 * 60 + 30, 14 * 60, 14 * 60 + 30
+    };
+    int band = 7;
+    for (int i = 0; i < 7; ++i) {
+        if (minute < cut_min[i]) { band = i; break; }
+    }
+    return static_cast<int64_t>(slot_ms[band] * 1000.0);
 }
 
-int64_t take_level(BtOrder& o, double qpx, int64_t qsz) {
-    bool hit = o.dir == 0 ? (near_px(qpx, o.px) || qpx <= o.px)
-                          : (near_px(qpx, o.px) || o.px <= qpx);
-    int64_t left = o.qty - o.filled;
-    if (!hit || left <= 0 || qsz <= 0) return 0;
-    int64_t n = std::min(left, qsz);
-    o.avg = (o.avg * double(o.filled) + qpx * double(n)) / double(o.filled + n);
-    o.filled += n;
-    o.st = o.filled >= o.qty ? 7 : 6;
+bool px_eq(double a, double b) { return std::abs(a - b) < 1e-6; }
+
+bool level_ok(const OpenTicket& t, double level) {
+    if (px_eq(level, t.cap)) return true;
+    return t.bid ? level <= t.cap : t.cap <= level;
+}
+
+bool print_ok(const OpenTicket& t, double trade_px, double bend, bool tight) {
+    double gate = t.cap + (tight ? (t.bid ? -bend : bend) : 0);
+    if (px_eq(trade_px, gate)) return true;
+    return t.bid ? trade_px <= gate : gate <= trade_px;
+}
+
+double print_deal_px(const OpenTicket& t, double trade_px, int64_t bid_seq, int64_t ask_seq) {
+    bool buyer_later = bid_seq > ask_seq;
+    bool same = t.bid ? buyer_later : !buyer_later;
+    return same ? trade_px : t.cap;
+}
+
+int64_t book_fill(OpenTicket& t, int64_t now_us, double px, int64_t avail) {
+    int64_t left = t.shares - t.done;
+    if (left <= 0 || avail <= 0 || now_us < t.ready_us) return 0;
+    int64_t n = left < avail ? left : avail;
+    t.cash += px * static_cast<double>(n);
+    t.done += n;
+    t.mark = t.done >= t.shares ? 2 : 3;
     return n;
-}
-
-bool ext_hit(const BtOrder& o, double tpx, double slip, bool rigid) {
-    double lim = o.px + (rigid ? (o.dir == 0 ? -slip : slip) : 0);
-    if (near_px(tpx, lim)) return true;
-    return o.dir == 0 ? tpx <= lim : lim <= tpx;
-}
-
-double ext_fill_px(const BtOrder& o, double tpx, int64_t buy_no, int64_t sell_no) {
-    bool aggressor = o.dir == 0 ? buy_no > sell_no : sell_no > buy_no;
-    return aggressor ? tpx : o.px;
 }
 ```
 
+### 8. k线生成器
 ```cpp
 #ifndef BAR_GENERATOR_H
 #define BAR_GENERATOR_H
@@ -31385,105 +31396,106 @@ bool pace_ok(Band& b, double time_frac, double done_frac, int64_t now) {
 }
 ```
 
-**分时子单的取价和收尾**
+**子单定价与尾盘处理**
 
-执行粒度要落在 (0, 100]。开始时间和结束时间先收到交易时段里面。开始晚于结束、结束早于当前时间、或最大容忍时间早于结束时间，都不建执行器。涨停不卖，跌停不买。涨停上的买和跌停上的卖可以配成一次性挂出。
+执行粒度大于 0，且不超过 100。开始时刻和结束时刻先夹进交易时段。开始晚于结束、结束早于当前时刻、最大容忍时刻早于结束，执行器不创建。涨停不卖出，跌停不买入。涨停价上的买入和跌停价上的卖出可以一次挂完。
 
-子单基准价有五种。对侧一、二、三档：买取卖一、卖二或卖三，卖取买一、买二或买三；开关打开时二档和三档收回一档。本侧一档：买取买一，卖取卖一。中间价是买一和卖一的平均，缺一边就用剩下的一边，两边都空则没有价。选中的价格绝对值小于 1e-6、且该侧允许回退时，改用另一侧的一档。融券卖出在对侧档和中间价上直接用最新价。
+子单价格从盘口取出。打一档、二档、三档时，买读卖盘对应档，卖读买盘对应档。只允许一档时，二档和三档都退回一档。排队时买读买一，卖读卖一。中间价是买一和卖一的均值，缺一边就用另一边，两边都没有则没有价格。取出的价格绝对值小于 1e-6 且允许改挂时，改挂到另一侧的一档。融券卖出在打档和中间价上改用最新价。
 
-账户分片落后超过给定时间后，把剩余量一次挂出，并把结束时间往后改。剩余量连同在途仍不足一手时，单独做一笔碎股，之后不再为这笔剩余撤单。只等回报的阶段同样把结束时间往后推。
+被动挂单从己方一档向价差内部移动。移动档数大于 0，并且小于半个价差所含的档数时，买从买一向上移，卖从卖一向下移。档数到达或超过半个价差时，价格停在己方一档。追价基准可以是对侧一档、己方一档，或行情里单独给出的价格。该价格绝对值小于 1e-6 时不追。档数为正时买向上、卖向下，档数为负时方向相反。结果按最小变动价位对齐，余数达到半档就再进一档。
+
+阈值单在限价仍然能够成交的档位里取数量最大的一档。买跳过高于限价的档，卖跳过低于限价的档，价差小于 1e-6 仍算能够成交。买价等于该档乘以 1 加浮动比例，卖价等于该档乘以 1 减浮动比例，再按半档进位对齐。账户进度落后超过时限后，剩余数量一次挂出，结束时刻后移。剩余数量加上在途仍不足一手时，单独送出这一笔，此后不再为它撤单。只等待回报时，结束时刻同样后移。
 
 ```cpp
-enum class PxMode : int8_t { Opp1, Opp2, Opp3, Same1, Mid };
+struct BookTop {
+    double bid_px[3]{};
+    double ask_px[3]{};
+    double last_px{0};
+    double hint_px{0};
+};
 
-struct L5 { double bid[3]; double ask[3]; double last; };
+enum class Peg : uint8_t { Hit1, Hit2, Hit3, Join, Mid };
+enum class Aim : uint8_t { Buy, Sell, ShortSale };
+enum class Tail : uint8_t { Slice, Dump, Odd };
 
-double pre_px(PxMode m, int dir, int side, const L5& q, bool fold_deep, bool fallback) {
-    auto ok = [](double p) { return std::abs(p) >= 1e-6; };
-    if (side == 3 && m != PxMode::Same1) return q.last;
-    if (m == PxMode::Mid) {
-        if (ok(q.bid[0]) && ok(q.ask[0])) return 0.5 * (q.bid[0] + q.ask[0]);
-        return ok(q.bid[0]) ? q.bid[0] : q.ask[0];
+bool live_px(double p) { return std::abs(p) >= 1e-6; }
+
+double peg_px(Peg peg, Aim aim, const BookTop& b, bool top_only, bool reroute) {
+    if (aim == Aim::ShortSale && peg != Peg::Join) return b.last_px;
+    if (peg == Peg::Mid) {
+        bool hb = live_px(b.bid_px[0]);
+        bool ha = live_px(b.ask_px[0]);
+        if (hb && ha) return 0.5 * (b.bid_px[0] + b.ask_px[0]);
+        if (hb) return b.bid_px[0];
+        return ha ? b.ask_px[0] : 0;
     }
-    int lv = m == PxMode::Opp3 ? 2 : m == PxMode::Opp2 ? 1 : 0;
-    if (fold_deep && lv > 0) lv = 0;
-    bool buy = dir == 0;
-    double px = m == PxMode::Same1 ? (buy ? q.bid[0] : q.ask[0])
-                                   : (buy ? q.ask[lv] : q.bid[lv]);
-    if (!ok(px) && fallback)
-        px = m == PxMode::Same1 ? (buy ? q.ask[0] : q.bid[0])
-                                : (buy ? q.bid[0] : q.ask[0]);
-    return px;
+    int depth = peg == Peg::Hit3 ? 2 : peg == Peg::Hit2 ? 1 : 0;
+    if (top_only) depth = 0;
+    bool buy = aim != Aim::Sell;
+    double px = peg == Peg::Join ? (buy ? b.bid_px[0] : b.ask_px[0])
+                                 : (buy ? b.ask_px[depth] : b.bid_px[depth]);
+    if (live_px(px) || !reroute) return px;
+    if (peg == Peg::Join) return buy ? b.ask_px[0] : b.bid_px[0];
+    return buy ? b.bid_px[0] : b.ask_px[0];
 }
 
-enum class TwapEnd : int8_t { Keep, AllIn, OddLot };
-
-TwapEnd finish_slice(int64_t left, int64_t lot, bool behind_expired) {
-    if (left < lot) return TwapEnd::OddLot;
-    if (behind_expired) return TwapEnd::AllIn;
-    return TwapEnd::Keep;
+double align_tick(double px, double tick) {
+    if (tick <= 0) return px;
+    double steps = std::trunc(px / tick);
+    if (px - steps * tick + 1e-6 >= 0.5 * tick) steps += 1;
+    return steps * tick;
 }
-```
 
-**双边先挂再追**
-
-挂单价从己方一档往价差里面走，但不超过价差的一半。配置档数大于 0，并且严格小于 (卖一 − 买一) / 最小变动价位 的一半时，买单从买一上移这么多档，卖单从卖一下移这么多档。档数已经到达或越过中点时，停在己方一档。
-
-追价先选基准。对侧：买用卖一，卖用买一。本侧：买用买一，卖用卖一。指定价直接用行情上带来的价格，绝对值小于 1e-6 时不追。档数的符号决定方向：正数沿更主动的方向移动，买上移、卖下移；负数反向。移动后再按最小变动价位取整，余数达到半个价位就进一档。
-
-```cpp
-double move_up(double px, int n);
-double move_down(double px, int n);
-
-double post_px(int dir, double bid, double ask, double tick, int ticks) {
+int steps_inside(double bid, double ask, double tick, int want) {
+    if (tick <= 0 || want <= 0) return 0;
     double half = 0.5 * (ask - bid) / tick;
-    int n = std::abs(ticks);
-    if (!(n > 0 && double(n) + 1e-6 < half)) n = 0;
-    return dir == 0 ? move_up(bid, n) : move_down(ask, n);
+    if (static_cast<double>(want) + 1e-6 < half) return want;
+    return 0;
 }
 
-double chase_px(int dir, int mode, double bid, double ask, double specified,
-                 double tick, int ticks) {
-    double base = mode == 0 ? (dir == 0 ? ask : bid)
-                : mode == 1 ? (dir == 0 ? bid : ask)
-                            : specified;
-    if (std::abs(base) < 1e-6) return 0;
-    int n = std::abs(ticks);
-    double px = ticks > 0 ? (dir == 0 ? move_up(base, n) : move_down(base, n))
-                          : (dir == 0 ? move_down(base, n) : move_up(base, n));
-    double q = std::trunc(px / tick);
-    if (px - q * tick + 1e-6 >= 0.5 * tick) q += 1;
-    return q * tick;
+double rest_inside(double bid, double ask, double tick, bool buy, int want) {
+    int n = steps_inside(bid, ask, tick, want < 0 ? -want : want);
+    double raw = buy ? bid + static_cast<double>(n) * tick
+                     : ask - static_cast<double>(n) * tick;
+    return align_tick(raw, tick);
 }
-```
 
-**按档位上的大单定价**
+double chase_from(const BookTop& b, int mode, bool buy, double tick, int steps) {
+    double base = mode == 0 ? (buy ? b.ask_px[0] : b.bid_px[0])
+                : mode == 1 ? (buy ? b.bid_px[0] : b.ask_px[0])
+                            : b.hint_px;
+    if (!live_px(base)) return 0;
+    int signed_steps = buy ? steps : -steps;
+    return align_tick(base + static_cast<double>(signed_steps) * tick, tick);
+}
 
-在限价还能打到的档位里，取挂单量最大的那一档作为大单价。买单跳过高于限价的档，卖单跳过低于限价的档，价差小于 1e-6 算打到。买把大单价乘上 (1 + 浮动比例)，卖乘上 (1 − 浮动比例)。再按最小变动价位取整，余数达到半个价位就进一档。
-
-```cpp
-double big_px(int dir, double limit, const double* px, const int64_t* sz, int n) {
-    int64_t best = -1;
-    double out = 0;
-    for (int i = 0; i < n; ++i) {
-        bool reach = dir == 0 ? px[i] <= limit + 1e-6 : px[i] + 1e-6 >= limit;
-        if (reach && sz[i] > best) { best = sz[i]; out = px[i]; }
+double fattest(bool buy, double limit, const double* px, const int64_t* vol, int n) {
+    int64_t peak = -1;
+    double chosen = 0;
+    for (int i = n - 1; i >= 0; --i) {
+        bool reach = buy ? px[i] <= limit + 1e-6 : px[i] + 1e-6 >= limit;
+        if (!reach || vol[i] <= peak) continue;
+        peak = vol[i];
+        chosen = px[i];
     }
-    return out;
+    return chosen;
 }
 
-double snap_half_up(double px, double tick) {
-    double q = std::trunc(px / tick);
-    if (px - q * tick + 1e-6 >= 0.5 * tick) q += 1;
-    return q * tick;
+double widened(bool buy, double level, double ratio, double tick) {
+    double raw = buy ? level * (1.0 + ratio) : level * (1.0 - ratio);
+    return align_tick(raw, tick);
 }
 
-double thresh_px(int dir, double big, double ratio, double tick) {
-    double px = dir == 0 ? big * (1.0 + ratio) : big * (1.0 - ratio);
-    return snap_half_up(px, tick);
+bool grain_ok(double g) { return g > 1e-6 && g <= 100.0; }
+
+Tail tail_of(int64_t left, int64_t lot, bool late) {
+    if (left < lot) return Tail::Odd;
+    if (late) return Tail::Dump;
+    return Tail::Slice;
 }
 ```
 
+### 31. 报单入库前的开平与方向规整
 
 现货没有平今、平昨。入库前若标的类型仍未知，用代码解析一次并写回，后面不再拆字符串。股票、债券、基金、指数、回购把开平强制写成开仓，避免柜台收到无意义的平今。期货和期权才保留平仓：上期所（SHF）和能源中心（INE）把普通平仓改成平昨，平今保持不变；其余交易所把平今、平昨收成普通平仓。方向由买卖方向映射：买入、融资买入、买券还券、申购记为多头，卖出、融券卖出、卖券还款、赎回记为空头。映射失败时在写环之前填错误码和短文案，单不到柜台。价格已经给出、价格类型仍未知、且价格大于 0 时，收成限价，避免算法单带着未知价型出去。限价类型已经写上、价格绝对值仍小于 1e-6 时直接拒单。
 

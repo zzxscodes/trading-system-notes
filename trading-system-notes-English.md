@@ -13956,23 +13956,23 @@ Perf in-depth analysis reference:[https://xie.infoq.cn/article/d86b3a3ca106449cb
 | End point: Send trading order (trade issuing system) | `Common::TCPSocket::send()`(TCP sending function of market participant client) | After risk check, the order gateway sends the order request to the exchange through the TCP socket to complete the issuance of "trade" |
 
 
-**Unattended performance loop**
+**Closed loop for unattended performance changes**
 
-A person first seals evaluation into one command. The agent only experiments through that command. Implementation code may change. Correctness tests, benchmark inputs, the scorer, the build script, and the evaluation script stay fixed. Source: [https://github.com/intel/intel-performance-skills](https://github.com/intel/intel-performance-skills).
+A person seals evaluation into one command. Implementation code may change. Correctness tests, benchmark inputs, the scorer, the build script, and the evaluation script stay fixed. Source: [https://github.com/intel/intel-performance-skills](https://github.com/intel/intel-performance-skills).
 
-The command always runs in the same order: compile at one optimization level, require every correctness test to pass, then run the same benchmark several times. The whole run keeps a single statistic for the decision. For latency that statistic is the median above. Core pinning, core isolation, and realtime priority reduce environmental noise. The decision still reads that one number.
+The command always runs in one order. It compiles at one optimization level, requires every correctness test to pass, then runs the same benchmark load several times. The whole experiment keeps or drops a change with one number. For latency that number is the median of those runs, and a smaller median is the improvement. The comparison direction stays fixed. Core pinning, core isolation, and realtime priority reduce machine noise.
 
-A clean workspace first records baseline B. Each round states one hypothesis and edits only the implementation, then runs the same command. A compile, correctness, or scoring failure gets a short repair. If that repair does not land quickly, the round is rolled back. A fully passing round whose metric is not strictly better than B is rolled back as well. A fully passing round that is strictly better is committed, and B becomes the new value. Both kept and discarded rounds append one line to the experiment log. Version control is the isolator: keep means commit, discard means restore.
+A clean tree first records the baseline. Each round changes one kind of implementation and runs the same command again. A compile failure, a test failure, or a scoring failure gets a short repair. If the repair does not land, the tree is restored. A round whose tests all pass but whose median is not strictly better is restored as well. A round whose tests all pass and whose median is strictly better is committed, and the baseline becomes that median. A commit and a restore each append one line to the experiment log.
 
 ```cpp
-enum class Verdict { Keep, Discard };
+enum class Round { Commit, Revert };
 
-bool better(double now, double base); // one comparison direction for the whole run
+bool strictly_faster(double median_us, double base_us);
 
-Verdict step(double& B, bool correct, double metric) {
-    if (!correct || !better(metric, B)) return Verdict::Discard;
-    B = metric;
-    return Verdict::Keep;
+Round judge(double& base_us, bool built, bool tests_ok, double median_us) {
+    if (!built || !tests_ok || !strictly_faster(median_us, base_us)) return Round::Revert;
+    base_us = median_us;
+    return Round::Commit;
 }
 ```
 
@@ -27390,60 +27390,71 @@ int main() {
 }
 ```
 
-**Replay match against quotes and prints**
+**Fills from a historical replay**
 
-A replay match fills from historical quotes and external prints. An order is rejected when its time is empty, its id is 0, its quantity is not positive, its direction is neither buy nor sell, or the id is already in the book. An accepted order is marked new, and its filled quantity and amount are cleared. Its effective time is the order time plus a simulated delay. Before 09:30 the delay is 0. After that, one of eight configured millisecond values is multiplied by 1000 and added to the order time in microseconds. The buckets are [09:30, 10:00), [10:00, 10:30), [10:30, 11:00), [11:00, 11:30), [11:30, 13:30), [13:30, 14:00), [14:00, 14:30), and 14:30 onward for the last slot. An order that still carries a timer in the future is skipped for this pass.
+Replay matching fills an accepted order from a historical book and from prints. An order is dropped when its timestamp is invalid, its token is 0, its size is not positive, its side is outside buy and sell, or the token is already present. An accepted order is marked working, and its filled size and cash are cleared. The effective time is the order time plus a simulated lag. Before 09:30 the lag is 0. From 09:30 to 10:00, 10:00 to 10:30, 10:30 to 11:00, 11:00 to 11:30, 11:30 to 13:30, 13:30 to 14:00, and 14:00 to 14:30, each window reads one configured millisecond value. From 14:30 onward the last value is used. That value is multiplied by 1000 and added to the order time in microseconds. An order that still carries a later ready time does not join this pass.
 
-A buy fills when the quote price is at or below the limit, and a sell fills when the quote price is at or above the limit. A gap smaller than 1e-6 counts as equal. The fill size is the minimum of the remaining quantity and the level size. Both sides are reduced, and the average price is the volume-weighted price of the fills. Zero remaining is a full fill; anything left is a partial fill.
+On the book, a buy fills when the level price is at or below the limit, and a sell fills when the level price is at or above the limit. A difference under 1e-6 is the same price. The fill size is the smaller of the remaining size and the level size. The order and the level both decrease, and the average is weighted by size. Zero remaining is a complete fill. A positive remainder is a partial fill.
 
-External prints take a second path. A print older than the order is dropped. With the rigid switch off, a buy takes a print at or below the limit and a sell takes a print at or above the limit. With the switch on, the buy limit is first reduced by the instrument's price offset and the sell limit is increased by it. The fill size is again the minimum. On the print, the larger of the buy sequence and the sell sequence is the later aggressor. When that aggressor is this order's side, the fill price is the print price; otherwise it is this order's limit.
+On prints, a trade older than the order is ignored. Without a tight limit, a buy accepts a trade at or below the limit and a sell accepts a trade at or above the limit. With the tight limit, a buy limit is reduced by the instrument price offset and a sell limit is increased by it. The fill size is again the smaller of the two sizes. When the buy sequence is greater than the sell sequence, the buyer arrived later. When the sell sequence is greater, the seller arrived later. If that later side is this order's side, the fill price is the print. Otherwise it is this order's limit.
 
 ```cpp
-struct BtOrder {
-    int64_t t_us{};
-    uint64_t id{};
-    int dir{}; // 0 buy, 1 sell
-    double px{};
-    int64_t qty{};
-    int64_t filled{};
-    double avg{};
-    int st{3};
+struct OpenTicket {
+    int64_t stamp_us{0};
+    uint64_t token{0};
+    bool bid{true};
+    double cap{0};
+    int64_t shares{0};
+    int64_t done{0};
+    double cash{0};
+    int8_t mark{1};
+    int64_t ready_us{0};
 };
 
-inline bool near_px(double a, double b) { return std::abs(a - b) < 1e-6; }
-
-int64_t match_delay_us(int hhmm, const double* ms8) {
-    if (hhmm < 930) return 0;
-    const int edge[] = {1000, 1030, 1100, 1130, 1330, 1400, 1430};
-    int i = 7;
-    for (int k = 0; k < 7; ++k) if (hhmm < edge[k]) { i = k; break; }
-    return int64_t(ms8[i] * 1000.0);
+int64_t replay_lag_us(int minute, const double* slot_ms) {
+    if (minute < 9 * 60 + 30) return 0;
+    const int cut_min[] = {
+        10 * 60, 10 * 60 + 30, 11 * 60, 11 * 60 + 30,
+        13 * 60 + 30, 14 * 60, 14 * 60 + 30
+    };
+    int band = 7;
+    for (int i = 0; i < 7; ++i) {
+        if (minute < cut_min[i]) { band = i; break; }
+    }
+    return static_cast<int64_t>(slot_ms[band] * 1000.0);
 }
 
-int64_t take_level(BtOrder& o, double qpx, int64_t qsz) {
-    bool hit = o.dir == 0 ? (near_px(qpx, o.px) || qpx <= o.px)
-                          : (near_px(qpx, o.px) || o.px <= qpx);
-    int64_t left = o.qty - o.filled;
-    if (!hit || left <= 0 || qsz <= 0) return 0;
-    int64_t n = std::min(left, qsz);
-    o.avg = (o.avg * double(o.filled) + qpx * double(n)) / double(o.filled + n);
-    o.filled += n;
-    o.st = o.filled >= o.qty ? 7 : 6;
+bool px_eq(double a, double b) { return std::abs(a - b) < 1e-6; }
+
+bool level_ok(const OpenTicket& t, double level) {
+    if (px_eq(level, t.cap)) return true;
+    return t.bid ? level <= t.cap : t.cap <= level;
+}
+
+bool print_ok(const OpenTicket& t, double trade_px, double bend, bool tight) {
+    double gate = t.cap + (tight ? (t.bid ? -bend : bend) : 0);
+    if (px_eq(trade_px, gate)) return true;
+    return t.bid ? trade_px <= gate : gate <= trade_px;
+}
+
+double print_deal_px(const OpenTicket& t, double trade_px, int64_t bid_seq, int64_t ask_seq) {
+    bool buyer_later = bid_seq > ask_seq;
+    bool same = t.bid ? buyer_later : !buyer_later;
+    return same ? trade_px : t.cap;
+}
+
+int64_t book_fill(OpenTicket& t, int64_t now_us, double px, int64_t avail) {
+    int64_t left = t.shares - t.done;
+    if (left <= 0 || avail <= 0 || now_us < t.ready_us) return 0;
+    int64_t n = left < avail ? left : avail;
+    t.cash += px * static_cast<double>(n);
+    t.done += n;
+    t.mark = t.done >= t.shares ? 2 : 3;
     return n;
-}
-
-bool ext_hit(const BtOrder& o, double tpx, double slip, bool rigid) {
-    double lim = o.px + (rigid ? (o.dir == 0 ? -slip : slip) : 0);
-    if (near_px(tpx, lim)) return true;
-    return o.dir == 0 ? tpx <= lim : lim <= tpx;
-}
-
-double ext_fill_px(const BtOrder& o, double tpx, int64_t buy_no, int64_t sell_no) {
-    bool aggressor = o.dir == 0 ? buy_no > sell_no : sell_no > buy_no;
-    return aggressor ? tpx : o.px;
 }
 ```
 
+### 8. k line generator
 ```cpp
 #ifndef BAR_GENERATOR_H
 #define BAR_GENERATOR_H
@@ -31396,105 +31407,106 @@ bool pace_ok(Band& b, double time_frac, double done_frac, int64_t now) {
 }
 ```
 
-**Child price and the end of a time slice**
+**Child pricing and the tail of a slice**
 
-The execution grain has to sit in (0, 100]. Start and end are pulled back into the trading session. The executor is not created when the start is after the end, the end is before now, or the maximum tolerate time is before the end. A limit-up book does not sell, and a limit-down book does not buy. A buy at limit-up and a sell at limit-down can be posted as a single resting order.
+The execution grain is greater than 0 and at most 100. Start and end are clamped into the trading session. The executor is not created when the start is after the end, the end is before the current time, or the latest tolerate time is before the end. A limit-up book does not sell. A limit-down book does not buy. A buy at the limit-up price and a sell at the limit-down price may be posted in one order.
 
-The child base price has five choices. Opposite levels one, two, and three: a buy reads ask one, two, or three, and a sell reads bid one, two, or three. A switch folds levels two and three back to level one. Same-side level one: a buy reads bid one and a sell reads ask one. The mid is the average of bid one and ask one; if one side is missing the other side is used, and if both are missing there is no price. When the chosen price has absolute value below 1e-6 and that side allows a fallback, the other side's first level is used instead. A short-sell uses the last price on the opposite levels and on the mid.
+The child price is taken from the book. Hitting level one, two, or three reads the opposite side at that depth: a buy reads the ask, a sell reads the bid. When only the top level is allowed, levels two and three fall back to level one. A join reads bid one for a buy and ask one for a sell. The middle price is the mean of bid one and ask one. If one side is missing, the other side is used. If both are missing, there is no price. When the chosen price has absolute value below 1e-6 and rerouting is allowed, the order moves to level one on the other side. A short sale uses the last price for a hit and for the middle price.
 
-Once an account slice has stayed behind schedule past the given time, the whole remainder is posted at once and the end time is moved later. When the remainder, including size still live, is below one lot, it is sent as its own odd-lot slice and that remainder is not cancelled again. The wait-only phase moves the end time later as well.
+A passive order walks from its own touch into the spread. When the step count is positive and smaller than half the spread in ticks, a buy moves up from bid one and a sell moves down from ask one. When the count reaches or passes half the spread, the price stays on its own touch. A chase starts from the opposite touch, from its own touch, or from a price carried on the quote. A carried price whose absolute value is below 1e-6 does not chase. A positive step count moves a buy up and a sell down. A negative count reverses that direction. The result is aligned to the tick, and a remainder of at least half a tick steps one more tick.
+
+A threshold order takes the level with the largest displayed size among levels the limit can still trade. A buy skips levels above the limit. A sell skips levels below the limit. A gap under 1e-6 still counts as tradable. A buy price is that level times one plus the float ratio. A sell price is that level times one minus the float ratio. The result is aligned by the same half-tick step. After the account has stayed behind schedule past the time limit, the remaining size is posted at once and the end time moves later. When the remainder plus size still working is below one lot, that piece is sent alone and is not cancelled again. While the slice is only waiting for reports, the end time moves later as well.
 
 ```cpp
-enum class PxMode : int8_t { Opp1, Opp2, Opp3, Same1, Mid };
+struct BookTop {
+    double bid_px[3]{};
+    double ask_px[3]{};
+    double last_px{0};
+    double hint_px{0};
+};
 
-struct L5 { double bid[3]; double ask[3]; double last; };
+enum class Peg : uint8_t { Hit1, Hit2, Hit3, Join, Mid };
+enum class Aim : uint8_t { Buy, Sell, ShortSale };
+enum class Tail : uint8_t { Slice, Dump, Odd };
 
-double pre_px(PxMode m, int dir, int side, const L5& q, bool fold_deep, bool fallback) {
-    auto ok = [](double p) { return std::abs(p) >= 1e-6; };
-    if (side == 3 && m != PxMode::Same1) return q.last;
-    if (m == PxMode::Mid) {
-        if (ok(q.bid[0]) && ok(q.ask[0])) return 0.5 * (q.bid[0] + q.ask[0]);
-        return ok(q.bid[0]) ? q.bid[0] : q.ask[0];
+bool live_px(double p) { return std::abs(p) >= 1e-6; }
+
+double peg_px(Peg peg, Aim aim, const BookTop& b, bool top_only, bool reroute) {
+    if (aim == Aim::ShortSale && peg != Peg::Join) return b.last_px;
+    if (peg == Peg::Mid) {
+        bool hb = live_px(b.bid_px[0]);
+        bool ha = live_px(b.ask_px[0]);
+        if (hb && ha) return 0.5 * (b.bid_px[0] + b.ask_px[0]);
+        if (hb) return b.bid_px[0];
+        return ha ? b.ask_px[0] : 0;
     }
-    int lv = m == PxMode::Opp3 ? 2 : m == PxMode::Opp2 ? 1 : 0;
-    if (fold_deep && lv > 0) lv = 0;
-    bool buy = dir == 0;
-    double px = m == PxMode::Same1 ? (buy ? q.bid[0] : q.ask[0])
-                                   : (buy ? q.ask[lv] : q.bid[lv]);
-    if (!ok(px) && fallback)
-        px = m == PxMode::Same1 ? (buy ? q.ask[0] : q.bid[0])
-                                : (buy ? q.bid[0] : q.ask[0]);
-    return px;
+    int depth = peg == Peg::Hit3 ? 2 : peg == Peg::Hit2 ? 1 : 0;
+    if (top_only) depth = 0;
+    bool buy = aim != Aim::Sell;
+    double px = peg == Peg::Join ? (buy ? b.bid_px[0] : b.ask_px[0])
+                                 : (buy ? b.ask_px[depth] : b.bid_px[depth]);
+    if (live_px(px) || !reroute) return px;
+    if (peg == Peg::Join) return buy ? b.ask_px[0] : b.bid_px[0];
+    return buy ? b.bid_px[0] : b.ask_px[0];
 }
 
-enum class TwapEnd : int8_t { Keep, AllIn, OddLot };
-
-TwapEnd finish_slice(int64_t left, int64_t lot, bool behind_expired) {
-    if (left < lot) return TwapEnd::OddLot;
-    if (behind_expired) return TwapEnd::AllIn;
-    return TwapEnd::Keep;
+double align_tick(double px, double tick) {
+    if (tick <= 0) return px;
+    double steps = std::trunc(px / tick);
+    if (px - steps * tick + 1e-6 >= 0.5 * tick) steps += 1;
+    return steps * tick;
 }
-```
 
-**Post on both sides, then chase**
-
-The post price walks from the near touch into the spread and stops at the midpoint. When the configured tick count is positive and strictly below half of (ask one − bid one) / tick, a buy moves up from bid one by that many ticks and a sell moves down from ask one by that many ticks. Once the count reaches or passes the midpoint, the order stays on its own touch.
-
-A chase starts from a base. Opposite: a buy uses ask one and a sell uses bid one. Same side: a buy uses bid one and a sell uses ask one. Specified uses the price carried on the quote, and a value whose absolute size is below 1e-6 does not chase. The sign of the tick count picks the direction. A positive count moves the aggressive way, up for a buy and down for a sell. A negative count moves the other way. The result is then snapped to the tick, and a remainder of at least half a tick rounds up one tick.
-
-```cpp
-double move_up(double px, int n);
-double move_down(double px, int n);
-
-double post_px(int dir, double bid, double ask, double tick, int ticks) {
+int steps_inside(double bid, double ask, double tick, int want) {
+    if (tick <= 0 || want <= 0) return 0;
     double half = 0.5 * (ask - bid) / tick;
-    int n = std::abs(ticks);
-    if (!(n > 0 && double(n) + 1e-6 < half)) n = 0;
-    return dir == 0 ? move_up(bid, n) : move_down(ask, n);
+    if (static_cast<double>(want) + 1e-6 < half) return want;
+    return 0;
 }
 
-double chase_px(int dir, int mode, double bid, double ask, double specified,
-                 double tick, int ticks) {
-    double base = mode == 0 ? (dir == 0 ? ask : bid)
-                : mode == 1 ? (dir == 0 ? bid : ask)
-                            : specified;
-    if (std::abs(base) < 1e-6) return 0;
-    int n = std::abs(ticks);
-    double px = ticks > 0 ? (dir == 0 ? move_up(base, n) : move_down(base, n))
-                          : (dir == 0 ? move_down(base, n) : move_up(base, n));
-    double q = std::trunc(px / tick);
-    if (px - q * tick + 1e-6 >= 0.5 * tick) q += 1;
-    return q * tick;
+double rest_inside(double bid, double ask, double tick, bool buy, int want) {
+    int n = steps_inside(bid, ask, tick, want < 0 ? -want : want);
+    double raw = buy ? bid + static_cast<double>(n) * tick
+                     : ask - static_cast<double>(n) * tick;
+    return align_tick(raw, tick);
 }
-```
 
-**Price from the largest displayed size**
+double chase_from(const BookTop& b, int mode, bool buy, double tick, int steps) {
+    double base = mode == 0 ? (buy ? b.ask_px[0] : b.bid_px[0])
+                : mode == 1 ? (buy ? b.bid_px[0] : b.ask_px[0])
+                            : b.hint_px;
+    if (!live_px(base)) return 0;
+    int signed_steps = buy ? steps : -steps;
+    return align_tick(base + static_cast<double>(signed_steps) * tick, tick);
+}
 
-Among the levels the limit can still reach, the level with the largest displayed size is the big-order price. A buy skips levels above the limit and a sell skips levels below it. A gap under 1e-6 still counts as reached. A buy multiplies that price by (1 + float ratio) and a sell multiplies it by (1 − float ratio). The result is snapped to the tick, and a remainder of at least half a tick rounds up one tick.
-
-```cpp
-double big_px(int dir, double limit, const double* px, const int64_t* sz, int n) {
-    int64_t best = -1;
-    double out = 0;
-    for (int i = 0; i < n; ++i) {
-        bool reach = dir == 0 ? px[i] <= limit + 1e-6 : px[i] + 1e-6 >= limit;
-        if (reach && sz[i] > best) { best = sz[i]; out = px[i]; }
+double fattest(bool buy, double limit, const double* px, const int64_t* vol, int n) {
+    int64_t peak = -1;
+    double chosen = 0;
+    for (int i = n - 1; i >= 0; --i) {
+        bool reach = buy ? px[i] <= limit + 1e-6 : px[i] + 1e-6 >= limit;
+        if (!reach || vol[i] <= peak) continue;
+        peak = vol[i];
+        chosen = px[i];
     }
-    return out;
+    return chosen;
 }
 
-double snap_half_up(double px, double tick) {
-    double q = std::trunc(px / tick);
-    if (px - q * tick + 1e-6 >= 0.5 * tick) q += 1;
-    return q * tick;
+double widened(bool buy, double level, double ratio, double tick) {
+    double raw = buy ? level * (1.0 + ratio) : level * (1.0 - ratio);
+    return align_tick(raw, tick);
 }
 
-double thresh_px(int dir, double big, double ratio, double tick) {
-    double px = dir == 0 ? big * (1.0 + ratio) : big * (1.0 - ratio);
-    return snap_half_up(px, tick);
+bool grain_ok(double g) { return g > 1e-6 && g <= 100.0; }
+
+Tail tail_of(int64_t left, int64_t lot, bool late) {
+    if (left < lot) return Tail::Odd;
+    if (late) return Tail::Dump;
+    return Tail::Slice;
 }
 ```
 
+### 31. Normalize offset and direction before the order hits the ring
 
 Cash names have no close-today or close-yesterday. If the instrument kind is still unknown, parse it from the symbol once and store it; later inserts do not split the string again. Stocks, bonds, funds, indexes, and repos force offset to open, so the broker never sees a meaningless close-today. Futures and options keep close semantics: SHFE (SHF) and INE rewrite a plain close into close-yesterday and leave close-today unchanged; every other venue collapses close-today and close-yesterday into a plain close. Direction folds the side into long or short: buy, margin buy, repay-stock, and subscribe are long; sell, short-sell, repay-margin, and redeem are short. A failed map fills an error code and a short text before the ring write, and the ticket never reaches the broker. When a price is present, the price is greater than 0, and the price kind is still unknown, snap the kind to limit so an algo ticket does not leave with an unset price kind. A limit kind whose absolute price is still below 1e-6 is rejected.
 
