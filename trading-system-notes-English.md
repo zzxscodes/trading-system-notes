@@ -22458,6 +22458,53 @@ public:
 } // namespace lob
 ```
 
+**Dense sorted Vec: best price at the end**
+
+The vector scheme above allocates the full tick span. Another layout keeps only live levels, so memory grows with the number of levels and is not capped by the price range. Put the best price at the end on both sides: bids ascending, asks stored as negated ticks then ascending, so inserts and deletes only shift elements after the touch point and near-touch updates move the least. Lookup can walk backward from the end (fast near the touch) or use `partition_point` (distance-independent, but harder to predict). When every message must read the top few tens of levels for factors and you do not want a price window, this can beat an ordered tree on pointer hops.
+
+```cpp
+struct DenseSide {
+    std::vector<std::pair<int64_t, double>> lv; // ascending; best at back
+    // Negate ask ticks on write so both sides share one path
+    bool apply(int64_t tick, double qty) {
+        auto it = std::lower_bound(lv.begin(), lv.end(), tick,
+            [](const auto& a, int64_t t) { return a.first < t; });
+        if (it != lv.end() && it->first == tick) {
+            if (qty == 0.0) { lv.erase(it); return true; }
+            it->second = qty;
+            return true;
+        }
+        if (qty == 0.0) return false;
+        lv.insert(it, {tick, qty});
+        return true;
+    }
+    std::pair<int64_t, double> best() const { return lv.empty() ? std::pair<int64_t, double>{} : lv.back(); }
+};
+```
+
+**Window ring and far levels: dual-write, split store, stale slots after recenter**
+
+A fixed array or modular ring only covers a tick window around mid. Deltas outside the window must not be dropped: when price finally moves there the level would be wrong. Dual-write keeps the full book in an ordered tree and the ring as a window cache; every update writes both, and recenter backfills from the tree—update cost stays close to the tree alone. Split store writes the ring inside the window and the tree outside; touch updates approach array speed, but a large jump forces a recenter that may move thousands of levels into the tree and spike tens of microseconds.
+
+Each ring slot must record its current tick; a mismatch on read means empty. Moving the window back and forth can still surface a stale quantity: a slot leaves the window without being overwritten, a delete for that tick arrives while it is outside, then the window returns, the stored tick matches, and the old quantity is read. On recenter, clear newly entered slots to zero first, then move live levels back from the far tree; read slots that are leaving before reusing the same physical cells.
+
+```cpp
+struct RingSlot { int64_t tick{0}; double qty{0}; };
+
+struct PriceWindow {
+    std::vector<RingSlot> slot;
+    int64_t lo{0}, hi{0}; // [lo, hi)
+    size_t mask{0};
+    size_t idx(int64_t t) const { return size_t(t) & mask; }
+    double get(int64_t t) const {
+        if (t < lo || t >= hi) return 0;
+        const auto& s = slot[idx(t)];
+        return s.tick == t ? s.qty : 0;
+    }
+    void clear_enter(int64_t t) { slot[idx(t)] = RingSlot{t, 0}; }
+};
+```
+
 ### 3. message transmission Protocol Engine (FIX)
 The basic building blocks of the FIX protocol are tag-value pairs. Each data field consists of three parts:
 
@@ -39904,6 +39951,70 @@ int main() {
 ```
 
 ### 3. CEX order book solution
+**Incremental overwrite and snapshot alignment**
+
+Each depth delta level is the absolute quantity at that price, not a signed delta; quantity 0 deletes the level, and prices absent from the message stay unchanged. Use integer ticks as keys, parsing the string by tick size without floating point so one level cannot hash to two keys. Quantity is the value and is not ordered; overwrite does not accumulate float error. Convert to lot steps only when reconciling against your own orders.
+
+The incremental stream has no origin. Subscribe and buffer first, then pull a REST depth snapshot and note `snap_id`; drop buffered messages with `last_id < snap_id`; the first remaining message must satisfy `first_id <= snap_id <= last_id`, then apply from there; each later message needs `prev_last ==` the previous `last_id`. If the first already has `first_id > snap_id`, a gap sits between snapshot and stream—pull the snapshot again. A snapshot only covers the top N levels, so the local book is incomplete beyond that depth; deleting a price that is not local is a no-op. Source: [Local order book maintenance: incremental sync and structures](https://mp.weixin.qq.com/s/eHa2-JakVzoHwVmgq-y7RQ)
+
+```cpp
+struct DepthDelta {
+    uint64_t first_id{0};   // first update id in this batch
+    uint64_t last_id{0};    // last update id in this batch
+    uint64_t prev_last{0};  // last_id of the previous message
+    // levels: (tick, qty); qty==0 removes the level
+};
+
+enum class Sync { NeedSnap, Ready, Broken };
+
+Sync align_first(uint64_t snap_id, const DepthDelta& d) {
+    if (d.last_id < snap_id) return Sync::NeedSnap; // still before the snapshot
+    if (d.first_id <= snap_id && snap_id <= d.last_id) return Sync::Ready;
+    return Sync::Broken; // missing segment
+}
+
+bool contiguous(uint64_t applied_last, const DepthDelta& d) {
+    return d.prev_last == applied_last;
+}
+
+void paint(auto& side, int64_t tick, double qty) {
+    if (qty == 0.0) side.erase(tick);
+    else side[tick] = qty;
+}
+```
+
+**Three ways to handle a gap**
+
+When `prev_last` does not match at runtime, the local book is no longer exchange-true. Strict check: verify continuity on every message and resync from a fresh snapshot on a break; set `book_ok = false` while syncing and let the strategy read only that flag—clearing or keeping the book barely matters, the strategy already saw the pre-gap state. Resync only on WebSocket drop: skip runtime checks so the book stays available, but a real loss keeps wrong levels until the next reconnect; notify the strategy. Allow overlap: treat `prev_last > applied_last` as a real hole and resync; when `prev_last <= applied_last` and `last_id > applied_last`, keep applying—quantities are absolute, so rewriting the overlap is correct; drop any message with `last_id <= applied_last` or old values reappear. Default to strict checks; loosen to overlap only if frequent gaps make downtime hurt the strategy.
+
+```cpp
+enum class GapPolicy { Strict, WsOnly, AllowOverlap };
+
+bool on_delta(GapPolicy pol, uint64_t& applied_last, bool& book_ok,
+              const DepthDelta& d, auto&& apply_body, auto&& resync) {
+    if (!book_ok) return false;
+    if (pol == GapPolicy::WsOnly) {
+        apply_body(d);
+        applied_last = d.last_id;
+        return true;
+    }
+    if (d.prev_last == applied_last) {
+        apply_body(d);
+        applied_last = d.last_id;
+        return true;
+    }
+    if (pol == GapPolicy::AllowOverlap && d.prev_last <= applied_last && d.last_id > applied_last) {
+        apply_body(d);
+        applied_last = d.last_id;
+        return true;
+    }
+    if (pol == GapPolicy::AllowOverlap && d.last_id <= applied_last) return false; // fully stale
+    book_ok = false;
+    resync();
+    return false;
+}
+```
+
 **VectorOrderBook:**
 
 1. **Extreme performance requirements** - High-frequency trading systems require nanosecond latency
