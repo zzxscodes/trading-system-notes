@@ -108,6 +108,10 @@
   - [31. Normalize offset and direction before the order hits the ring](#31-normalize-offset-and-direction-before-the-order-hits-the-ring)
   - [32. Position queries leave the order thread and resume by cursor](#32-position-queries-leave-the-order-thread-and-resume-by-cursor)
   - [33. Signal windows that emit parent orders](#33-signal-windows-that-emit-parent-orders)
+  - [34. Close-today, close-yesterday, and stock sellable locks](#34-close-today-close-yesterday-and-stock-sellable-locks)
+  - [35. Instrument-class fees and frozen-price backfill](#35-instrument-class-fees-and-frozen-price-backfill)
+  - [36. Read-only catch-up and publish watermark on the monitor](#36-read-only-catch-up-and-publish-watermark-on-the-monitor)
+  - [37. Process lifecycle control and host sampling](#37-process-lifecycle-control-and-host-sampling)
 - [Business logic design-calculation](#business-logic-design-calculation)
   - [1. Log return (percent asymmetry)](#1-log-return-percent-asymmetry)
   - [2. Changes in state of market trends and volatility](#2-changes-in-state-of-market-trends-and-volatility)
@@ -28620,6 +28624,38 @@ int main() {
 }
 ```
 
+On the order path the self-trade check keeps two price trees per symbol. Bids sort high to low, asks low to high, and each price holds the live order ids. Multiply the price by 1000 and round to an integer key; the first node is then the best price. A new buy is compared only with the lowest ask, a new sell only with the highest bid. When the best price does not cross, no worse price can. Directions other than long and short stay out of the trees. If history replay is on at startup, resting limit orders still in shared memory are inserted with the same key, so the first order after a restart still sees the live book.
+
+```cpp
+struct PxTree {
+    std::map<uint64_t, std::unordered_set<uint64_t>, std::greater<>> bids;
+    std::map<uint64_t, std::unordered_set<uint64_t>, std::less<>> asks;
+};
+
+uint64_t milli_key(double px) {
+    return static_cast<uint64_t>(std::llround(px * 1000.0));
+}
+
+bool would_cross(const PxTree& book, int dir, double px) {
+    uint64_t k = milli_key(px);
+    if (dir == 0) {
+        if (book.asks.empty()) return false;
+        return k >= book.asks.begin()->first;
+    }
+    if (dir == 1) {
+        if (book.bids.empty()) return false;
+        return k <= book.bids.begin()->first;
+    }
+    return false;
+}
+
+void remember_resting(PxTree& book, int dir, double px, uint64_t id) {
+    uint64_t k = milli_key(px);
+    if (dir == 0) book.bids[k].insert(id);
+    else if (dir == 1) book.asks[k].insert(id);
+}
+```
+
 
 ### 12. Current limiter
 In high-concurrency links such as trading systems/risk control/matching/gateways, the goal of current limiting is to turn "uncontrollable burst traffic" into "stable traffic that the system can bear", so as to:
@@ -31042,6 +31078,38 @@ public:
 };
 ```
 
+A cancel ratio on a tiny sample is skipped. While placed count plus the order under test is still below the configured minimum, the ratio is not computed. Past that threshold the test is (cancels+1)/(places+1). A gap of 1e-6 or less around the cap still passes; only a ratio clearly above the cap rejects. The cash ratio is a second test. It stays idle when placed cash is near zero or when cancels inside the short window are still under their count. Once the count is reached, a cash ratio within 1e-6 of the cap, or already at or above it, rejects. Open and close keep separate blacklists, and a close consults only the close set. Per-order cash caps are stored per instrument class, with one integer default under the map. The master switch is a single byte in shared config. When it is off, the check returns before the symbol is parsed. Create and cancel enter the check once the offset is filled in.
+
+```cpp
+struct PullStats {
+    uint64_t placed{0};
+    uint64_t pulled{0};
+    double placed_cash{0};
+    double pulled_cash{0};
+    uint64_t pulls_in_window{0};
+};
+
+bool count_ratio_ok(const PullStats& s, uint64_t min_n, double cap) {
+    if (s.placed + 1 < min_n) return true;
+    double r = double(s.pulled + 1) / double(s.placed + 1);
+    if (std::fabs(r - cap) <= 1e-6) return true;
+    return r < cap;
+}
+
+bool cash_ratio_ok(const PullStats& s, uint64_t min_pulls, double cap) {
+    if (std::fabs(s.placed_cash) <= 1e-6) return true;
+    if (s.pulls_in_window < min_pulls) return true;
+    double r = s.pulled_cash / s.placed_cash;
+    if (std::fabs(r - cap) <= 1e-6) return false;
+    return r < cap;
+}
+
+bool listed(bool opening, const std::unordered_set<std::string>& opens,
+            const std::unordered_set<std::string>& closes, const std::string& sym) {
+    return (opening ? opens : closes).count(sym) != 0;
+}
+```
+
 
 ### 27. Pulling high-frequency factors on the hot path
 
@@ -32043,6 +32111,322 @@ void cancel_other_side(int dir, Live& live) {
     }
     live.n = w;
 }
+```
+
+
+### 34. Close-today, close-yesterday, and stock sellable locks
+
+Futures closes draw from different quantity pools according to the offset. A plain close uses total lots minus lots already locked. Close-today uses today's lots (total minus yesterday still open) minus today's locked lots (total locked minus yesterday locked). Close-yesterday uses only yesterday remaining minus yesterday locked. The three shortages return as separate results. After a plain close or a close-today, only the total lock increases. A close-yesterday increases both the total lock and the yesterday lock, and free lots are rewritten as total minus total locked. Opens do not lock position. They add min(target quantity, locked quantity) into the working counter of that side. A request whose locked quantity is already zero passes through.
+
+On stocks, sell and the repay directions deduct sellable quantity, and a shortfall rejects the order. The deduction increases both total lock and yesterday lock, because sellable quantity comes from yesterday. Buys and margin buys only bump the working counter. A fill with quantity above zero and an absolute price below 1e-6 is a constituent transfer and stays out of cash and fees. Intraday round-trip is allowed for four kinds of names: a code with a Hong Kong suffix, a symbol on the whitelist, the zero-price constituent transfer above, and bonds. Other stocks keep the next-day sell constraint. The venue sits after a dot in the symbol; the suffix is cut off and then mapped.
+
+The offset on a fill may no longer be the offset from the request. Futures settlement of a fill reads the offset snapshotted when the request was seen, and that snapshot decides which pool to release. The snapshot stores only status and offset, keyed by order id.
+
+```cpp
+enum class CloseHow { Open, Close, CloseToday, CloseYday };
+enum class LotErr { Ok, NoLot, NoToday, NoYday };
+
+struct LotBook {
+    int64_t total{0};
+    int64_t yday_left{0};
+    int64_t locked{0};
+    int64_t yday_locked{0};
+    int64_t free_lots{0};
+    int64_t buy_working{0};
+    int64_t sell_working{0};
+};
+
+void add_working(LotBook& b, bool buy, int64_t target, int64_t locked_qty) {
+    int64_t q = target < locked_qty ? target : locked_qty;
+    if (buy) b.buy_working += q;
+    else b.sell_working += q;
+}
+
+LotErr lock_future(LotBook& b, CloseHow how, int64_t qty) {
+    if (qty <= 0) return LotErr::Ok;
+    if (how == CloseHow::Close) {
+        if (b.total - b.locked < qty) return LotErr::NoLot;
+        b.locked += qty;
+    } else if (how == CloseHow::CloseToday) {
+        int64_t today = b.total - b.yday_left;
+        int64_t today_locked = b.locked - b.yday_locked;
+        if (today - today_locked < qty) return LotErr::NoToday;
+        b.locked += qty;
+    } else if (how == CloseHow::CloseYday) {
+        if (b.yday_left - b.yday_locked < qty) return LotErr::NoYday;
+        b.locked += qty;
+        b.yday_locked += qty;
+    }
+    b.free_lots = b.total - b.locked;
+    return LotErr::Ok;
+}
+
+bool lock_stock_sell(LotBook& b, int64_t qty) {
+    if (b.free_lots < qty) return false;
+    b.free_lots -= qty;
+    b.locked += qty;
+    b.yday_locked += qty;
+    return true;
+}
+
+bool constituent_xfer(int64_t fill_qty, double fill_px) {
+    return fill_qty > 0 && std::fabs(fill_px) < 1e-6;
+}
+
+struct ReqSnap { int status; int close_how; };
+
+int how_on_fill(const ReqSnap* snap, int rsp_how) {
+    return snap ? snap->close_how : rsp_how;
+}
+```
+
+### 35. Instrument-class fees and frozen-price backfill
+
+Fees follow two formulas by instrument class. The hot path does not look up the contract master. Cash classes (stock, bond, fund, index, repo) use a multiplier of 1 and a margin ratio of 1. Every other class uses a multiplier of 100 and a margin ratio of 0.15. The caller forms notional as frozen price times frozen quantity and passes the constant 0.0003 as the second argument. The futures formula treats that constant as a rate, so the fee is notional times the rate. The cash formula treats it as a commission amount and adds it, then adds notional times the transfer rate. A sell also adds notional times the stamp rate.
+
+A frozen price that is already set is left alone. The test is an absolute value above 1e-6. Otherwise the limit price is copied first. When the limit is missing too, the quote ring is indexed by write sequence minus one, modulo capacity, which lands on the last published snapshot. If both best bid and best ask are positive, the frozen price is their midpoint. If only one side is positive, that side is used. A zero frozen quantity is filled from the target quantity first. After the price store and after the quantity store, a store fence runs so the other side of the order observes the pair together.
+
+```cpp
+struct ClassScale { double mult; double margin; };
+
+ClassScale class_scale(int inst) {
+    bool cash = inst == 0 || inst == 2 || (inst >= 4 && inst <= 7);
+    if (cash) return {1.0, 1.0};
+    return {100.0, 0.15};
+}
+
+double fee_cash(double notional, double commission_amt, bool sell,
+                double stamp_rate, double xfer_rate) {
+    double stamp = sell ? notional * stamp_rate : 0.0;
+    return notional * xfer_rate + commission_amt + stamp;
+}
+
+double fee_deriv(double notional, double rate) {
+    return notional * rate;
+}
+
+bool backfill_lock(double& lock_px, int64_t& lock_qty, int64_t qty,
+                   double limit_px, double bid1, double ask1) {
+    if (lock_qty == 0) {
+        lock_qty = qty;
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+    }
+    if (std::fabs(lock_px) > 1e-6) return true;
+    double px = 0;
+    if (std::fabs(limit_px) > 1e-6) px = limit_px;
+    else if (bid1 > 0 && ask1 > 0) px = (bid1 + ask1) * 0.5;
+    else if (ask1 > 0) px = ask1;
+    else if (bid1 > 0) px = bid1;
+    else return false;
+    lock_px = px;
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+    return true;
+}
+```
+
+### 36. Read-only catch-up and publish watermark on the monitor
+
+Monitoring and disk capture run in their own processes, each with its own read cursor. The high-frequency factor ring is a fixed 128 slots, the slot array sits in front of the write sequence, and the index is masked and then scaled by the slot size. A subscriber that already holds a non-negative cursor continues from there. A subscribe time earlier than the system minimum time starts at 0. Otherwise the reader walks published slots from the oldest until the first slot whose calc time is at or after the subscribe time. If none qualifies, the scan returns empty. A depth of 128 makes that walk cheaper than another time index.
+
+Pools with capacity at or below zero are skipped. When free slots fall below 5% of capacity, an alert is raised. The comparison uses the free count.
+
+Publish and consume callbacks sit on separate event loops. The leaky bucket runs on the publish thread. Water level drops by rate times elapsed milliseconds, and a negative level is clamped to zero. If the level is still under capacity, it increases by one and one message is released. Otherwise the message stays on the outbound queue until the next timer. Heartbeats use non-persistent delivery. Replies to start and stop commands use persistent delivery. Property reports are packed once the batch exceeds 100 items or 15 seconds have passed since the last send. Log reports are forwarded as they arrive. The capture side preallocates a fixed array, advances an integer index, writes count times stride in one call, then zeroes the whole slab and resets the index.
+
+```cpp
+struct HfTape {
+    static constexpr int N = 128;
+    struct Slot { int64_t sample_ns; int64_t calc_ns; double v[8]; } slot[N];
+    uint64_t end{0};
+    uint64_t mask{N - 1};
+};
+
+int64_t catch_up(const HfTape& t, int64_t cursor, int64_t from_ns, int64_t min_ns) {
+    if (cursor >= 0) return cursor;
+    if (from_ns < min_ns) return 0;
+    if (t.end == 0) return -1;
+    for (uint64_t i = 0; i < t.end; ++i) {
+        const auto& s = t.slot[i & t.mask];
+        if (s.calc_ns >= from_ns) return static_cast<int64_t>(i);
+    }
+    return -1;
+}
+
+void watch_pool(const char* name, int64_t used, int64_t cap) {
+    if (cap <= 0) return;
+    if (static_cast<double>(cap - used) < static_cast<double>(cap) * 0.05)
+        raise_pool(name, used, cap);
+}
+```
+
+```cpp
+bool leak_one(int64_t& level, int64_t& last_ms, int64_t now_ms, int rate, int cap) {
+    int64_t dt = now_ms - last_ms;
+    last_ms = now_ms;
+    level -= static_cast<int64_t>(rate) * dt;
+    if (level < 0) level = 0;
+    if (level >= cap) return false;
+    ++level;
+    return true;
+}
+
+struct PropBatch {
+    int n{0};
+    int64_t last_ms{0};
+    bool due(int64_t now_ms) const {
+        return n > 100 || now_ms - last_ms > 15000;
+    }
+};
+
+struct Slab {
+    static constexpr int CAP = 1000000;
+    char* rec{nullptr};
+    int n{0};
+    size_t stride{0};
+    void flush(std::ostream& out) {
+        out.write(rec, static_cast<std::streamsize>(n * stride));
+        std::memset(rec, 0, stride * CAP);
+        n = 0;
+    }
+};
+```
+
+A quote subscription that arrives late is parked in a pending map keyed by symbol. Each incoming quote looks at that map first and returns when the map is empty. When the symbol is present, the current quote is wrapped into one message, with kind, codec, compression, body, and body length, and sent to every route waiting under that symbol. The symbol is then removed from the map. Later quotes follow the ordinary forward path.
+
+```cpp
+void push_fresh(std::unordered_map<std::string, std::vector<std::string>>& fresh,
+                const std::string& sym, const Quote& q) {
+    if (fresh.empty()) return;
+    auto it = fresh.find(sym);
+    if (it == fresh.end() || it->second.empty()) return;
+    for (const auto& route : it->second) {
+        Envelope env;
+        env.kind = "mkt.quote";
+        env.codec = "json";
+        env.pack = "none";
+        env.body = dump_one(q);
+        env.body_n = static_cast<int>(env.body.size());
+        send_one(route, env);
+    }
+    fresh.erase(it);
+}
+```
+
+
+### 37. Process lifecycle control and host sampling
+
+Start, stop, and host sampling run in two processes. The command process handles the clocks, process start and stop, and config changes. The report process handles host counters and the shared-memory log. Shared memory is created by the producers first, and the reader attaches after that. At the open, the command process writes the reader flag true and leaves the report process running, so the next start attaches with that flag. At the close, it stops the business processes, writes the flag false, and restarts the report process. The mapping comes off before the producers exit.
+
+A process is known by the tail of its command line. The name in `/proc/pid/status` keeps only a few characters, and a minute-stamped backup shares that prefix with the live binary, so a short name or a prefix match lands on the wrong file. The lookup throws away its own line and keeps a pid only when the line ends with the target file name. A Python process is known by the script name. An existing pid means the start stops there. Stop sends a normal terminate, waits half a second, looks again, and force-kills anything still there. A full start stops the whole set, waits a few seconds for shared memory and ports to come free, then starts each process in order. A failure in the middle leaves the rest to continue. The control process stays off this path. Before a start, the working directory moves to that install directory and the directory is placed at the front of the library path. The child inherits both. After the start, the working directory moves back to the control process.
+
+A day holds several open and close times. When the command process comes up, times already past move to the next day and sit behind the times still ahead, so a control process started at noon leaves the morning start where it is. Start and stop each have a weekday range. A time outside its range moves to the next day. A time that has run moves to the same clock on the next day. Start and restart go to a pool of one worker. Stop and config changes stay on the request thread, and the sleep between starts stays in the pool. Each command is matched to the site id first. A mismatch comes back as a failure.
+
+CPU use is the change since the previous call, and the call itself does not sleep. A temperature read takes about fifteen seconds, and per-core use stays outside the periodic sample. Network speed is taken on the report thread: two counter reads a second apart, then the difference. Disk throughput is cumulative bytes divided by cumulative busy time, the average since boot. A threshold of zero is skipped. Shared-memory size is stored on its own in the memory sample. A thread that barely sleeps pulls shared-memory logs into the send queue. Host status goes out every hundred milliseconds. Status messages are non-persistent. Shared-memory logs are persistent. The publish connection keeps a 60-second heartbeat. With the heartbeat set to zero, a failed send raises nothing and the reconnect path stays idle. The publish side confirms delivery. The consume side caps prefetch. Queue names and routing keys both carry the site id.
+
+```python
+def session_open(cfg_path):
+    patch_flag(cfg_path, reader=True)
+
+def session_close(cfg_path, reporter):
+    stop_fleet()
+    patch_flag(cfg_path, reader=False)
+    restart(reporter)
+```
+
+```python
+def live_pids(binary):
+    pids = []
+    text = run(f"pgrep -af {binary}")
+    for line in text.splitlines():
+        if "pgrep -af" in line:
+            continue
+        if line.endswith(binary):
+            pids.append(line.split()[0])
+    return pids
+
+def stop_one(binary):
+    for pid in live_pids(binary):
+        run(f"kill {pid}")
+    time.sleep(0.5)
+    for pid in live_pids(binary):
+        run(f"kill -9 {pid}")
+
+def bring_up(apps, self_name, self_home):
+    stop_fleet(apps)
+    time.sleep(5)
+    for app in sorted(apps, key=lambda a: a["order"]):
+        if not app["on"] or app["name"] == self_name:
+            continue
+        os.chdir(app["home"])
+        prepend("LD_LIBRARY_PATH", app["home"])
+        if not live_pids(app["name"]):
+            run(f"nohup ./{app['name']} >/dev/null 2>&1 &")
+        os.chdir(self_home)
+        time.sleep(app.get("gap", 5))
+```
+
+```python
+def load_clocks(clocks, now):
+    pending, late = [], []
+    for item in clocks:
+        (pending if item["when"] > now else late).append(item)
+    pending.sort(key=lambda x: x["when"])
+    late.sort(key=lambda x: x["when"])
+    for item in late:
+        item["when"] = item["when"] + timedelta(days=1)
+        pending.append(item)
+    return pending
+
+def fire(item, start_days, stop_days):
+    wd = item["when"].isoweekday()
+    window = start_days if item["opening"] else stop_days
+    if wd < window[0] or wd > window[1]:
+        item["when"] = item["when"] + timedelta(days=1)
+        return False
+    run_open() if item["opening"] else run_close()
+    item["when"] = item["when"] + timedelta(days=1)
+    return True
+```
+
+```python
+def sample_host(prev_net, unit):
+    cpu = psutil.cpu_percent(interval=None)
+    wait = psutil.cpu_times_percent().iowait
+    shared = psutil.virtual_memory().shared / unit
+    time.sleep(1)
+    now = psutil.net_io_counters(nowrap=True)
+    up = (now.bytes_sent - prev_net.bytes_sent) / unit
+    return cpu, wait, shared, up
+
+def breached(value, limit):
+    if math.isclose(limit, 0.0):
+        return False
+    return value >= limit
+```
+
+A package is unpacked into a side directory. When the directory name inside the archive differs from the configured process name, the extracted executable is renamed to the configured name before the tree is copied onto the install path. The executable already in the install directory is copied aside with a minute timestamp before that overwrite. A config file gets the same timestamped copy before the new body is written. The whole install tree is copied into a backup directory under a version name, and a rollback copies that version back onto the install path. The application roster merges by process name: a process present in the new message replaces the entry of the same name. Open and close clocks, weekday ranges, and the shared library path stay as they were when the new message leaves them empty.
+
+```python
+def install_tree(home, name, unpacked, stamp):
+    live = os.path.join(home, name)
+    if os.path.exists(live):
+        shutil.copy(live, f"{live}_{stamp}")
+    inner = os.path.join(unpacked, os.listdir(unpacked)[0])
+    packed = os.path.join(inner, os.path.basename(inner))
+    if os.path.basename(inner) != name and os.path.exists(packed):
+        os.rename(packed, os.path.join(inner, name))
+    for entry in os.listdir(inner):
+        copy_over(os.path.join(inner, entry), home)
+
+def merge_roster(old, incoming):
+    by_name = {a["name"]: a for a in old.get("apps", [])}
+    for app in incoming.get("apps", []):
+        by_name[app["name"]] = app
+    out = dict(old)
+    for key in ("open_days", "close_days", "clocks", "shared_libs"):
+        if incoming.get(key):
+            out[key] = incoming[key]
+    out["apps"] = list(by_name.values())
+    return out
 ```
 
 

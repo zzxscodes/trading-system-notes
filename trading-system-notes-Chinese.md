@@ -108,6 +108,10 @@ English version：[https://github.com/zzxscodes/trading-system-notes/blob/main/t
   - [31. 报单入库前的开平与方向规整](#31-报单入库前的开平与方向规整)
   - [32. 持仓查询移出报单线程并按游标续页](#32-持仓查询移出报单线程并按游标续页)
   - [33. 信号窗口驱动自动母单](#33-信号窗口驱动自动母单)
+  - [34. 平今平昨与股票可卖冻结](#34-平今平昨与股票可卖冻结)
+  - [35. 品种大类费用与冻结价回填](#35-品种大类费用与冻结价回填)
+  - [36. 监控进程的只读追赶与发布水位](#36-监控进程的只读追赶与发布水位)
+  - [37. 交易进程的启停与主机采样](#37-交易进程的启停与主机采样)
 - [业务逻辑设计-计算](#业务逻辑设计-计算)
   - [1. 对数收益率(百分比非对称性)](#1-对数收益率百分比非对称性)
   - [2. 市场趋势和波动率的状态变化](#2-市场趋势和波动率的状态变化)
@@ -28608,6 +28612,38 @@ int main() {
 }
 ```
 
+报单热路径上的自成交检查按标的维护两棵价格树。买价降序，卖价升序，同一价位挂一组订单号。价格先乘 1000 再四舍五入，整数键的首结点就是最优价。新的买单只和最低卖价比较，新的卖单只和最高买价比较。最优价没有交叉时，更差的价位也不会交叉。多空以外的方向不进这两棵树。启动时若打开历史重建，就把共享内存里仍未终态的限价单用同一套键灌进去，重启后的第一笔单能看见盘中挂单。
+
+```cpp
+struct PxTree {
+    std::map<uint64_t, std::unordered_set<uint64_t>, std::greater<>> bids;
+    std::map<uint64_t, std::unordered_set<uint64_t>, std::less<>> asks;
+};
+
+uint64_t milli_key(double px) {
+    return static_cast<uint64_t>(std::llround(px * 1000.0));
+}
+
+bool would_cross(const PxTree& book, int dir, double px) {
+    uint64_t k = milli_key(px);
+    if (dir == 0) {
+        if (book.asks.empty()) return false;
+        return k >= book.asks.begin()->first;
+    }
+    if (dir == 1) {
+        if (book.bids.empty()) return false;
+        return k <= book.bids.begin()->first;
+    }
+    return false;
+}
+
+void remember_resting(PxTree& book, int dir, double px, uint64_t id) {
+    uint64_t k = milli_key(px);
+    if (dir == 0) book.bids[k].insert(id);
+    else if (dir == 1) book.asks[k].insert(id);
+}
+```
+
 
 ### 12. 限流器
 在交易系统/风控/撮合/网关等高并发链路里，限流的目标是：把“不可控的突发流量”变成“系统可承受的稳定流量”，从而：
@@ -31031,6 +31067,38 @@ public:
 };
 ```
 
+委撤比在样本太少时直接放过。委托笔数加上当前这一笔仍低于配置的最小样本时，不做比例比较。过了门槛之后用 (撤单数+1)/(委托数+1)。与上限的绝对差不超过 1e-6 仍视为未超，只有明显大于上限才拒绝。金额比另走一条：短窗口内的撤单次数还没到次数门槛，或者委托金额接近 0，都不看金额；次数够了以后，撤单金额/委托金额与上限的差落在 1e-6 以内，或者比例已经不低于上限，都拒绝。开仓和平仓各有一套黑名单，平仓单只查平仓集合。单笔金额上限按品种大类存一张表，表里没有再落到全局整数。总开关是共享配置里的一个字节，关闭时检查在解析合约名之前返回。新建和撤单在开平已经填好时进入检查。
+
+```cpp
+struct PullStats {
+    uint64_t placed{0};
+    uint64_t pulled{0};
+    double placed_cash{0};
+    double pulled_cash{0};
+    uint64_t pulls_in_window{0};
+};
+
+bool count_ratio_ok(const PullStats& s, uint64_t min_n, double cap) {
+    if (s.placed + 1 < min_n) return true;
+    double r = double(s.pulled + 1) / double(s.placed + 1);
+    if (std::fabs(r - cap) <= 1e-6) return true;
+    return r < cap;
+}
+
+bool cash_ratio_ok(const PullStats& s, uint64_t min_pulls, double cap) {
+    if (std::fabs(s.placed_cash) <= 1e-6) return true;
+    if (s.pulls_in_window < min_pulls) return true;
+    double r = s.pulled_cash / s.placed_cash;
+    if (std::fabs(r - cap) <= 1e-6) return false;
+    return r < cap;
+}
+
+bool listed(bool opening, const std::unordered_set<std::string>& opens,
+            const std::unordered_set<std::string>& closes, const std::string& sym) {
+    return (opening ? opens : closes).count(sym) != 0;
+}
+```
+
 
 ### 27. 高频因子热路径拉取
 
@@ -32032,6 +32100,322 @@ void cancel_other_side(int dir, Live& live) {
     }
     live.n = w;
 }
+```
+
+
+### 34. 平今平昨与股票可卖冻结
+
+期货平仓按开平标志扣不同的数量池。平仓看总仓减去已冻；平今看今仓（总仓减去昨仓剩余）再减去今仓已冻（总冻减去昨冻）；平昨只看昨仓剩余减去昨冻。三条不够的路径分开返回。通过以后，平仓和平今只增加总冻结，平昨同时增加总冻结和昨冻结，可卖改写成总仓减总冻结。买开和卖开不冻仓位，只把 min(目标量, 冻定量) 累进对应方向的委托量。冻定量为 0 的请求直接放过。
+
+股票侧，卖出以及还券、还款一类方向才扣可卖，可卖不够即拒绝。扣减时总冻结和昨冻结一起增加，可卖来自昨仓。买和融资买入只累委托量。成交量大于 0 且成交价绝对值小于 1e-6 的回报按成分股划转处理，不进现金和费用。日内回转放行四类名字：带港股后缀的代码、白名单合约、上述零价格成分划转、债券。其余股票按先买后卖的隔日约束处理。代码里交易所写在点号后面，先切出后缀再映射。
+
+成交回报上的开平可能已经不是报单时的值。期货按成交结算时，用报单瞬间缓存的开平决定还哪一个池。这条缓存只有状态和开平，按订单号存放。
+
+```cpp
+enum class CloseHow { Open, Close, CloseToday, CloseYday };
+enum class LotErr { Ok, NoLot, NoToday, NoYday };
+
+struct LotBook {
+    int64_t total{0};
+    int64_t yday_left{0};
+    int64_t locked{0};
+    int64_t yday_locked{0};
+    int64_t free_lots{0};
+    int64_t buy_working{0};
+    int64_t sell_working{0};
+};
+
+void add_working(LotBook& b, bool buy, int64_t target, int64_t locked_qty) {
+    int64_t q = target < locked_qty ? target : locked_qty;
+    if (buy) b.buy_working += q;
+    else b.sell_working += q;
+}
+
+LotErr lock_future(LotBook& b, CloseHow how, int64_t qty) {
+    if (qty <= 0) return LotErr::Ok;
+    if (how == CloseHow::Close) {
+        if (b.total - b.locked < qty) return LotErr::NoLot;
+        b.locked += qty;
+    } else if (how == CloseHow::CloseToday) {
+        int64_t today = b.total - b.yday_left;
+        int64_t today_locked = b.locked - b.yday_locked;
+        if (today - today_locked < qty) return LotErr::NoToday;
+        b.locked += qty;
+    } else if (how == CloseHow::CloseYday) {
+        if (b.yday_left - b.yday_locked < qty) return LotErr::NoYday;
+        b.locked += qty;
+        b.yday_locked += qty;
+    }
+    b.free_lots = b.total - b.locked;
+    return LotErr::Ok;
+}
+
+bool lock_stock_sell(LotBook& b, int64_t qty) {
+    if (b.free_lots < qty) return false;
+    b.free_lots -= qty;
+    b.locked += qty;
+    b.yday_locked += qty;
+    return true;
+}
+
+bool constituent_xfer(int64_t fill_qty, double fill_px) {
+    return fill_qty > 0 && std::fabs(fill_px) < 1e-6;
+}
+
+struct ReqSnap { int status; int close_how; };
+
+int how_on_fill(const ReqSnap* snap, int rsp_how) {
+    return snap ? snap->close_how : rsp_how;
+}
+```
+
+### 35. 品种大类费用与冻结价回填
+
+费用按品种大类走两条公式，热路径不查合约主数据。现货大类（股票、债券、基金、指数、回购）乘数取 1，保证金比例取 1；其余品种乘数取 100，保证金比例取 0.15。调用点用冻结价乘冻定量得到名义金额，第二参数传入常数 0.0003。期货公式把这个常数当作费率，费用等于名义金额乘费率。现货公式把它当作佣金金额直接相加，再加名义金额乘过户费率；卖出方向另加名义金额乘印花税率。
+
+冻结价已经有值就不再覆盖，判断用绝对值大于 1e-6。否则优先抄限价。限价也缺失时，用该合约行情环的写序号减一、按容量取模，落到最后一条已发布快照。买一和卖一都为正时取二者中点，只有一侧为正时用那一侧。冻定量为 0 时先把目标量抄进冻定量。价和量各自写完后跟一条顺序栅栏，让读这张单的另一侧看到成对的价和量。
+
+```cpp
+struct ClassScale { double mult; double margin; };
+
+ClassScale class_scale(int inst) {
+    bool cash = inst == 0 || inst == 2 || (inst >= 4 && inst <= 7);
+    if (cash) return {1.0, 1.0};
+    return {100.0, 0.15};
+}
+
+double fee_cash(double notional, double commission_amt, bool sell,
+                double stamp_rate, double xfer_rate) {
+    double stamp = sell ? notional * stamp_rate : 0.0;
+    return notional * xfer_rate + commission_amt + stamp;
+}
+
+double fee_deriv(double notional, double rate) {
+    return notional * rate;
+}
+
+bool backfill_lock(double& lock_px, int64_t& lock_qty, int64_t qty,
+                   double limit_px, double bid1, double ask1) {
+    if (lock_qty == 0) {
+        lock_qty = qty;
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+    }
+    if (std::fabs(lock_px) > 1e-6) return true;
+    double px = 0;
+    if (std::fabs(limit_px) > 1e-6) px = limit_px;
+    else if (bid1 > 0 && ask1 > 0) px = (bid1 + ask1) * 0.5;
+    else if (ask1 > 0) px = ask1;
+    else if (bid1 > 0) px = bid1;
+    else return false;
+    lock_px = px;
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+    return true;
+}
+```
+
+### 36. 监控进程的只读追赶与发布水位
+
+监控和落盘放在独立进程里，各自保存读序号。高频因子环固定 128 槽，槽数组排在写序号前面，下标与掩码相与后乘槽长。订阅者已经持有非负读序号就从那里继续。订阅时间早于系统最小时间则从 0 读。否则从最旧的已发布槽线性扫到第一条计算时间不早于订阅时间的槽；扫完没有就返回空。128 的深度使这次扫描比再挂一层时间索引更便宜。
+
+池子容量不大于 0 时跳过。剩余槽位低于容量的 5% 时打一条告警，比较的是剩余量。
+
+对外发布和消费回调各用一条事件循环。漏桶在发布线程上：水位减去费率乘经过的毫秒，小于 0 就归零；水位仍低于容量就加 1 并放行一条，否则这条留在待发队列里等下一个定时器。心跳用非持久投递，启停命令的应答用持久投递。属性上报凑满 100 条，或距离上次发送超过 15 秒，再打成一包；日志上报到达即转发。落盘侧预分配固定条数的数组，下标前移，刷盘时按条数乘步长一次写出，然后清零整段并把下标归零。
+
+```cpp
+struct HfTape {
+    static constexpr int N = 128;
+    struct Slot { int64_t sample_ns; int64_t calc_ns; double v[8]; } slot[N];
+    uint64_t end{0};
+    uint64_t mask{N - 1};
+};
+
+int64_t catch_up(const HfTape& t, int64_t cursor, int64_t from_ns, int64_t min_ns) {
+    if (cursor >= 0) return cursor;
+    if (from_ns < min_ns) return 0;
+    if (t.end == 0) return -1;
+    for (uint64_t i = 0; i < t.end; ++i) {
+        const auto& s = t.slot[i & t.mask];
+        if (s.calc_ns >= from_ns) return static_cast<int64_t>(i);
+    }
+    return -1;
+}
+
+void watch_pool(const char* name, int64_t used, int64_t cap) {
+    if (cap <= 0) return;
+    if (static_cast<double>(cap - used) < static_cast<double>(cap) * 0.05)
+        raise_pool(name, used, cap);
+}
+```
+
+```cpp
+bool leak_one(int64_t& level, int64_t& last_ms, int64_t now_ms, int rate, int cap) {
+    int64_t dt = now_ms - last_ms;
+    last_ms = now_ms;
+    level -= static_cast<int64_t>(rate) * dt;
+    if (level < 0) level = 0;
+    if (level >= cap) return false;
+    ++level;
+    return true;
+}
+
+struct PropBatch {
+    int n{0};
+    int64_t last_ms{0};
+    bool due(int64_t now_ms) const {
+        return n > 100 || now_ms - last_ms > 15000;
+    }
+};
+
+struct Slab {
+    static constexpr int CAP = 1000000;
+    char* rec{nullptr};
+    int n{0};
+    size_t stride{0};
+    void flush(std::ostream& out) {
+        out.write(rec, static_cast<std::streamsize>(n * stride));
+        std::memset(rec, 0, stride * CAP);
+        n = 0;
+    }
+};
+```
+
+晚到的行情订阅先放进一张按标的索引的待补表。每笔行情到来时先看这张表，空表直接返回。标的在表里时，把当前这一笔装进一条消息，带上类型、编码、压缩方式、正文和正文字节数，发给该标的下挂着的每一条路由。发完把这个标的从表里删掉。之后的行情按原路径转发。
+
+```cpp
+void push_fresh(std::unordered_map<std::string, std::vector<std::string>>& fresh,
+                const std::string& sym, const Quote& q) {
+    if (fresh.empty()) return;
+    auto it = fresh.find(sym);
+    if (it == fresh.end() || it->second.empty()) return;
+    for (const auto& route : it->second) {
+        Envelope env;
+        env.kind = "mkt.quote";
+        env.codec = "json";
+        env.pack = "none";
+        env.body = dump_one(q);
+        env.body_n = static_cast<int>(env.body.size());
+        send_one(route, env);
+    }
+    fresh.erase(it);
+}
+```
+
+
+### 37. 交易进程的启停与主机采样
+
+启停和主机采样放在两个进程里。命令进程管定时拉起、停止和改配置，上报进程管主机计数和共享内存日志。共享内存要等生产进程把段建好，读者才挂上去。开盘只改配置里的读者开关，上报进程继续跑，下一次起来时按这个开关挂上。收盘先停业务进程，把开关写回假，再重启上报进程，映射在生产端退出前卸掉。
+
+进程用完整命令行的结尾来认。`/proc/pid/status` 里的名字只留十几个字符，带分钟后缀的备份文件又和正本共前缀，短名和前缀都会对到别人身上。查询先丢掉查询命令自己那一行，只留命令行以目标文件名结尾的 pid。Python 进程认脚本名。这个 pid 已经在，就不再拉起。停止先发普通终止，等半秒再查，还在的发强制终止。整组拉起先整组停掉，空出几秒让共享内存和端口放开，再按序号逐个拉起。中间有一个失败，后面的继续。控制进程不进这条路径。拉起前把工作目录切到该进程的安装目录，目录插到库路径最前面，子进程带着这套环境起来；起来之后工作目录切回控制进程自己的目录。
+
+一天可以排多段开收盘时刻。命令进程起来时，已经过去的时刻改到下一天，排在还没到的时刻后面，中午起来的控制进程不会把早上那次启动再跑一遍。启动和停止各有一段星期范围，当天在范围外就把这条时刻推到下一天。跑完的时刻推到下一天的同一钟点。拉起和重启进只有一个工人的池子，停止和改配置留在请求线程上，启动间隔里的睡眠留在池子里。命令先对站点号，对不上就回失败。
+
+CPU 占用取上次调用到这次的差值，这次调用不睡。温度读一轮要十几秒，逐核占用留在周期采样外面。网速放在上报线程里，隔一秒读两次计数再相减。磁盘用累计字节除累计忙时间，得到开机以来的平均吞吐。阈值写 0 的项直接跳过。内存里单独记共享内存占用。共享内存日志由一条几乎不睡的线程抽进发送队列，主机状态按一百毫秒上报一次。状态报文非持久，共享内存日志持久。发布连接的心跳设成 60 秒。心跳写成 0 时，发送失败不抛错，重连不会被带起来。发布侧打开送达确认，消费侧限制预取。队列名和路由键都带站点号。
+
+```python
+def session_open(cfg_path):
+    patch_flag(cfg_path, reader=True)
+
+def session_close(cfg_path, reporter):
+    stop_fleet()
+    patch_flag(cfg_path, reader=False)
+    restart(reporter)
+```
+
+```python
+def live_pids(binary):
+    pids = []
+    text = run(f"pgrep -af {binary}")
+    for line in text.splitlines():
+        if "pgrep -af" in line:
+            continue
+        if line.endswith(binary):
+            pids.append(line.split()[0])
+    return pids
+
+def stop_one(binary):
+    for pid in live_pids(binary):
+        run(f"kill {pid}")
+    time.sleep(0.5)
+    for pid in live_pids(binary):
+        run(f"kill -9 {pid}")
+
+def bring_up(apps, self_name, self_home):
+    stop_fleet(apps)
+    time.sleep(5)
+    for app in sorted(apps, key=lambda a: a["order"]):
+        if not app["on"] or app["name"] == self_name:
+            continue
+        os.chdir(app["home"])
+        prepend("LD_LIBRARY_PATH", app["home"])
+        if not live_pids(app["name"]):
+            run(f"nohup ./{app['name']} >/dev/null 2>&1 &")
+        os.chdir(self_home)
+        time.sleep(app.get("gap", 5))
+```
+
+```python
+def load_clocks(clocks, now):
+    pending, late = [], []
+    for item in clocks:
+        (pending if item["when"] > now else late).append(item)
+    pending.sort(key=lambda x: x["when"])
+    late.sort(key=lambda x: x["when"])
+    for item in late:
+        item["when"] = item["when"] + timedelta(days=1)
+        pending.append(item)
+    return pending
+
+def fire(item, start_days, stop_days):
+    wd = item["when"].isoweekday()
+    window = start_days if item["opening"] else stop_days
+    if wd < window[0] or wd > window[1]:
+        item["when"] = item["when"] + timedelta(days=1)
+        return False
+    run_open() if item["opening"] else run_close()
+    item["when"] = item["when"] + timedelta(days=1)
+    return True
+```
+
+```python
+def sample_host(prev_net, unit):
+    cpu = psutil.cpu_percent(interval=None)
+    wait = psutil.cpu_times_percent().iowait
+    shared = psutil.virtual_memory().shared / unit
+    time.sleep(1)
+    now = psutil.net_io_counters(nowrap=True)
+    up = (now.bytes_sent - prev_net.bytes_sent) / unit
+    return cpu, wait, shared, up
+
+def breached(value, limit):
+    if math.isclose(limit, 0.0):
+        return False
+    return value >= limit
+```
+
+安装包先解到旁路目录。包内目录名和配置里的进程名不一致时，先把解压出来的可执行文件改成配置名，再整目录覆盖到安装路径。覆盖前把安装目录里同名可执行文件按分钟时间戳拷到旁边。配置文件同样先留一份带时间戳的副本，再写新内容。整棵安装树按版本号拷进备份目录，回退时把那一版整棵拷回安装路径。应用清单按进程名合并：这次报文里出现的进程覆盖同名项；报文里空着的开收盘时刻、星期范围和公共库路径保持原值。
+
+```python
+def install_tree(home, name, unpacked, stamp):
+    live = os.path.join(home, name)
+    if os.path.exists(live):
+        shutil.copy(live, f"{live}_{stamp}")
+    inner = os.path.join(unpacked, os.listdir(unpacked)[0])
+    packed = os.path.join(inner, os.path.basename(inner))
+    if os.path.basename(inner) != name and os.path.exists(packed):
+        os.rename(packed, os.path.join(inner, name))
+    for entry in os.listdir(inner):
+        copy_over(os.path.join(inner, entry), home)
+
+def merge_roster(old, incoming):
+    by_name = {a["name"]: a for a in old.get("apps", [])}
+    for app in incoming.get("apps", []):
+        by_name[app["name"]] = app
+    out = dict(old)
+    for key in ("open_days", "close_days", "clocks", "shared_libs"):
+        if incoming.get(key):
+            out[key] = incoming[key]
+    out["apps"] = list(by_name.values())
+    return out
 ```
 
 
