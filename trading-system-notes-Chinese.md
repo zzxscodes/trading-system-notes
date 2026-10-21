@@ -22455,6 +22455,53 @@ public:
 } // namespace lob
 ```
 
+**有序稠密 Vec：最优价落在末尾**
+
+上面的向量方案按 tick 开满价格空间；另一种只存有挂单的价位，内存随档位数涨，不受价格范围限制。买卖两边都让最优价落在末尾：买盘升序，卖盘存负 tick 后升序，插入删除时只挪插入点之后的元素，盘口附近更新挪动最少。查找可用从末尾往前的线性扫描（近盘口快），或 `partition_point` 二分（距离无关，但比较结果更难预测）。每条消息都要取前几十档算因子、又不想处理价格窗口时，可比有序树少几次指针跳转。
+
+```cpp
+struct DenseSide {
+    std::vector<std::pair<int64_t, double>> lv; // 升序；最优在末尾
+    // 卖侧写入前把 tick 取负，共用同一套代码
+    bool apply(int64_t tick, double qty) {
+        auto it = std::lower_bound(lv.begin(), lv.end(), tick,
+            [](const auto& a, int64_t t) { return a.first < t; });
+        if (it != lv.end() && it->first == tick) {
+            if (qty == 0.0) { lv.erase(it); return true; }
+            it->second = qty;
+            return true;
+        }
+        if (qty == 0.0) return false;
+        lv.insert(it, {tick, qty});
+        return true;
+    }
+    std::pair<int64_t, double> best() const { return lv.empty() ? std::pair<int64_t, double>{} : lv.back(); }
+};
+```
+
+**窗口环与远档：双写、分存、居中后的过期槽**
+
+定长数组或取模环只能覆盖以中间价为中心的一段 tick。窗口外的增量不能丢：价格真移过去时那一档会是错的。双写是完整簿用有序树、环只缓存窗口，每次更新两边都写，窗口移动时从树回填；更新成本仍接近单用树。分存是窗口内只写环、窗外写树，盘口更新接近数组，但一次大跳后的居中要把上千档迁进树，出现几十微秒尖峰。
+
+取模环每个槽必须记下当前所属 tick；读时对不上当作空档。窗口来回移动时仍会读到过期数量：槽位离开窗口后没被覆盖，窗外又收到该 tick 的删档，窗口移回后 `tick` 对得上却读出旧量。居中时进入窗口的槽要先清成 0，再从远档树挪回有单的价位；离开窗口的槽要先读出再复用同一批物理槽。
+
+```cpp
+struct RingSlot { int64_t tick{0}; double qty{0}; };
+
+struct PriceWindow {
+    std::vector<RingSlot> slot;
+    int64_t lo{0}, hi{0}; // [lo, hi)
+    size_t mask{0};
+    size_t idx(int64_t t) const { return size_t(t) & mask; }
+    double get(int64_t t) const {
+        if (t < lo || t >= hi) return 0;
+        const auto& s = slot[idx(t)];
+        return s.tick == t ? s.qty : 0;
+    }
+    void clear_enter(int64_t t) { slot[idx(t)] = RingSlot{t, 0}; }
+};
+```
+
 ### 3. 消息传输协议引擎（FIX）
 FIX协议的基本构建块是 **标签-值对**。每个数据字段都由三部分组成：
 
@@ -39892,6 +39939,70 @@ int main() {
 ```
 
 ### 3. CEX订单簿方案
+**增量覆盖与快照对齐**
+
+深度增量里每一档是该价位的覆盖数量，不是加减量；数量为 0 表示删档，消息里没出现的价位保持原样。价格用 tick 整数做键，从字符串按最小变动直接收成整数，不经浮点，避免同一档算出两个键。数量作值、不参与排序，覆盖写不会累积浮点误差；需要和挂单精确对账时再按数量步长收成整数。
+
+增量流没有起点。先订增量并缓存，再拉 REST 深度快照记下 `snap_id`；丢掉缓存里 `last_id < snap_id` 的消息；留下的第一条要满足 `first_id <= snap_id <= last_id`，从它开始应用；之后每条要求 `prev_last ==` 上一条的 `last_id`。第一条已经 `first_id > snap_id`，说明快照和增量之间缺了一段，重新拉快照。快照只有前若干档，本地在快照深度以外本就不完整；删一个本地没有的价位直接忽略。来源：[本地订单簿维护：增量同步、数据结构](https://mp.weixin.qq.com/s/eHa2-JakVzoHwVmgq-y7RQ)
+
+```cpp
+struct DepthDelta {
+    uint64_t first_id{0};   // 本批第一个更新号
+    uint64_t last_id{0};    // 本批最后一个更新号
+    uint64_t prev_last{0};  // 上一条消息的 last_id
+    // levels: (tick, qty)，qty==0 删档
+};
+
+enum class Sync { NeedSnap, Ready, Broken };
+
+Sync align_first(uint64_t snap_id, const DepthDelta& d) {
+    if (d.last_id < snap_id) return Sync::NeedSnap; // 仍早于快照，继续丢
+    if (d.first_id <= snap_id && snap_id <= d.last_id) return Sync::Ready;
+    return Sync::Broken; // 中间缺段
+}
+
+bool contiguous(uint64_t applied_last, const DepthDelta& d) {
+    return d.prev_last == applied_last;
+}
+
+void paint(auto& side, int64_t tick, double qty) {
+    if (qty == 0.0) side.erase(tick);
+    else side[tick] = qty;
+}
+```
+
+**断档时的三种处理**
+
+运行中 `prev_last` 对不上，本地簿从这一刻起和交易所不一致。严格校验：每条都查连续性，断了就重新拉快照并对齐，同步期间 `book_ok = false`，策略只看这个标志；簿清空或保留影响不大，断档前的状态策略上一跳已经见过。只在 WebSocket 断开时重同步：运行中不校验，簿始终可用，但真丢包会带着错档直到下次重连，最好给策略一条通知。放宽重叠：`prev_last > applied_last` 才算缺消息并重同步；`prev_last <= applied_last` 且 `last_id > applied_last` 时允许继续应用——数量是覆盖值，重叠区间重写一遍结果仍对；整条 `last_id <= applied_last` 必须丢弃，否则会把价位写回旧值。默认用严格校验；断档频繁、不可用时间伤策略时再放宽重叠。
+
+```cpp
+enum class GapPolicy { Strict, WsOnly, AllowOverlap };
+
+bool on_delta(GapPolicy pol, uint64_t& applied_last, bool& book_ok,
+              const DepthDelta& d, auto&& apply_body, auto&& resync) {
+    if (!book_ok) return false;
+    if (pol == GapPolicy::WsOnly) {
+        apply_body(d);
+        applied_last = d.last_id;
+        return true;
+    }
+    if (d.prev_last == applied_last) {
+        apply_body(d);
+        applied_last = d.last_id;
+        return true;
+    }
+    if (pol == GapPolicy::AllowOverlap && d.prev_last <= applied_last && d.last_id > applied_last) {
+        apply_body(d);
+        applied_last = d.last_id;
+        return true;
+    }
+    if (pol == GapPolicy::AllowOverlap && d.last_id <= applied_last) return false; // 整段旧数据
+    book_ok = false;
+    resync();
+    return false;
+}
+```
+
 **VectorOrderBook：**
 
 1. **极致性能要求** - 高频交易系统，需要纳秒级延迟
