@@ -102,21 +102,20 @@ English version：[https://github.com/zzxscodes/trading-system-notes/blob/main/t
   - [20. 成交回报先于状态回报的本地缓存](#20-成交回报先于状态回报的本地缓存)
   - [21. 关联订单元数据](#21-关联订单元数据)
   - [22. 多档最小变动价位表](#22-多档最小变动价位表)
-  - [23. 交易日历对齐的因子存储与缺口回填](#23-交易日历对齐的因子存储与缺口回填)
+  - [23. 因子存储与实时面](#23-因子存储与实时面)
   - [24. 引擎消息路由过滤器](#24-引擎消息路由过滤器)
   - [25. 篮子控制通道与超大执行缓冲](#25-篮子控制通道与超大执行缓冲)
   - [26. 交易桥前置风控过滤与错误码分层](#26-交易桥前置风控过滤与错误码分层)
-  - [27. 高频因子热路径拉取](#27-高频因子热路径拉取)
-  - [28. 订单检查计数信号量与两阶段账本预锁](#28-订单检查计数信号量与两阶段账本预锁)
-  - [29. 行情网关接入：全订过滤、字段补丁与夜盘交易日](#29-行情网关接入全订过滤字段补丁与夜盘交易日)
-  - [30. 交易桥短单号、异步配额与算法容器时钟扇出](#30-交易桥短单号异步配额与算法容器时钟扇出)
-  - [31. 报单入库前的开平与方向规整](#31-报单入库前的开平与方向规整)
-  - [32. 持仓查询移出报单线程并按游标续页](#32-持仓查询移出报单线程并按游标续页)
-  - [33. 信号窗口驱动自动母单](#33-信号窗口驱动自动母单)
-  - [34. 平今平昨与股票可卖冻结](#34-平今平昨与股票可卖冻结)
-  - [35. 品种大类费用与冻结价回填](#35-品种大类费用与冻结价回填)
-  - [36. 监控进程的只读追赶与发布水位](#36-监控进程的只读追赶与发布水位)
-  - [37. 交易进程的启停与主机采样](#37-交易进程的启停与主机采样)
+  - [27. 订单检查计数信号量与两阶段账本预锁](#27-订单检查计数信号量与两阶段账本预锁)
+  - [28. 行情网关接入：全订过滤、字段补丁与夜盘交易日](#28-行情网关接入全订过滤字段补丁与夜盘交易日)
+  - [29. 交易桥短单号、异步配额与算法容器时钟扇出](#29-交易桥短单号异步配额与算法容器时钟扇出)
+  - [30. 报单入库前的开平与方向规整](#30-报单入库前的开平与方向规整)
+  - [31. 持仓查询移出报单线程并按游标续页](#31-持仓查询移出报单线程并按游标续页)
+  - [32. 信号窗口驱动自动母单](#32-信号窗口驱动自动母单)
+  - [33. 平今平昨与股票可卖冻结](#33-平今平昨与股票可卖冻结)
+  - [34. 品种大类费用与冻结价回填](#34-品种大类费用与冻结价回填)
+  - [35. 监控进程的只读追赶与发布水位](#35-监控进程的只读追赶与发布水位)
+  - [36. 交易进程的启停与主机采样](#36-交易进程的启停与主机采样)
 - [业务逻辑设计-计算](#业务逻辑设计-计算)
   - [1. 对数收益率(百分比非对称性)](#1-对数收益率百分比非对称性)
   - [2. 市场趋势和波动率的状态变化](#2-市场趋势和波动率的状态变化)
@@ -33417,9 +33416,9 @@ public:
 ```
 
 
-### 23. 交易日历对齐的因子存储与缺口回填
+### 23. 因子存储与实时面
 
-分钟因子、采样值若按稀疏 map 存，多标的对齐成本高。更好的做法是全局一张“日历时间 → 下标”表，每个因子名对应一条定长环，按下标写入。写入时若跳过了中间 bar，用调用方提供的填充函数回填缺口，并打上“已填充”标记。哨兵下标（例如 -2）区分“从未写过”和“已写到 0”，省掉额外的 bool。
+分钟因子和采样值按名字落在日历环上。全局一张日历时间到下标的表，每个名字一条定长环，按下标写入。写入跳过中间 bar 时，用调用方提供的填充函数回填缺口，并打上已填充标记。哨兵下标 -2 表示从未写过，和已经写到 0 区分开，不必再放一个 bool。
 
 ```cpp
 struct FactorCell { bool filled; double value; };
@@ -33458,6 +33457,224 @@ public:
 };
 ```
 
+实盘标的不走这张日历表。高频带嵌在标的对象里。因子面、采样面、非结构化信号面用指针挂在同一标的上，按名字分条目。
+
+因子面每个名字一条环，深 256。元素是一个填充标记加一个 double，标记占 1 字节，double 对齐到 8 字节，整格 16 字节。单标的名字预算 20。采样面用同一种元素，环深 512，名字预算 100。非结构化信号面环深 512，一条记录带上代码、频率、计算时间、产出时间、发出时间、信号名、复权系数和数值，名字预算 10。三类池各预留 1000 个，进程起来时按配置从共享段切出。短周期 RSI、动量、价差和基金净值走因子面的字符串键，不写入高频带的八个槽。
+
+```cpp
+struct NamedCell {
+    bool ready{false};
+    double reading{0};
+};
+static_assert(sizeof(NamedCell) == 16, "标记、对齐空档、double");
+
+template <typename Cell, uint32_t Depth>
+struct NamedRing {
+    char key[32]{};
+    bool used{false};
+    Cell cell[Depth]{};
+    uint64_t head{0};
+    uint64_t mask{Depth - 1};
+};
+
+struct OpenSignal {
+    char code[48]{};
+    char freq[16]{};
+    int64_t computed_ns{0};
+    int64_t produced_ns{0};
+    int64_t sent_ns{0};
+    char label[24]{};
+    double corp_scale{1};
+    double reading{0};
+    bool ready{false};
+};
+
+struct InstrumentFaces {
+    NamedRing<NamedCell, 256>* factor{nullptr};
+    NamedRing<NamedCell, 512>* sample{nullptr};
+    NamedRing<OpenSignal, 512>* open_sig{nullptr};
+};
+
+struct FacePools {
+    static constexpr int kPool = 1000;
+    static constexpr int kFactorNames = 20;
+    static constexpr int kSampleNames = 100;
+    static constexpr int kOpenNames = 10;
+    NamedRing<NamedCell, 256> factor[kPool][kFactorNames];
+    NamedRing<NamedCell, 512> sample[kPool][kSampleNames];
+    NamedRing<OpenSignal, 512> open_sig[kPool][kOpenNames];
+    std::atomic<int> used{0};
+};
+
+InstrumentFaces bind_faces(FacePools& pools) {
+    int i = pools.used.fetch_add(1);
+    InstrumentFaces faces;
+    faces.factor = pools.factor[i];
+    faces.sample = pools.sample[i];
+    faces.open_sig = pools.open_sig[i];
+    return faces;
+}
+```
+
+发送进程用一个面标签分叉。标签为 0 时扫因子面，为 1 时扫采样面，把新条目收成一批再送出。非结构化面按信号名在该标的的收集器里取环，名字第一次出现时占用一个空条目。策略侧订阅分成三条：普通信号请求、高频带、非结构化信号。
+
+```cpp
+enum class FaceTag : int { Factor = 0, Sample = 1 };
+enum class SubKind : int { Request = 0, Pulse = 1, Open = 2 };
+
+struct CellBatch {
+    const char* code{nullptr};
+    std::vector<NamedCell> rows;
+};
+
+CellBatch drain_face(FaceTag tag, InstrumentFaces& face, const char* code) {
+    CellBatch batch;
+    batch.code = code;
+    if (tag == FaceTag::Factor)
+        batch.rows = take_unread(face.factor, FacePools::kFactorNames);
+    else if (tag == FaceTag::Sample)
+        batch.rows = take_unread(face.sample, FacePools::kSampleNames);
+    ship_batch(batch);
+    return batch;
+}
+
+NamedRing<OpenSignal, 512>* open_by_label(InstrumentFaces& face, const char* label) {
+    NamedRing<OpenSignal, 512>* free_slot = nullptr;
+    for (int i = 0; i < FacePools::kOpenNames; ++i) {
+        auto& slot = face.open_sig[i];
+        if (!slot.used) {
+            if (!free_slot) free_slot = &slot;
+            continue;
+        }
+        if (std::strcmp(slot.key, label) == 0) return &slot;
+    }
+    if (!free_slot) return nullptr;
+    std::snprintf(free_slot->key, sizeof(free_slot->key), "%s", label);
+    free_slot->used = true;
+    return free_slot;
+}
+
+void bind_sub(SubKind kind, const char* code) {
+    if (kind == SubKind::Request) attach_request(code);
+    else if (kind == SubKind::Pulse) attach_pulse(code);
+    else attach_open(code);
+}
+```
+
+复权系数只放在信号记录上，不进高频带的八个槽。开盘前把列式表整表读入，每行两个文本字段和一个系数，按固定顺序拼成键。查中返回表内系数。查不到时记下键并返回 1，后面的乘法保持原值。
+
+```cpp
+struct CorpTable {
+    std::unordered_map<std::string, double> scale;
+};
+
+void load_corp(CorpTable& table, ColumnFile& file) {
+    std::string left, right;
+    double value = 0;
+    while (file.next(left, right, value))
+        table.scale.emplace(left + right, value);
+}
+
+double corp_of(const CorpTable& table, const std::string& key, Logger& log) {
+    auto it = table.scale.find(key);
+    if (it != table.scale.end()) return it->second;
+    log.warn("corp scale missing, key={}", key);
+    return 1.0;
+}
+```
+
+高频带给策略循环用，不走订阅回调。行情侧写入共享槽，策略按标的拷最新一槽。函数签名上的时间参数不参加比较。标的不存在才返回失败。写序号仍为 0 时，减一再与掩码相与会落到最后一格物理槽。
+
+这条带固定八个 double，整段 80 字节。下标 0 到 3 是标的自身在 30、60、120、300 四个期限上的收益，4 到 7 是同一组期限的领先滞后。数值由外部计算进程填好，按下标落槽。对外短名和进程内枚举分开存放，查找要求整串相等。大小写不一致、缺分隔符，或者拿枚举名去对短名，都记为无效，不能落到第 0 槽。
+
+发布时若环上已有样本，本笔计算时间必须严格晚于最近一笔，否则丢掉。空环直接写入。拷完后再把写序号加一。同一条带只允许一个写者，这次发布不拿环上的自旋锁。
+
+```cpp
+enum class PulseLane : int8_t {
+    None = -1,
+    Own30 = 0, Own60, Own120, Own300,
+    Lead30, Lead60, Lead120, Lead300
+};
+
+PulseLane lane_of(const char* wire) {
+    static const char* names[] = {
+        "r30", "r60", "r120", "r300",
+        "ld30", "ld60", "ld120", "ld300"
+    };
+    for (int i = 0; i < 8; ++i)
+        if (std::strcmp(wire, names[i]) == 0) return PulseLane(i);
+    return PulseLane::None;
+}
+
+struct Pulse {
+    int64_t seen_ns{};
+    int64_t made_ns{};
+    double lane[8]{};
+};
+
+struct PulseTape {
+    static constexpr uint32_t N = 128;
+    Pulse slot[N]{};
+    uint64_t published{0};
+    uint64_t mask{N - 1};
+};
+
+bool push_pulse(PulseTape& tape, const Pulse& in) {
+    if (tape.published != 0) {
+        const Pulse& prev = tape.slot[(tape.published - 1) & tape.mask];
+        if (in.made_ns <= prev.made_ns) return false;
+    }
+    tape.slot[tape.published & tape.mask] = in;
+    tape.published += 1;
+    return true;
+}
+
+bool copy_latest(const PulseTape* tape, Pulse& out) {
+    if (!tape) return false;
+    out = tape->slot[(tape->published - 1) & tape->mask];
+    return true;
+}
+```
+
+监控和落盘各自保存读序号，不在策略拷贝里比较时间。已经持有非负读序号就从那里继续。订阅时间早于系统最小时间则从 0 读。否则从最旧的已发布槽扫到第一条计算时间不早于订阅时间的槽，扫完没有就返回空。深度 128，这次扫描比再挂一层时间索引更便宜。
+
+```cpp
+int64_t catch_up(const PulseTape& tape, int64_t cursor, int64_t from_ns, int64_t min_ns) {
+    if (cursor >= 0) return cursor;
+    if (from_ns < min_ns) return 0;
+    if (tape.published == 0) return -1;
+    uint64_t begin = 0;
+    if (tape.published > PulseTape::N)
+        begin = tape.published - PulseTape::N;
+    for (uint64_t i = begin; i < tape.published; ++i) {
+        if (tape.slot[i & tape.mask].made_ns >= from_ns)
+            return static_cast<int64_t>(i);
+    }
+    return -1;
+}
+```
+
+回放文件带代码、日期、时间和四列自身收益，没有领先滞后列。装入只覆盖前四个槽，后四个保持记录里已有的值。回放开关关闭时这张表不发布到共享带。回测开跑前也可以把历史脉冲放进共享内存的向量池，运行时不再读盘。
+
+```cpp
+struct HistRow {
+    char code[32]{};
+    int ymd{0};
+    int hms{0};
+    double own30{0};
+    double own60{0};
+    double own120{0};
+    double own300{0};
+};
+
+void load_hist_row(double lane[8], const HistRow& row, bool publish) {
+    if (!publish) return;
+    lane[0] = row.own30;
+    lane[1] = row.own60;
+    lane[2] = row.own120;
+    lane[3] = row.own300;
+}
+```
 
 ### 24. 引擎消息路由过滤器
 
@@ -33616,29 +33833,7 @@ bool listed(bool opening, const std::unordered_set<std::string>& opens,
 ```
 
 
-### 27. 高频因子热路径拉取
-
-高频因子窗口短、更新密，若走“订阅回调批量推送”，容易在策略线程上制造额外排队。更稳妥的是行情进程写入共享槽位，策略在自己的 Loop 里按标的与时间主动拉取。普通分钟因子仍可用请求/应答订阅；高频槽位保持无回调、无堆分配的定长数组。
-
-```cpp
-enum { kHfSlots = 16 };
-
-struct HfFactorSlot {
-    char symbol[32]{};
-    int64_t asof_ms{};
-    double values[kHfSlots]{}; // lead-lag / multi-factor 窗口结果
-};
-
-bool pull_hf(const char* symbol, int64_t t, HfFactorSlot& out) {
-    // 从本标的共享槽位读最新；不注册回调
-    const HfFactorSlot* p = find_hf_slot(symbol);
-    if (!p || p->asof_ms < t) return false;
-    out = *p;
-    return true;
-}
-```
-
-### 28. 订单检查计数信号量与两阶段账本预锁
+### 27. 订单检查计数信号量与两阶段账本预锁
 
 串行“先风控再发往交易桥”会把风控排队加进报单时延。更低延迟的做法是：策略只写一次订单请求，风控进程与交易桥同时看见；交易桥不立刻外发，而是轮询订单上的检查通过计数与拒绝计数。配置里约定需要几个风控柜台签字；全部通过且拒绝为 0 才发往券商。风控内部先做全部校验与预锁计算（不写共享账本），通过后再提交冻结并递增检查计数，避免失败路径留下半截资金占用。市价单冻结价可取中间价或对手价，首写者用原子量占住冻结价量。
 
@@ -33719,7 +33914,7 @@ void drop_late(std::unordered_map<uint64_t, Inflight>& wait, int64_t now, int64_
 ```
 
 
-### 29. 行情网关接入：全订过滤、字段补丁与夜盘交易日
+### 28. 行情网关接入：全订过滤、字段补丁与夜盘交易日
 
 现货 L2 常整市场订阅，开盘前把订阅收成按下标排列的字节，回调读这一字节决定放行，未开过滤则全部放行。沪市深度快照常缺涨跌停，静态查询时按下标写入平行数组，快照缺字段时用同一下标补上。沪深逐笔序号字段含义不同，重建订单簿前必须按交易所解释。期货行情里的业务日不可盲信接口字段，应按更新时刻反推：日盘与 TradingDay 相同；夜盘 18:00 后按星期减一天或三天；周一凌晨再特殊处理。算法母单创建后可读共享环最新一档立即喂一次，不必空等下一笔行情。
 
@@ -33865,7 +34060,7 @@ thread_local Tape tls_tape;
 ```
 
 
-### 30. 交易桥短单号、异步配额与算法容器时钟扇出
+### 29. 交易桥短单号、异步配额与算法容器时钟扇出
 
 期货开仓/平仓限额常在中台，交易桥不能在 API 回调线程里同步死等，又不能未获配额就外发。开仓与平仓插入走异步申请，状态为等待；回报或超时后再发或拒。平仓插入可预占一次撤单额度，首次撤单免再申请，第二次起再申请。外部手工成交合成回灌单时更新风险视图，但不释放撤单预占。
 
@@ -34149,7 +34344,7 @@ Tail tail_of(int64_t left, int64_t lot, bool late) {
 }
 ```
 
-### 31. 报单入库前的开平与方向规整
+### 30. 报单入库前的开平与方向规整
 
 现货没有平今、平昨。入库前若标的类型仍未知，用代码解析一次并写回，后面不再拆字符串。股票、债券、基金、指数、回购把开平强制写成开仓，避免柜台收到无意义的平今。期货和期权才保留平仓：上期所（SHF）和能源中心（INE）把普通平仓改成平昨，平今保持不变；其余交易所把平今、平昨收成普通平仓。方向由买卖方向映射：买入、融资买入、买券还券、申购记为多头，卖出、融券卖出、卖券还款、赎回记为空头。映射失败时在写环之前填错误码和短文案，单不到柜台。价格已经给出、价格类型仍未知、且价格大于 0 时，收成限价，避免算法单带着未知价型出去。限价类型已经写上、价格绝对值仍小于 1e-6 时直接拒单。
 
@@ -34247,7 +34442,7 @@ void close_td_then_yd(int want, Pos pos, Pend pend, int max_lot, int min_lot,
 ```
 
 
-### 32. 持仓查询移出报单线程并按游标续页
+### 31. 持仓查询移出报单线程并按游标续页
 
 现货柜台的持仓查询常常是同步的，一页几百行。放在报单线程里，后面的委托会排在整次查询之后。每个引擎只写自己的一条环，槽里放下标，同一账号后写的请求在查询线程折合时盖住前写。查询线程把这个账号上各引擎的槽合成一次柜台调用，每一行写回每一个等待中的请求。环满时这一笔直接失败返回。
 
@@ -34341,9 +34536,9 @@ public:
 ```
 
 
-### 33. 信号窗口驱动自动母单
+### 32. 信号窗口驱动自动母单
 
-自动策略每个时钟按开盘前收好的下标把新行情收进本地带，再跑决策。基类时钟会扫委托、算法回报、资金、持仓四条链。自动簿只走行情订阅的那段下标，拉行情和逐笔，再收母单回报。资金查询挂在保证金需要复核的时候，不进每一拍。行情回调按下标写入槽位。订阅名单在开盘前收成一段连续下标，时钟顺着它取行情。母单直接写进算法环的空槽：先核对单号基数，把买卖收成多空，限价缺失时用对手价补上，生成唯一母单号，字段写完再发布写序号。这条环只有策略时钟一个写者，环满时这一笔直接失败返回。子单由执行进程按母单上的算法类型继续拆。策略基类另外提供三条信号订阅名，`SignalReq`、`HighFreqFactor`、`NonstructSignal`，自动簿的买卖决策读的是开盘前信号书和盘中行情带。
+自动策略每个时钟按开盘前收好的下标把新行情收进本地带，再跑决策。基类时钟会扫委托、算法回报、资金、持仓四条链。自动簿只走行情订阅的那段下标，拉行情和逐笔，再收母单回报。资金查询挂在保证金需要复核的时候，不进每一拍。行情回调按下标写入槽位。订阅名单在开盘前收成一段连续下标，时钟顺着它取行情。母单直接写进算法环的空槽：先核对单号基数，把买卖收成多空，限价缺失时用对手价补上，生成唯一母单号，字段写完再发布写序号。这条环只有策略时钟一个写者，环满时这一笔直接失败返回。子单由执行进程按母单上的算法类型继续拆。自动簿的买卖决策读的是开盘前信号书和盘中行情带。
 
 ```cpp
 struct Parent {
@@ -34619,7 +34814,7 @@ void cancel_other_side(int dir, Live& live) {
 ```
 
 
-### 34. 平今平昨与股票可卖冻结
+### 33. 平今平昨与股票可卖冻结
 
 期货平仓按开平标志扣不同的数量池。平仓看总仓减去已冻；平今看今仓（总仓减去昨仓剩余）再减去今仓已冻（总冻减去昨冻）；平昨只看昨仓剩余减去昨冻。三条不够的路径分开返回。通过以后，平仓和平今只增加总冻结，平昨同时增加总冻结和昨冻结，可卖改写成总仓减总冻结。买开和卖开不冻仓位，只把 min(目标量, 冻定量) 累进对应方向的委托量。冻定量为 0 的请求直接放过。
 
@@ -34685,7 +34880,7 @@ int how_on_fill(const ReqSnap* snap, int rsp_how) {
 }
 ```
 
-### 35. 品种大类费用与冻结价回填
+### 34. 品种大类费用与冻结价回填
 
 费用按品种大类走两条公式，热路径不查合约主数据。现货大类（股票、债券、基金、指数、回购）乘数取 1，保证金比例取 1；其余品种乘数取 100，保证金比例取 0.15。调用点用冻结价乘冻定量得到名义金额，第二参数传入常数 0.0003。期货公式把这个常数当作费率，费用等于名义金额乘费率。现货公式把它当作佣金金额直接相加，再加名义金额乘过户费率；卖出方向另加名义金额乘印花税率。
 
@@ -34729,33 +34924,13 @@ bool backfill_lock(double& lock_px, int64_t& lock_qty, int64_t qty,
 }
 ```
 
-### 36. 监控进程的只读追赶与发布水位
+### 35. 监控进程的只读追赶与发布水位
 
-监控和落盘放在独立进程里，各自保存读序号。高频因子环固定 128 槽，槽数组排在写序号前面，下标与掩码相与后乘槽长。订阅者已经持有非负读序号就从那里继续。订阅时间早于系统最小时间则从 0 读。否则从最旧的已发布槽线性扫到第一条计算时间不早于订阅时间的槽；扫完没有就返回空。128 的深度使这次扫描比再挂一层时间索引更便宜。
-
-池子容量不大于 0 时跳过。剩余槽位低于容量的 5% 时打一条告警，比较的是剩余量。
+监控和落盘放在独立进程里。池子容量不大于 0 时跳过。剩余槽位低于容量的 5% 时打一条告警，比较的是剩余量。
 
 对外发布和消费回调各用一条事件循环。漏桶在发布线程上：水位减去费率乘经过的毫秒，小于 0 就归零；水位仍低于容量就加 1 并放行一条，否则这条留在待发队列里等下一个定时器。心跳用非持久投递，启停命令的应答用持久投递。属性上报凑满 100 条，或距离上次发送超过 15 秒，再打成一包；日志上报到达即转发。落盘侧预分配固定条数的数组，下标前移，刷盘时按条数乘步长一次写出，然后清零整段并把下标归零。
 
 ```cpp
-struct HfTape {
-    static constexpr int N = 128;
-    struct Slot { int64_t sample_ns; int64_t calc_ns; double v[8]; } slot[N];
-    uint64_t end{0};
-    uint64_t mask{N - 1};
-};
-
-int64_t catch_up(const HfTape& t, int64_t cursor, int64_t from_ns, int64_t min_ns) {
-    if (cursor >= 0) return cursor;
-    if (from_ns < min_ns) return 0;
-    if (t.end == 0) return -1;
-    for (uint64_t i = 0; i < t.end; ++i) {
-        const auto& s = t.slot[i & t.mask];
-        if (s.calc_ns >= from_ns) return static_cast<int64_t>(i);
-    }
-    return -1;
-}
-
 void watch_pool(const char* name, int64_t used, int64_t cap) {
     if (cap <= 0) return;
     if (static_cast<double>(cap - used) < static_cast<double>(cap) * 0.05)
@@ -34817,7 +34992,7 @@ void push_fresh(std::unordered_map<std::string, std::vector<std::string>>& fresh
 ```
 
 
-### 37. 交易进程的启停与主机采样
+### 36. 交易进程的启停与主机采样
 
 启停和主机采样放在两个进程里。命令进程管定时拉起、停止和改配置，上报进程管主机计数和共享内存日志。共享内存要等生产进程把段建好，读者才挂上去。开盘只改配置里的读者开关，上报进程继续跑，下一次起来时按这个开关挂上。收盘先停业务进程，把开关写回假，再重启上报进程，映射在生产端退出前卸掉。
 

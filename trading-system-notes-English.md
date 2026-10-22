@@ -102,21 +102,20 @@
   - [20. Local cache when fills arrive before status](#20-local-cache-when-fills-arrive-before-status)
   - [21. Linked-order metadata](#21-linked-order-metadata)
   - [22. Multi-band minimum tick table](#22-multi-band-minimum-tick-table)
-  - [23. Calendar-aligned factor store with gap fill](#23-calendar-aligned-factor-store-with-gap-fill)
+  - [23. Factor storage and live faces](#23-factor-storage-and-live-faces)
   - [24. Engine message route filters](#24-engine-message-route-filters)
   - [25. Basket control channel and oversized exec buffer](#25-basket-control-channel-and-oversized-exec-buffer)
   - [26. Pre-trade risk gate and layered error codes](#26-pre-trade-risk-gate-and-layered-error-codes)
-  - [27. Pulling high-frequency factors on the hot path](#27-pulling-high-frequency-factors-on-the-hot-path)
-  - [28. Order check-count semaphore and two-phase ledger prelock](#28-order-check-count-semaphore-and-two-phase-ledger-prelock)
-  - [29. Market-data gateway: full-sub filter, field patches, night-session day](#29-market-data-gateway-full-sub-filter-field-patches-night-session-day)
-  - [30. Short venue refs, async quota, and algo-container clock fanout](#30-short-venue-refs-async-quota-and-algo-container-clock-fanout)
-  - [31. Normalize offset and direction before the order hits the ring](#31-normalize-offset-and-direction-before-the-order-hits-the-ring)
-  - [32. Position queries leave the order thread and resume by cursor](#32-position-queries-leave-the-order-thread-and-resume-by-cursor)
-  - [33. Signal windows that emit parent orders](#33-signal-windows-that-emit-parent-orders)
-  - [34. Close-today, close-yesterday, and stock sellable locks](#34-close-today-close-yesterday-and-stock-sellable-locks)
-  - [35. Instrument-class fees and frozen-price backfill](#35-instrument-class-fees-and-frozen-price-backfill)
-  - [36. Read-only catch-up and publish watermark on the monitor](#36-read-only-catch-up-and-publish-watermark-on-the-monitor)
-  - [37. Process lifecycle control and host sampling](#37-process-lifecycle-control-and-host-sampling)
+  - [27. Order check-count semaphore and two-phase ledger prelock](#27-order-check-count-semaphore-and-two-phase-ledger-prelock)
+  - [28. Market-data gateway: full-sub filter, field patches, night-session day](#28-market-data-gateway-full-sub-filter-field-patches-night-session-day)
+  - [29. Short venue refs, async quota, and algo-container clock fanout](#29-short-venue-refs-async-quota-and-algo-container-clock-fanout)
+  - [30. Normalize offset and direction before the order hits the ring](#30-normalize-offset-and-direction-before-the-order-hits-the-ring)
+  - [31. Position queries leave the order thread and resume by cursor](#31-position-queries-leave-the-order-thread-and-resume-by-cursor)
+  - [32. Signal windows that emit parent orders](#32-signal-windows-that-emit-parent-orders)
+  - [33. Close-today, close-yesterday, and stock sellable locks](#33-close-today-close-yesterday-and-stock-sellable-locks)
+  - [34. Instrument-class fees and frozen-price backfill](#34-instrument-class-fees-and-frozen-price-backfill)
+  - [35. Read-only catch-up and publish watermark on the monitor](#35-read-only-catch-up-and-publish-watermark-on-the-monitor)
+  - [36. Process lifecycle control and host sampling](#36-process-lifecycle-control-and-host-sampling)
 - [Business logic design-calculation](#business-logic-design-calculation)
   - [1. Log return (percent asymmetry)](#1-log-return-percent-asymmetry)
   - [2. Changes in state of market trends and volatility](#2-changes-in-state-of-market-trends-and-volatility)
@@ -33430,9 +33429,9 @@ public:
 ```
 
 
-### 23. Calendar-aligned factor store with gap fill
+### 23. Factor storage and live faces
 
-Storing minute factors in sparse maps makes multi-symbol alignment expensive. Prefer a global “calendar time → index” map and one fixed ring per factor name written by index. When a write skips intermediate bars, fill the gap with a caller-supplied function and mark cells as filled. A sentinel last-write index (e.g. -2) distinguishes “never written” from “written at 0” without an extra bool.
+Minute factors and samples land on a calendar ring, one ring per name. A global table maps calendar time to an index, and a write goes to that index. When a write skips intermediate bars, a caller-supplied function fills the gap and those cells are marked filled. The sentinel index -2 means never written. That is distinct from a write at index 0, so the series does not need another bool.
 
 ```cpp
 struct FactorCell { bool filled; double value; };
@@ -33471,6 +33470,224 @@ public:
 };
 ```
 
+A live instrument does not use that calendar table. The high-frequency tape is embedded in the instrument object. The factor face, the sample face, and the unstructured signal face hang off the same instrument by pointer and are split by name.
+
+On the factor face each name owns a ring of depth 256. The element is a filled flag plus one double: the flag is one byte, the double sits on an 8-byte boundary, and the cell is 16 bytes. One instrument has a budget of 20 factor names. The sample face uses the same cell, with depth 512 and a budget of 100 names. The unstructured signal face uses depth 512. One record carries the code, frequency, calc time, produce time, send time, signal name, corporate-action scale, and value, with a budget of 10 names. Each of the three pools reserves 1000 objects, carved from the shared segment at startup from config. Short-horizon RSI, momentum, spread, and fund net-asset values live on the factor face as string keys. They are not written into the eight tape slots.
+
+```cpp
+struct NamedCell {
+    bool ready{false};
+    double reading{0};
+};
+static_assert(sizeof(NamedCell) == 16, "flag then pad then double");
+
+template <typename Cell, uint32_t Depth>
+struct NamedRing {
+    char key[32]{};
+    bool used{false};
+    Cell cell[Depth]{};
+    uint64_t head{0};
+    uint64_t mask{Depth - 1};
+};
+
+struct OpenSignal {
+    char code[48]{};
+    char freq[16]{};
+    int64_t computed_ns{0};
+    int64_t produced_ns{0};
+    int64_t sent_ns{0};
+    char label[24]{};
+    double corp_scale{1};
+    double reading{0};
+    bool ready{false};
+};
+
+struct InstrumentFaces {
+    NamedRing<NamedCell, 256>* factor{nullptr};
+    NamedRing<NamedCell, 512>* sample{nullptr};
+    NamedRing<OpenSignal, 512>* open_sig{nullptr};
+};
+
+struct FacePools {
+    static constexpr int kPool = 1000;
+    static constexpr int kFactorNames = 20;
+    static constexpr int kSampleNames = 100;
+    static constexpr int kOpenNames = 10;
+    NamedRing<NamedCell, 256> factor[kPool][kFactorNames];
+    NamedRing<NamedCell, 512> sample[kPool][kSampleNames];
+    NamedRing<OpenSignal, 512> open_sig[kPool][kOpenNames];
+    std::atomic<int> used{0};
+};
+
+InstrumentFaces bind_faces(FacePools& pools) {
+    int i = pools.used.fetch_add(1);
+    InstrumentFaces faces;
+    faces.factor = pools.factor[i];
+    faces.sample = pools.sample[i];
+    faces.open_sig = pools.open_sig[i];
+    return faces;
+}
+```
+
+The sender forks on a face tag. Tag 0 scans the factor face, tag 1 scans the sample face, and the new cells leave as one batch. The unstructured face looks the ring up by signal name on that instrument. The first time a name appears it occupies an empty entry. A strategy subscription is one of three names: a plain signal request, the high-frequency tape, or an unstructured signal.
+
+```cpp
+enum class FaceTag : int { Factor = 0, Sample = 1 };
+enum class SubKind : int { Request = 0, Pulse = 1, Open = 2 };
+
+struct CellBatch {
+    const char* code{nullptr};
+    std::vector<NamedCell> rows;
+};
+
+CellBatch drain_face(FaceTag tag, InstrumentFaces& face, const char* code) {
+    CellBatch batch;
+    batch.code = code;
+    if (tag == FaceTag::Factor)
+        batch.rows = take_unread(face.factor, FacePools::kFactorNames);
+    else if (tag == FaceTag::Sample)
+        batch.rows = take_unread(face.sample, FacePools::kSampleNames);
+    ship_batch(batch);
+    return batch;
+}
+
+NamedRing<OpenSignal, 512>* open_by_label(InstrumentFaces& face, const char* label) {
+    NamedRing<OpenSignal, 512>* free_slot = nullptr;
+    for (int i = 0; i < FacePools::kOpenNames; ++i) {
+        auto& slot = face.open_sig[i];
+        if (!slot.used) {
+            if (!free_slot) free_slot = &slot;
+            continue;
+        }
+        if (std::strcmp(slot.key, label) == 0) return &slot;
+    }
+    if (!free_slot) return nullptr;
+    std::snprintf(free_slot->key, sizeof(free_slot->key), "%s", label);
+    free_slot->used = true;
+    return free_slot;
+}
+
+void bind_sub(SubKind kind, const char* code) {
+    if (kind == SubKind::Request) attach_request(code);
+    else if (kind == SubKind::Pulse) attach_pulse(code);
+    else attach_open(code);
+}
+```
+
+The corporate-action scale sits on the signal record and is not one of the eight tape slots. Before the open, the whole columnar table is loaded. Each row is two text fields and one scale, joined in a fixed order into the lookup key. A hit returns the stored scale. A miss logs the key and returns 1, so later multiplication leaves the value unchanged.
+
+```cpp
+struct CorpTable {
+    std::unordered_map<std::string, double> scale;
+};
+
+void load_corp(CorpTable& table, ColumnFile& file) {
+    std::string left, right;
+    double value = 0;
+    while (file.next(left, right, value))
+        table.scale.emplace(left + right, value);
+}
+
+double corp_of(const CorpTable& table, const std::string& key, Logger& log) {
+    auto it = table.scale.find(key);
+    if (it != table.scale.end()) return it->second;
+    log.warn("corp scale missing, key={}", key);
+    return 1.0;
+}
+```
+
+The high-frequency tape is for the strategy loop, not for subscribe callbacks. The market-data side writes the shared slot, and the strategy copies the newest slot by name. The time argument on that call is not compared. The call fails when the name is absent. A write sequence that is still zero, after subtracting one and masking, addresses the last physical slot.
+
+The tape holds eight doubles and the record is 80 bytes. Indexes 0 through 3 are the name's own return over horizons 30, 60, 120, and 300. Indexes 4 through 7 are lead-lag over the same horizons. An external calculator fills the numbers and they land by index. The short names on the wire and the in-process enum are separate tables. Lookup requires the whole string to match. A case difference, a missing separator, or the enum spelling used where the short name is required, all count as unknown and must not fall through to slot 0.
+
+If the ring already holds a sample, the new calc time must be strictly later than the latest one. Otherwise the sample is dropped. An empty ring accepts the first write. The write sequence increments after the copy. One writer owns the tape, and this publish does not take the ring spinlock.
+
+```cpp
+enum class PulseLane : int8_t {
+    None = -1,
+    Own30 = 0, Own60, Own120, Own300,
+    Lead30, Lead60, Lead120, Lead300
+};
+
+PulseLane lane_of(const char* wire) {
+    static const char* names[] = {
+        "r30", "r60", "r120", "r300",
+        "ld30", "ld60", "ld120", "ld300"
+    };
+    for (int i = 0; i < 8; ++i)
+        if (std::strcmp(wire, names[i]) == 0) return PulseLane(i);
+    return PulseLane::None;
+}
+
+struct Pulse {
+    int64_t seen_ns{};
+    int64_t made_ns{};
+    double lane[8]{};
+};
+
+struct PulseTape {
+    static constexpr uint32_t N = 128;
+    Pulse slot[N]{};
+    uint64_t published{0};
+    uint64_t mask{N - 1};
+};
+
+bool push_pulse(PulseTape& tape, const Pulse& in) {
+    if (tape.published != 0) {
+        const Pulse& prev = tape.slot[(tape.published - 1) & tape.mask];
+        if (in.made_ns <= prev.made_ns) return false;
+    }
+    tape.slot[tape.published & tape.mask] = in;
+    tape.published += 1;
+    return true;
+}
+
+bool copy_latest(const PulseTape* tape, Pulse& out) {
+    if (!tape) return false;
+    out = tape->slot[(tape->published - 1) & tape->mask];
+    return true;
+}
+```
+
+Monitoring and disk capture each keep a read cursor. That cursor compares calc time. The strategy copy does not. A subscriber that already holds a non-negative cursor continues from there. A subscribe time earlier than the system minimum starts at 0. Otherwise the reader walks from the oldest published slot to the first slot whose calc time is at or after the subscribe time. If none qualifies, the scan returns empty. A depth of 128 makes that walk cheaper than another time index.
+
+```cpp
+int64_t catch_up(const PulseTape& tape, int64_t cursor, int64_t from_ns, int64_t min_ns) {
+    if (cursor >= 0) return cursor;
+    if (from_ns < min_ns) return 0;
+    if (tape.published == 0) return -1;
+    uint64_t begin = 0;
+    if (tape.published > PulseTape::N)
+        begin = tape.published - PulseTape::N;
+    for (uint64_t i = begin; i < tape.published; ++i) {
+        if (tape.slot[i & tape.mask].made_ns >= from_ns)
+            return static_cast<int64_t>(i);
+    }
+    return -1;
+}
+```
+
+A replay file carries the code, the date, the time, and four own-name returns. It has no lead-lag columns. Loading overwrites only the first four slots. The last four keep whatever value is already in the record. When the replay switch is off, the table is not published onto the shared tape. A backtest can also place the historical pulses into the shared-memory vector pool before it starts, and then not read the file again while it runs.
+
+```cpp
+struct HistRow {
+    char code[32]{};
+    int ymd{0};
+    int hms{0};
+    double own30{0};
+    double own60{0};
+    double own120{0};
+    double own300{0};
+};
+
+void load_hist_row(double lane[8], const HistRow& row, bool publish) {
+    if (!publish) return;
+    lane[0] = row.own30;
+    lane[1] = row.own60;
+    lane[2] = row.own120;
+    lane[3] = row.own300;
+}
+```
 
 ### 24. Engine message route filters
 
@@ -33629,29 +33846,7 @@ bool listed(bool opening, const std::unordered_set<std::string>& opens,
 ```
 
 
-### 27. Pulling high-frequency factors on the hot path
-
-High-frequency factor windows are short and update densely. Pushing them through subscribe callbacks adds extra queuing on the strategy thread. Prefer the MD process writing shared slots and the strategy pulling by symbol and time inside its own loop. Ordinary minute factors can still use request/reply subscribe; HF slots stay callback-free fixed arrays with no heap.
-
-```cpp
-enum { kHfSlots = 16 };
-
-struct HfFactorSlot {
-    char symbol[32]{};
-    int64_t asof_ms{};
-    double values[kHfSlots]{}; // lead-lag / multi-factor window results
-};
-
-bool pull_hf(const char* symbol, int64_t t, HfFactorSlot& out) {
-    // read latest from this symbol's shared slot; no callback registration
-    const HfFactorSlot* p = find_hf_slot(symbol);
-    if (!p || p->asof_ms < t) return false;
-    out = *p;
-    return true;
-}
-```
-
-### 28. Order check-count semaphore and two-phase ledger prelock
+### 27. Order check-count semaphore and two-phase ledger prelock
 
 A serial “risk then trade-bridge” path adds risk queueing to submit latency. A lower-latency design has the strategy write the order request once; risk and the trade bridge both see it. The bridge does not send immediately: it polls a check-passed count and a reject count on the order. Config says how many risk signers are required; only when all have passed and rejects stay zero does the bridge hit the venue. Inside risk, run every check and a prelock computation without writing the shared ledger; only then commit freezes and bump the check count, so a failed path never leaves a half-applied cash lock. For market orders the freeze price can be mid or the opposite touch; the first writer wins the freeze price/qty with atomics.
 
@@ -33732,7 +33927,7 @@ void drop_late(std::unordered_map<uint64_t, Inflight>& wait, int64_t now, int64_
 ```
 
 
-### 29. Market-data gateway: full-sub filter, field patches, night-session day
+### 28. Market-data gateway: full-sub filter, field patches, night-session day
 
 Cash L2 often subscribes the whole venue. Before the open the subscribe set is flattened into a byte per name id, and the callback reads that byte, accepting everything when filtering is off. Shanghai depth snapshots often omit limit-up/down; the static instrument query writes a parallel array by the same id, and a snapshot missing the field is patched from that slot. Shanghai and Shenzhen disagree on which tick field is the book index; interpret by venue before rebuilding. Futures ActionDay in the wire message is unreliable—derive it from update time: day session matches TradingDay; after 18:00 on night session subtract one or three calendar days by weekday; Monday early morning needs its own rule. After an algo parent is created, read the latest quote already in the shared ring and feed it once so the algo need not wait for the next tick.
 
@@ -33878,7 +34073,7 @@ thread_local Tape tls_tape;
 ```
 
 
-### 30. Short venue refs, async quota, and algo-container clock fanout
+### 29. Short venue refs, async quota, and algo-container clock fanout
 
 Futures open/close budgets often live in the mid-desk. The trade bridge must not block forever on the API callback thread, and must not send before quota arrives. Open and close inserts request quota asynchronously and enter Wait; on grant or timeout the bridge sends or rejects. A close insert can pre-reserve one cancel credit so the first cancel skips a second round-trip; further cancels request again. External manual fills synthesize a feedback order to update risk views without releasing cancel credits.
 
@@ -34162,7 +34357,7 @@ Tail tail_of(int64_t left, int64_t lot, bool late) {
 }
 ```
 
-### 31. Normalize offset and direction before the order hits the ring
+### 30. Normalize offset and direction before the order hits the ring
 
 Cash names have no close-today or close-yesterday. If the instrument kind is still unknown, parse it from the symbol once and store it; later inserts do not split the string again. Stocks, bonds, funds, indexes, and repos force offset to open, so the broker never sees a meaningless close-today. Futures and options keep close semantics: SHFE (SHF) and INE rewrite a plain close into close-yesterday and leave close-today unchanged; every other venue collapses close-today and close-yesterday into a plain close. Direction folds the side into long or short: buy, margin buy, repay-stock, and subscribe are long; sell, short-sell, repay-margin, and redeem are short. A failed map fills an error code and a short text before the ring write, and the ticket never reaches the broker. When a price is present, the price is greater than 0, and the price kind is still unknown, snap the kind to limit so an algo ticket does not leave with an unset price kind. A limit kind whose absolute price is still below 1e-6 is rejected.
 
@@ -34260,7 +34455,7 @@ void close_td_then_yd(int want, Pos pos, Pend pend, int max_lot, int min_lot,
 ```
 
 
-### 32. Position queries leave the order thread and resume by cursor
+### 31. Position queries leave the order thread and resume by cursor
 
 On many cash brokers a position query is synchronous and returns a few hundred rows a page. Running it on the order thread places later orders behind the whole query. Each engine writes only its own ring, storing an account id in the slot. When the query thread folds a batch, a later request for the same account overwrites the earlier one. It then issues one broker call for every engine waiting on that account, and writes each row back to each waiting request. A full ring fails that request immediately.
 
@@ -34354,9 +34549,9 @@ public:
 ```
 
 
-### 33. Signal windows that emit parent orders
+### 32. Signal windows that emit parent orders
 
-On each clock the automatic book walks the id array built before the open, pulls fresh quotes into a local tape, then decides. The base clock scans four chains: orders, algo responses, cash, and positions. The automatic book walks only the quote-subscription ids, pulls quotes and prints, then collects parent responses. A cash query runs when margin must be rechecked, and stays off the every-tick path. The quote callback writes a slot by integer id. The subscription list is flattened into a dense id array before the open, and the clock walks that array. A parent is written straight into a free algo-ring slot: check the id base, map buy and sell onto long and short, fill a missing limit with the opposite touch, mint a unique parent id, then publish the write index. The strategy clock is the only writer of this ring. A full ring fails that parent immediately. Child slicing stays in the execution process, using the algo type stamped on the parent. The strategy base also accepts three signal subscription names, `SignalReq`, `HighFreqFactor`, and `NonstructSignal`. The automatic book’s buy and sell decision reads the pre-open signal file and the intraday tape.
+On each clock the automatic book walks the id array built before the open, pulls fresh quotes into a local tape, then decides. The base clock scans four chains: orders, algo responses, cash, and positions. The automatic book walks only the quote-subscription ids, pulls quotes and prints, then collects parent responses. A cash query runs when margin must be rechecked, and stays off the every-tick path. The quote callback writes a slot by integer id. The subscription list is flattened into a dense id array before the open, and the clock walks that array. A parent is written straight into a free algo-ring slot: check the id base, map buy and sell onto long and short, fill a missing limit with the opposite touch, mint a unique parent id, then publish the write index. The strategy clock is the only writer of this ring. A full ring fails that parent immediately. Child slicing stays in the execution process, using the algo type stamped on the parent. The automatic book’s buy and sell decision reads the pre-open signal file and the intraday tape.
 
 ```cpp
 struct Parent {
@@ -34632,7 +34827,7 @@ void cancel_other_side(int dir, Live& live) {
 ```
 
 
-### 34. Close-today, close-yesterday, and stock sellable locks
+### 33. Close-today, close-yesterday, and stock sellable locks
 
 Futures closes draw from different quantity pools according to the offset. A plain close uses total lots minus lots already locked. Close-today uses today's lots (total minus yesterday still open) minus today's locked lots (total locked minus yesterday locked). Close-yesterday uses only yesterday remaining minus yesterday locked. The three shortages return as separate results. After a plain close or a close-today, only the total lock increases. A close-yesterday increases both the total lock and the yesterday lock, and free lots are rewritten as total minus total locked. Opens do not lock position. They add min(target quantity, locked quantity) into the working counter of that side. A request whose locked quantity is already zero passes through.
 
@@ -34698,7 +34893,7 @@ int how_on_fill(const ReqSnap* snap, int rsp_how) {
 }
 ```
 
-### 35. Instrument-class fees and frozen-price backfill
+### 34. Instrument-class fees and frozen-price backfill
 
 Fees follow two formulas by instrument class. The hot path does not look up the contract master. Cash classes (stock, bond, fund, index, repo) use a multiplier of 1 and a margin ratio of 1. Every other class uses a multiplier of 100 and a margin ratio of 0.15. The caller forms notional as frozen price times frozen quantity and passes the constant 0.0003 as the second argument. The futures formula treats that constant as a rate, so the fee is notional times the rate. The cash formula treats it as a commission amount and adds it, then adds notional times the transfer rate. A sell also adds notional times the stamp rate.
 
@@ -34742,33 +34937,13 @@ bool backfill_lock(double& lock_px, int64_t& lock_qty, int64_t qty,
 }
 ```
 
-### 36. Read-only catch-up and publish watermark on the monitor
+### 35. Read-only catch-up and publish watermark on the monitor
 
-Monitoring and disk capture run in their own processes, each with its own read cursor. The high-frequency factor ring is a fixed 128 slots, the slot array sits in front of the write sequence, and the index is masked and then scaled by the slot size. A subscriber that already holds a non-negative cursor continues from there. A subscribe time earlier than the system minimum time starts at 0. Otherwise the reader walks published slots from the oldest until the first slot whose calc time is at or after the subscribe time. If none qualifies, the scan returns empty. A depth of 128 makes that walk cheaper than another time index.
-
-Pools with capacity at or below zero are skipped. When free slots fall below 5% of capacity, an alert is raised. The comparison uses the free count.
+Monitoring and disk capture run in their own processes. Pools with capacity at or below zero are skipped. When free slots fall below 5% of capacity, an alert is raised. The comparison uses the free count.
 
 Publish and consume callbacks sit on separate event loops. The leaky bucket runs on the publish thread. Water level drops by rate times elapsed milliseconds, and a negative level is clamped to zero. If the level is still under capacity, it increases by one and one message is released. Otherwise the message stays on the outbound queue until the next timer. Heartbeats use non-persistent delivery. Replies to start and stop commands use persistent delivery. Property reports are packed once the batch exceeds 100 items or 15 seconds have passed since the last send. Log reports are forwarded as they arrive. The capture side preallocates a fixed array, advances an integer index, writes count times stride in one call, then zeroes the whole slab and resets the index.
 
 ```cpp
-struct HfTape {
-    static constexpr int N = 128;
-    struct Slot { int64_t sample_ns; int64_t calc_ns; double v[8]; } slot[N];
-    uint64_t end{0};
-    uint64_t mask{N - 1};
-};
-
-int64_t catch_up(const HfTape& t, int64_t cursor, int64_t from_ns, int64_t min_ns) {
-    if (cursor >= 0) return cursor;
-    if (from_ns < min_ns) return 0;
-    if (t.end == 0) return -1;
-    for (uint64_t i = 0; i < t.end; ++i) {
-        const auto& s = t.slot[i & t.mask];
-        if (s.calc_ns >= from_ns) return static_cast<int64_t>(i);
-    }
-    return -1;
-}
-
 void watch_pool(const char* name, int64_t used, int64_t cap) {
     if (cap <= 0) return;
     if (static_cast<double>(cap - used) < static_cast<double>(cap) * 0.05)
@@ -34830,7 +35005,7 @@ void push_fresh(std::unordered_map<std::string, std::vector<std::string>>& fresh
 ```
 
 
-### 37. Process lifecycle control and host sampling
+### 36. Process lifecycle control and host sampling
 
 Start, stop, and host sampling run in two processes. The command process handles the clocks, process start and stop, and config changes. The report process handles host counters and the shared-memory log. Shared memory is created by the producers first, and the reader attaches after that. At the open, the command process writes the reader flag true and leaves the report process running, so the next start attaches with that flag. At the close, it stops the business processes, writes the flag false, and restarts the report process. The mapping comes off before the producers exit.
 
