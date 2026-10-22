@@ -3013,6 +3013,204 @@ struct BlockBuddy {
 };
 ```
 
+**Append a segment, and leave words already written where they are**
+
+A word offset stays valid when a whole segment moves. Pointers formed during construction are raw addresses of words inside the segment, and a new base leaves those addresses aimed at the old storage. The first segment supplied by the caller stays in the caller's buffer. A full segment is followed by a newly allocated one, and the old segment stays where it is. When the object fits in the same segment, the pointer stores an in-segment offset. Once the object no longer fits, the original pointer becomes a far pointer. The bottom two bits of the low 32 bits are the type, the next bit marks a two-word landing pad, the remaining bits are the segment number, and the high 32 bits are the word index in the target segment. A new object is placed in the new segment together with its landing word. The landing word is an ordinary in-segment pointer, and the object starts at the next word. When the object already lives in another segment and that segment has no spare word for a landing pad, the pad is two words. The first word is a far pointer to the object. The second word keeps the type and the length, with offset 0.
+
+New segments come from calloc, so the tail is zero. A zero word is a null pointer and a default field. Most messages fit in the first segment. A read that crosses segments looks the segment up in the table first. A huge first segment makes the zeroing of that segment the hot cost. The first segment's capacity is the caller's buffer. Each later segment takes the larger of the request and the current preference. After the first segment, the preference equals that segment's capacity. Each segment after that adds its capacity to the preference, which is the total handed out so far, and the sum is clamped near the upper bound, so the segment count follows the logarithm of the message length. A tight loop that builds small messages reuses a caller buffer that is already zero. After each message, only the written prefix is set back to zero. What is handed out is the used word count of each segment. The unused tail stays in the segment.
+
+```cpp
+#include <cstddef>
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
+
+struct SlotWord {
+    uint32_t loc = 0;
+    uint32_t meta = 0;
+
+    static constexpr uint32_t kStruct = 0;
+    static constexpr uint32_t kFar = 2;
+    static constexpr uint32_t kDouble = 4;
+
+    bool is_null() const { return loc == 0 && meta == 0; }
+
+    void aim(uint64_t* self, uint64_t* obj, uint16_t data, uint16_t ptrs) {
+        int32_t delta = (int32_t)(obj - (self + 1));
+        loc = ((uint32_t)delta << 2) | kStruct;
+        meta = (uint32_t)data | ((uint32_t)ptrs << 16);
+    }
+
+    void aim_blank() {
+        loc = 0xfffffffc;
+        meta = 0;
+    }
+
+    void set_far(uint32_t seg, uint32_t at, bool dbl) {
+        loc = (seg << 3) | (dbl ? kDouble : 0u) | kFar;
+        meta = at;
+    }
+
+    uint64_t* open(uint64_t* self, uint64_t* begin, uint64_t* end) const {
+        if ((loc & 2u) != 0) return nullptr;
+        int32_t delta = (int32_t)(loc & ~3u) >> 2;
+        uint64_t* base = self + 1;
+        ptrdiff_t lo = begin - base;
+        ptrdiff_t hi = end - base;
+        if (delta < lo || delta >= hi) return nullptr;
+        return base + delta;
+    }
+};
+
+struct SlabTape {
+    static constexpr int kMax = 8;
+    static constexpr uint32_t kCapLimit = 1u << 20;
+
+    struct Slab {
+        uint64_t* p = nullptr;
+        uint32_t cap = 0;
+        uint32_t used = 0;
+    };
+
+    struct Span {
+        uint64_t* p;
+        uint32_t n;
+    };
+
+    Slab slab[kMax]{};
+    int n = 0;
+    uint32_t prefer;
+    uint64_t* scratch;
+    uint32_t scratch_cap;
+
+    explicit SlabTape(uint64_t* buf, uint32_t cap)
+        : prefer(cap), scratch(buf), scratch_cap(cap) {}
+
+    int find(uint64_t* p) const {
+        for (int i = 0; i < n; ++i)
+            if (p >= slab[i].p && p < slab[i].p + slab[i].cap) return i;
+        return -1;
+    }
+
+    uint64_t* carve(uint32_t words) {
+        if (words == 0) return nullptr;
+        if (n > 0 && slab[n - 1].used + words <= slab[n - 1].cap) {
+            uint64_t* r = slab[n - 1].p + slab[n - 1].used;
+            slab[n - 1].used += words;
+            return r;
+        }
+        return open_slab(words);
+    }
+
+    uint64_t* open_slab(uint32_t words) {
+        if (n >= kMax) return nullptr;
+        uint32_t cap = words > prefer ? words : prefer;
+        uint64_t* p;
+        if (n == 0 && words <= scratch_cap) {
+            p = scratch;
+            cap = scratch_cap;
+        } else {
+            p = (uint64_t*)std::calloc(cap, sizeof(uint64_t));
+            if (!p) return nullptr;
+        }
+        slab[n].p = p;
+        slab[n].cap = cap;
+        slab[n].used = words;
+        if (n == 0) prefer = cap;
+        else prefer = (cap <= kCapLimit - prefer) ? prefer + cap : kCapLimit;
+        ++n;
+        return p;
+    }
+
+    int spans(Span* out) const {
+        for (int i = 0; i < n; ++i) out[i] = Span{slab[i].p, slab[i].used};
+        return n;
+    }
+
+    void recycle() {
+        if (n > 0 && slab[0].p == scratch)
+            std::memset(scratch, 0, slab[0].used * sizeof(uint64_t));
+        for (int i = 0; i < n; ++i)
+            if (slab[i].p != scratch) std::free(slab[i].p);
+        n = 0;
+        prefer = scratch_cap;
+    }
+};
+
+uint64_t* load_at(const SlabTape& tape, uint64_t* slot) {
+    auto* w = reinterpret_cast<SlotWord*>(slot);
+    if (w->is_null()) return nullptr;
+    if ((w->loc & 3u) == SlotWord::kFar) {
+        uint32_t seg = w->loc >> 3;
+        uint64_t* pad = tape.slab[seg].p + w->meta;
+        if ((w->loc & SlotWord::kDouble) == 0)
+            return load_at(tape, pad);
+        auto* hop = reinterpret_cast<SlotWord*>(pad);
+        uint32_t obj_seg = hop->loc >> 3;
+        return tape.slab[obj_seg].p + hop->meta;
+    }
+    int si = tape.find(slot);
+    if (si < 0) return nullptr;
+    const SlabTape::Slab& s = tape.slab[si];
+    return w->open(slot, s.p, s.p + s.used);
+}
+
+uint64_t* place(SlabTape& tape, uint64_t* slot, uint32_t body) {
+    auto* w = reinterpret_cast<SlotWord*>(slot);
+    if (body == 0) {
+        w->aim_blank();
+        return slot;
+    }
+    if (body > 0xffffu) return nullptr;
+    int si = tape.find(slot);
+    if (si < 0) return nullptr;
+    SlabTape::Slab& home = tape.slab[si];
+    if (home.used + body <= home.cap) {
+        uint64_t* obj = home.p + home.used;
+        home.used += body;
+        w->aim(slot, obj, (uint16_t)body, 0);
+        return obj;
+    }
+    uint64_t* pad = tape.carve(body + 1);
+    if (!pad) return nullptr;
+    int di = tape.find(pad);
+    w->set_far((uint32_t)di, (uint32_t)(pad - tape.slab[di].p), false);
+    auto* landing = reinterpret_cast<SlotWord*>(pad);
+    landing->aim(pad, pad + 1, (uint16_t)body, 0);
+    return pad + 1;
+}
+
+bool alias_across(SlabTape& tape, uint64_t* dst, uint64_t* obj, uint16_t data) {
+    int os = tape.find(obj);
+    int ds = tape.find(dst);
+    if (os < 0 || ds < 0) return false;
+    auto* w = reinterpret_cast<SlotWord*>(dst);
+    if (os == ds) {
+        w->aim(dst, obj, data, 0);
+        return true;
+    }
+    SlabTape::Slab& home = tape.slab[os];
+    if (home.used < home.cap) {
+        uint64_t* pad = home.p + home.used;
+        home.used += 1;
+        auto* landing = reinterpret_cast<SlotWord*>(pad);
+        landing->aim(pad, obj, data, 0);
+        w->set_far((uint32_t)os, (uint32_t)(pad - home.p), false);
+        return true;
+    }
+    uint64_t* pad = tape.carve(2);
+    if (!pad) return false;
+    int ps = tape.find(pad);
+    auto* hop = reinterpret_cast<SlotWord*>(pad);
+    hop->set_far((uint32_t)os, (uint32_t)(obj - tape.slab[os].p), false);
+    SlotWord* tag = hop + 1;
+    tag->loc = SlotWord::kStruct;
+    tag->meta = data;
+    w->set_far((uint32_t)ps, (uint32_t)(pad - tape.slab[ps].p), true);
+    return true;
+}
+```
+
 ### 7. Large page memory
 1. Large page memory simplifies the address translation process by increasing the granularity of a single page and reducing the page table traversal level (1GB large page level 4 becomes level 2).
 2. Because the memory page table is accessed less, the latency of a single address translation is reduced, avoiding performance losses caused by CPU waiting.
@@ -3372,6 +3570,89 @@ public:
 private:
     static constexpr size_t HPA_PAGE_SIZE_2MB = 2ULL * 1024ULL * 1024ULL;  // 2MBbig page
     static constexpr size_t HPA_PAGE_SIZE_1GB = 1ULL* 1024ULL * 1024ULL * 1024ULL;  // 1GBbig page
+};
+```
+
+
+**Pages handed to a device are not copied on fork**
+
+The device DMAs by physical page. If a fork can still copy those pages on write, the parent's next store takes a fault, the kernel installs a new physical page, and the device keeps writing the old one. Before the buffer is handed to the device, call `MADV_DONTFORK` on the whole pages. The child does not inherit that mapping. The advice is page-granular, so the caller's range is expanded to page boundaries first. The arguments are a start address and a length. Align the start down to a page, align the start plus the length up to a page, then subtract one, and the last byte stays inside the page. Subtracting one from the aligned address itself moves the range onto the previous page. When the mapping sits on a huge page, the boundary is the huge page. Advice issued at 4KiB is rejected.
+
+Overlapping registrations share a reference count. The count going from 0 to 1 is the `DONTFORK` call. The count going from 1 to 0 is the `DOFORK` call. The address space is kept as spans, each with its own count. The span is split at both ends of the range before the advice, and adjacent spans with the same count are joined afterwards. If advice fails on one span, that span's count stays put. Every span this call already changed has its count restored. A span that moved from 0 to 1, or from 1 to 0, is restored with the opposite advice as well. The buffer should occupy whole pages by itself. An object the child still needs, sitting on the same page, disappears from the child's address space together with the buffer.
+
+```cpp
+#include <cstdint>
+#include <sys/mman.h>
+#include <vector>
+
+struct ForkGap {
+    struct Span {
+        uintptr_t begin;
+        uintptr_t end;
+        int held;
+    };
+    std::vector<Span> span;
+    uintptr_t page = 4096;
+
+    void cut(uintptr_t at) {
+        for (size_t i = 0; i < span.size(); ++i) {
+            if (span[i].begin < at && at <= span[i].end) {
+                span.insert(span.begin() + i + 1,
+                            Span{at, span[i].end, span[i].held});
+                span[i].end = at - 1;
+                return;
+            }
+        }
+    }
+
+    void join() {
+        for (size_t i = 1; i < span.size();) {
+            if (span[i].held == span[i - 1].held &&
+                span[i].begin == span[i - 1].end + 1) {
+                span[i - 1].end = span[i].end;
+                span.erase(span.begin() + i);
+            } else {
+                ++i;
+            }
+        }
+    }
+
+    bool advise(uintptr_t base, size_t size, bool keep) {
+        if (!size) return true;
+        uintptr_t begin = base & ~(page - 1);
+        uintptr_t end = ((base + size + page - 1) & ~(page - 1)) - 1;
+        if (span.empty())
+            span.push_back(Span{0, UINTPTR_MAX, 0});
+        cut(begin);
+        cut(end + 1);
+        for (size_t i = 0; i < span.size(); ++i) {
+            if (span[i].end < begin || span[i].begin > end)
+                continue;
+            bool edge = (keep && span[i].held == 0) || (!keep && span[i].held == 1);
+            if (edge) {
+                void* p = reinterpret_cast<void*>(span[i].begin);
+                size_t n = span[i].end - span[i].begin + 1;
+                if (madvise(p, n, keep ? MADV_DONTFORK : MADV_DOFORK) != 0) {
+                    for (size_t j = 0; j < i; ++j) {
+                        if (span[j].end < begin || span[j].begin > end)
+                            continue;
+                        bool was_edge = keep ? span[j].held == 1 : span[j].held == 0;
+                        span[j].held += keep ? -1 : 1;
+                        if (!was_edge)
+                            continue;
+                        madvise(reinterpret_cast<void*>(span[j].begin),
+                                span[j].end - span[j].begin + 1,
+                                keep ? MADV_DOFORK : MADV_DONTFORK);
+                    }
+                    join();
+                    return false;
+                }
+            }
+            span[i].held += keep ? 1 : -1;
+        }
+        join();
+        return true;
+    }
 };
 ```
 
@@ -4700,6 +4981,35 @@ struct SlotRing {
         slot[rd].store(kEmpty, std::memory_order_release);
         rd = (rd + 1) % kCap;
         return true;
+    }
+};
+```
+
+
+**Judge in-flight count from the local tail, and reread it only near the limit**
+
+The completion tail only moves forward. The send side keeps a local copy. The in-flight count computed from that copy can only be too high, so a full queue is not treated as having space. When the count is still far from the limit, post immediately and leave the completion lock alone. Near the limit, take that lock, copy the tail into the local shadow, and compute again. The completion thread may have just advanced the tail. If the queue is still full, return failure. Most posts never reach the lock.
+
+```cpp
+#include <atomic>
+#include <cstdint>
+#include <immintrin.h>
+
+struct Lane {
+    uint32_t head = 0;
+    uint32_t shadow = 0;
+    uint32_t limit = 64;
+    uint32_t* done = nullptr;
+    std::atomic_flag* busy = nullptr;
+
+    bool room(uint32_t n) {
+        if (head - shadow + n < limit)
+            return true;
+        while (busy->test_and_set(std::memory_order_acquire))
+            _mm_pause();
+        shadow = *done;
+        busy->clear(std::memory_order_release);
+        return head - shadow + n < limit;
     }
 };
 ```
@@ -7869,6 +8179,63 @@ public:
 ```
 
 
+**The pointer word carries the layout**
+
+A pointer is one 8-byte word in memory and the same word on the wire. The low 32 bits hold a type in the bottom two bits and a signed word offset in the other 30. The offset is measured from the word after the pointer. An object placed directly after the pointer has offset 0. A struct's type bits are 0 as well, so the low 4 bytes are zero and the packer drops them. When the low 32 bits AND 2 equals 0, the pointer is a struct or a list and the offset stays inside the segment. When that AND equals 2, the pointer is a far pointer or another type, and the segment number and the word index are stored apart from this offset. The high 32 bits of a struct are the data-word count and the pointer-word count. A reader copies the length it knows: a short message supplies zeros for the missing tail, and a long message leaves the extra words in place. A list stores an element-width code in the low 3 bits of the high half and the element count above that. The all-zero word is a null pointer. An empty struct also has a zero length, and an offset of 0 is the same word as a null pointer, so an empty struct uses offset -1 and lands on the pointer word itself. Copying the word to another address keeps an offset computed for the old address. Updates are stored in place.
+
+Before following, convert the segment start and the segment end into a lower and an upper bound relative to the word after the pointer. The end is exclusive. The offset has to fall inside both bounds. Both addresses belong to the same segment and are 8-byte aligned before the subtraction. With an 8-byte pointer type the compiler subtracts the addresses in bytes, arithmetic-shifts right by 3 to get a word delta, then shifts left by 2 so the low two bits stay free for the type. When the addresses are aligned to fewer than 8 bytes, the shift writes into those two bits.
+
+```cpp
+#include <cstddef>
+#include <cstdint>
+
+struct WordRef {
+    uint32_t loc = 0;
+    uint32_t meta = 0;
+
+    static constexpr uint32_t kStruct = 0;
+    static constexpr uint32_t kList = 1;
+
+    bool is_null() const { return loc == 0 && meta == 0; }
+
+    void aim(uint64_t* self, uint64_t* obj, uint16_t data, uint16_t ptrs) {
+        int32_t delta = (int32_t)(obj - (self + 1));
+        loc = ((uint32_t)delta << 2) | kStruct;
+        meta = (uint32_t)data | ((uint32_t)ptrs << 16);
+    }
+
+    void aim_list(uint64_t* self, uint64_t* obj, uint32_t count, uint32_t width) {
+        int32_t delta = (int32_t)(obj - (self + 1));
+        loc = ((uint32_t)delta << 2) | kList;
+        meta = (count << 3) | (width & 7u);
+    }
+
+    void aim_blank() {
+        loc = 0xfffffffc;
+        meta = 0;
+    }
+
+    uint64_t* open(uint64_t* self, uint64_t* begin, uint64_t* end) const {
+        if ((loc & 2u) != 0) return nullptr;
+        int32_t delta = (int32_t)(loc & ~3u) >> 2;
+        uint64_t* base = self + 1;
+        ptrdiff_t lo = begin - base;
+        ptrdiff_t hi = end - base;
+        if (delta < lo || delta >= hi) return nullptr;
+        return base + delta;
+    }
+
+    void pull(const uint64_t* obj, uint64_t* dst, uint16_t want) const {
+        uint16_t have = (uint16_t)meta;
+        uint16_t n = have < want ? have : want;
+        for (uint16_t i = 0; i < n; ++i) dst[i] = obj[i];
+        for (uint16_t i = n; i < want; ++i) dst[i] = 0;
+    }
+};
+
+static_assert(sizeof(WordRef) == sizeof(uint64_t), "one word");
+```
+
 **4.Non-Temporal writes large data blocks**
 
 Use special instructions provided by the CPU instead of relying on`memset`Or a normal assignment statement.
@@ -7965,6 +8332,66 @@ inline volatile uint64_t* store_frame(volatile uint64_t* dst,
     _mm_sfence();
     return dst;
 }
+```
+
+
+**Write a 64-byte block into the write-combining window in ascending order**
+
+A library `memcpy` may use `rep movs`, and it may store from high addresses down toward low addresses. Write-combining memory merges the stores the CPU actually issues. A block stored backwards arrives at the device with the words reversed. Expand 64 bytes into eight 8-byte stores whose addresses only increase. A relaxed atomic store compiles to an ordinary `mov`. A sequentially consistent atomic store compiles to a locked exchange, and the write-combining buffer is drained before it fills. On a machine with a single instruction that stores 64 bytes, that instruction replaces the eight stores, and the bus still carries one transaction.
+
+```cpp
+#include <cstdint>
+#include <immintrin.h>
+
+inline void push_block(uint64_t* dest, const uint64_t* src) {
+    __atomic_store_n(dest + 0, src[0], __ATOMIC_RELAXED);
+    __atomic_store_n(dest + 1, src[1], __ATOMIC_RELAXED);
+    __atomic_store_n(dest + 2, src[2], __ATOMIC_RELAXED);
+    __atomic_store_n(dest + 3, src[3], __ATOMIC_RELAXED);
+    __atomic_store_n(dest + 4, src[4], __ATOMIC_RELAXED);
+    __atomic_store_n(dest + 5, src[5], __ATOMIC_RELAXED);
+    __atomic_store_n(dest + 6, src[6], __ATOMIC_RELAXED);
+    __atomic_store_n(dest + 7, src[7], __ATOMIC_RELAXED);
+    _mm_sfence();
+}
+```
+
+**Drain a shared write-combining register before releasing the lock**
+
+The write-combining buffer belongs to one CPU. When two threads share one device register, the drain stays inside the lock. A thread that drops the lock while its doorbell is still in that buffer lets the other thread drain first, and the device observes the later doorbell first. On x86 the atomic operation that takes the lock already separates earlier ordinary stores from the write-combining stores that follow. The entry path ends at that atomic. On a weakly ordered machine, entry still needs a write barrier once the lock is held. Before the lock is released, execute `sfence`, then exclusive-or the window offset with the window length so the next post lands in the other half. Another post into a half that has not left the CPU is merged into the same bus transaction. A register with a single writer skips the lock. It still executes one `sfence` on entry, so earlier stores to ordinary memory stay ahead of this write-combining burst.
+
+```cpp
+#include <atomic>
+#include <cstdint>
+#include <immintrin.h>
+
+struct WcWindow {
+    std::atomic_flag gate = ATOMIC_FLAG_INIT;
+    uint64_t* base = nullptr;
+    uint32_t span = 0;
+    uint32_t off = 0;
+    bool shared = false;
+
+    void enter() {
+        if (shared) {
+            while (gate.test_and_set(std::memory_order_acquire))
+                _mm_pause();
+        } else {
+            _mm_sfence();
+        }
+    }
+
+    void leave(const uint64_t* src, uint32_t nwords) {
+        auto* dst = reinterpret_cast<uint64_t*>(
+            reinterpret_cast<uint8_t*>(base) + off);
+        for (uint32_t i = 0; i < nwords; ++i)
+            __atomic_store_n(dst + i, src[i], __ATOMIC_RELAXED);
+        _mm_sfence();
+        off ^= span;
+        if (shared)
+            gate.clear(std::memory_order_release);
+    }
+};
 ```
 
 ### 18. Regarding potential optimizations of functions
@@ -8754,6 +9181,108 @@ int main() {
 }
 ```
 
+
+**A tag byte drops the zero bytes of an 8-byte word**
+
+A word is 8 bytes. A tag byte is reserved first. Each bit says whether the matching byte is nonzero, and only the nonzero bytes follow. A zero test writes 0 or 1 with `setne`, and that value is added to the output pointer. That step has no jump. A tag of 0 means the word is all zeros. The next byte is the number of further all-zero words, the current word already counted. The zeros are scanned 8 bytes at a time. The input is word-aligned, and the count stops at 255. A tag of 0xff means the word contains no zero byte. The next byte is how many following words stay uncompressed, and those words are copied unchanged. A word with fewer than two zero bytes stays in that raw run. At two zero bytes the tag form is shorter than the raw word, and that word is left for the next round.
+
+The fast path of unpacking masks each bit, and the loop body has no per-bit branch. A 1 bit subtracts from 0 to form an all-ones mask, the input byte is combined with the mask, and the input advances. A 0 bit produces a zero mask, the output byte is 0, and the input stays. This path runs when at least 10 input bytes remain, covering the tag, up to 8 data bytes, and a possible count byte, so the loop does not test the end on every byte. A shorter tail checks each byte. The output side enters the fast path only when 10 bytes of room remain. A short buffer returns, and the caller hands off the bytes already written before continuing.
+
+```cpp
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+
+struct TagPack {
+    static int squeeze(const uint8_t* in, uint32_t nbytes, uint8_t* out, uint32_t out_cap) {
+        if (nbytes % 8u != 0) return -1;
+        const uint8_t* end = in + nbytes;
+        uint8_t* o = out;
+        uint8_t* oend = out + out_cap;
+        while (in < end) {
+            if ((size_t)(oend - o) < 10) return -1;
+            uint8_t* tagp = o++;
+            uint8_t bit[8];
+            for (int i = 0; i < 8; ++i) {
+                bit[i] = in[i] != 0;
+                *o = in[i];
+                o += bit[i];
+            }
+            uint8_t tag = 0;
+            for (int i = 0; i < 8; ++i) tag = (uint8_t)(tag | (bit[i] << i));
+            *tagp = tag;
+            in += 8;
+            if (tag == 0) {
+                const auto* w = reinterpret_cast<const uint64_t*>(in);
+                const auto* lim = reinterpret_cast<const uint64_t*>(end);
+                if (lim - w > 255) lim = w + 255;
+                while (w < lim && *w == 0) ++w;
+                if (o >= oend) return -1;
+                *o++ = (uint8_t)(w - reinterpret_cast<const uint64_t*>(in));
+                in = reinterpret_cast<const uint8_t*>(w);
+            } else if (tag == 0xff) {
+                const uint8_t* run = in;
+                const uint8_t* lim = end;
+                if ((size_t)(lim - in) > 255u * 8u) lim = in + 255u * 8u;
+                while (in + 8 <= lim) {
+                    int z = 0;
+                    for (int i = 0; i < 8; ++i) z += in[i] == 0;
+                    if (z >= 2) break;
+                    in += 8;
+                }
+                uint32_t raw = (uint32_t)(in - run);
+                if ((size_t)(oend - o) < 1u + raw) return -1;
+                *o++ = (uint8_t)(raw / 8u);
+                if (raw) std::memcpy(o, run, raw);
+                o += raw;
+            }
+        }
+        return (int)(o - out);
+    }
+
+    static int expand(const uint8_t* in, uint32_t nbytes, uint8_t* out, uint32_t out_cap) {
+        const uint8_t* end = in + nbytes;
+        uint8_t* o = out;
+        uint8_t* oend = out + out_cap;
+        while (in < end) {
+            if ((size_t)(oend - o) < 8) return -1;
+            bool fast = (size_t)(end - in) >= 10;
+            uint8_t tag = *in++;
+            if (fast) {
+                for (int i = 0; i < 8; ++i) {
+                    unsigned nz = (tag >> i) & 1u;
+                    o[i] = *in & (uint8_t)(0u - nz);
+                    in += nz;
+                }
+            } else {
+                for (int i = 0; i < 8; ++i) {
+                    if (tag & (1u << i)) {
+                        if (in >= end) return -1;
+                        o[i] = *in++;
+                    } else {
+                        o[i] = 0;
+                    }
+                }
+            }
+            o += 8;
+            if (tag == 0 || tag == 0xff) {
+                if (in >= end) return -1;
+                uint32_t n = (uint32_t)(*in++) * 8u;
+                if ((size_t)(oend - o) < n) return -1;
+                if (tag == 0) {
+                    if (n) std::memset(o, 0, n);
+                } else {
+                    if ((size_t)(end - in) < n) return -1;
+                    if (n) std::memcpy(o, in, n);
+                    in += n;
+                }
+                o += n;
+            }
+        }
+        return (int)(o - out);
+    }
+};
+```
 
 ### 21. Function call optimization that cannot be inlined
 **(1) Recursion: stack overhead and cache invalidation**
@@ -10841,6 +11370,68 @@ struct BookPub {
 };
 ```
 
+**The sign of the ticket says which round a write is in, and a sample waits only for the previous round**
+
+Writers keep adding into the current counter block, and those writes run in two rounds, one after the other. Entry adds one to the entry counter, and the value after the add is the ticket. A nonnegative ticket belongs to the round that counts up from 0, and adds one to the positive completion counter on exit. A negative ticket belongs to the round that counts up from the smallest 64-bit signed value, and adds one to the negative completion counter. Tickets in one round share a sign, and the sign says which completion counter to increment on exit. Entry and exit are each one `lock xadd`, with the record between them.
+
+Before a sample switches in a new block, every writer that has already entered finishes its add. When the current entry count is negative, the next round starts at 0. When it is nonnegative, the next round starts at the signed minimum. Store that base into the next round's completion counter, then `xchg` the entry counter to the same base. A writer that arrives from then on holds a ticket for the next round. The value `xchg` returns is the previous round's entry count, and the sample waits only for that round's completion counter. The entry counter and the previous round's completion counter both count up from the same base. Once the completion counter equals the returned value, every writer from the previous round has left. The wait loop is `pause`.
+
+The next round's completion counter is stored before the `xchg`. A writer that enters afterward adds into a completion counter that already holds the base. The active pointer is exchanged before this wait. A writer that already holds a ticket from the previous round may load the pointer before that exchange or after it. A load of the old block adds into the old block before that writer leaves. A load of the new block adds into the new block. Once the completion counter catches up, the adds on the old block are finished. A writer that enters the next round loads the new pointer. One sample runs at a time.
+
+```cpp
+#include <atomic>
+#include <cstdint>
+#include <immintrin.h>
+
+struct PhaseGate {
+    std::atomic<int64_t> entered{0};
+    std::atomic<int64_t> done_pos{0};
+    std::atomic<int64_t> done_neg{INT64_MIN};
+
+    int64_t arrive() {
+        return entered.fetch_add(1, std::memory_order_acq_rel) + 1;
+    }
+
+    void depart(int64_t ticket) {
+        std::atomic<int64_t>& side = ticket < 0 ? done_neg : done_pos;
+        side.fetch_add(1, std::memory_order_release);
+    }
+
+    void flip_and_wait() {
+        int64_t cur = entered.load(std::memory_order_acquire);
+        bool to_pos = cur < 0;
+        int64_t base = to_pos ? 0 : INT64_MIN;
+        std::atomic<int64_t>& incoming = to_pos ? done_pos : done_neg;
+        incoming.store(base, std::memory_order_relaxed);
+        int64_t seen = entered.exchange(base, std::memory_order_acq_rel);
+        std::atomic<int64_t>& previous = to_pos ? done_neg : done_pos;
+        while (previous.load(std::memory_order_acquire) != seen)
+            _mm_pause();
+    }
+};
+
+struct Counter {
+    std::atomic<uint64_t> n{0};
+};
+
+struct ActiveSum {
+    PhaseGate gate;
+    std::atomic<Counter*> cell{nullptr};
+
+    void add(uint64_t v) {
+        int64_t ticket = gate.arrive();
+        cell.load(std::memory_order_acquire)->n.fetch_add(v, std::memory_order_relaxed);
+        gate.depart(ticket);
+    }
+
+    Counter* rotate(Counter* next) {
+        Counter* prev = cell.exchange(next, std::memory_order_acq_rel);
+        gate.flip_and_wait();
+        return prev;
+    }
+};
+```
+
 ### 25. Custom spin lock implementation
 in the form of a lock abstractionUsed to protect shared resource operations with extremely short execution time (much shorter than the thread context switching time), such as real-time updating of order books, capturing market data snapshots, and rapid calculation of trading signals.
 
@@ -12775,6 +13366,41 @@ list[i & 15] += 1.0f; // Suitable for arrays of size 16
 + pass `i & (2^n - 1)` Ensures that the value is within the range [0, 2^n-1]
 
 
+**5. Charge the words actually walked**
+
+Searching the pointer graph for a cycle costs more than the read itself. Each time a pointer is followed, the word count of that object is subtracted from a budget. Reading the same object twice charges it twice. The budget sits high enough that only an unreasonable message hits the top, about 8M words by default. The remaining count is loaded first, and the difference is stored only when the charge fits. An unsigned underflow wraps to a huge value, and every later check succeeds. Several threads may charge the same counter with a relaxed atomic. An update that is lost only makes the budget a little looser, and the counter still reaches the top. On x86 a relaxed atomic is an ordinary `mov`, with no lock prefix. The counter is aligned to 8 bytes. An atomic on a misaligned address on a 32-bit machine takes a lock. Depth stays on each reader's own stack, starting at 64. Each step down decrements it, a 0 stops the walk, and the matching step up increments it.
+
+```cpp
+#include <atomic>
+#include <cstdint>
+
+struct WalkBudget {
+    alignas(8) std::atomic<uint64_t> left;
+
+    explicit WalkBudget(uint64_t words) : left(words) {}
+
+    bool charge(uint64_t words) {
+        uint64_t cur = left.load(std::memory_order_relaxed);
+        if (words > cur) return false;
+        left.store(cur - words, std::memory_order_relaxed);
+        return true;
+    }
+};
+
+struct Walk {
+    WalkBudget* budget;
+    uint32_t depth;
+
+    bool enter(uint64_t words) {
+        if (depth == 0 || !budget->charge(words)) return false;
+        --depth;
+        return true;
+    }
+
+    void leave() { ++depth; }
+};
+```
+
 ### 31. wait-free programming
 + Definition: Each thread is completed in limited steps, and scheduling/suspension does not affect it; it is stronger than lock-free and eliminates starvation and unbounded spin.
 + Core mechanism: Helping cooperation, when threads encounter unfinished operations, they actively help complete them to avoid retry loops.
@@ -14157,6 +14783,104 @@ struct TickWheel {
 
 ```
 
+**Bucket a latency sample by magnitude**
+
+Latency is bucketed by relative error. Near 1 microsecond, 100 nanoseconds is its own bucket. Near 1 millisecond, the same 100 nanoseconds shares a bucket with the neighboring values. The bucket width doubles with each magnitude. Three significant figures use a half-count of 1024. From the second magnitude on, the coarsest bucket is about a thousandth of the value where that magnitude starts. The example uses a half-count of 8 and 16 magnitudes. The full-bucket count is twice the half-count, and the array length is (magnitude count + 1) times the half-count. A value whose index falls outside the array is dropped.
+
+OR the value with (full-bucket count - 1), count the leading zeros, and subtract that count from 64. The difference is the exponent of the smallest power of two strictly greater than the OR result. Every value below the full-bucket count, including 0, produces the same OR result, and its magnitude is 0. The magnitude is that exponent, minus the half-count bit width, minus 1.
+
+At magnitude 0 the index is the value itself, the bucket width is 1, and the number of buckets is the full-bucket count. In every higher magnitude the lower half already sits in the finer buckets of the previous magnitude, so this magnitude keeps only the upper half, one half-count of buckets. Shift the value right by the magnitude to get the sub-index, then subtract the half-count to place it in that upper half. This magnitude begins at (magnitude + 1) shifted left by the half-count bit width. On x86 the leading-zero count is `bsr` followed by XOR 63. The value recovered from an index is the low edge of that bucket, and the width is 1 shifted left by the magnitude.
+
+A percentile is a numerator and a denominator. 99.9% is 999 and 1000. The target count is the total times the numerator, divided by the denominator, plus one when the division leaves a remainder, and at least 1. The scan takes four counters at a time. When their sum plus the running total is still below the target, add the whole group and compare only once. When the sum has reached the target, add those four one by one and stop at the bucket that crosses it. The counters are nonnegative and the running total only grows, so the target falls in the first group that crosses it.
+
+```cpp
+#include <cstdint>
+
+struct MagBins {
+    static constexpr int kHalfBits = 3;
+    static constexpr int kHalf = 1 << kHalfBits;
+    static constexpr int kSub = kHalf << 1;
+    static constexpr int kBuckets = 16;
+    static constexpr int kLen = (kBuckets + 1) * kHalf;
+
+    int64_t bin[kLen]{};
+    int64_t total = 0;
+
+    static int index_of(uint64_t v) {
+        unsigned long long x = v | (unsigned long long)(kSub - 1);
+        int ceiling = 64 - __builtin_clzll(x);
+        int mag = ceiling - (kHalfBits + 1);
+        if (mag < 0) mag = 0;
+        int sub = (int)(v >> mag);
+        return ((mag + 1) << kHalfBits) + (sub - kHalf);
+    }
+
+    static uint64_t low_at(int index) {
+        int mag = (index >> kHalfBits) - 1;
+        int sub = (index & (kHalf - 1)) + kHalf;
+        if (mag < 0) {
+            sub -= kHalf;
+            mag = 0;
+        }
+        return (uint64_t)sub << mag;
+    }
+
+    bool add(uint64_t v) {
+        int i = index_of(v);
+        if ((unsigned)i >= (unsigned)kLen) return false;
+        bin[i] += 1;
+        ++total;
+        return true;
+    }
+
+    uint64_t percentile(int numer, int denom) const {
+        uint64_t need = 1;
+        if (total > 0) {
+            uint64_t prod = (uint64_t)total * (uint64_t)numer;
+            need = prod / (uint64_t)denom;
+            if (prod % (uint64_t)denom) ++need;
+            if (need == 0) need = 1;
+        }
+        uint64_t run = 0;
+        int i = 0;
+        int lim = kLen - (kLen % 4);
+        for (; i < lim; i += 4) {
+            uint64_t blk = (uint64_t)bin[i] + (uint64_t)bin[i + 1]
+                         + (uint64_t)bin[i + 2] + (uint64_t)bin[i + 3];
+            if (run + blk >= need) {
+                for (int j = 0; j < 4; ++j) {
+                    run += (uint64_t)bin[i + j];
+                    if (run >= need) return low_at(i + j);
+                }
+            } else {
+                run += blk;
+            }
+        }
+        for (; i < kLen; ++i) {
+            run += (uint64_t)bin[i];
+            if (run >= need) return low_at(i);
+        }
+        return low_at(kLen - 1);
+    }
+};
+```
+
+**In a closed loop, fill in the latencies the stall skipped**
+
+The next request goes out only after the previous one returns, so each interval should contribute one latency. When this one is late, the intervals in between have no sample, and the distribution gains only that one long latency. The stall is counted once, and the percentile comes out low. When the latency is greater than the interval, record the original latency, then subtract one interval at a time and record each remainder that is still at least the interval. An interval of 10 and a latency of 35 record 35, 25, and 15. An interval of 0 records only the original value, and so does a latency no greater than the interval.
+
+```cpp
+#include <cstdint>
+
+template <class Note>
+void note_paced(Note&& note, uint64_t took, uint64_t pace) {
+    note(took);
+    if (pace == 0 || took <= pace) return;
+    for (uint64_t left = took - pace; left >= pace; left -= pace)
+        note(left);
+}
+```
+
 ### 34. End-to-end latency tracing layout
 
 Use one unified trace: every node timestamp lives in a fixed-size array indexed by enum, packed into a cheap-to-copy struct.
@@ -14716,6 +15440,64 @@ struct TxKick {
 ```
 
 
+
+**A prefetch sees the next line, so the enabling field is stored last**
+
+The device prefetches the cache line after the current descriptor. If the first 4 bytes of that line are anything other than the invalid value, the device transmits from an address that has not been written yet. Every 64-byte line except the first is initialized with all-ones in those 4 bytes. The address and the key are stored first, a compiler barrier follows, and the length is stored after that. A length of 0 is stored as the value with only the top bit set. That value is distinct from the all-ones invalid mark, and the device treats it as a filled segment of length zero. The ownership word of the whole descriptor is stored last, after another barrier. Once the device observes the ownership bit for this lap, it starts executing.
+
+The prefetch distance is a fixed number of descriptors. The slot that far ahead of the current index must already be invalid. When this batch still has another descriptor, invalidate that slot immediately. For the last descriptor in the batch, ring the doorbell and invalidate afterwards. Those stores overlap the doorbell, and the doorbell does not wait for them to leave the store buffer.
+
+```cpp
+#include <cstdint>
+
+struct alignas(64) Seg {
+    uint32_t len;
+    uint32_t key;
+    uint64_t addr;
+    uint32_t own;
+    uint8_t pad[44];
+};
+
+struct SendWin {
+    static constexpr uint32_t kSlots = 16;
+    static constexpr uint32_t kAhead = 2;
+    static constexpr uint32_t kHole = 0xffffffffu;
+    static constexpr uint32_t kZero = 0x80000000u;
+    Seg seg[kSlots]{};
+    volatile uint32_t* bell = nullptr;
+    uint32_t prod = 0;
+
+    SendWin() {
+        for (auto& s : seg)
+            s.len = kHole;
+    }
+
+    void invalidate(uint32_t index) {
+        seg[(index + kAhead) & (kSlots - 1)].len = kHole;
+    }
+
+    void write_seg(uint32_t index, uint32_t nbytes, uint32_t key, uint64_t addr) {
+        Seg& s = seg[index & (kSlots - 1)];
+        s.key = key;
+        s.addr = addr;
+        asm volatile("" ::: "memory");
+        s.len = nbytes ? nbytes : kZero;
+    }
+
+    void finish(uint32_t index, uint32_t opcode, bool more) {
+        asm volatile("" ::: "memory");
+        uint32_t phase = (index & kSlots) ? 0x80000000u : 0;
+        seg[index & (kSlots - 1)].own = opcode | phase;
+        if (more) {
+            invalidate(index);
+            return;
+        }
+        *bell = prod;
+        invalidate(index);
+    }
+};
+```
+
 **Cut-through sends insert a clock gap between write buffers**
 
 Cut-through writes the frame into the NIC's write-combining window and the NIC starts transmitting while the write is still in progress. Writing slower than the line underruns that window. Writing flat out reorders PCIe transactions and the NIC assembles a corrupt frame. An `sfence` on every 64-byte buffer keeps the order, and the throughput falls below a 10G cut-through stream. The usual choice is to spin on the timestamp counter for a computed gap after each full buffer. Size the gap a little faster than the line, about twice line rate, then subtract the cost of reading the counter. Without that subtraction the spin loop's own counter reads pull the achieved rate under the line.
@@ -15155,6 +15937,45 @@ struct EvRing {
             ev = load(0);
         } while (live(ev));
         return n;
+    }
+};
+```
+
+
+**The ownership bit flips each lap, and the payload is read after it matches**
+
+When the device writes a completion record, software leaves the slot as it is. Storing an empty marker marks the line modified, and the device and the CPU pass that line back and forth. The ring length is a power of two. The expected ownership bit is the bitwise and of the consumer index and the ring length: 0 on the first lap, 1 after the index passes the ring length, and 0 again on the lap after that. The slot index is the consumer index anded with the ring length minus one. Before the slot is given to the device, the bit is stored as the opposite of the first lap's expectation, so an untouched slot is not a completion. The device writes the payload and only then stores the bit expected for the current lap. Software reads that bit and nothing else. A mismatch means there is no new record. After a match, execute `lfence`, and only then read the payload. A speculative load issued before the bit was known can already be sitting in a register. Without the barrier, the later reads reuse that stale value. A 128-byte record keeps the header that is polled in the second 64 bytes. The first 64 bytes are attached data. Until the flag in the header is set, that first half stays unread.
+
+```cpp
+#include <cstddef>
+#include <cstdint>
+#include <immintrin.h>
+
+struct DoneSlot {
+    uint8_t extra[64];
+    uint8_t body[63];
+    uint8_t own;
+};
+
+struct DoneRing {
+    static constexpr uint32_t kN = 256;
+    DoneSlot slot[kN]{};
+    uint32_t cursor = 0;
+
+    DoneRing() {
+        for (auto& s : slot)
+            s.own = 1;
+    }
+
+    const DoneSlot* poll() {
+        auto* s = &slot[cursor & (kN - 1)];
+        uint8_t expect = (cursor & kN) ? 1u : 0u;
+        auto* flag = reinterpret_cast<volatile uint8_t*>(s) + offsetof(DoneSlot, own);
+        if (*flag != expect)
+            return nullptr;
+        _mm_lfence();
+        ++cursor;
+        return s;
     }
 };
 ```
@@ -26959,6 +27780,180 @@ public:
 + **Fit**: hot path repeatedly reads fixed tags (e.g. `35`/`11`/`55`/`44`) whose values sit in a small integer range
 + **Trade-off**: larger `MaxTag` costs more memory; rare/huge tags can use a side map instead of growing the sparse array unboundedly
 + **Caveat**: repeating groups that reuse the same tag will overwrite `entries_[tag]`; handle groups with group-aware storage
+
+
+**The stop bit is the high bit, and the high group is sent first**
+
+An unsigned integer goes out in 7-bit groups. Each group occupies the low 7 bits of a byte. A high bit of 1 ends the integer. A high bit of 0 means another group follows. The high group is sent first. 0 is `80`, 127 is `FF`, 128 is `01 80`, and 300 is `02 AC`. All-ones in 64 bits occupies 10 bytes. A fixed-width integer occupies 8. The wire is shorter when values stay small, or when a price is first reduced to the gap from the previous price. The gap makes the number small. The stop bit then writes that small number in fewer bytes.
+
+A first group whose payload is 0 and whose high bit is also 0 can be written in fewer bytes, so that encoding is invalid. Encoding counts the groups, writes the stop bit in the last slot, and fills the higher groups backward into the same output. A value that fits in one or two bytes is finished immediately. When the buffer holds at least 10 bytes, the following groups are merged across that length. When an integer is split across two receives, the merged value and the number of groups already taken stay in place. The next call brings only the new bytes.
+
+```cpp
+#include <cstdint>
+#include <cstddef>
+
+struct PartialInt {
+    uint64_t value = 0;
+    unsigned groups = 0;
+};
+
+enum class Step : uint8_t { full, more, bad };
+
+struct StepResult {
+    Step step;
+    size_t used;
+};
+
+unsigned wire_len(uint64_t v) {
+    unsigned n = 1;
+    while (v >= 128) {
+        v >>= 7;
+        ++n;
+    }
+    return n;
+}
+
+size_t write_int(uint64_t v, uint8_t* dst) {
+    unsigned n = wire_len(v);
+    dst[n - 1] = static_cast<uint8_t>((v & 0x7f) | 0x80);
+    for (unsigned i = n - 1; i > 0;) {
+        v >>= 7;
+        dst[--i] = static_cast<uint8_t>(v & 0x7f);
+    }
+    return n;
+}
+
+size_t write_int_to(uint64_t v, uint8_t* dst, size_t cap) {
+    unsigned n = wire_len(v);
+    if (cap < n) return 0;
+    return write_int(v, dst);
+}
+
+StepResult read_int(const uint8_t* in, size_t len, PartialInt& st) {
+    if (len == 0) return {Step::more, 0};
+    size_t i = 0;
+    if (st.groups == 0) {
+        uint8_t b = in[i++];
+        if (b & 0x80) {
+            st.value = b & 0x7f;
+            return {Step::full, 1};
+        }
+        if (b == 0) return {Step::bad, 1};
+        st.value = b;
+        st.groups = 1;
+        if (i == len) return {Step::more, i};
+        uint8_t c = in[i++];
+        st.value = (st.value << 7) | (c & 0x7f);
+        if (c & 0x80) {
+            st.groups = 0;
+            return {Step::full, i};
+        }
+        st.groups = 2;
+        if (len >= 10) {
+            for (unsigned k = 2; k < 10; ++k) {
+                uint8_t d = in[k];
+                if (k == 9 && (st.value > (UINT64_MAX >> 7) || (d & 0x80) == 0))
+                    return {Step::bad, k + 1};
+                st.value = (st.value << 7) | (d & 0x7f);
+                if (d & 0x80) {
+                    st.groups = 0;
+                    return {Step::full, k + 1};
+                }
+            }
+            return {Step::bad, 10};
+        }
+    }
+    while (i < len) {
+        uint8_t b = in[i++];
+        if (st.groups == 9 && (st.value > (UINT64_MAX >> 7) || (b & 0x80) == 0))
+            return {Step::bad, i};
+        st.value = (st.value << 7) | (b & 0x7f);
+        if (b & 0x80) {
+            st.groups = 0;
+            return {Step::full, i};
+        }
+        ++st.groups;
+    }
+    return {Step::more, i};
+}
+```
+
+**Across receives, keep the integer progress and the unfinished quote**
+
+One receive can stop in the middle of an integer, or carry the beginning of the next quote. The stop bit ends one integer. A quote is four unsigned integers in order: contract, serial, price, volume. The parser stays with the connection. Bytes in the current buffer are shifted and merged on the spot, and they live only for this call. An unfinished integer keeps the merged value and the group count. An unfinished quote keeps the field index and the fields already written. When the fourth field is written, the quote is handed to the callback, and the same struct is reused for the next one. The callback copies the quote before it returns. The parser continues with the bytes after that only once the callback has returned. Returning complete means this input landed on a quote boundary. When the peer closes, the last quote is whole only if the parser is on a quote boundary as well. Stopping on half an integer or half a quote means later bytes are still required. On an invalid encoding, parsing stops at the offending byte.
+
+Contract 1, serial 128, price 300, volume 10 is the byte sequence `81 01 80 02 AC 8A`. A first receive of only `81 01` has finished the contract, and the serial has only its high group.
+
+```cpp
+#include <cstdint>
+#include <cstddef>
+
+enum class Step : uint8_t { full, more, bad };
+
+struct StepResult {
+    Step step;
+    size_t used;
+};
+
+struct L1Msg {
+    uint64_t word[4]{};
+};
+
+struct L1Parser {
+    L1Msg msg{};
+    uint64_t acc = 0;
+    unsigned groups = 0;
+    unsigned field = 0;
+    bool broken = false;
+
+    bool at_boundary() const {
+        return !broken && field == 0 && groups == 0;
+    }
+
+    StepResult pull(const uint8_t* p, size_t n) {
+        size_t i = 0;
+        if (n == 0) return {Step::more, 0};
+        while (i < n) {
+            uint8_t b = p[i++];
+            if (groups == 0) {
+                if (b == 0) return {Step::bad, i};
+                acc = b & 0x7f;
+            } else {
+                if (groups == 9 && (acc > (UINT64_MAX >> 7) || (b & 0x80) == 0))
+                    return {Step::bad, i};
+                acc = (acc << 7) | (b & 0x7f);
+            }
+            if (b & 0x80) {
+                groups = 0;
+                return {Step::full, i};
+            }
+            ++groups;
+        }
+        return {Step::more, i};
+    }
+
+    template <class Fn>
+    StepResult ingest(const uint8_t* in, size_t len, Fn&& fn) {
+        if (broken) return {Step::bad, 0};
+        size_t used = 0;
+        while (used < len) {
+            StepResult r = pull(in + used, len - used);
+            used += r.used;
+            if (r.step == Step::bad) {
+                broken = true;
+                return {Step::bad, used};
+            }
+            if (r.step == Step::more) return {Step::more, used};
+            msg.word[field] = acc;
+            if (++field == 4) {
+                fn(msg);
+                field = 0;
+            }
+        }
+        return {at_boundary() ? Step::full : Step::more, used};
+    }
+};
+```
 
 
 ### 4. Message middleware (zmq)

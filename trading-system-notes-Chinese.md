@@ -3016,6 +3016,204 @@ struct BlockBuddy {
 };
 ```
 
+**段只往后加，已写的字留在原地**
+
+段内的字偏移在整段一起搬家时仍然有效。构造过程里已经形成的是段内某个字的裸指针，段的基址一变，这些指针还指着旧地址。调用方交来的第一段留在调用方的缓冲区里。一段写满就另分配一段，旧段留在原地。同一段里放得下，指针写成段内偏移。放不下，原来的指针改成远指针：低 32 位的最低两位是类型，再上一位是两字落点的标志，其余位是段号，高 32 位是目标段里的字下标。新对象连同落点一起放到新段里。落点是普通的段内指针，对象紧跟在它后面。对象已经在另一段里，而那一段没有空字可以放落点时，落点换成两个字：前一个字是指向对象的远指针，后一个字只留下类型和长度，偏移为 0。
+
+新段来自 calloc，尾部是零。零字是空指针，也是默认字段。多数报文落在第一段里。跨段读取要先查段表。第一段太大，每次把整段清零会成为热点。第一段的容量就是调用方给的缓冲区。后面每一段取这次申请的字数和当前偏好里较大的那个。第一段分出之后，偏好等于这一段的容量。以后每分出一段，偏好加上这一段的容量，也就是到目前为止的总量，接近上限时截断，段数随报文长度成对数。循环里造小报文时，第一段用已经清零的缓冲区。用完只把这次写过的前缀再写成 0。对外交出的是每段里用过的字数，多分配的尾部留在段里。
+
+```cpp
+#include <cstddef>
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
+
+struct SlotWord {
+    uint32_t loc = 0;
+    uint32_t meta = 0;
+
+    static constexpr uint32_t kStruct = 0;
+    static constexpr uint32_t kFar = 2;
+    static constexpr uint32_t kDouble = 4;
+
+    bool is_null() const { return loc == 0 && meta == 0; }
+
+    void aim(uint64_t* self, uint64_t* obj, uint16_t data, uint16_t ptrs) {
+        int32_t delta = (int32_t)(obj - (self + 1));
+        loc = ((uint32_t)delta << 2) | kStruct;
+        meta = (uint32_t)data | ((uint32_t)ptrs << 16);
+    }
+
+    void aim_blank() {
+        loc = 0xfffffffc;
+        meta = 0;
+    }
+
+    void set_far(uint32_t seg, uint32_t at, bool dbl) {
+        loc = (seg << 3) | (dbl ? kDouble : 0u) | kFar;
+        meta = at;
+    }
+
+    uint64_t* open(uint64_t* self, uint64_t* begin, uint64_t* end) const {
+        if ((loc & 2u) != 0) return nullptr;
+        int32_t delta = (int32_t)(loc & ~3u) >> 2;
+        uint64_t* base = self + 1;
+        ptrdiff_t lo = begin - base;
+        ptrdiff_t hi = end - base;
+        if (delta < lo || delta >= hi) return nullptr;
+        return base + delta;
+    }
+};
+
+struct SlabTape {
+    static constexpr int kMax = 8;
+    static constexpr uint32_t kCapLimit = 1u << 20;
+
+    struct Slab {
+        uint64_t* p = nullptr;
+        uint32_t cap = 0;
+        uint32_t used = 0;
+    };
+
+    struct Span {
+        uint64_t* p;
+        uint32_t n;
+    };
+
+    Slab slab[kMax]{};
+    int n = 0;
+    uint32_t prefer;
+    uint64_t* scratch;
+    uint32_t scratch_cap;
+
+    explicit SlabTape(uint64_t* buf, uint32_t cap)
+        : prefer(cap), scratch(buf), scratch_cap(cap) {}
+
+    int find(uint64_t* p) const {
+        for (int i = 0; i < n; ++i)
+            if (p >= slab[i].p && p < slab[i].p + slab[i].cap) return i;
+        return -1;
+    }
+
+    uint64_t* carve(uint32_t words) {
+        if (words == 0) return nullptr;
+        if (n > 0 && slab[n - 1].used + words <= slab[n - 1].cap) {
+            uint64_t* r = slab[n - 1].p + slab[n - 1].used;
+            slab[n - 1].used += words;
+            return r;
+        }
+        return open_slab(words);
+    }
+
+    uint64_t* open_slab(uint32_t words) {
+        if (n >= kMax) return nullptr;
+        uint32_t cap = words > prefer ? words : prefer;
+        uint64_t* p;
+        if (n == 0 && words <= scratch_cap) {
+            p = scratch;
+            cap = scratch_cap;
+        } else {
+            p = (uint64_t*)std::calloc(cap, sizeof(uint64_t));
+            if (!p) return nullptr;
+        }
+        slab[n].p = p;
+        slab[n].cap = cap;
+        slab[n].used = words;
+        if (n == 0) prefer = cap;
+        else prefer = (cap <= kCapLimit - prefer) ? prefer + cap : kCapLimit;
+        ++n;
+        return p;
+    }
+
+    int spans(Span* out) const {
+        for (int i = 0; i < n; ++i) out[i] = Span{slab[i].p, slab[i].used};
+        return n;
+    }
+
+    void recycle() {
+        if (n > 0 && slab[0].p == scratch)
+            std::memset(scratch, 0, slab[0].used * sizeof(uint64_t));
+        for (int i = 0; i < n; ++i)
+            if (slab[i].p != scratch) std::free(slab[i].p);
+        n = 0;
+        prefer = scratch_cap;
+    }
+};
+
+uint64_t* load_at(const SlabTape& tape, uint64_t* slot) {
+    auto* w = reinterpret_cast<SlotWord*>(slot);
+    if (w->is_null()) return nullptr;
+    if ((w->loc & 3u) == SlotWord::kFar) {
+        uint32_t seg = w->loc >> 3;
+        uint64_t* pad = tape.slab[seg].p + w->meta;
+        if ((w->loc & SlotWord::kDouble) == 0)
+            return load_at(tape, pad);
+        auto* hop = reinterpret_cast<SlotWord*>(pad);
+        uint32_t obj_seg = hop->loc >> 3;
+        return tape.slab[obj_seg].p + hop->meta;
+    }
+    int si = tape.find(slot);
+    if (si < 0) return nullptr;
+    const SlabTape::Slab& s = tape.slab[si];
+    return w->open(slot, s.p, s.p + s.used);
+}
+
+uint64_t* place(SlabTape& tape, uint64_t* slot, uint32_t body) {
+    auto* w = reinterpret_cast<SlotWord*>(slot);
+    if (body == 0) {
+        w->aim_blank();
+        return slot;
+    }
+    if (body > 0xffffu) return nullptr;
+    int si = tape.find(slot);
+    if (si < 0) return nullptr;
+    SlabTape::Slab& home = tape.slab[si];
+    if (home.used + body <= home.cap) {
+        uint64_t* obj = home.p + home.used;
+        home.used += body;
+        w->aim(slot, obj, (uint16_t)body, 0);
+        return obj;
+    }
+    uint64_t* pad = tape.carve(body + 1);
+    if (!pad) return nullptr;
+    int di = tape.find(pad);
+    w->set_far((uint32_t)di, (uint32_t)(pad - tape.slab[di].p), false);
+    auto* landing = reinterpret_cast<SlotWord*>(pad);
+    landing->aim(pad, pad + 1, (uint16_t)body, 0);
+    return pad + 1;
+}
+
+bool alias_across(SlabTape& tape, uint64_t* dst, uint64_t* obj, uint16_t data) {
+    int os = tape.find(obj);
+    int ds = tape.find(dst);
+    if (os < 0 || ds < 0) return false;
+    auto* w = reinterpret_cast<SlotWord*>(dst);
+    if (os == ds) {
+        w->aim(dst, obj, data, 0);
+        return true;
+    }
+    SlabTape::Slab& home = tape.slab[os];
+    if (home.used < home.cap) {
+        uint64_t* pad = home.p + home.used;
+        home.used += 1;
+        auto* landing = reinterpret_cast<SlotWord*>(pad);
+        landing->aim(pad, obj, data, 0);
+        w->set_far((uint32_t)os, (uint32_t)(pad - home.p), false);
+        return true;
+    }
+    uint64_t* pad = tape.carve(2);
+    if (!pad) return false;
+    int ps = tape.find(pad);
+    auto* hop = reinterpret_cast<SlotWord*>(pad);
+    hop->set_far((uint32_t)os, (uint32_t)(obj - tape.slab[os].p), false);
+    SlotWord* tag = hop + 1;
+    tag->loc = SlotWord::kStruct;
+    tag->meta = data;
+    w->set_far((uint32_t)ps, (uint32_t)(pad - tape.slab[ps].p), true);
+    return true;
+}
+```
+
 ### 7. 大页内存
 1. 大页内存通过增大单页粒度，减少页表遍历层级（1GB大页 4 级变 2 级），简化地址转换流程。
 2. 因少访问内存页表，单次地址转换延迟降低，避免 CPU 等待带来的性能损耗。
@@ -3378,6 +3576,89 @@ private:
 };
 ```
 
+
+
+**交给设备的页在 fork 时不要复制**
+
+设备按物理页做 DMA。这段内存若在 fork 时仍会写时复制，父进程下一次写入会缺页，换成一张新的物理页，设备仍写着旧页。交给设备之前对整页调用 `MADV_DONTFORK`，子进程不继承这段映射。建议的粒度是页，调用区间先扩到页边界。参数用起始地址和长度。起始地址向下对齐到页，起始地址加长度再向上对齐到页，然后减一，最后一个字节落在页内。页对齐的地址本身再减一，区间会退到前一页。映射落在大页上时按大页对齐，按 4KiB 去建议会被内核拒绝。
+
+同一区间多次注册时，引用计数从 0 变 1 才做 `DONTFORK`，从 1 变 0 才做 `DOFORK`。地址空间按段记下计数。建议之前先在区间两端把段切开，相邻且计数相同的段再并回去。某一页建议失败，这一页的计数不动。这次调用里已经改过的段把计数退回；其中从 0 加到 1 或从 1 减到 0 的段，再用相反的建议退回。缓冲独占整页。同一页上还有子进程要用的对象，整页都会从子进程的地址空间里消失。
+
+```cpp
+#include <cstdint>
+#include <sys/mman.h>
+#include <vector>
+
+struct ForkGap {
+    struct Span {
+        uintptr_t begin;
+        uintptr_t end;
+        int held;
+    };
+    std::vector<Span> span;
+    uintptr_t page = 4096;
+
+    void cut(uintptr_t at) {
+        for (size_t i = 0; i < span.size(); ++i) {
+            if (span[i].begin < at && at <= span[i].end) {
+                span.insert(span.begin() + i + 1,
+                            Span{at, span[i].end, span[i].held});
+                span[i].end = at - 1;
+                return;
+            }
+        }
+    }
+
+    void join() {
+        for (size_t i = 1; i < span.size();) {
+            if (span[i].held == span[i - 1].held &&
+                span[i].begin == span[i - 1].end + 1) {
+                span[i - 1].end = span[i].end;
+                span.erase(span.begin() + i);
+            } else {
+                ++i;
+            }
+        }
+    }
+
+    bool advise(uintptr_t base, size_t size, bool keep) {
+        if (!size) return true;
+        uintptr_t begin = base & ~(page - 1);
+        uintptr_t end = ((base + size + page - 1) & ~(page - 1)) - 1;
+        if (span.empty())
+            span.push_back(Span{0, UINTPTR_MAX, 0});
+        cut(begin);
+        cut(end + 1);
+        for (size_t i = 0; i < span.size(); ++i) {
+            if (span[i].end < begin || span[i].begin > end)
+                continue;
+            bool edge = (keep && span[i].held == 0) || (!keep && span[i].held == 1);
+            if (edge) {
+                void* p = reinterpret_cast<void*>(span[i].begin);
+                size_t n = span[i].end - span[i].begin + 1;
+                if (madvise(p, n, keep ? MADV_DONTFORK : MADV_DOFORK) != 0) {
+                    for (size_t j = 0; j < i; ++j) {
+                        if (span[j].end < begin || span[j].begin > end)
+                            continue;
+                        bool was_edge = keep ? span[j].held == 1 : span[j].held == 0;
+                        span[j].held += keep ? -1 : 1;
+                        if (!was_edge)
+                            continue;
+                        madvise(reinterpret_cast<void*>(span[j].begin),
+                                span[j].end - span[j].begin + 1,
+                                keep ? MADV_DOFORK : MADV_DONTFORK);
+                    }
+                    join();
+                    return false;
+                }
+            }
+            span[i].held += keep ? 1 : -1;
+        }
+        join();
+        return true;
+    }
+};
+```
 
 ### 8. 内联及内联汇编
 inline相关内容
@@ -4708,6 +4989,35 @@ struct SlotRing {
         slot[rd].store(kEmpty, std::memory_order_release);
         rd = (rd + 1) % kCap;
         return true;
+    }
+};
+```
+
+
+**在途数用本地尾先判，接近容量再重读**
+
+完成尾只向前走。发送侧留一份本地尾，用它算出来的在途数只会偏大，满的队列不会被看成还有空位。离容量还远就直接提交，不碰完成侧的锁。接近容量时，在完成侧那把锁里把尾读进本地副本再算一次。完成线程可能刚刚推进了尾。这次仍满就返回失败。大多数提交走不到这把锁。
+
+```cpp
+#include <atomic>
+#include <cstdint>
+#include <immintrin.h>
+
+struct Lane {
+    uint32_t head = 0;
+    uint32_t shadow = 0;
+    uint32_t limit = 64;
+    uint32_t* done = nullptr;
+    std::atomic_flag* busy = nullptr;
+
+    bool room(uint32_t n) {
+        if (head - shadow + n < limit)
+            return true;
+        while (busy->test_and_set(std::memory_order_acquire))
+            _mm_pause();
+        shadow = *done;
+        busy->clear(std::memory_order_release);
+        return head - shadow + n < limit;
     }
 };
 ```
@@ -7864,6 +8174,63 @@ public:
 ```
 
 
+**指针字里带着布局**
+
+指针在内存里是一个 8 字节的字，报文里也是这个字。低 32 位的最低两位是类型，上面 30 位是有符号的字偏移，从指针后面那一个字算起。对象紧挨着指针时偏移是 0。结构体的类型位也是 0，低 4 个字节全是零，打包时被收掉。低两位与 2 相与得 0，是结构体或列表，按这个偏移在段内往下找。与 2 相与得 2，是远指针或其他类型，段号和字下标另放。高 32 位对结构体是数据区字数和指针区字数。读者按自己认识的长度来取：报文短，缺的尾部当零；报文长，多出来的字留在原地。列表把元素宽度的编码放在高 32 位的低 3 位，元素个数放在上面。全零的字是空指针。空结构的长度也是零，偏移写成 0 会和空指针变成同一个字，所以空结构的偏移写成 -1，目标落在指针自己身上。这个字拷到别的地址之后，偏移仍按原来的位置解释。改指针就地写。
+
+跟随之前，把段首和段尾相对指针后面那个字的距离算成下界和上界，段尾按开区间。偏移同时落在这两界里才继续。两个地址都落在同一段里，并且按 8 字节对齐之后再相减。指针按 8 字节取值时，编译器先做字节相减，算术右移 3 位得到字差，再左移 2 位，低两位留给类型。地址没有按 8 字节对齐时，这次移位会写进这两位。
+
+```cpp
+#include <cstddef>
+#include <cstdint>
+
+struct WordRef {
+    uint32_t loc = 0;
+    uint32_t meta = 0;
+
+    static constexpr uint32_t kStruct = 0;
+    static constexpr uint32_t kList = 1;
+
+    bool is_null() const { return loc == 0 && meta == 0; }
+
+    void aim(uint64_t* self, uint64_t* obj, uint16_t data, uint16_t ptrs) {
+        int32_t delta = (int32_t)(obj - (self + 1));
+        loc = ((uint32_t)delta << 2) | kStruct;
+        meta = (uint32_t)data | ((uint32_t)ptrs << 16);
+    }
+
+    void aim_list(uint64_t* self, uint64_t* obj, uint32_t count, uint32_t width) {
+        int32_t delta = (int32_t)(obj - (self + 1));
+        loc = ((uint32_t)delta << 2) | kList;
+        meta = (count << 3) | (width & 7u);
+    }
+
+    void aim_blank() {
+        loc = 0xfffffffc;
+        meta = 0;
+    }
+
+    uint64_t* open(uint64_t* self, uint64_t* begin, uint64_t* end) const {
+        if ((loc & 2u) != 0) return nullptr;
+        int32_t delta = (int32_t)(loc & ~3u) >> 2;
+        uint64_t* base = self + 1;
+        ptrdiff_t lo = begin - base;
+        ptrdiff_t hi = end - base;
+        if (delta < lo || delta >= hi) return nullptr;
+        return base + delta;
+    }
+
+    void pull(const uint64_t* obj, uint64_t* dst, uint16_t want) const {
+        uint16_t have = (uint16_t)meta;
+        uint16_t n = have < want ? have : want;
+        for (uint16_t i = 0; i < n; ++i) dst[i] = obj[i];
+        for (uint16_t i = n; i < want; ++i) dst[i] = 0;
+    }
+};
+
+static_assert(sizeof(WordRef) == sizeof(uint64_t), "one word");
+```
+
 **4.Non-Temporal写大数据块**
 
 使用CPU提供的特殊指令，而不是依赖`memset`或普通的赋值语句。
@@ -7960,6 +8327,66 @@ inline volatile uint64_t* store_frame(volatile uint64_t* dst,
     _mm_sfence();
     return dst;
 }
+```
+
+
+**64 字节按地址递增写进写合并窗口**
+
+`memcpy` 可能走 `rep movs`，也可能从高地址往低地址写。写合并映射按 CPU 实际发出的 store 合并。倒着写出去的一段，设备读到的字序是反的。64 字节展开成 8 次地址只增不减的 8 字节写。存储用宽松原子，生成的是普通 `mov`。顺序一致的原子存储会变成带锁前缀的交换，写合并缓冲还没满就被排空。机器若提供一次写入 64 字节的存储指令，这一段改用那条指令，总线上仍是一个事务。
+
+```cpp
+#include <cstdint>
+#include <immintrin.h>
+
+inline void push_block(uint64_t* dest, const uint64_t* src) {
+    __atomic_store_n(dest + 0, src[0], __ATOMIC_RELAXED);
+    __atomic_store_n(dest + 1, src[1], __ATOMIC_RELAXED);
+    __atomic_store_n(dest + 2, src[2], __ATOMIC_RELAXED);
+    __atomic_store_n(dest + 3, src[3], __ATOMIC_RELAXED);
+    __atomic_store_n(dest + 4, src[4], __ATOMIC_RELAXED);
+    __atomic_store_n(dest + 5, src[5], __ATOMIC_RELAXED);
+    __atomic_store_n(dest + 6, src[6], __ATOMIC_RELAXED);
+    __atomic_store_n(dest + 7, src[7], __ATOMIC_RELAXED);
+    _mm_sfence();
+}
+```
+
+**共用的写合并寄存器先排空再放锁**
+
+写合并缓冲按核分开。两个线程共用一块设备寄存器时，排空留在锁里面。一个线程把门铃留在自己的缓冲里就放锁，另一个线程先排空，设备会先看见后一个门铃。x86 上加锁的原子操作已经把临界区前面的普通写和后面的写合并写隔开，进锁不必再加 `sfence`。弱序机器上进锁之后还要补一条写屏障。放锁前先 `sfence`，再把窗口偏移异或窗口长度，下一次写落到另一半。同一半还没离开 CPU 就接着写，后一次会和前一次并进同一个事务。只有一个线程写这块寄存器时不必加锁，进入时仍做一次 `sfence`，把前面的普通内存写和这次写合并写分开。
+
+```cpp
+#include <atomic>
+#include <cstdint>
+#include <immintrin.h>
+
+struct WcWindow {
+    std::atomic_flag gate = ATOMIC_FLAG_INIT;
+    uint64_t* base = nullptr;
+    uint32_t span = 0;
+    uint32_t off = 0;
+    bool shared = false;
+
+    void enter() {
+        if (shared) {
+            while (gate.test_and_set(std::memory_order_acquire))
+                _mm_pause();
+        } else {
+            _mm_sfence();
+        }
+    }
+
+    void leave(const uint64_t* src, uint32_t nwords) {
+        auto* dst = reinterpret_cast<uint64_t*>(
+            reinterpret_cast<uint8_t*>(base) + off);
+        for (uint32_t i = 0; i < nwords; ++i)
+            __atomic_store_n(dst + i, src[i], __ATOMIC_RELAXED);
+        _mm_sfence();
+        off ^= span;
+        if (shared)
+            gate.clear(std::memory_order_release);
+    }
+};
 ```
 
 ### 18. 关于函数的潜在优化
@@ -8745,6 +9172,108 @@ int main() {
 }
 ```
 
+
+**用标记字节收掉一个字里的零字节**
+
+一个字 8 个字节。先占一个标记字节，每一位表示对应字节非零，后面只跟那些非零字节。字节是否为 0 用 `setne` 写成 0 或 1，输出指针加上这个值，这一步没有跳转。标记是 0，这个字全是零，后面一个字节是后续连续全零字的个数，当前这个字已经算过。全零按 8 字节来扫，输入按字对齐，个数最多 255。标记是 0xff，这个字没有零字节，后面一个字节是紧跟着的原文段有几个字，再把这些字原样抄上。一个字里的零字节少于两个，就留在这段原文里。零字节达到两个，标记形式比原文短，这个字留给下一轮单独压。
+
+展开的快路径按位做掩码，循环体里没有按位跳转。该位是 1，用 0 减去这个 1 得到全 1 的掩码，输入字节和掩码相与后写入，输入前进。该位是 0，掩码是 0，输出写 0，输入不动。输入至少还剩 10 个字节时走这条路径，标记、最多 8 个数据字节、以及可能出现的计数字节一次处理完，循环里不再逐字节查边界。更短的尾巴逐字节检查。输出至少还剩 10 字节才进入快路径。空间不够就返回，调用方把已经写好的字节交出去之后再继续。
+
+```cpp
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+
+struct TagPack {
+    static int squeeze(const uint8_t* in, uint32_t nbytes, uint8_t* out, uint32_t out_cap) {
+        if (nbytes % 8u != 0) return -1;
+        const uint8_t* end = in + nbytes;
+        uint8_t* o = out;
+        uint8_t* oend = out + out_cap;
+        while (in < end) {
+            if ((size_t)(oend - o) < 10) return -1;
+            uint8_t* tagp = o++;
+            uint8_t bit[8];
+            for (int i = 0; i < 8; ++i) {
+                bit[i] = in[i] != 0;
+                *o = in[i];
+                o += bit[i];
+            }
+            uint8_t tag = 0;
+            for (int i = 0; i < 8; ++i) tag = (uint8_t)(tag | (bit[i] << i));
+            *tagp = tag;
+            in += 8;
+            if (tag == 0) {
+                const auto* w = reinterpret_cast<const uint64_t*>(in);
+                const auto* lim = reinterpret_cast<const uint64_t*>(end);
+                if (lim - w > 255) lim = w + 255;
+                while (w < lim && *w == 0) ++w;
+                if (o >= oend) return -1;
+                *o++ = (uint8_t)(w - reinterpret_cast<const uint64_t*>(in));
+                in = reinterpret_cast<const uint8_t*>(w);
+            } else if (tag == 0xff) {
+                const uint8_t* run = in;
+                const uint8_t* lim = end;
+                if ((size_t)(lim - in) > 255u * 8u) lim = in + 255u * 8u;
+                while (in + 8 <= lim) {
+                    int z = 0;
+                    for (int i = 0; i < 8; ++i) z += in[i] == 0;
+                    if (z >= 2) break;
+                    in += 8;
+                }
+                uint32_t raw = (uint32_t)(in - run);
+                if ((size_t)(oend - o) < 1u + raw) return -1;
+                *o++ = (uint8_t)(raw / 8u);
+                if (raw) std::memcpy(o, run, raw);
+                o += raw;
+            }
+        }
+        return (int)(o - out);
+    }
+
+    static int expand(const uint8_t* in, uint32_t nbytes, uint8_t* out, uint32_t out_cap) {
+        const uint8_t* end = in + nbytes;
+        uint8_t* o = out;
+        uint8_t* oend = out + out_cap;
+        while (in < end) {
+            if ((size_t)(oend - o) < 8) return -1;
+            bool fast = (size_t)(end - in) >= 10;
+            uint8_t tag = *in++;
+            if (fast) {
+                for (int i = 0; i < 8; ++i) {
+                    unsigned nz = (tag >> i) & 1u;
+                    o[i] = *in & (uint8_t)(0u - nz);
+                    in += nz;
+                }
+            } else {
+                for (int i = 0; i < 8; ++i) {
+                    if (tag & (1u << i)) {
+                        if (in >= end) return -1;
+                        o[i] = *in++;
+                    } else {
+                        o[i] = 0;
+                    }
+                }
+            }
+            o += 8;
+            if (tag == 0 || tag == 0xff) {
+                if (in >= end) return -1;
+                uint32_t n = (uint32_t)(*in++) * 8u;
+                if ((size_t)(oend - o) < n) return -1;
+                if (tag == 0) {
+                    if (n) std::memset(o, 0, n);
+                } else {
+                    if ((size_t)(end - in) < n) return -1;
+                    if (n) std::memcpy(o, in, n);
+                    in += n;
+                }
+                o += n;
+            }
+        }
+        return (int)(o - out);
+    }
+};
+```
 
 ### 21. 无法内联的函数调用优化
 **（1）递归（Recursion）：栈开销与缓存失效**
@@ -10808,6 +11337,68 @@ struct BookPub {
 };
 ```
 
+**票据的正负标出写在哪一轮，采样只等上一轮**
+
+写线程一直往当前这块计数上加，这些写分成前后两轮。进入时把进入计数加一，加完得到的值是票据。票据非负，这笔写属于从 0 往上数的一轮，离开时给正完成计数加一。票据为负，属于从 64 位有符号最小值往上数的一轮，离开时给负完成计数加一。同一轮的票据符号相同，看符号就知道离开时该加哪一个完成计数。进入和离开各是一条 `lock xadd`，中间是这次记录。
+
+采样换成新的一块之前，已经进入的写要把这一次加法做完。当前进入计数是负数，下一轮从 0 开始。当前非负，下一轮从有符号最小值开始。先把下一轮的完成计数写成这个起点，再用 `xchg` 把进入计数换成同一个起点。新来的写从此拿到下一轮的票据。`xchg` 带回的是上一轮的进入计数，采样只等上一轮的完成计数。进入计数和上一轮的完成计数从同一个起点往上加，完成计数等于带回的值，上一轮的写就都离开了。等待循环里是 `pause`。
+
+下一轮的完成计数写在 `xchg` 之前。新进来的写离开时，加到的是已经设好起点的完成计数。活跃指针在这次等待之前交换。上一轮里已经拿到票据的写，读指针可能在交换前，也可能在交换后。读到旧块，这一笔在离开前加进旧块；读到新块，加进的是新块。等完成计数追上之后，旧块上的加法已经结束。进入下一轮的写读到的是新指针。同一时刻只跑一次采样。
+
+```cpp
+#include <atomic>
+#include <cstdint>
+#include <immintrin.h>
+
+struct PhaseGate {
+    std::atomic<int64_t> entered{0};
+    std::atomic<int64_t> done_pos{0};
+    std::atomic<int64_t> done_neg{INT64_MIN};
+
+    int64_t arrive() {
+        return entered.fetch_add(1, std::memory_order_acq_rel) + 1;
+    }
+
+    void depart(int64_t ticket) {
+        std::atomic<int64_t>& side = ticket < 0 ? done_neg : done_pos;
+        side.fetch_add(1, std::memory_order_release);
+    }
+
+    void flip_and_wait() {
+        int64_t cur = entered.load(std::memory_order_acquire);
+        bool to_pos = cur < 0;
+        int64_t base = to_pos ? 0 : INT64_MIN;
+        std::atomic<int64_t>& incoming = to_pos ? done_pos : done_neg;
+        incoming.store(base, std::memory_order_relaxed);
+        int64_t seen = entered.exchange(base, std::memory_order_acq_rel);
+        std::atomic<int64_t>& previous = to_pos ? done_neg : done_pos;
+        while (previous.load(std::memory_order_acquire) != seen)
+            _mm_pause();
+    }
+};
+
+struct Counter {
+    std::atomic<uint64_t> n{0};
+};
+
+struct ActiveSum {
+    PhaseGate gate;
+    std::atomic<Counter*> cell{nullptr};
+
+    void add(uint64_t v) {
+        int64_t ticket = gate.arrive();
+        cell.load(std::memory_order_acquire)->n.fetch_add(v, std::memory_order_relaxed);
+        gate.depart(ticket);
+    }
+
+    Counter* rotate(Counter* next) {
+        Counter* prev = cell.exchange(next, std::memory_order_acq_rel);
+        gate.flip_and_wait();
+        return prev;
+    }
+};
+```
+
 ### 25. 自定义自旋锁实现
 以锁的抽象方式用于保护执行时间极短（远短于线程上下文切换耗时）的共享资源操作，如订单簿实时更新、行情数据快照抓取、交易信号快速计算等场景。
 
@@ -12743,6 +13334,41 @@ list[i & 15] += 1.0f;  // 适用于大小为16的数组
 
 
 
+**5. 按走过的字数扣预算**
+
+顺着指针找环，比这次读取本身更贵。每次跟着指针走进去，把这段的字数从预算里扣掉。同一段被读两次会扣两次。预算放到只有不合理的报文才会触顶，默认大约 8M 个字。先读出剩余，剩余够才写入差值。无符号下溢会绕成一个很大的数，后面的检查都会通过。几个线程可以同时扣同一个计数，用宽松原子。丢失的那一次更新只让预算比实际松一点，最终仍会触顶。宽松序在 x86 上是普通的 `mov`，没有锁前缀。计数器按 8 字节对齐，32 位上对未对齐地址做原子操作会走锁。深度留在每个读者自己的栈上，从 64 起，每跟进一层减一，减到 0 就停，回到上一层再加回去。
+
+```cpp
+#include <atomic>
+#include <cstdint>
+
+struct WalkBudget {
+    alignas(8) std::atomic<uint64_t> left;
+
+    explicit WalkBudget(uint64_t words) : left(words) {}
+
+    bool charge(uint64_t words) {
+        uint64_t cur = left.load(std::memory_order_relaxed);
+        if (words > cur) return false;
+        left.store(cur - words, std::memory_order_relaxed);
+        return true;
+    }
+};
+
+struct Walk {
+    WalkBudget* budget;
+    uint32_t depth;
+
+    bool enter(uint64_t words) {
+        if (depth == 0 || !budget->charge(words)) return false;
+        --depth;
+        return true;
+    }
+
+    void leave() { ++depth; }
+};
+```
+
 ### 31. wait-free编程
 + 定义：每线程有限步完成，调度/挂起不影响；强于 lock-free，杜绝饥饿和无界自旋。
 + 核心机制：Helping 协作，线程遇到未完成操作时主动帮忙完成，避免重试循环。
@@ -14128,6 +14754,104 @@ struct TickWheel {
 
 ```
 
+**按数量级分桶记延迟**
+
+延迟按相对误差分桶。1 微秒附近，100 纳秒单独成格；1 毫秒附近，同样的 100 纳秒和旁边的值放进同一格。格宽随数量级加倍。留三位有效数字时，半桶个数取 1024。从第二档起，最粗的一格大约是该档起始值的千分之一。例子里半桶个数是 8，一共 16 档。整桶个数是半桶的两倍，数组长度是 (档数 + 1) 乘以半桶个数。下标落到数组外面，这个值就不记。
+
+值先和 (整桶个数 - 1) 按位或，再数前导零，用 64 减去前导零个数。减出来的就是大于或运算结果的最小 2 的幂的指数。小于整桶个数的值，包括 0，或完都是同一个数，数量级是 0。数量级等于这个指数减去半桶位数，再减 1。
+
+数量级为 0 时，下标就是值本身，格宽是 1，这一档的格子个数等于整桶个数。更高一档，低半段已经落在上一档更细的格子里，这一档只给高半段留出半桶个数那么多格。值右移数量级得到格号，格号减去半桶个数，就是高半段里的位置。这一档在数组里的起点是 (数量级 + 1) 左移半桶位数。x86 上前导零是 `bsr` 再异或 63。下标还原出来的是这一格的下沿，格宽是 1 左移数量级。
+
+百分位用分子和分母表示，99.9% 写成 999 和 1000。目标个数是总数乘以分子再除以分母，除不尽就加 1，并且至少是 1。扫描一次取 4 个计数。这四个的和加上已有累计还小于目标，就把这一组整段加进去，只比较一次。这一组已经达到目标，就在里面逐个累加，停在跨过目标的那一格。计数不为负，累计只增不减，目标落在第一次跨过它的那一组。
+
+```cpp
+#include <cstdint>
+
+struct MagBins {
+    static constexpr int kHalfBits = 3;
+    static constexpr int kHalf = 1 << kHalfBits;
+    static constexpr int kSub = kHalf << 1;
+    static constexpr int kBuckets = 16;
+    static constexpr int kLen = (kBuckets + 1) * kHalf;
+
+    int64_t bin[kLen]{};
+    int64_t total = 0;
+
+    static int index_of(uint64_t v) {
+        unsigned long long x = v | (unsigned long long)(kSub - 1);
+        int ceiling = 64 - __builtin_clzll(x);
+        int mag = ceiling - (kHalfBits + 1);
+        if (mag < 0) mag = 0;
+        int sub = (int)(v >> mag);
+        return ((mag + 1) << kHalfBits) + (sub - kHalf);
+    }
+
+    static uint64_t low_at(int index) {
+        int mag = (index >> kHalfBits) - 1;
+        int sub = (index & (kHalf - 1)) + kHalf;
+        if (mag < 0) {
+            sub -= kHalf;
+            mag = 0;
+        }
+        return (uint64_t)sub << mag;
+    }
+
+    bool add(uint64_t v) {
+        int i = index_of(v);
+        if ((unsigned)i >= (unsigned)kLen) return false;
+        bin[i] += 1;
+        ++total;
+        return true;
+    }
+
+    uint64_t percentile(int numer, int denom) const {
+        uint64_t need = 1;
+        if (total > 0) {
+            uint64_t prod = (uint64_t)total * (uint64_t)numer;
+            need = prod / (uint64_t)denom;
+            if (prod % (uint64_t)denom) ++need;
+            if (need == 0) need = 1;
+        }
+        uint64_t run = 0;
+        int i = 0;
+        int lim = kLen - (kLen % 4);
+        for (; i < lim; i += 4) {
+            uint64_t blk = (uint64_t)bin[i] + (uint64_t)bin[i + 1]
+                         + (uint64_t)bin[i + 2] + (uint64_t)bin[i + 3];
+            if (run + blk >= need) {
+                for (int j = 0; j < 4; ++j) {
+                    run += (uint64_t)bin[i + j];
+                    if (run >= need) return low_at(i + j);
+                }
+            } else {
+                run += blk;
+            }
+        }
+        for (; i < kLen; ++i) {
+            run += (uint64_t)bin[i];
+            if (run >= need) return low_at(i);
+        }
+        return low_at(kLen - 1);
+    }
+};
+```
+
+**闭环测量里按间隔把漏掉的耗时补上**
+
+下一笔要等上一笔回来才发出，每个间隔本来都有一笔耗时。这一笔迟了，中间那几个间隔没有样本，分布里只多出最后这一次很长的耗时。停顿只算了一次，百分位会偏低。耗时大于间隔时，先记下原始耗时，然后每次减去一个间隔，剩下的值仍然不小于间隔，就再记一笔。间隔 10、耗时 35，记下 35、25、15。间隔是 0，或者耗时不超过间隔，只记原始的一笔。
+
+```cpp
+#include <cstdint>
+
+template <class Note>
+void note_paced(Note&& note, uint64_t took, uint64_t pace) {
+    note(took);
+    if (pace == 0 || took <= pace) return;
+    for (uint64_t left = took - pace; left >= pace; left -= pace)
+        note(left);
+}
+```
+
 ### 34. 全链路延时打点结构设计
 
 统一打点结构，所有节点时间戳存入一个定长数组，用枚举定义下标，整体是一个拷贝成本低的结构体。
@@ -14686,6 +15410,64 @@ struct TxKick {
 ```
 
 
+
+**预取会看见下一行，使能字段留到最后**
+
+设备会预取当前描述符后面的缓存行。这一行开头 4 字节若不是无效值，设备会按还没写完的地址把数据发出去。除了第一条，每条 64 字节的开头 4 字节先写成全 1。地址和键先写，中间放一条编译器屏障，再写长度。长度是 0 时写成最高位为 1 的值，和全 1 的无效标记分开，设备也不会把它当成一段还没填的空洞。整段的所有权字最后写，写之前再加一条屏障。设备看见所有权翻到这一圈就开始执行。
+
+预取深度是固定的几条。当前序号再往前这么多条，必须已经是无效值。这一批里还有下一条，立刻写成无效。这一批的最后一条，门铃写完再写成无效。这几条存储和门铃重叠，门铃不用等它们离开 store buffer。
+
+```cpp
+#include <cstdint>
+
+struct alignas(64) Seg {
+    uint32_t len;
+    uint32_t key;
+    uint64_t addr;
+    uint32_t own;
+    uint8_t pad[44];
+};
+
+struct SendWin {
+    static constexpr uint32_t kSlots = 16;
+    static constexpr uint32_t kAhead = 2;
+    static constexpr uint32_t kHole = 0xffffffffu;
+    static constexpr uint32_t kZero = 0x80000000u;
+    Seg seg[kSlots]{};
+    volatile uint32_t* bell = nullptr;
+    uint32_t prod = 0;
+
+    SendWin() {
+        for (auto& s : seg)
+            s.len = kHole;
+    }
+
+    void invalidate(uint32_t index) {
+        seg[(index + kAhead) & (kSlots - 1)].len = kHole;
+    }
+
+    void write_seg(uint32_t index, uint32_t nbytes, uint32_t key, uint64_t addr) {
+        Seg& s = seg[index & (kSlots - 1)];
+        s.key = key;
+        s.addr = addr;
+        asm volatile("" ::: "memory");
+        s.len = nbytes ? nbytes : kZero;
+    }
+
+    void finish(uint32_t index, uint32_t opcode, bool more) {
+        asm volatile("" ::: "memory");
+        uint32_t phase = (index & kSlots) ? 0x80000000u : 0;
+        seg[index & (kSlots - 1)].own = opcode | phase;
+        if (more) {
+            invalidate(index);
+            return;
+        }
+        *bell = prod;
+        invalidate(index);
+    }
+};
+```
+
 **切穿发送在写缓冲之间插入时钟间隔**
 
 切穿是把帧写进网卡的写合并窗口，网卡边收边发。写得比线速慢，窗口会被抽空；写得太快，PCIe 事务会乱序，帧在网卡上拼错。每个 64 字节缓冲都加 `sfence` 可以保住顺序，吞吐会掉到撑不住 10G 切穿。默认做法是每写满一个缓冲，用时间戳计数器空转到一个事先算好的间隔。间隔按略高于线速来定，目标大约是线速的两倍，再减去读计数器本身的开销。不减的话，空转循环自己的读计数器时间会把实际速率压到线速以下。
@@ -15123,6 +15905,45 @@ struct EvRing {
             ev = load(0);
         } while (live(ev));
         return n;
+    }
+};
+```
+
+
+**所有权位按圈翻转，看见之后再读载荷**
+
+设备写完成记录时，软件不把槽写回空。写空会把这一行标成已修改，设备和 CPU 来回传递同一行。环长是 2 的幂。所有权位的期望值是消费序号与环长按位与的结果：第一圈是 0，序号跨过环长变成 1，再跨过回到 0。槽下标用序号与环长减一。槽交给设备之前，这一位先写成和第一圈期望相反的值，空槽不会被看成已经完成。设备写完载荷才把这一位改成当前圈的期望。软件先只读这一位，和期望不同就还没有新记录。相同之后先执行 `lfence`，再读载荷。检查这一位之前的推测读可能已经把旧载荷放进寄存器，没有这条屏障，后面的读仍用那份旧值。记录长 128 字节时，要轮询的头放在后 64 字节，前 64 字节是附带数据。头上的标志没有置位，不去读前一半。
+
+```cpp
+#include <cstddef>
+#include <cstdint>
+#include <immintrin.h>
+
+struct DoneSlot {
+    uint8_t extra[64];
+    uint8_t body[63];
+    uint8_t own;
+};
+
+struct DoneRing {
+    static constexpr uint32_t kN = 256;
+    DoneSlot slot[kN]{};
+    uint32_t cursor = 0;
+
+    DoneRing() {
+        for (auto& s : slot)
+            s.own = 1;
+    }
+
+    const DoneSlot* poll() {
+        auto* s = &slot[cursor & (kN - 1)];
+        uint8_t expect = (cursor & kN) ? 1u : 0u;
+        auto* flag = reinterpret_cast<volatile uint8_t*>(s) + offsetof(DoneSlot, own);
+        if (*flag != expect)
+            return nullptr;
+        _mm_lfence();
+        ++cursor;
+        return s;
     }
 };
 ```
@@ -26956,6 +27777,180 @@ public:
 + **适用**：热路径上反复按固定 tag 取字段（如 `35`/`11`/`55`/`44`），且常见 tag 落在较小整数区间
 + **权衡**：`MaxTag` 越大表越占内存；超大/稀有 tag 可另挂溢出映射，勿无限放大稀疏数组
 + **注意**：重复组同一 tag 多次出现时，简单 `entries_[tag]` 会被后者覆盖，需按组语义单独处理
+
+
+**停位在最高位，高位组先发出**
+
+无符号整数按 7 位一组发送。一组放在一个字节的低 7 位，最高位为 1 表示这个整数结束，为 0 表示后面还有一组。高位的组先发送。0 编成 `80`，127 编成 `FF`，128 编成 `01 80`，300 编成 `02 AC`。64 位全 1 占 10 个字节，定长整数占 8 个字节。字段经常很小，或者价格先收成相邻差分，线上的字节才会少下来。差分把数变小，停位编码再把小的数写成较少的字节。
+
+第一组载荷为 0 且最高位为 0，同一个数还能用更少的字节写下，这种编码无效。编码先算出组数，结束位写在最后一格，更高的组从后往前填进同一块输出。只占一个或两个字节的值当场解完。缓冲里至少有 10 个字节时，后续的组按这个长度直接并进来。整数分在两次接收里时，保留已经合并的值和已经收到的组数，下一次调用只带新到的字节。
+
+```cpp
+#include <cstdint>
+#include <cstddef>
+
+struct PartialInt {
+    uint64_t value = 0;
+    unsigned groups = 0;
+};
+
+enum class Step : uint8_t { full, more, bad };
+
+struct StepResult {
+    Step step;
+    size_t used;
+};
+
+unsigned wire_len(uint64_t v) {
+    unsigned n = 1;
+    while (v >= 128) {
+        v >>= 7;
+        ++n;
+    }
+    return n;
+}
+
+size_t write_int(uint64_t v, uint8_t* dst) {
+    unsigned n = wire_len(v);
+    dst[n - 1] = static_cast<uint8_t>((v & 0x7f) | 0x80);
+    for (unsigned i = n - 1; i > 0;) {
+        v >>= 7;
+        dst[--i] = static_cast<uint8_t>(v & 0x7f);
+    }
+    return n;
+}
+
+size_t write_int_to(uint64_t v, uint8_t* dst, size_t cap) {
+    unsigned n = wire_len(v);
+    if (cap < n) return 0;
+    return write_int(v, dst);
+}
+
+StepResult read_int(const uint8_t* in, size_t len, PartialInt& st) {
+    if (len == 0) return {Step::more, 0};
+    size_t i = 0;
+    if (st.groups == 0) {
+        uint8_t b = in[i++];
+        if (b & 0x80) {
+            st.value = b & 0x7f;
+            return {Step::full, 1};
+        }
+        if (b == 0) return {Step::bad, 1};
+        st.value = b;
+        st.groups = 1;
+        if (i == len) return {Step::more, i};
+        uint8_t c = in[i++];
+        st.value = (st.value << 7) | (c & 0x7f);
+        if (c & 0x80) {
+            st.groups = 0;
+            return {Step::full, i};
+        }
+        st.groups = 2;
+        if (len >= 10) {
+            for (unsigned k = 2; k < 10; ++k) {
+                uint8_t d = in[k];
+                if (k == 9 && (st.value > (UINT64_MAX >> 7) || (d & 0x80) == 0))
+                    return {Step::bad, k + 1};
+                st.value = (st.value << 7) | (d & 0x7f);
+                if (d & 0x80) {
+                    st.groups = 0;
+                    return {Step::full, k + 1};
+                }
+            }
+            return {Step::bad, 10};
+        }
+    }
+    while (i < len) {
+        uint8_t b = in[i++];
+        if (st.groups == 9 && (st.value > (UINT64_MAX >> 7) || (b & 0x80) == 0))
+            return {Step::bad, i};
+        st.value = (st.value << 7) | (b & 0x7f);
+        if (b & 0x80) {
+            st.groups = 0;
+            return {Step::full, i};
+        }
+        ++st.groups;
+    }
+    return {Step::more, i};
+}
+```
+
+**跨接收只留下整数进度和尚未写完的行情**
+
+一次接收可以停在某个整数的中间，也可以带上下一条的开头。停位只结束一个整数。一条行情依次是合约号、序号、价格、数量。解析器挂在连接上。本次缓冲里的字节当场移位合并，这些字节只在这一次调用里使用。整数没结束，留下已合并的值和组数；行情没结束，留下字段下标和已经写入的字段。第四个字段写完就把这条交给回调，同一块结构接着写下一条。回调在返回前把行情复制走，解析器等回调返回，再继续读后面的字节。这次输入正好落在行情边界上，返回完成。对端关闭连接时，解析器也停在行情边界，最后一条才是完整的。停在半个整数或半条行情上，返回值表示还要后续字节。编码无效时，解析停在出错的那个字节。
+
+合约号 1、序号 128、价格 300、数量 10 的线上字节是 `81 01 80 02 AC 8A`。第一次只收到 `81 01`，合约号已经结束，序号只到了高位那一组。
+
+```cpp
+#include <cstdint>
+#include <cstddef>
+
+enum class Step : uint8_t { full, more, bad };
+
+struct StepResult {
+    Step step;
+    size_t used;
+};
+
+struct L1Msg {
+    uint64_t word[4]{};
+};
+
+struct L1Parser {
+    L1Msg msg{};
+    uint64_t acc = 0;
+    unsigned groups = 0;
+    unsigned field = 0;
+    bool broken = false;
+
+    bool at_boundary() const {
+        return !broken && field == 0 && groups == 0;
+    }
+
+    StepResult pull(const uint8_t* p, size_t n) {
+        size_t i = 0;
+        if (n == 0) return {Step::more, 0};
+        while (i < n) {
+            uint8_t b = p[i++];
+            if (groups == 0) {
+                if (b == 0) return {Step::bad, i};
+                acc = b & 0x7f;
+            } else {
+                if (groups == 9 && (acc > (UINT64_MAX >> 7) || (b & 0x80) == 0))
+                    return {Step::bad, i};
+                acc = (acc << 7) | (b & 0x7f);
+            }
+            if (b & 0x80) {
+                groups = 0;
+                return {Step::full, i};
+            }
+            ++groups;
+        }
+        return {Step::more, i};
+    }
+
+    template <class Fn>
+    StepResult ingest(const uint8_t* in, size_t len, Fn&& fn) {
+        if (broken) return {Step::bad, 0};
+        size_t used = 0;
+        while (used < len) {
+            StepResult r = pull(in + used, len - used);
+            used += r.used;
+            if (r.step == Step::bad) {
+                broken = true;
+                return {Step::bad, used};
+            }
+            if (r.step == Step::more) return {Step::more, used};
+            msg.word[field] = acc;
+            if (++field == 4) {
+                fn(msg);
+                field = 0;
+            }
+        }
+        return {at_boundary() ? Step::full : Step::more, used};
+    }
+};
+```
 
 
 ### 4. 消息中间件（zmq）
