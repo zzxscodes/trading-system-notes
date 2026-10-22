@@ -667,6 +667,35 @@ void* open_lane_on_cpu(int cpu, std::size_t n) {
 }
 ```
 
+**写游标前方的页，用一次不改值的交换提前承担写缺页**
+
+追加映射会不断碰到还没有物理页的地址。后台跟着当前写入位置，把前方一个窗口里的页先写一次。对页只做读取，第一次写入引起的缺页仍发生在业务线程上。
+
+每一页的开头 8 字节做一次比较交换，期望值是 0，新值也是 0。原值是 0，交换成功，这 8 字节仍是 0。原值不是 0，交换失败，页上已经写下的字节留在原地。这次写把缺页放到后台线程。窗口跟着写入位置往前移。写入超过窗口，或者页被内核收回，业务线程仍会碰到缺页。
+
+```cpp
+#include <cstddef>
+#include <cstdint>
+
+struct AheadTouch {
+    static constexpr size_t kPage = 4096;
+    uint8_t* base = nullptr;
+    size_t touched = 0;
+
+    void advance(size_t cursor, size_t window) {
+        size_t end = cursor + window;
+        for (size_t page = touched; page < end; page += kPage) {
+            uint64_t expect = 0;
+            __atomic_compare_exchange_n(
+                reinterpret_cast<uint64_t*>(base + page),
+                &expect, uint64_t{0}, false,
+                __ATOMIC_RELAXED, __ATOMIC_RELAXED);
+            touched = page + kPage;
+        }
+    }
+};
+```
+
 **3. 管理与优化工具**
 
 1. **`numactl`（最常用）**：命令行工具，在启动应用时指定其NUMA策略。
@@ -14483,6 +14512,50 @@ struct ClockView {
 };
 ```
 
+**设备钟夹在两次周期读取中间**
+
+网卡上的时钟要进内核去读。热路径只读本核的周期计数，用事先采好的比例换算。采一组对照时先读周期，再读设备钟，再读周期。设备钟落在两次周期读取之间，和两次读数的中点配对。两次周期读数之差的一半，是这一组配对的不确定范围。
+
+换算用整数。经过的周期乘比例分子，右移之前先加上半个除数，再按比例的移位位数右移，然后加上基准设备时间。比例由两段中点之间的增量算出。设备钟的走速会被对时改掉，隔一段时间重新采一组。
+
+```cpp
+#include <cstdint>
+
+struct DevScale {
+    uint64_t base_tick = 0;
+    int64_t base_dev = 0;
+    uint32_t mult = 1;
+    uint32_t shift = 32;
+    uint64_t half_span = 0;
+
+    static uint64_t mid(uint64_t before, uint64_t after) {
+        return before + (after - before) / 2;
+    }
+
+    void anchor(uint64_t before, int64_t dev, uint64_t after) {
+        base_tick = mid(before, after);
+        base_dev = dev;
+        half_span = (after - before) / 2;
+    }
+
+    void slope(uint64_t before, int64_t dev, uint64_t after) {
+        uint64_t m2 = mid(before, after);
+        uint64_t dt = m2 - base_tick;
+        uint64_t dd = (uint64_t)(dev - base_dev);
+        unsigned __int128 num = dt ? ((unsigned __int128)dd << shift) / dt : 0;
+        if (num > 0xffffffffu) num = 0xffffffffu;
+        mult = (uint32_t)num;
+    }
+
+    int64_t to_dev(uint64_t tick) const {
+        uint64_t d = tick - base_tick;
+        unsigned __int128 prod = (unsigned __int128)d * mult;
+        if (shift) prod += (unsigned __int128)1 << (shift - 1);
+        return base_dev + (int64_t)(prod >> shift);
+    }
+};
+```
+
 **轮询分成快慢两档**
 
 调用方会在一个紧循环里反复问有没有事件。每次都把描述符走一遍，刚看过的缓存行会被再打一次。记下上次走完的周期。差还没到快档间隔，这次就返回没有新事件。第一次没有上次的周期，必须走一遍。
@@ -14530,6 +14603,27 @@ struct PollPace {
         return n <= 16 ? local : heap;
     }
 };
+```
+
+**回放期限从起点一次算好，只等剩下的那段**
+
+回放按每条报文相对首包的到达时刻发送。这条的期限是起点加上它自己的偏移。准备好它的时候起点已经过去一段，等待就停在这个期限上。下一条的期限仍用同一个起点加上它自己的偏移。前面多出来的等待留在已经过去的那段里。
+
+线程已经钉在专用核上时，这段短等待用忙等。循环里读单调计数，到了期限就退出，中间执行 `pause`。期限已经过去，调用立刻返回。
+
+```cpp
+#include <cstdint>
+
+inline void pause_cpu() { asm volatile("pause"); }
+
+template <class Now>
+void wait_until(uint64_t deadline, Now&& now) {
+    while ((int64_t)(deadline - now()) > 0) pause_cpu();
+}
+
+uint64_t replay_deadline(uint64_t origin, uint64_t offset) {
+    return origin + offset;
+}
 ```
 
 **每核跳表定时器**
@@ -15185,6 +15279,49 @@ bool write_frame(uint8_t* frame, uint32_t nbytes, int64_t trigger_ns, Fill fill)
 }
 ```
 
+
+**长度先写成负数，正数留到最后一次写**
+
+共享映射里的读者直接看帧长。预留之后先把长度写成负数，绝对值是帧头加正文的字节数，类型写成数据帧。正文写在这次发布之前。最后一次写用 release 把长度改成正数。读者用 acquire 读长度。读到的值还不是正数，就停在这一帧。看到正数之后，按 32 字节向上对齐的步长往下走。数据帧把正文交给业务，填充帧只前进位置。
+
+写者中途离开、长度仍是负数时，这一帧改成填充帧。先把类型改成填充，再把长度发布成正数。类型还是数据帧的时候长度已经是正数，读者会把没写完的正文当成一条完整消息。
+
+```cpp
+#include <atomic>
+#include <cstdint>
+
+enum class FrameLook : uint8_t { wait, data, skip };
+
+struct FrameWord {
+    std::atomic<int32_t> len;
+    int32_t kind;
+};
+
+inline uint32_t round32(uint32_t n) { return (n + 31u) & ~31u; }
+
+void open_len(FrameWord* w, int32_t raw) {
+    w->len.store(-raw, std::memory_order_relaxed);
+    w->kind = 1;
+}
+
+void seal_len(FrameWord* w, int32_t raw) {
+    w->len.store(raw, std::memory_order_release);
+}
+
+void seal_skip(FrameWord* w) {
+    int32_t raw = w->len.load(std::memory_order_relaxed);
+    if (raw >= 0) return;
+    w->kind = 2;
+    w->len.store(-raw, std::memory_order_release);
+}
+
+FrameLook read_len(const FrameWord* w, uint32_t& step) {
+    int32_t raw = w->len.load(std::memory_order_acquire);
+    if (raw <= 0) return FrameLook::wait;
+    step = round32((uint32_t)raw);
+    return w->kind == 2 ? FrameLook::skip : FrameLook::data;
+}
+```
 
 ### 36. 共享资源容量耗尽时快速失败
 
@@ -16036,6 +16173,22 @@ struct SideBurst {
 ```
 
 
+**低 32 位硬件戳按最近的 64 位补高位**
+
+网卡在帧开始到达时记下自己时钟的低 32 位。同一帧分成多块时，每一块带同一份低 32 位，末块上的这份就是帧开始的时刻。应用侧用最近一次读到的 64 位设备钟补上高位。先用这 64 位的高半和低 32 位拼成候选值。候选值落到这 64 位之前，距离超过 32 位计数的一半，就加上 2 的 32 次方。候选值落到这 64 位之后，距离超过一半，就减去 2 的 32 次方。
+
+```cpp
+#include <cstdint>
+
+uint64_t widen32(uint32_t low, uint64_t recent) {
+    uint64_t base = recent & ~0xffffffffull;
+    uint64_t cand = base | low;
+    if (cand + 0x80000000ull < recent) cand += 0x100000000ull;
+    else if (recent + 0x80000000ull < cand) cand -= 0x100000000ull;
+    return cand;
+}
+```
+
 ### 38. 用户态静默期回收
 
 无锁结构上摘下一个节点之后，要等每个还在读的核都走过一个不再持有该指针的点，才能把内存还回去。每个读者一条独占缓存行的计数，0 表示这个核已经离线，不参与等待。全局代单独放一条缓存行，从 1 开始单调增加。
@@ -16213,6 +16366,41 @@ struct SeqWin {
             ++min_seq;
         }
         return n;
+    }
+};
+```
+
+**后到的字节按偏移放下，空洞单独去要**
+
+接收缓冲按偏移落位。后面的片段先到，就写在自己的偏移上，并记下这一段已经到达。连续位置停在第一个空洞前面。见过的最高偏移单独往前走。连续位置还没追上最高偏移时，从连续位置起数到下一段已到达的字节，这一段就是向对端重发的起点和长度。重发的字节补上之后，连续位置再往前走。
+
+```cpp
+#include <cstdint>
+#include <cstring>
+
+struct GapLog {
+    static constexpr uint32_t kCap = 4096;
+    uint8_t mem[kCap]{};
+    uint8_t got[kCap]{};
+    uint32_t contig = 0;
+    uint32_t high = 0;
+
+    bool land(uint32_t off, const uint8_t* src, uint32_t n) {
+        if ((uint64_t)off + n > kCap) return false;
+        std::memcpy(mem + off, src, n);
+        std::memset(got + off, 1, n);
+        if (off + n > high) high = off + n;
+        while (contig < high && got[contig]) ++contig;
+        return true;
+    }
+
+    bool hole(uint32_t& from, uint32_t& len) const {
+        if (contig >= high) return false;
+        from = contig;
+        uint32_t e = contig;
+        while (e < high && !got[e]) ++e;
+        len = e - contig;
+        return len != 0;
     }
 };
 ```
@@ -16435,6 +16623,54 @@ struct StageRing {
         if (stage == 1)
             freed.store(cursor[stage], std::memory_order_release);
         return true;
+    }
+};
+```
+
+**限速只统计还留在集合里的读者**
+
+发布上限是集合里各读者进度的最小值，再加上窗口长度。旁路读者的进度落后超过窗口的四分之一，安静时间达到时限，就退出集合。必须逐条跟上的读者标成常驻，进度一直参与最小值。退出的读者从当时的发布位置重新加入。
+
+```cpp
+#include <cstdint>
+
+struct GateSet {
+    static constexpr int kSlots = 8;
+    static constexpr uint64_t kWin = 128 * 1024;
+    uint64_t pos[kSlots]{};
+    uint64_t quiet_since[kSlots]{};
+    uint8_t in_set[kSlots]{};
+    uint8_t sticky[kSlots]{};
+    int count = 0;
+
+    uint64_t limit(uint64_t published, uint64_t now, uint64_t hold) {
+        uint64_t slow = 0;
+        bool any = false;
+        for (int i = 0; i < count; ++i) {
+            if (!in_set[i]) continue;
+            if (!sticky[i]) {
+                uint64_t lag = published - pos[i];
+                if (lag > (kWin >> 2)) {
+                    if (quiet_since[i] == 0) quiet_since[i] = now;
+                    if (now - quiet_since[i] >= hold) {
+                        in_set[i] = 0;
+                        continue;
+                    }
+                } else {
+                    quiet_since[i] = 0;
+                }
+            }
+            if (!any || pos[i] < slow) slow = pos[i];
+            any = true;
+        }
+        if (!any) return published + kWin;
+        return slow + kWin;
+    }
+
+    void rejoin(int i, uint64_t at) {
+        pos[i] = at;
+        quiet_since[i] = 0;
+        in_set[i] = 1;
     }
 };
 ```
@@ -33909,6 +34145,42 @@ struct Page {
 };
 ```
 
+
+**三块等长分区轮转，字节位置一直往前加**
+
+一份发布会话的日志是三块等长分区。分区长度是 2 的幂。写者往当前分区末尾追加。这一块剩下的空间小于这次要写的长度，就换下一块，块内偏移从 0 重新开始。旧的分区留在原地，读者和重传仍按原来的位置去读。这三块反复使用，逻辑编号每换一块加一。
+
+字节位置是逻辑编号左移分区长度的位数，再或上块内偏移。换块之后字节位置继续增加。定位时，逻辑编号对 3 取余选出分区，位置和长度掩码按位与得到块内偏移。两条会话可以带出相同的字节位置，各自落在自己的分区里。
+
+```cpp
+#include <cstdint>
+
+struct TurnLog {
+    static constexpr uint32_t kShift = 16;
+    static constexpr uint32_t kBytes = 1u << kShift;
+    static constexpr uint32_t kMask = kBytes - 1;
+    uint8_t* part[3]{};
+    uint32_t lap = 0;
+    uint32_t off = 0;
+
+    uint8_t* locate(uint64_t pos) const {
+        uint32_t id = (uint32_t)(pos >> kShift);
+        return part[id % 3] + (pos & kMask);
+    }
+
+    uint8_t* reserve(uint32_t n, uint64_t& pos) {
+        if (n == 0 || n > kBytes) return nullptr;
+        if (off + n > kBytes) {
+            ++lap;
+            off = 0;
+        }
+        pos = (uint64_t(lap) << kShift) | off;
+        uint8_t* p = part[lap % 3] + off;
+        off += n;
+        return p;
+    }
+};
+```
 
 ### 19. 交易桥双边订单号索引
 
