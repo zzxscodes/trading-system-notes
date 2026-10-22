@@ -39,12 +39,17 @@
   - [30. C++ bounds checking optimization technology](#30-c-bounds-checking-optimization-technology)
   - [31. wait-free programming](#31-wait-free-programming)
   - [32. Linux kernel tuning and BIOS configuration](#32-linux-kernel-tuning-and-bios-configuration)
-  - [33. Latency measurement (clock cycles)](#33-latency-measurement-clock-cycles)
+  - [33. Clock cycles, latency measurement, and timers](#33-clock-cycles-latency-measurement-and-timers)
   - [34. End-to-end latency tracing layout](#34-end-to-end-latency-tracing-layout)
   - [35. In-place ring writes to avoid large-object copies](#35-in-place-ring-writes-to-avoid-large-object-copies)
   - [36. Fail fast when shared capacity is exhausted](#36-fail-fast-when-shared-capacity-is-exhausted)
   - [37. User-space NIC I/O and in-order bypass handoff](#37-user-space-nic-io-and-in-order-bypass-handoff)
-  - [38. High-quality articles on system design](#38-high-quality-articles-on-system-design)
+  - [38. Quiescent-state reclamation](#38-quiescent-state-reclamation)
+  - [39. Sequence-window reordering](#39-sequence-window-reordering)
+  - [40. Fixed-stride per-core variables](#40-fixed-stride-per-core-variables)
+  - [41. Signature-first bucket lookup](#41-signature-first-bucket-lookup)
+  - [42. Staged ordered completion ring](#42-staged-ordered-completion-ring)
+  - [43. High-quality articles on system design](#43-high-quality-articles-on-system-design)
 - [Common performance bottlenecks and optimization directions](#common-performance-bottlenecks-and-optimization-directions)
   - [1. roofline model](#1-roofline-model)
     - [Memory Bound optimization](#memory-bound-optimization)
@@ -2782,6 +2787,233 @@ vec.emplace_back(1); // Undefined behavior
 2. **Default memory resource**: can be used`std::pmr::get_default_resource()`Get the default memory resource, or pass`std::pmr::set_default_resource()`set up.
 
 
+
+**Per-core object stack, shared free list with a generation**
+
+When many cores allocate from one pool, every allocation that swings the same free-list head bounces that cache line. Each core keeps a fixed stack of pointers. An allocation pops the top; a free pushes the top. The object just returned is still in this core's L1, and the next allocation hits it.
+
+When the local stack is empty, detach half a capacity from the shared list in one step and push that batch in reverse, so the most recently freed object, which sat at the shared head, is still the next pop. When the local stack is full, link only the colder bottom half back onto the shared list and slide the hotter top half down. A request larger than half the cache goes straight to the shared list, so one burst does not evict the hot half.
+
+The shared head is 16 bytes: the node pointer in the low 64 bits and a generation in the high 64 bits, updated by one 128-bit compare-and-exchange. A node can come back with the same pointer and a different generation; a pop that still holds the old head fails and rereads. Before walking `next`, reserve the count. If the count is short, leave the list alone instead of following a chain that another core already owns. The object itself is cache-line aligned, so a node on the free list does not share a line with a live object. The machine needs `cmpxchg16b`; otherwise the 128-bit exchange becomes a lock.
+
+```cpp
+#include <atomic>
+#include <cstdint>
+#include <immintrin.h>
+
+struct alignas(64) Obj {
+    Obj* next;
+    uint64_t payload;
+};
+
+struct Pile {
+    alignas(64) std::atomic<unsigned __int128> top{0};
+    alignas(64) std::atomic<uint64_t> depth{0};
+
+    static unsigned __int128 pack(Obj* p, uint64_t gen) {
+        return (unsigned __int128)(uintptr_t)p | ((unsigned __int128)gen << 64);
+    }
+    static Obj* ptr_of(unsigned __int128 w) {
+        return reinterpret_cast<Obj*>(uintptr_t(uint64_t(w)));
+    }
+    static uint64_t gen_of(unsigned __int128 w) { return uint64_t(w >> 64); }
+
+    void push_chain(Obj* first, Obj* last, uint32_t n) {
+        unsigned __int128 old = top.load(std::memory_order_relaxed);
+        for (;;) {
+            last->next = ptr_of(old);
+            unsigned __int128 neu = pack(first, gen_of(old) + 1);
+            if (top.compare_exchange_weak(old, neu,
+                    std::memory_order_release, std::memory_order_relaxed))
+                break;
+            _mm_pause();
+        }
+        depth.fetch_add(n, std::memory_order_release);
+    }
+
+    Obj* pop_n(uint32_t n) {
+        uint64_t d = depth.load(std::memory_order_relaxed);
+        for (;;) {
+            if (d < n) return nullptr;
+            if (depth.compare_exchange_weak(d, d - n,
+                    std::memory_order_acquire, std::memory_order_relaxed))
+                break;
+        }
+        unsigned __int128 old = top.load(std::memory_order_relaxed);
+        for (;;) {
+            std::atomic_thread_fence(std::memory_order_acquire);
+            Obj* p = ptr_of(old);
+            Obj* tail = nullptr;
+            uint32_t i = 0;
+            for (; i < n && p != nullptr; ++i) {
+                tail = p;
+                p = p->next;
+            }
+            if (i != n) {
+                old = top.load(std::memory_order_relaxed);
+                _mm_pause();
+                continue;
+            }
+            unsigned __int128 neu = pack(p, gen_of(old) + 1);
+            if (top.compare_exchange_weak(old, neu,
+                    std::memory_order_relaxed, std::memory_order_relaxed)) {
+                tail->next = nullptr;
+                return ptr_of(old);
+            }
+            _mm_pause();
+        }
+    }
+};
+
+template<int Cap>
+struct CorePile {
+    static_assert(Cap >= 2 && Cap % 2 == 0, "even capacity");
+    Obj* slot[Cap]{};
+    uint32_t n{0};
+    Pile* pile{nullptr};
+
+    Obj* take_one() {
+        if (n == 0) {
+            Obj* head = pile->pop_n(Cap / 2);
+            if (head == nullptr) return nullptr;
+            Obj* rev[Cap / 2];
+            uint32_t c = 0;
+            for (Obj* p = head; p != nullptr; p = p->next)
+                rev[c++] = p;
+            while (c > 0)
+                slot[n++] = rev[--c];
+        }
+        return slot[--n];
+    }
+
+    void give_one(Obj* obj) {
+        if (n == Cap) {
+            constexpr uint32_t drop = Cap / 2;
+            for (uint32_t i = 0; i + 1 < drop; ++i)
+                slot[i]->next = slot[i + 1];
+            pile->push_chain(slot[0], slot[drop - 1], drop);
+            uint32_t keep = n - drop;
+            for (uint32_t i = 0; i < keep; ++i)
+                slot[i] = slot[drop + i];
+            n = keep;
+        }
+        slot[n++] = obj;
+    }
+};
+```
+
+**Integer ids recycled in FIFO order**
+
+Ids are issued by counting up from 0. A returned id goes onto a fixed ring and the next issue takes from the head of that ring. An id that just came back waits until every id returned before it has been issued again. A new id is counted out only when the ring is empty. Hitting the limit returns a reserved value, and the caller decides whether to fail or wait. A full ring refuses the return. The ring length is a power of two. One thread uses it.
+
+```cpp
+#include <cstdint>
+
+struct IdRing {
+    static constexpr uint32_t kNone = 0xffffffffu;
+    uint32_t* slot;
+    uint32_t mask;
+    uint32_t rd = 0;
+    uint32_t wr = 0;
+    uint32_t n = 0;
+    uint32_t next = 0;
+    uint32_t limit;
+
+    explicit IdRing(uint32_t cap_pow2, uint32_t lim)
+        : slot(new uint32_t[cap_pow2]()), mask(cap_pow2 - 1), limit(lim) {}
+    ~IdRing() { delete[] slot; }
+
+    uint32_t take() {
+        if (n) {
+            uint32_t id = slot[rd];
+            rd = (rd + 1) & mask;
+            --n;
+            return id;
+        }
+        if (next == limit) return kNone;
+        return next++;
+    }
+
+    bool give(uint32_t id) {
+        if (n == mask + 1) return false;
+        slot[wr] = id;
+        wr = (wr + 1) & mask;
+        ++n;
+        return true;
+    }
+};
+```
+
+**Power-of-two buddy allocation**
+
+A region carved out in advance is split into power-of-two lengths. Each length has a free chain, and the chain stores the index of the block start. Allocation takes the smallest chain that is large enough. A larger block pushes its upper half onto the next-smaller chain until the order matches the request. On release the buddy index is the current index XOR the length of this order. If that buddy is free and has the same order, it is unlinked, the start becomes the lower of the two indexes, the order increases by one, and merging continues up to the whole region. The allocator hands out indexes. The bytes stay in the original region. The largest order in this layout is 8. One thread uses it, and release passes the same order that allocation returned.
+
+```cpp
+#include <cstdint>
+#include <cstdlib>
+
+struct BlockBuddy {
+    static constexpr int kBusy = -2;
+    int free_head[9]{};
+    int* link;
+    uint8_t* rank;
+    int order;
+
+    explicit BlockBuddy(int ord) : order(ord) {
+        if (ord < 1 || ord > 8) std::abort();
+        int span = 1 << ord;
+        link = new int[span];
+        rank = new uint8_t[span];
+        for (int i = 0; i <= ord; ++i) free_head[i] = -1;
+        for (int i = 0; i < span; ++i) {
+            link[i] = kBusy;
+            rank[i] = 0;
+        }
+        link[0] = -1;
+        free_head[ord] = 0;
+        rank[0] = (uint8_t)ord;
+    }
+    ~BlockBuddy() { delete[] link; delete[] rank; }
+
+    int alloc(int need) {
+        int o = need;
+        while (o <= order && free_head[o] < 0) ++o;
+        if (o > order) return -1;
+        int addr = free_head[o];
+        free_head[o] = link[addr];
+        while (o-- > need) {
+            int half = addr + (1 << o);
+            link[half] = free_head[o];
+            free_head[o] = half;
+            rank[half] = (uint8_t)o;
+        }
+        link[addr] = kBusy;
+        rank[addr] = (uint8_t)need;
+        return addr;
+    }
+
+    void unlink(int o, int addr) {
+        int* p = &free_head[o];
+        while (*p != addr) p = &link[*p];
+        *p = link[addr];
+    }
+
+    void release(int addr, int need) {
+        int span = 1 << order;
+        while (need < order) {
+            int mate = addr ^ (1 << need);
+            if (mate >= span || link[mate] == kBusy || rank[mate] != need) break;
+            unlink(need, mate);
+            if (mate < addr) addr = mate;
+            ++need;
+        }
+        link[addr] = free_head[need];
+        free_head[need] = addr;
+        rank[addr] = (uint8_t)need;
+    }
+};
+```
+
 ### 7. Large page memory
 1. Large page memory simplifies the address translation process by increasing the granularity of a single page and reducing the page table traversal level (1GB large page level 4 becomes level 2).
 2. Because the memory page table is accessed less, the latency of a single address translation is reduced, avoiding performance losses caused by CPU waiting.
@@ -4289,6 +4521,187 @@ private:
     std::array<T, Batch> hold_{};
     alignas(64) std::atomic<std::uint64_t> pub_{0};
     alignas(64) std::atomic<std::uint64_t> acked_{0};
+};
+```
+
+
+**Relaxed tail sync: the tail moves when the completion count catches the head**
+
+With several producers, the line the other side spins on is the tail index. A release store to that tail after every slot write bounces the line on every item. The tail position can be published less often. The head word holds both a position and a completion count. One compare-and-exchange advances the position by `n` and adds one to the count. After the slots are written, the producer compare-and-exchanges the tail: it adds one to the tail count it observed, and copies the head position into the tail only when that count equals the head count. A producer that is not the last in the group only bumps the count. The consumer watches the tail position, so a run of in-flight writes becomes visible in one step.
+
+Cap the distance between head and tail. Size the cap to one batch. Too large, and the consumer waits a long time to see the tail; too small, and every completion publishes the tail again. The fragment below is multi-producer and single-consumer. Several consumers use a second head/tail pair on the dequeue side. Slot stores sit after a successful `claim` and before `publish`; the release in `publish` makes those stores visible to the consumer's acquire.
+
+```cpp
+#include <atomic>
+#include <cstdint>
+#include <immintrin.h>
+
+struct RtsProd {
+    static constexpr uint32_t Cap = 1024;
+    static constexpr uint32_t Mask = Cap - 1;
+    static constexpr uint32_t Gap = 32;
+    alignas(64) std::atomic<uint64_t> head{0};
+    alignas(64) std::atomic<uint64_t> tail{0};
+    alignas(64) std::atomic<uint32_t> read_pos{0};
+    uint64_t slot[Cap]{};
+
+    static uint64_t pack(uint32_t pos, uint32_t cnt) {
+        return uint64_t(pos) | (uint64_t(cnt) << 32);
+    }
+
+    uint32_t claim(uint32_t want, uint32_t& start) {
+        uint64_t hw = head.load(std::memory_order_acquire);
+        for (;;) {
+            uint32_t hp = uint32_t(hw);
+            uint32_t hc = uint32_t(hw >> 32);
+            uint32_t tp = uint32_t(tail.load(std::memory_order_relaxed));
+            while (hp - tp > Gap) {
+                _mm_pause();
+                hw = head.load(std::memory_order_acquire);
+                hp = uint32_t(hw);
+                hc = uint32_t(hw >> 32);
+                tp = uint32_t(tail.load(std::memory_order_relaxed));
+            }
+            uint32_t rp = read_pos.load(std::memory_order_acquire);
+            uint32_t room = (Cap - 1) + rp - hp;
+            uint32_t n = want <= room ? want : room;
+            if (n == 0) return 0;
+            if (head.compare_exchange_weak(hw, pack(hp + n, hc + 1),
+                    std::memory_order_release, std::memory_order_acquire)) {
+                start = hp;
+                return n;
+            }
+        }
+    }
+
+    void publish() {
+        uint64_t tw = tail.load(std::memory_order_acquire);
+        for (;;) {
+            uint64_t hw = head.load(std::memory_order_relaxed);
+            uint32_t tc = uint32_t(tw >> 32) + 1;
+            uint32_t np = uint32_t(tw);
+            if (tc == uint32_t(hw >> 32)) np = uint32_t(hw);
+            if (tail.compare_exchange_weak(tw, pack(np, tc),
+                    std::memory_order_release, std::memory_order_acquire))
+                return;
+        }
+    }
+
+    uint32_t consume(uint64_t* out, uint32_t cap) {
+        uint32_t rp = read_pos.load(std::memory_order_relaxed);
+        uint32_t tp = uint32_t(tail.load(std::memory_order_acquire));
+        uint32_t n = tp - rp;
+        if (n > cap) n = cap;
+        for (uint32_t i = 0; i < n; ++i)
+            out[i] = slot[(rp + i) & Mask];
+        if (n) read_pos.store(rp + n, std::memory_order_release);
+        return n;
+    }
+};
+```
+
+**Head and tail live in one 64-bit word**
+
+When producers must run one at a time, pack head and tail into one 64-bit word. A producer may advance the head only while the two halves are equal. Until it publishes the new tail, every other producer sees them differ and pauses. It writes the slots, then one release store sets both halves to the new position. The consumer reads the high 32 bits of that same word. Only one producer is inside the window, so the critical section is the slot write and nothing else.
+
+```cpp
+#include <atomic>
+#include <cstdint>
+#include <immintrin.h>
+
+struct HtsProd {
+    static constexpr uint32_t Cap = 1024;
+    static constexpr uint32_t Mask = Cap - 1;
+    alignas(64) std::atomic<uint64_t> gate{0};
+    alignas(64) std::atomic<uint32_t> read_pos{0};
+    uint64_t slot[Cap]{};
+
+    static uint64_t pack(uint32_t head, uint32_t tail) {
+        return uint64_t(head) | (uint64_t(tail) << 32);
+    }
+
+    uint32_t claim(uint32_t want, uint32_t& start) {
+        uint64_t w = gate.load(std::memory_order_acquire);
+        for (;;) {
+            uint32_t h = uint32_t(w);
+            uint32_t t = uint32_t(w >> 32);
+            if (h != t) {
+                _mm_pause();
+                w = gate.load(std::memory_order_acquire);
+                continue;
+            }
+            uint32_t rp = read_pos.load(std::memory_order_acquire);
+            uint32_t room = (Cap - 1) + rp - h;
+            uint32_t n = want <= room ? want : room;
+            if (n == 0) return 0;
+            if (gate.compare_exchange_weak(w, pack(h + n, t),
+                    std::memory_order_acq_rel, std::memory_order_acquire)) {
+                start = h;
+                return n;
+            }
+        }
+    }
+
+    void publish(uint32_t start, uint32_t n) {
+        gate.store(pack(start + n, start + n), std::memory_order_release);
+    }
+
+    uint32_t consume(uint64_t* out, uint32_t cap) {
+        uint32_t rp = read_pos.load(std::memory_order_relaxed);
+        uint32_t tp = uint32_t(gate.load(std::memory_order_acquire) >> 32);
+        uint32_t n = tp - rp;
+        if (n > cap) n = cap;
+        for (uint32_t i = 0; i < n; ++i)
+            out[i] = slot[(rp + i) & Mask];
+        if (n) read_pos.store(rp + n, std::memory_order_release);
+        return n;
+    }
+};
+```
+
+**The empty slot is the publication**
+
+Each side keeps an index that only it writes. The ring does not carry a shared head and tail beside the slots. The slot value is the thing being handed over, and an all-ones word means empty. The writer looks at its next slot and does not write when that slot is not empty. When it is empty, the writer release-stores the value and then advances its own index. The reader acquire-loads its next slot and stops on the empty word. After it is done, it release-stores the empty word and advances. The two sides do not bounce a cache line just to publish an index. The load that reads the slot brings the id with it.
+
+The ring is one slot longer than the number of objects in flight. When every object is on the ring, one slot is still empty. A reader that has caught up stops on that slot and does not wrap around onto a value it has already taken. The low 32 bits of a slot hold the object id and the high 32 bits hold a generation. The same id posted again is a different word.
+
+```cpp
+#include <atomic>
+#include <cstdint>
+
+struct SlotRing {
+    static constexpr uint64_t kEmpty = ~uint64_t{0};
+    static constexpr uint32_t kCap = 8;
+    std::atomic<uint64_t> slot[kCap];
+    uint32_t wr = 0;
+    uint32_t rd = 0;
+
+    SlotRing() {
+        for (uint32_t i = 0; i < kCap; ++i)
+            slot[i].store(kEmpty, std::memory_order_relaxed);
+    }
+
+    static uint64_t pack(uint32_t index, uint32_t gen) {
+        return (uint64_t)index | ((uint64_t)gen << 32);
+    }
+    static uint32_t index_of(uint64_t v) { return (uint32_t)v; }
+    static uint32_t gen_of(uint64_t v) { return (uint32_t)(v >> 32); }
+
+    bool push(uint64_t id) {
+        if (slot[wr].load(std::memory_order_acquire) != kEmpty) return false;
+        slot[wr].store(id, std::memory_order_release);
+        wr = (wr + 1) % kCap;
+        return true;
+    }
+
+    bool pop(uint64_t& id) {
+        uint64_t v = slot[rd].load(std::memory_order_acquire);
+        if (v == kEmpty) return false;
+        id = v;
+        slot[rd].store(kEmpty, std::memory_order_release);
+        rd = (rd + 1) % kCap;
+        return true;
+    }
 };
 ```
 
@@ -7485,7 +7898,7 @@ for (int i = 0; i + 7 < N; i += 8) { // Process 8 ints (32 bytes) each time
 Generic `memcpy` often branches on length and alignment; short or unaligned paths emit many discrete 1-byte / 2-byte stores. When the destination is a NIC/FPGA BAR or DMA buffer mapped as WC (Write Combining) PCIe memory, those fragmented stores become separate PCIe write transactions and break the write-combining window. Aligned `uint64_t` (or wider fixed-width / NT) bulk stores match the controller’s write-combining granularity better, so adjacent writes coalesce into fewer bus transactions and cut PCIe round-trip cost.
 
 + **Use when**: fixed/known-size packets, descriptors, or doorbell fields written into device-mapped memory
-+ **Keys**: keep src/dst 8-byte aligned; avoid relying on generic `memcpy`’s “catch-all” branches on the hot path; flush WC buffers with `sfence` when needed (see SFENCE above)
++ **Keys**: keep src/dst 8-byte aligned; avoid relying on generic `memcpy`’s “catch-all” branches on the hot path; fill each 64-byte write-combining buffer, then `sfence` once. On x86 a cacheable descriptor followed by an uncached doorbell only needs a compiler barrier
 + **Caveat**: on ordinary DRAM, modern `memcpy` is already highly tuned—this tip targets **PCIe/MMIO/WC** paths, not every copy in the process
 
 ```cpp
@@ -7502,6 +7915,56 @@ inline void copy_u64_blocks(volatile void* dst, const void* src, size_t nbytes) 
         d[i] = s[i]; // wide stores favor PCIe write combining vs memcpy's 1B/2B fragments
     }
     // If later code assumes the device has observed all writes, add sfence / platform barriers for WC
+}
+```
+
+**A short tail is still one aligned store**
+
+A write-combining aperture accepts naturally aligned 8-byte stores. A tail shorter than 8 bytes is assembled in a register and stored once. When the source is already 8-byte aligned, reading up to 7 bytes past the tail is safe: the extra bytes stay in the same cache line and the same page. An unaligned source is not over-read. If an 8-byte load would cross the end of the page, load the 8 bytes that end on the last valid byte and shift them down. Those earlier bytes may not belong to this slice, but they sit on the same mapped page.
+
+A leftover of fewer than 8 bytes from the previous slice stays in the register and is completed from the start of the next slice, so the boundary is not broken into byte stores. After the payload, pad the current 64-byte write-combining buffer with zeros. Stopping in the middle of that buffer lets later stores leave the CPU out of order. One `sfence` after the pad drains the combining buffer before the uncached doorbell.
+
+```cpp
+#include <cstdint>
+#include <cstring>
+#include <immintrin.h>
+
+inline uint64_t tail_word(const uint8_t* p, size_t n) {
+    constexpr uintptr_t kPage = 4096;
+    if (((uintptr_t)p & (kPage - 1)) > kPage - 8) {
+        uint64_t raw;
+        std::memcpy(&raw, p - (8 - n), 8);
+        return raw >> (8 * (8 - n));
+    }
+    uint64_t raw;
+    std::memcpy(&raw, p, 8);
+    if (n == 8) return raw;
+    return raw & ((1ull << (8 * n)) - 1);
+}
+
+inline volatile uint64_t* store_frame(volatile uint64_t* dst,
+                                      const uint8_t* src, size_t n) {
+    const bool aligned = ((uintptr_t)src & 7u) == 0;
+    if (aligned) {
+        const size_t words = (n + 7) >> 3;
+        auto* s = reinterpret_cast<const uint64_t*>(src);
+        for (size_t i = 0; i < words; ++i)
+            *dst++ = s[i];
+    } else {
+        size_t off = 0;
+        while (n - off >= 8) {
+            uint64_t w;
+            std::memcpy(&w, src + off, 8);
+            *dst++ = w;
+            off += 8;
+        }
+        if (off < n)
+            *dst++ = tail_word(src + off, n - off);
+    }
+    while (((uintptr_t)dst & 63u) != 0)
+        *dst++ = 0;
+    _mm_sfence();
+    return dst;
 }
 ```
 
@@ -7884,6 +8347,48 @@ int cents = total_cents % 100;
 **Note**: Integer division/remainder is still an inefficient operation and should be avoided as much as possible - for example, in the above scenario, if you only need to output the total price, you can format it directly `total_cents` is a string (such as `sprintf(buf, "%d.%02d", total_cents/100, total_cents%100)`) to avoid performing division/remainder in the hot path.
 
 
+
+**(5) Runtime-invariant integer divisors**
+
+When the divisor is known only at run time and then reused, the compiler will not turn it into a shift. The invariant-divisor algorithm of Granlund and Montgomery builds a multiplier and two shifts once; the hot path is a high-half multiply. For an unsigned 32-bit divisor with `d >= 2`, both the preparation and the hot path are below. A 64-bit dividend has the same shape: preparation obtains the multiplier with one 128-bit division, and the hot path replaces the 64-bit multiply with the high 64 bits of a 128-bit product. Only that hot path is shown.
+
+Lot size, contract multiplier, and tick are fixed at the open and then applied to every quote.
+
+```cpp
+#include <cstdint>
+
+struct DivConst {
+    uint32_t mul;
+    uint8_t sh1;
+    uint8_t sh2;
+};
+
+inline DivConst prep_div_u32(uint32_t d) {
+    int l = 32 - __builtin_clz(d - 1);
+    uint64_t span = (1ull << l) - d;
+    uint64_t m = ((1ull << 32) * span) / d + 1;
+    DivConst c;
+    c.mul = uint32_t(m);
+    c.sh1 = uint8_t(l < 1 ? l : 1);
+    c.sh2 = uint8_t(l > 0 ? l - 1 : 0);
+    return c;
+}
+
+inline uint32_t div_u32(uint32_t n, DivConst c) {
+    uint32_t t = uint32_t((uint64_t)n * c.mul >> 32);
+    return (t + ((n - t) >> c.sh1)) >> c.sh2;
+}
+
+inline uint64_t div_u64(uint64_t n, uint64_t mul, uint8_t sh1, uint8_t sh2) {
+    uint64_t t = uint64_t((unsigned __int128)n * mul >> 64);
+    return (t + ((n - t) >> sh1)) >> sh2;
+}
+
+inline uint32_t lots_of(uint32_t notional, DivConst lot) {
+    return div_u32(notional, lot);
+}
+```
+
 **3. Avoid inefficient remainder (`%`) with implicit conversions**
 
 ---
@@ -8085,6 +8590,117 @@ constexpr float two_pi = pi * 2.0f; // Force calculation at compile time, no ope
 static const float sqrt2 = sqrtf(2.0f);
 ```
 
+**4. Ones' complement checksum on two carry chains**
+
+TCP, UDP, and IP checksums are a 16-bit ones' complement sum. The hot path adds 8 bytes at a time and folds the carry with `adc`, instead of reducing to 16 bits on every step. A single chain waits on the previous carry, so the whole buffer is limited by add latency. Adjacent 8-byte words go into two registers. The chains do not depend on each other, and the adds overlap. After the loop the chains are added, folded from 64 bits to 32 and from 32 to 16, then inverted. A datagram shorter than 64KiB leaves the top 16 bits of the 64-bit sum at zero, so the fold does not need another pass. After folding, the direction of the carry is symmetric, and network-order words can be added with native integer adds.
+
+A 20-byte IP header is unrolled as 16-bit adds, skipping the checksum field itself. Options are added only when the header is longer than 20 bytes. A UDP fold of 0 is stored as `0xffff`, because 0 means the checksum is absent. The last byte of an odd-length slice is carried into the high 8 bits of the next slice.
+
+The hot loop is two independent `add` / `adc $0` pairs, each on its own register.
+
+```cpp
+#include <cstdint>
+#include <cstring>
+
+inline uint64_t adc64(uint64_t a, uint64_t b) {
+  unsigned long long s = a;
+  unsigned char c = __builtin_uaddll_overflow(s, b, &s);
+  return s + c;
+}
+
+inline uint16_t fold_invert(uint64_t sum) {
+  uint32_t s = (uint32_t)sum + (uint32_t)(sum >> 32);
+  s = (uint16_t)s + (s >> 16);
+  s = (uint16_t)s + (s >> 16);
+  return (uint16_t)~s;
+}
+
+inline uint64_t sum_chains(uint64_t acc, const uint8_t* p, size_t n) {
+  uint64_t other = 0;
+  while (n >= 16) {
+    uint64_t w;
+    std::memcpy(&w, p, 8);
+    acc = adc64(acc, w);
+    std::memcpy(&w, p + 8, 8);
+    other = adc64(other, w);
+    p += 16;
+    n -= 16;
+  }
+  if (n >= 8) {
+    uint64_t w;
+    std::memcpy(&w, p, 8);
+    acc = adc64(acc, w);
+    p += 8;
+    n -= 8;
+  }
+  acc = adc64(acc, other);
+  if (n >= 4) {
+    uint32_t w;
+    std::memcpy(&w, p, 4);
+    acc += w;
+    p += 4;
+    n -= 4;
+  }
+  if (n >= 2) {
+    uint16_t w;
+    std::memcpy(&w, p, 2);
+    acc += w;
+    p += 2;
+    n -= 2;
+  }
+  if (n) acc += *p;
+  return acc;
+}
+
+inline uint16_t ip_header_sum(const uint16_t* h, int words) {
+  uint32_t s = h[0] + h[1] + h[2] + h[3] + h[4];
+  s += h[6] + h[7] + h[8] + h[9];
+  for (int i = 10; i < words; ++i) s += h[i];
+  s = (s & 0xffff) + (s >> 16);
+  s += s >> 16;
+  return (uint16_t)~s;
+}
+
+inline uint16_t udp_sum(uint64_t acc) {
+  uint16_t v = fold_invert(acc);
+  return v ? v : 0xffff;
+}
+
+inline uint64_t add_carried_byte(uint64_t acc, uint8_t b, bool into_high) {
+  return acc + (into_high ? ((uint64_t)b << 8) : b);
+}
+```
+
+**5. Leave the unchanging fields as a partial sum**
+
+On one connection the addresses, ports, and protocol do not change. Those 16-bit words are added once when the connection is established, and the sum is kept before the final inversion. Each message adds only the words that change, then the partial sum of the payload. Every added word is folded: the high 16 bits are added back into the low 16, and that is folded once more. The folded sum stays inside 17 bits, so the next addition is an ordinary 32-bit add and does not wait on a carry each step. After the last word, invert. That value is what the message stores. The number of words has to stay small enough for the running sum to fit in 32 bits.
+
+Changing a single 16-bit word does not require adding the whole message again. Invert the checksum already stored in the message, add the ones' complement of the old word, add the new word, fold back to 16 bits the same way, and invert. When the old word and the new word are equal, the stored checksum comes back unchanged.
+
+```cpp
+#include <cstdint>
+
+inline uint32_t fold16(uint32_t s) {
+    s = (s & 0xffffu) + (s >> 16);
+    return (s & 0xffffu) + (s >> 16);
+}
+
+inline uint16_t invert_sum(uint32_t s) { return (uint16_t)~fold16(s); }
+
+inline uint32_t add_word(uint32_t part, uint16_t w) { return fold16(part + w); }
+
+inline uint16_t finish_words(uint32_t part, const uint16_t* w, int n) {
+    for (int i = 0; i < n; ++i) part = add_word(part, w[i]);
+    return invert_sum(part);
+}
+
+inline uint16_t rewrite_word(uint16_t stored, uint16_t from, uint16_t to) {
+    uint32_t s = (uint16_t)~stored;
+    s += (uint16_t)~from;
+    s += to;
+    return invert_sum(s);
+}
+```
 
 ### 20. Direct manipulation of in-memory binary representations
 ```cpp
@@ -10180,6 +10796,52 @@ public:
 ```
 
 
+
+**Single-writer sequence count**
+
+A small record that is read often and written rarely, such as a set of risk limits or one bid/ask, can be wrapped in a 32-bit sequence. An even value is stable. An odd value means a write is in progress.
+
+The reader loads the sequence with acquire. An odd value starts the read over. It then copies the fields onto its own stack, issues an acquire fence, and loads the sequence again with relaxed ordering. The copy may be used only when the two loads match. Until the second load returns, the reader does not act on a half-updated field.
+
+The writer adds one, making the sequence odd, and stores it relaxed. A release fence follows, then the field stores. A second increment makes the sequence even and is stored with release. The fence keeps the field stores from floating above the odd value. The release of the even value pairs with the reader's first acquire.
+
+With one writer the sequence is enough. Several writers take a short spin around the write only; readers still take no lock. The writer should not sit on an odd sequence, because readers keep retrying. Store values inside the record. The lifetime of anything a pointer refers to is a separate problem.
+
+```cpp
+#include <atomic>
+#include <cstdint>
+
+struct TopOfBook {
+    int64_t bid_px;
+    int64_t ask_px;
+    int32_t bid_qty;
+    int32_t ask_qty;
+};
+
+struct BookPub {
+    std::atomic<uint32_t> seq{0};
+    TopOfBook book{};
+
+    void write(const TopOfBook& in) {
+        uint32_t s = seq.load(std::memory_order_relaxed) + 1;
+        seq.store(s, std::memory_order_relaxed);
+        std::atomic_thread_fence(std::memory_order_release);
+        book = in;
+        seq.store(s + 1, std::memory_order_release);
+    }
+
+    bool read(TopOfBook& out) const {
+        uint32_t s = seq.load(std::memory_order_acquire);
+        if (s & 1u) return false;
+        TopOfBook tmp = book;
+        std::atomic_thread_fence(std::memory_order_acquire);
+        if (seq.load(std::memory_order_relaxed) != s) return false;
+        out = tmp;
+        return true;
+    }
+};
+```
+
 ### 25. Custom spin lock implementation
 in the form of a lock abstractionUsed to protect shared resource operations with extremely short execution time (much shorter than the thread context switching time), such as real-time updating of order books, capturing market data snapshots, and rapid calculation of trading signals.
 
@@ -10553,6 +11215,310 @@ void unlock() {
 | **Applicable scenarios** | Low thread contention environment | Environments with high thread contention and pursuit of extreme performance and scalability | Common scenarios that require fairness and simple implementation |
 
 
+
+**4. Phase-fair reader-writer lock**
+
+With many readers and few writers, a plain reader-writer lock lets a stream of readers keep a writer out, or a queue of writers starve the readers. A phase-fair lock alternates a read phase and a write phase. At most 4095 readers are inside at once. The reader word is 16 bits: the high 12 bits count readers and step by 16; the low 2 bits belong to the writer, one for presence and one for the phase.
+
+A reader adds 16. If the low 2 bits are still 0, no write phase is active and the reader enters. A writer first takes a ticket on its own pair, so writers enter in ticket order. It then adds the presence bit and the phase bit into the reader word and keeps the value from before that add. Readers already inside advance the completion count toward that old value, and the writer waits until completion catches it. A reader that arrives later has already added itself, sees a nonzero low pair, and waits outside until the writer clears those bits. Unlock clears the low 2 bits with a release AND, then advances the writer ticket. The phase flips with the ticket, so the next writer does not reuse the previous mark.
+
+```cpp
+#include <atomic>
+#include <cstdint>
+#include <immintrin.h>
+
+struct PhaseRw {
+    struct Side {
+        std::atomic<uint16_t> issued{0};
+        std::atomic<uint16_t> done{0};
+    };
+    Side readers{};
+    Side writers{};
+
+    static constexpr uint16_t kStep = 0x10;
+    static constexpr uint16_t kWriterBits = 0x3;
+    static constexpr uint16_t kPresent = 0x2;
+    static constexpr uint16_t kPhase = 0x1;
+    static constexpr uint16_t kReaderMask = 0xFFF0;
+
+    void read_lock() {
+        uint16_t w = readers.issued.fetch_add(kStep, std::memory_order_acquire) & kWriterBits;
+        if (w == 0) return;
+        while ((readers.issued.load(std::memory_order_acquire) & kWriterBits) == w)
+            _mm_pause();
+    }
+
+    void read_unlock() {
+        readers.done.fetch_add(kStep, std::memory_order_release);
+    }
+
+    void write_lock() {
+        uint16_t ticket = writers.issued.fetch_add(1, std::memory_order_relaxed);
+        while (writers.done.load(std::memory_order_acquire) != ticket)
+            _mm_pause();
+        uint16_t mark = kPresent | (ticket & kPhase);
+        uint16_t seen = readers.issued.fetch_add(mark, std::memory_order_relaxed);
+        while (readers.done.load(std::memory_order_acquire) != seen)
+            _mm_pause();
+    }
+
+    void write_unlock() {
+        readers.issued.fetch_and(kReaderMask, std::memory_order_release);
+        writers.done.fetch_add(1, std::memory_order_release);
+    }
+};
+```
+
+**5. Lock bit and wake bit in one word**
+
+An idle word is 0. The fast path compare-exchanges it from 0 to the lock bit. On failure, spin for a budget of cycles, pausing before each retry. The budget is the difference of two timestamp-counter reads, converted from the desired interval ahead of time, so the loop does not divide. When the budget is gone, one more compare-exchange decides: if the lock bit is clear, take it; if someone still holds it, set the wake bit and leave. The holder unlocks a word that contains only the lock bit by compare-exchanging it to 0, and wakes nobody. If the wake bit is also set, the unlock clears the lock bit and the wake bit together, and the caller wakes after that. With nobody waiting, the fast path never touches the wait queue.
+
+```cpp
+#include <atomic>
+#include <cstdint>
+#include <immintrin.h>
+#include <x86intrin.h>
+
+struct WakeLock {
+    static constexpr uint32_t kHeld = 1;
+    static constexpr uint32_t kWake = 2;
+    std::atomic<uint32_t> word{0};
+    uint64_t budget = 0;
+
+    bool try_lock() {
+        uint32_t z = 0;
+        return word.compare_exchange_strong(z, kHeld,
+                                             std::memory_order_acquire,
+                                             std::memory_order_relaxed);
+    }
+
+    bool claim_or_mark() {
+        for (;;) {
+            uint32_t v = word.load(std::memory_order_relaxed);
+            if ((v & kHeld) == 0) {
+                uint32_t n = kHeld;
+                if (word.compare_exchange_weak(v, n,
+                                               std::memory_order_acquire,
+                                               std::memory_order_relaxed))
+                    return true;
+            } else if (v & kWake) {
+                return false;
+            } else if (word.compare_exchange_weak(v, v | kWake,
+                                                  std::memory_order_relaxed,
+                                                  std::memory_order_relaxed)) {
+                return false;
+            }
+        }
+    }
+
+    bool lock_polite() {
+        if (try_lock()) return true;
+        uint64_t t0 = __rdtsc();
+        while (__rdtsc() - t0 < budget) {
+            _mm_pause();
+            if (try_lock()) return true;
+        }
+        return claim_or_mark();
+    }
+
+    bool unlock() {
+        for (;;) {
+            uint32_t v = word.load(std::memory_order_relaxed);
+            uint32_t n = v & ~(kHeld | kWake);
+            if (word.compare_exchange_weak(v, n,
+                                           std::memory_order_release,
+                                           std::memory_order_relaxed))
+                return (v & kWake) != 0;
+        }
+    }
+};
+```
+
+**6. Hang the work off the lock word**
+
+The low two bits are the lock bit and the wake bit. The rest of the word is the head of a work chain, so a node is aligned to at least 4 bytes. A caller that does not get the lock compare-exchanges its node onto the head and returns. The holder runs that work. Nodes are pushed at the head, and the chain is reversed before it runs, so the earlier node runs first. Both the reverse and the run save the successor before touching the node, because the callback may free it. The lock is still held while the callback runs, and the callback does not unlock.
+
+Unlock looks at the chain first. If nodes are present, one compare-exchange detaches the chain and leaves the low two bits in place, then the nodes run. When the chain is empty, the whole word is compare-exchanged to 0. If that word had the wake bit set, take the mutex that exists only for the slow path, drop it, then broadcast. The mutex orders “already inside the condition wait” against the broadcast: the waiter sets the wake bit while holding the mutex, then waits. When nobody is queued, unlock is still one compare-exchange.
+
+```cpp
+#include <atomic>
+#include <condition_variable>
+#include <cstdint>
+#include <mutex>
+
+struct alignas(8) Work {
+    void (*fn)(Work*);
+    Work* next;
+};
+
+struct WorkLock {
+    static constexpr uintptr_t kHeld = 1;
+    static constexpr uintptr_t kWake = 2;
+    static constexpr uintptr_t kBits = 3;
+    std::atomic<uintptr_t> word{0};
+    std::mutex mu;
+    std::condition_variable cv;
+
+    bool try_lock() {
+        uintptr_t z = 0;
+        return word.compare_exchange_strong(z, kHeld,
+                                            std::memory_order_acquire,
+                                            std::memory_order_relaxed);
+    }
+
+    bool try_queue(Work* w) {
+        uintptr_t v = word.load(std::memory_order_relaxed);
+        if ((v & kHeld) == 0) return false;
+        w->next = reinterpret_cast<Work*>(v & ~kBits);
+        uintptr_t n = (v & kBits) | reinterpret_cast<uintptr_t>(w);
+        return word.compare_exchange_strong(v, n,
+                                            std::memory_order_release,
+                                            std::memory_order_relaxed);
+    }
+
+    bool lock_or_queue(Work* w) {
+        for (;;) {
+            if (try_queue(w)) return false;
+            if (try_lock()) return true;
+        }
+    }
+
+    void run_list(Work* head) {
+        Work* rev = nullptr;
+        while (head) {
+            Work* nxt = head->next;
+            head->next = rev;
+            rev = head;
+            head = nxt;
+        }
+        while (rev) {
+            Work* nxt = rev->next;
+            rev->fn(rev);
+            rev = nxt;
+        }
+    }
+
+    void drain() {
+        for (;;) {
+            uintptr_t v = word.load(std::memory_order_relaxed);
+            if ((v & ~kBits) == 0) return;
+            if (word.compare_exchange_weak(v, v & kBits,
+                                           std::memory_order_acquire,
+                                           std::memory_order_relaxed)) {
+                run_list(reinterpret_cast<Work*>(v & ~kBits));
+                return;
+            }
+        }
+    }
+
+    void lock_slow() {
+        std::unique_lock<std::mutex> g(mu);
+        for (;;) {
+            uintptr_t v = word.load(std::memory_order_relaxed);
+            if (v == 0) {
+                if (word.compare_exchange_weak(v, kHeld,
+                                               std::memory_order_acquire,
+                                               std::memory_order_relaxed))
+                    return;
+            } else if ((v & kWake) == 0) {
+                word.compare_exchange_weak(v, v | kWake,
+                                           std::memory_order_relaxed,
+                                           std::memory_order_relaxed);
+            } else {
+                cv.wait(g);
+            }
+        }
+    }
+
+    void lock() {
+        if (try_lock()) return;
+        lock_slow();
+    }
+
+    void unlock() {
+        uintptr_t seen = 0;
+        for (;;) {
+            uintptr_t v = word.load(std::memory_order_relaxed);
+            if ((v & ~kBits) != 0) {
+                drain();
+                continue;
+            }
+            if (word.compare_exchange_weak(v, 0,
+                                           std::memory_order_release,
+                                           std::memory_order_relaxed)) {
+                seen = v;
+                break;
+            }
+        }
+        if (seen & kWake) {
+            mu.lock();
+            mu.unlock();
+            cv.notify_all();
+        }
+    }
+};
+```
+
+**Split the sleep sequence in half**
+
+While holding the lock, the waiter records the direction it cares about, reads the sequence, then looks at the condition. If the condition already holds, it does not sleep. If the condition is still idle, it drops the lock and reads the sequence again, and sleeps only when the two reads match. The publisher, still inside that lock, finishes the data, adds to the sequence, then looks at the interest bits. With the interest bit clear, it does not wake anyone.
+
+The low 32 bits belong to receive and the high 32 bits belong to send. A publish adds only to its own half. Edge reporting remembers both halves from the last delivery. Read the sequence before looking at the level, and read it again after. If the two reads differ, this look is discarded, the remembered halves stay as they were, and the caller looks again. If they match, compare them with the halves last delivered. Both equal means the level is still up and nothing is delivered again. An unchanged low half drops the receive side. An unchanged high half drops the send side. The first registration subtracts one from each remembered half, so the first edge is not treated as already delivered.
+
+```cpp
+#include <atomic>
+#include <cstdint>
+
+struct HalfSeq {
+    static constexpr uint32_t kRx = 1;
+    static constexpr uint32_t kTx = 2;
+    std::atomic<uint64_t> word{0};
+    uint32_t interest = 0;
+    uint32_t seen_rx = 0;
+    uint32_t seen_tx = 0;
+
+    static uint32_t lo(uint64_t w) { return (uint32_t)w; }
+    static uint32_t hi(uint64_t w) { return (uint32_t)(w >> 32); }
+
+    void prime() {
+        uint64_t w = word.load(std::memory_order_relaxed);
+        seen_rx = lo(w) - 1;
+        seen_tx = hi(w) - 1;
+    }
+
+    uint64_t sample() const { return word.load(std::memory_order_acquire); }
+
+    void watch(uint32_t side) { interest |= side; }
+
+    bool sleep_if_unchanged(uint64_t sampled, bool still_idle) const {
+        if (!still_idle) return false;
+        return word.load(std::memory_order_acquire) == sampled;
+    }
+
+    uint32_t publish(uint32_t side) {
+        uint64_t add = 0;
+        if (side & kRx) add += 1;
+        if (side & kTx) add += 1ull << 32;
+        word.fetch_add(add, std::memory_order_release);
+        return interest & side;
+    }
+
+    int edge(uint64_t before, uint32_t level) {
+        uint64_t after = word.load(std::memory_order_acquire);
+        if (after != before) return -1;
+        uint32_t rx = lo(before);
+        uint32_t tx = hi(before);
+        uint32_t out = level;
+        if (rx == seen_rx && tx == seen_tx) out = 0;
+        else if (rx == seen_rx) out &= ~kRx;
+        else if (tx == seen_tx) out &= ~kTx;
+        seen_rx = rx;
+        seen_tx = tx;
+        return (int)out;
+    }
+};
+```
+
 **Spin wait and PAUSE: optimization of spin (lock)**
 
 Spin-wait Loop is a tight-loop
@@ -10853,6 +11819,47 @@ int aussie_popcount_msvs(unsigned int x) {
 
 ```plain
 - **Hardware support**: provided by x86 architecture`POPCNT`instruction, the built-in function directly maps the instruction, and completes 32-bit statistics in a single cycle.
+```
+
+
+**Two-level bitmap**
+
+A flat bitmap of free indexes walks cache lines until it finds a hole. A summary word above it has one bit per 64-bit slab, set only while that slab still has a free bit. A clear summary bit means the slab is not loaded. Sizing the slab to a cache line is the useful scale: one summary bit then skips 512 or 1024 indexes.
+
+One thread scans and clears. Other threads may read a single bit and do not update the map. Clearing the last set bit in a slab clears the summary bit in the same update; otherwise the next scan loads a slab that is already empty. A cursor remembers the slab last hit, and the next claim continues past it, so every allocation does not pile onto the lowest indexes.
+
+```cpp
+#include <cstdint>
+
+struct HoleMap {
+    uint64_t summary{~uint64_t{0}};
+    uint64_t slab[64];
+    uint32_t cursor{0};
+
+    HoleMap() {
+        for (uint64_t& w : slab) w = ~uint64_t{0};
+    }
+
+    int claim() {
+        if (summary == 0) return -1;
+        for (uint32_t k = 0; k < 64; ++k) {
+            uint32_t s = (cursor + k) & 63u;
+            if ((summary & (1ull << s)) == 0) continue;
+            int b = __builtin_ctzll(slab[s]);
+            slab[s] &= ~(1ull << b);
+            if (slab[s] == 0) summary &= ~(1ull << s);
+            cursor = s;
+            return int((s << 6) + uint32_t(b));
+        }
+        return -1;
+    }
+
+    void release(int index) {
+        uint32_t s = uint32_t(index) >> 6;
+        slab[s] |= 1ull << (index & 63);
+        summary |= 1ull << s;
+    }
+};
 ```
 
 ### 27. C++20 coroutine scheduling framework
@@ -12048,7 +13055,7 @@ aws ec2 create-placement-group --group-name lane-cluster --strategy cluster
 ```
 
 
-### 33. Latency measurement (clock cycles)
+### 33. Clock cycles, latency measurement, and timers
 
 Use `rtla` for OS noise on isolated cores. Do not judge tails from `handle()` time alone.
 
@@ -12709,6 +13716,448 @@ private:
 ```
 
 
+
+**Reading performance counters from user space**
+
+`rdtsc` reports cycles. Retired instructions, cache misses, and mispredicted branches come from the performance counters. A syscall per sample costs more than the code being measured. Open the event at startup, pin it to this core, map the user page the kernel provides, and the hot path is `rdpmc`.
+
+That page carries a sequence, a counter index, a width, a bias, and a flag for user-mode reads. An odd sequence means the kernel is updating the bias; drop the sample and retry. An index of 0 means this counter cannot be read. Mask the raw value to the hardware width and add the bias. The sample stands only when the sequence is unchanged at the end. With the event pinned to this core, the counter is not time-sliced and does not need to be scaled by enabled time over running time. Leave that division on a sampler thread. Do not read a counter on every order. The read itself is tens of cycles; place it around a whole stretch of logic, or on a side core.
+
+```cpp
+#include <atomic>
+#include <cstdint>
+
+struct PmcView {
+    uint32_t seq;
+    uint32_t index;   // 0: unreadable; otherwise hardware index plus one
+    uint32_t width;
+    uint8_t allow;
+    int64_t bias;
+};
+
+inline uint64_t read_pmc(const PmcView* pg) {
+    for (;;) {
+        uint32_t s = pg->seq;
+        if (s & 1u) continue;
+        std::atomic_thread_fence(std::memory_order_acquire);
+        uint32_t index = pg->index;
+        uint32_t width = pg->width;
+        int64_t bias = pg->bias;
+        uint64_t raw = 0;
+        if (pg->allow && index) {
+            uint32_t lo, hi;
+            asm volatile("rdpmc" : "=a"(lo), "=d"(hi) : "c"(index - 1));
+            raw = (uint64_t)hi << 32 | lo;
+            if (width && width < 64) {
+                raw <<= 64 - width;
+                raw >>= 64 - width;
+            }
+        }
+        std::atomic_thread_fence(std::memory_order_acquire);
+        if (pg->seq == s) return uint64_t(bias) + raw;
+    }
+}
+```
+
+**Keep the frequency sample in a thread-local copy**
+
+The pairing of the cycle counter and the wall clock lives on one shared page, rewritten every so often by a side thread. Each worker keeps a copy. When the copy's generation matches the page, a conversion does not touch the page. A mismatch copies the fields across. The writer first stores an odd generation, writes the fields, then stores an even generation. Zero means no sample has been published. A wrap of the generation skips zero.
+
+A sample is a sliding sum of the last 16 intervals, in cycles and in nanoseconds. A monotonic clock that steps backward, or an interval longer than 10 seconds, stays out of the sum. Only the baseline moves forward, so one long pause does not drag the frequency. The frequency is read after two intervals exist. It is the cycle sum times one million, divided by the nanosecond sum. The multiply happens first.
+
+Converting a past cycle stamp to wall time uses a 128-bit intermediate product: the cycle delta times the nanosecond sum, divided by the cycle sum. Asking again with the same stamp returns the previous result. Refreshing the copy drops that cache.
+
+```cpp
+#include <atomic>
+#include <cstdint>
+
+struct ClockPage {
+    std::atomic<uint32_t> gen{0};
+    uint64_t sum_ticks = 0;
+    uint64_t sum_ns = 0;
+    uint64_t base_tsc = 0;
+    int64_t base_sec = 0;
+    int64_t base_nsec = 0;
+};
+
+struct ClockSmooth {
+    static constexpr int kN = 16;
+    static constexpr int64_t kGapNs = 10000000000ll;
+    uint64_t tick_s[kN]{};
+    uint64_t ns_s[kN]{};
+    int at = 0;
+    int filled = 0;
+    uint64_t sum_ticks = 0;
+    uint64_t sum_ns = 0;
+
+    bool push(uint64_t ticks, int64_t ns) {
+        if (ns <= 0 || ns > kGapNs) return false;
+        sum_ticks += ticks;
+        sum_ticks -= tick_s[at];
+        tick_s[at] = ticks;
+        sum_ns += (uint64_t)ns;
+        sum_ns -= ns_s[at];
+        ns_s[at] = (uint64_t)ns;
+        at = (at + 1) & (kN - 1);
+        if (filled < kN) ++filled;
+        return filled >= 2;
+    }
+
+    uint64_t khz() const { return sum_ticks * 1000000ull / sum_ns; }
+};
+
+struct ClockView {
+    uint32_t gen = 0;
+    uint64_t sum_ticks = 0;
+    uint64_t sum_ns = 1;
+    uint64_t base_tsc = 0;
+    int64_t base_sec = 0;
+    int64_t base_nsec = 0;
+    uint64_t cached_stamp = 0;
+    int64_t cached_sec = 0;
+    int64_t cached_nsec = 0;
+    bool has_cache = false;
+
+    bool refresh(const ClockPage* pg) {
+        uint32_t g = pg->gen.load(std::memory_order_acquire);
+        if (g != 0 && g == gen) return true;
+        for (;;) {
+            g = pg->gen.load(std::memory_order_acquire);
+            if (g == 0 || (g & 1u)) continue;
+            uint64_t ticks = pg->sum_ticks;
+            uint64_t ns = pg->sum_ns;
+            uint64_t base = pg->base_tsc;
+            int64_t sec = pg->base_sec;
+            int64_t nsec = pg->base_nsec;
+            std::atomic_thread_fence(std::memory_order_acquire);
+            if (pg->gen.load(std::memory_order_relaxed) != g) continue;
+            gen = g;
+            sum_ticks = ticks;
+            sum_ns = ns ? ns : 1;
+            base_tsc = base;
+            base_sec = sec;
+            base_nsec = nsec;
+            has_cache = false;
+            return true;
+        }
+    }
+
+    void publish_page(ClockPage* pg, const ClockSmooth& sm,
+                      uint64_t base_tsc, int64_t sec, int64_t nsec) {
+        uint32_t g = pg->gen.load(std::memory_order_relaxed);
+        pg->gen.store(g + 1, std::memory_order_relaxed);
+        std::atomic_thread_fence(std::memory_order_release);
+        pg->sum_ticks = sm.sum_ticks;
+        pg->sum_ns = sm.sum_ns;
+        pg->base_tsc = base_tsc;
+        pg->base_sec = sec;
+        pg->base_nsec = nsec;
+        std::atomic_thread_fence(std::memory_order_release);
+        uint32_t n = g + 2;
+        if (n == 0) n = 2;
+        pg->gen.store(n, std::memory_order_release);
+    }
+
+    bool to_wall(uint64_t stamp, int64_t& sec, int64_t& nsec) {
+        if (sum_ticks == 0) return false;
+        if (has_cache && cached_stamp == stamp) {
+            sec = cached_sec;
+            nsec = cached_nsec;
+            return true;
+        }
+        int64_t dt = (int64_t)(stamp - base_tsc);
+        __int128 num = (__int128)dt * (__int128)sum_ns;
+        int64_t dns = (int64_t)(num / (__int128)sum_ticks);
+        sec = base_sec;
+        nsec = base_nsec + dns;
+        if (nsec >= 1000000000ll) {
+            sec += nsec / 1000000000ll;
+            nsec %= 1000000000ll;
+        } else if (nsec < 0) {
+            int64_t borrow = (-nsec + 999999999ll) / 1000000000ll;
+            sec -= borrow;
+            nsec += borrow * 1000000000ll;
+        }
+        cached_stamp = stamp;
+        cached_sec = sec;
+        cached_nsec = nsec;
+        has_cache = true;
+        return true;
+    }
+};
+```
+
+**Two cadences for a poll loop**
+
+A caller sitting in a tight loop asks whether anything is ready. Walking every descriptor each time hits cache lines that were just read. Remember the cycle counter from the last walk. If the difference is still inside the fast gap, tell the caller there is nothing new. The first call has no previous counter, so it walks.
+
+While waiting for an event, the shared flags are looked at every time. The set that enters the kernel is looked at only on the slow gap. A timeout is converted to cycles first: milliseconds times cycles per millisecond. The loop only subtracts. The division back to milliseconds happens when the result is handed to the caller. Up to 16 descriptors use an array on the stack and do not allocate.
+
+```cpp
+#include <cstdint>
+
+enum class Pace { kSkip, kFast, kSlow, kTimeout };
+
+struct PollPace {
+    uint64_t last_fast = 0;
+    uint64_t last_slow = 0;
+    uint64_t fast_gap = 0;
+    uint64_t slow_gap = 0;
+    uint64_t per_ms = 1;
+    bool fast_set = false;
+    bool slow_set = false;
+    struct pollfd_small { int fd; short ev; short rev; };
+    pollfd_small local[16]{};
+
+    Pace step(uint64_t now, int timeout_ms, uint64_t start, bool blocking) {
+        if (!blocking) {
+            if (fast_set && now - last_fast < fast_gap) return Pace::kSkip;
+            last_fast = now;
+            fast_set = true;
+            return Pace::kFast;
+        }
+        if (timeout_ms >= 0 && now - start >= (uint64_t)timeout_ms * per_ms)
+            return Pace::kTimeout;
+        if (!slow_set || now - last_slow >= slow_gap) {
+            last_slow = now;
+            last_fast = now;
+            slow_set = true;
+            fast_set = true;
+            return Pace::kSlow;
+        }
+        last_fast = now;
+        fast_set = true;
+        return Pace::kFast;
+    }
+
+    pollfd_small* table(int n, pollfd_small* heap) {
+        return n <= 16 ? local : heap;
+    }
+};
+```
+
+**Per-core skiplist timers**
+
+A timer hanging off one global ordered structure makes every core take the same lock when something expires. Give each core its own skiplist, walked only by that core in its own loop. The successor of the sentinel at level 0 is the soonest expiry. Before that time, the poll is one comparison.
+
+Level grows with probability 1/4: while the low two bits of a random value are zero, the node climbs one more level. A level above the current depth is cut back to that depth, and the depth then grows by one, so the list does not jump from level 0 to a tall level with nothing between.
+
+Another core does not edit this skiplist when it arms a timer. It pushes the node onto a lock-free chain. The owner detaches that chain once at the start of each poll and inserts the nodes. The expiry walk takes no lock. Expiry is a TSC value. A timer armed from the callback should expire after the current time, or this poll will keep spinning.
+
+```cpp
+#include <atomic>
+#include <cstdint>
+
+struct Alarm {
+    uint64_t when{0};
+    Alarm* up[8]{};
+    void (*fn)(Alarm*);
+};
+
+struct CoreAlarms {
+    Alarm head{};
+    int depth{1};
+    std::atomic<Alarm*> pending{nullptr};
+
+    static int level_of(uint32_t r) {
+        int lv = 0;
+        while (lv + 1 < 8 && (r & 3u) == 0u) {
+            ++lv;
+            r >>= 2;
+        }
+        return lv;
+    }
+
+    void push_remote(Alarm* a) {
+        Alarm* old = pending.load(std::memory_order_relaxed);
+        do {
+            a->up[0] = old;
+        } while (!pending.compare_exchange_weak(old, a,
+                std::memory_order_release, std::memory_order_relaxed));
+    }
+
+    void arm(Alarm* a, uint32_t salt) {
+        int lv = level_of(salt);
+        if (lv > depth) lv = depth;
+        if (lv == depth && depth < 8) {
+            head.up[depth] = nullptr;
+            ++depth;
+        }
+        Alarm* prev[8];
+        Alarm* cur = &head;
+        for (int i = depth - 1; i >= 0; --i) {
+            while (cur->up[i] != nullptr && cur->up[i]->when <= a->when)
+                cur = cur->up[i];
+            prev[i] = cur;
+        }
+        for (int i = 0; i <= lv; ++i) {
+            a->up[i] = prev[i]->up[i];
+            prev[i]->up[i] = a;
+        }
+    }
+
+    void poll(uint64_t now) {
+        Alarm* extra = pending.exchange(nullptr, std::memory_order_acquire);
+        while (extra != nullptr) {
+            Alarm* nxt = extra->up[0];
+            uint32_t salt = uint32_t(uintptr_t(extra) * 0x9e3779b9u);
+            arm(extra, salt);
+            extra = nxt;
+        }
+        while (head.up[0] != nullptr && head.up[0]->when <= now) {
+            Alarm* a = head.up[0];
+            for (int i = 0; i < depth; ++i) {
+                if (head.up[i] == a) head.up[i] = a->up[i];
+            }
+            a->fn(a);
+        }
+    }
+};
+```
+
+**Hierarchical timing wheel**
+
+When many timers are due soon, walking several pointer levels on every insert costs more than it saves. The near wheel uses the low 6 bits of the due time as a bucket index. Each of the 64 buckets is a chain, and one 64-bit mask records which buckets are non-empty. While time advances, the first set bit after the current bucket is the next tick to run. Empty buckets are not visited.
+
+Later times sit on the wheel above. One bucket there covers 64 ticks of the near wheel. When time reaches a multiple of 64, that upper bucket is detached and each timer is hung back onto the near wheel by its own low 6 bits, with the mask bit set. Anything further than 4096 ticks waits on a later chain and is looked at again at the start of a revolution, once it falls inside 4096 ticks.
+
+Order uses a signed subtraction, so a wrapped counter still says which time is earlier. A callback may arm or cancel other timers, so a firing bucket is detached and its mask bit cleared before any callback runs. A timer armed back into that same bucket is seen by the following pass of the loop. A due time that is not strictly after the current tick is moved to the next tick on insert. Cancel unlinks a timer only while it is still in the future, from the chain it belongs on. An emptied near bucket clears its mask bit. One thread advances the wheel.
+
+```cpp
+#include <cstdint>
+
+struct TickWheel {
+    static constexpr uint32_t kN = 64;
+    static constexpr uint32_t kMask = kN - 1;
+    static constexpr uint32_t kHorizon = kN * kN;
+    struct Node {
+        Node* next;
+        uint32_t when;
+        void (*fn)(TickWheel*, Node*);
+        void* arg;
+    };
+    Node* near_[kN]{};
+    Node* far_[kN]{};
+    Node* later = nullptr;
+    uint64_t busy = 0;
+    uint32_t now = 0;
+
+    static bool earlier(uint32_t a, uint32_t b) {
+        return (int32_t)(a - b) < 0;
+    }
+
+    void insert_near(Node* n) {
+        uint32_t b = n->when & kMask;
+        n->next = near_[b];
+        near_[b] = n;
+        busy |= 1ull << b;
+    }
+
+    void arm(Node* n) {
+        if (!earlier(now, n->when)) n->when = now + 1;
+        uint32_t delta = n->when - now;
+        if (delta < kN) {
+            insert_near(n);
+        } else if (delta < kHorizon) {
+            uint32_t b = (n->when >> 6) & kMask;
+            n->next = far_[b];
+            far_[b] = n;
+        } else {
+            n->next = later;
+            later = n;
+        }
+    }
+
+    static bool unlink(Node*& head, Node* n) {
+        Node** p = &head;
+        while (*p) {
+            if (*p == n) {
+                *p = n->next;
+                n->next = nullptr;
+                return true;
+            }
+            p = &(*p)->next;
+        }
+        return false;
+    }
+
+    bool cancel(Node* n) {
+        if (!earlier(now, n->when)) return false;
+        uint32_t delta = n->when - now;
+        if (delta < kN) {
+            uint32_t b = n->when & kMask;
+            if (!unlink(near_[b], n)) return false;
+            if (!near_[b]) busy &= ~(1ull << b);
+            return true;
+        }
+        if (delta < kHorizon) {
+            uint32_t b = (n->when >> 6) & kMask;
+            return unlink(far_[b], n);
+        }
+        return unlink(later, n);
+    }
+
+    void cascade() {
+        uint32_t b = (now >> 6) & kMask;
+        Node* list = far_[b];
+        far_[b] = nullptr;
+        while (list) {
+            Node* n = list;
+            list = n->next;
+            insert_near(n);
+        }
+    }
+
+    void pull_later() {
+        Node* list = later;
+        later = nullptr;
+        while (list) {
+            Node* n = list;
+            list = n->next;
+            n->next = nullptr;
+            arm(n);
+        }
+    }
+
+    void fire_bucket(uint32_t b) {
+        for (;;) {
+            Node* list = near_[b];
+            near_[b] = nullptr;
+            busy &= ~(1ull << b);
+            if (!list) return;
+            while (list) {
+                Node* n = list;
+                list = n->next;
+                n->next = nullptr;
+                n->fn(this, n);
+            }
+        }
+    }
+
+    void run_until(uint32_t limit) {
+        while (earlier(now, limit)) {
+            ++now;
+            if ((now & kMask) == 0) {
+                cascade();
+                pull_later();
+            }
+            fire_bucket(now & kMask);
+        }
+    }
+
+    uint32_t next_deadline() const {
+        uint32_t b = now & kMask;
+        if (b + 1 < kN) {
+            uint64_t hi = busy >> (b + 1);
+            if (hi)
+                return (now & ~kMask) + (b + 1) + (uint32_t)__builtin_ctzll(hi);
+        }
+        return (now & ~kMask) + kN;
+    }
+};
+
+```
+
 ### 34. End-to-end latency tracing layout
 
 Use one unified trace: every node timestamp lives in a fixed-size array indexed by enum, packed into a cheap-to-copy struct.
@@ -12854,6 +14303,53 @@ struct FrameStamp {
 int64_t hop_ns(const FrameStamp& s) { return s.gen_ns - s.trigger_ns; }
 ```
 
+
+
+**An enable word and a per-core flight recorder**
+
+Diagnostics on the hot path stay off. While they are off, every core shares one read-only enable word: one acquire load, and the predicted path returns. The line stays Shared, so cores do not invalidate each other. The high bits of the word hold the event id. When the point is on, this core packs that id with the low 48 bits of `rdtsc` into the record header, writes the payload, then release-stores its own index. Records live in a ring owned by this core. A full ring overwrites the oldest record. The trading thread does not wait for a consumer.
+
+When even that load should be absent from the instruction stream, a compile switch removes the call. The runtime switch is for a point that is already in the binary and is turned on while debugging.
+
+```cpp
+#include <atomic>
+#include <cstdint>
+#include <x86intrin.h>
+
+#ifndef TRACE_COMPILED
+#define TRACE_COMPILED 1
+#endif
+
+struct TracePoint {
+    std::atomic<uint64_t> gate{0}; // bit 0: on; high 16 bits: event id
+};
+
+struct TraceEv {
+    uint64_t hdr;
+    uint32_t oid;
+    int32_t px;
+};
+
+struct CoreLog {
+    TraceEv ev[1024];
+    std::atomic<uint32_t> head{0};
+};
+
+inline void note_order(TracePoint& tp, CoreLog& mine, uint32_t oid, int32_t px) {
+#if TRACE_COMPILED
+    uint64_t w = tp.gate.load(std::memory_order_acquire);
+    if ((w & 1ull) == 0) return;
+    uint32_t h = mine.head.load(std::memory_order_relaxed);
+    TraceEv& e = mine.ev[h & 1023u];
+    e.hdr = (w & 0xffff000000000000ull) | (__rdtsc() & 0x0000ffffffffffffull);
+    e.oid = oid;
+    e.px = px;
+    mine.head.store(h + 1, std::memory_order_release);
+#else
+    (void)tp; (void)mine; (void)oid; (void)px;
+#endif
+}
+```
 
 ### 35. In-place ring writes to avoid large-object copies
 
@@ -13133,7 +14629,1029 @@ struct InOrder {
 ```
 
 
-### 38. High-quality articles on system design
+A warm-up runs the same function as a real send and suppresses the transmit on the failure path. Set the completion index to the posted index minus the ring mask. The difference equals the mask, so the send function treats the queue as full. The descriptor is still written into the next slot, the full check fails, the doorbell is not rung, and the slot's request id is put back to free. The cut-through mapping is pointed at ordinary memory for the call, so the streaming stores never reach the NIC. Both values are restored when the function returns. A warm-up flag checked at every commit adds a branch to the real send. Making the queue look full leaves the real-send instructions alone. The ring must not transmit for real while this is in progress, because the completion index has been overwritten.
+
+```cpp
+struct SendRing {
+    static constexpr uint32_t kFree = 0xffffffffu;
+    uint32_t posted{0};
+    uint32_t done{0};
+    uint32_t mask{1023};
+    uint32_t ids[1024];
+    volatile uint8_t* cut{nullptr};
+    uint8_t* scratch{nullptr};
+
+    struct Saturate {
+        SendRing* ring;
+        uint32_t done;
+        volatile uint8_t* cut;
+        explicit Saturate(SendRing* r)
+            : ring(r), done(r->done), cut(r->cut) {
+            r->done = r->posted - r->mask;
+            r->cut = r->scratch;
+        }
+        ~Saturate() {
+            ring->done = done;
+            ring->cut = cut;
+        }
+    };
+
+    bool try_send(uint32_t id) {
+        uint32_t slot = posted & mask;
+        ids[slot] = id;
+        fill_desc(slot);
+        if (posted - done < mask) {
+            ++posted;
+            kick();
+            return true;
+        }
+        ids[slot] = kFree;
+        return false;
+    }
+
+    void fill_desc(uint32_t slot);
+    void kick();
+};
+```
+
+
+**A shallow send queue writes the descriptor and the index in one doorbell**
+
+When few descriptors are still outstanding and this one is not a continuation across a page, pack the descriptor's low 8 bytes and the write index into one 16-byte register and store it, aligned, to the doorbell. The NIC takes the packet and the new write index from a single PCIe write. When the queue is already deep, or this descriptor is a middle fragment, the doorbell slot cannot carry the whole chain. Write only the index and let the NIC fetch the descriptor from host memory.
+
+The descriptor lives in cacheable memory and the doorbell is an uncached register. On x86 those two stores are already ordered by the hardware, so a compiler barrier in front of the doorbell is enough. An extra `sfence` is not required. If the payload was just written into a write-combining mapping, the earlier `sfence` has already drained that buffer. Three separate 4-byte stores become three bus transactions. The generated code `movd`s the index into one XMM, `movq`s the descriptor into another, joins them with `punpcklqdq`, and writes the doorbell with one `movaps`. A programmed send buffer offset must be 64-byte aligned or the hardware rejects the send.
+
+```cpp
+#include <cstdint>
+#include <immintrin.h>
+
+struct TxWord {
+    uint64_t word;
+    uint32_t tag;
+    bool more;
+};
+
+struct TxKick {
+    volatile uint8_t* regs;
+    TxWord* ring;
+    uint32_t posted{0};
+    uint32_t done{0};
+    uint32_t mask{511};
+    uint32_t push_depth{8};
+
+    void submit(TxWord d) {
+        bool shallow = (posted - done) < push_depth && !d.more;
+        uint32_t slot = posted & mask;
+        ring[slot] = d;
+        ++posted;
+        asm volatile("" ::: "memory");
+        if (shallow) {
+            auto* door = reinterpret_cast<volatile __m128i*>(regs);
+            __m128i v = _mm_set_epi64x(posted & mask, (int64_t)d.word);
+            _mm_store_si128(const_cast<__m128i*>(door), v);
+        } else {
+            *reinterpret_cast<volatile uint32_t*>(regs + 8) = posted & mask;
+        }
+    }
+};
+```
+
+
+**Cut-through sends insert a clock gap between write buffers**
+
+Cut-through writes the frame into the NIC's write-combining window and the NIC starts transmitting while the write is still in progress. Writing slower than the line underruns that window. Writing flat out reorders PCIe transactions and the NIC assembles a corrupt frame. An `sfence` on every 64-byte buffer keeps the order, and the throughput falls below a 10G cut-through stream. The usual choice is to spin on the timestamp counter for a computed gap after each full buffer. Size the gap a little faster than the line, about twice line rate, then subtract the cost of reading the counter. Without that subtraction the spin loop's own counter reads pull the achieved rate under the line.
+
+Take the minimum of several measurements of the counter cost, not the average. The average includes samples that were interrupted. The first 8-byte store packs a 4-byte command with the first 4 payload bytes. The command carries the frame length, whether a hardware timestamp is wanted, and the fill level at which the NIC may open the gate. One fewer store lets cut-through start earlier.
+
+Keep a shadow of each write buffer on the stack. The gap between buffers is already a wait, and that wait is used to copy the shadow into the DMA fallback buffer. If the hardware drops the cut-through, the fallback buffer is already full and is posted as an ordinary DMA send. Pad the tail of the write buffer with zeros.
+
+```cpp
+#include <cstdint>
+#include <cstring>
+
+struct CutPace {
+    volatile uint64_t* aperture{nullptr};
+    uint32_t gap_ticks{0};
+
+    static uint32_t ticks() { return (uint32_t)__builtin_ia32_rdtsc(); }
+
+    static uint32_t timer_cost() {
+        uint32_t best = ~0u;
+        for (int trial = 0; trial < 8; ++trial) {
+            uint32_t a = ticks();
+            uint32_t b = a;
+            for (int i = 0; i < 64; ++i) b = ticks();
+            uint32_t each = (b - a) / 64;
+            if (each < best) best = each;
+        }
+        return best;
+    }
+
+    void set_gap(uint64_t tick_hz, uint32_t link_mbps) {
+        uint64_t at_line = (uint64_t)64 * 8 * tick_hz / link_mbps / 1000000ull;
+        uint64_t faster = at_line / 2;
+        uint32_t cost = timer_cost();
+        gap_ticks = faster > cost ? (uint32_t)faster - cost : 0;
+    }
+
+    void stream(const uint64_t* words, int nwords, uint8_t* fallback) {
+        uint8_t shadow[64];
+        int filled = 0;
+        volatile uint64_t* dst = aperture;
+        uint32_t t0 = ticks();
+        for (int i = 0; i < nwords; ++i) {
+            if (i != 0 && ((uintptr_t)dst & 63u) == 0) {
+                std::memcpy(fallback, shadow, filled);
+                fallback += filled;
+                filled = 0;
+                uint32_t now;
+                do now = ticks(); while (now - t0 < gap_ticks);
+                t0 = now;
+            }
+            uint64_t w = words[i];
+            *dst++ = w;
+            std::memcpy(shadow + filled, &w, 8);
+            filled += 8;
+        }
+        while (((uintptr_t)dst & 63u) != 0) *dst++ = 0;
+        std::memcpy(fallback, shadow, filled);
+    }
+};
+
+// stored as the first word passed to stream
+inline uint64_t lead_word(uint32_t frame_len, uint32_t open_at, uint32_t head4) {
+    uint32_t cmd = (frame_len & 0xffffu) | (open_at << 16);
+    return (uint64_t)cmd | ((uint64_t)head4 << 32);
+}
+```
+
+
+**Delegated send slices on the window and hands bytes to retransmit immediately**
+
+The stack fills the Ethernet, IP, and TCP headers and returns the maximum segment size, the peer window, the congestion window, and the number of bytes reserved for this call. The bytes in one segment are the minimum of those four. A closed congestion window means do not send, even though the headers are filled. Sending would violate congestion control. A closed peer window means the peer cannot accept data. If the neighbor address is not resolved yet, drop the reservation and use an ordinary send so the address gets looked up.
+
+Do not call `send` or `write` while a reservation is open. If the send queue still holds unsent data, drop the reservation and let an ordinary send queue the bytes. Patch the length and the PUSH bit only when the segment is shorter than the maximum, or when it is the last segment. A segment that is exactly the maximum size needs no patch. Call `commit` as soon as the bytes have been given to the NIC. Do not wait for the transmit-completion event. From that moment the stack owns retransmission and path MTU. Waiting for the peer ACK before `commit` skips the copy into the retransmit queue when nothing is lost, and makes recovery slower when a packet is lost. Bytes that were reserved and not sent must be released, including the tail left over because the window ran out. `reserve` may be called before the decision to send.
+
+```cpp
+#include <algorithm>
+#include <cstdint>
+
+struct WireGrant {
+    uint8_t* hdr{};
+    int hdr_len{};
+    int seg_max{};
+    int peer_wnd{};
+    int cwnd{};
+    int reserved{};
+};
+
+enum class GrantStatus { Ok, NoPeer, WndClosed, CwndClosed, Busy };
+
+GrantStatus reserve_wire(int fd, int want, WireGrant* g);
+void patch_seg(WireGrant* g, int n, bool push);
+void advance_hdr(WireGrant* g, int n);
+void commit_sent(int fd, const uint8_t* data, int n);
+void release_unused(int fd);
+int plain_send(int fd, const uint8_t* data, int n);
+void write_to_nic(const uint8_t* hdr, int hdr_len, const uint8_t* body, int n);
+
+int send_delegated(int fd, uint8_t* data, int len) {
+    WireGrant g;
+    GrantStatus st = reserve_wire(fd, len, &g);
+    if (st == GrantStatus::CwndClosed || st == GrantStatus::WndClosed) {
+        release_unused(fd);
+        return 0;
+    }
+    if (st == GrantStatus::NoPeer || st == GrantStatus::Busy) {
+        release_unused(fd);
+        return plain_send(fd, data, len);
+    }
+    int cap = std::min(len, g.reserved);
+    int sent = 0;
+    while (sent < cap) {
+        int room = std::min(g.peer_wnd, g.cwnd);
+        room = std::min(room, cap - sent);
+        room = std::min(room, g.seg_max);
+        if (room <= 0) break;
+        bool last = sent + room == cap;
+        if (room != g.seg_max || last)
+            patch_seg(&g, room, last);
+        write_to_nic(g.hdr, g.hdr_len, data + sent, room);
+        advance_hdr(&g, room);
+        g.peer_wnd -= room;
+        g.cwnd -= room;
+        sent += room;
+    }
+    if (sent > 0) commit_sent(fd, data, sent);
+    if (sent != len) release_unused(fd);
+    return sent;
+}
+```
+
+
+**A template packet rewrites only the bytes that change**
+
+Most bytes of an order are fixed before the trigger. Place that image in the NIC's programmed send buffer and keep the handle. On the trigger, submit a few patches. Each patch is the new bytes, the length, and the offset inside the template. Patches may be applied in several calls, and a later patch overwrites an earlier one. After a send-now, the stack owns the handle and it cannot be patched again. An empty patch list sends the template as it stands. If the order is cancelled, drop the template, return the buffer, and put nothing on the wire.
+
+When the TCP send queue is not empty, the stack falls back to an ordinary send, and that call can block. A no-wait flag makes the fallback return at once. If the programmed buffer cannot be allocated, record a retry for the next patch instead of failing the order. Closing the socket frees the templates with it.
+
+```cpp
+#include <cstdint>
+#include <arpa/inet.h>
+
+struct FieldPatch {
+    const void* src;
+    size_t n;
+    size_t at;
+};
+
+struct OrderMold {
+    uint64_t token{0};
+    bool live{false};
+
+    bool arm(int fd, const uint8_t* base, size_t n, bool retry_buf);
+    bool rewrite(int fd, const FieldPatch* ps, int np, bool send_now, bool no_block);
+    void drop(int fd);
+};
+
+bool fire_order(OrderMold& mold, int fd, uint32_t px, uint32_t qty) {
+    uint32_t px_be = htonl(px);
+    uint32_t qty_be = htonl(qty);
+    FieldPatch ps[2] = {
+        {&px_be, 4, 42},
+        {&qty_be, 4, 48},
+    };
+    if (!mold.rewrite(fd, ps, 2, true, true)) {
+        mold.drop(fd);
+        mold.live = false;
+        return false;
+    }
+    mold.live = false;
+    return true;
+}
+```
+
+
+**Receive descriptors are kicked in groups of eight and a fragment stays inside one page**
+
+Filling a receive descriptor only writes the host ring. It does not ring the doorbell. The doorbell is one 32-bit store of the filled index rounded down to a multiple of 8. The hardware accepts descriptors in groups of 8, so a remainder of 1 to 7 stays in memory until the group is complete. One bus write covers eight buffers.
+
+The doorbell watermark and the completion index are separate. The completion index advances as packets are consumed. The doorbell advances only when eight more descriptors have been filled.
+
+One DMA descriptor must not cross a 4KiB boundary. The fragment length is the smaller of the bytes still to post and the bytes left until the next page. Every fragment except the last is marked as having more data. The completion id is stored only on the last fragment, so one packet produces one completion.
+
+```cpp
+#include <cstdint>
+
+struct RxPost {
+    volatile uint32_t* door;
+    uint32_t posted{0};
+    uint32_t done{0};
+    uint32_t kicked{0};
+    uint32_t mask{2047};
+    uint64_t* desc;
+    uint32_t* tags;
+    static constexpr uint32_t kFree = 0xffffffffu;
+
+    int give(uint64_t addr, uint32_t len, uint32_t tag) {
+        uint32_t left = len;
+        while (left) {
+            if (posted - done >= mask) return -1;
+            uint32_t room = (~(uint32_t)addr & 0xfffu) + 1u;
+            uint32_t frag = room < left ? room : left;
+            uint32_t slot = posted & mask;
+            bool more = frag != left;
+            desc[slot] = addr | ((uint64_t)frag << 48) | (more ? (1ull << 47) : 0);
+            tags[slot] = more ? kFree : tag;
+            ++posted;
+            addr += frag;
+            left -= frag;
+        }
+        uint32_t mark = posted & ~7u;
+        if (mark != kicked) {
+            *door = mark & mask;
+            kicked = mark;
+        }
+        return 0;
+    }
+};
+```
+
+
+**Several receive descriptors share one completion event**
+
+The NIC can fold the completion of several receive descriptors into one event. That event records only how many descriptors completed. The length is not in the event, and neither is the request id of each descriptor. Length, filter id, and timestamp sit in a fixed prefix at the front of the packet, in the same memory as the payload, and come in when the packet is read.
+
+The descriptor index stored in the event is 4 bits wide and wraps at 16. The program keeps two other counts: how many the NIC has completed, and how many the program has already walked. The difference must stay below 16. Once the difference reaches 16, a new completion of the same slot cannot be distinguished from a completion that has not been walked yet. When a descriptor is walked, the program reads the length and the time from its prefix, then clears the request id on that slot.
+
+The time in the prefix covers only the fraction inside one second, in units of a quarter of a nanosecond. The whole seconds come from a separate clock-sync event and are stored on the queue while polling. Conversion starts by adding a correction to the prefix count. The correction is negative: it removes the fixed delay from the wire to the chip. After the add, a normal packet is still below the count for one second. Compare the unsigned value with that limit. A value below the limit is usable. All-ones means the NIC did not fill in a timestamp. Added to the negative correction, it becomes a large number past the limit, so the test sits on the side that already failed the compare. A normal packet does not reach it.
+
+Subtract the sync event's sub-second count from this sub-second count. If the packet count is smaller, the second has rolled over, and the difference gains another second's worth of counts. That add is done with a mask, without a conditional branch. When the difference stays within one sync period plus a small margin, the seconds increase by 1 if the second rolled, and by 0 otherwise. When the difference is almost a full second, the packet is earlier than this sync, and the seconds decrease by 1. If the difference fits neither range, the timestamp is unusable, and the descriptor is still counted as walked. The nanosecond value is the count divided by 4, a right shift of 2. The low 2 bits are the fraction below one nanosecond.
+
+```cpp
+#include <cstdint>
+
+struct Prefix {
+    uint16_t nbytes;
+    uint16_t filter;
+    uint32_t qns;
+};
+
+struct MergedRx {
+    static constexpr uint32_t kSecQns = 4000000000u;
+    static constexpr uint32_t kNone = 0xffffffffu;
+    static constexpr uint32_t kSyncSlack = 800000000u;
+    static constexpr uint32_t kPktSlack = 400000000u;
+    static constexpr uint32_t kMask = 1023;
+    Prefix* prefix{};
+    uint32_t done{0};
+    uint32_t taken{0};
+    uint32_t sync_qns{0};
+    uint32_t sync_sec{0};
+    int32_t wire_corr{0};
+
+    bool note(uint32_t n) {
+        if (n == 0 || done - taken + n > 15) return false;
+        done += n;
+        return true;
+    }
+
+    int take(Prefix* out, uint32_t* sec, uint32_t* nsec) {
+        if (taken == done) return 0;
+        Prefix p = prefix[taken & kMask];
+        ++taken;
+        *out = p;
+        uint32_t q = p.qns + static_cast<uint32_t>(wire_corr);
+        if (q >= kSecQns) {
+            if (q == kNone + static_cast<uint32_t>(wire_corr)) return 1;
+            q = (q < kSecQns + 22u) ? q - kSecQns : q + kSecQns;
+        }
+        int earlier = q < sync_qns;
+        uint32_t gap = q - sync_qns + (kSecQns & static_cast<uint32_t>(-earlier));
+        uint32_t sec_v = sync_sec;
+        if (gap < kSecQns / 4u + kSyncSlack)
+            sec_v += static_cast<uint32_t>(earlier);
+        else if (gap > kSecQns - kPktSlack)
+            sec_v -= static_cast<uint32_t>(!earlier);
+        else
+            return 1;
+        *sec = sec_v;
+        *nsec = q >> 2;
+        return 2;
+    }
+};
+```
+
+**Cut-through receive checks a flag in the next slot, and an idle buffer is filled with a fixed value first**
+
+This receive path does not post a separate descriptor for each packet. The NIC lays packets out at a fixed size in one contiguous region. Each packet has an integer id: the high bits select the large buffer, the low bits select the packet inside that buffer. The low field is exactly wide enough for the number of packets in one buffer, so the address is the base plus the id times the packet size. The packet size is a power of two, and the multiply is one shift.
+
+Whether a packet has finished is not decided by looking at that packet. The NIC writes the completion flag into the header of the next packet. The flag is 0 or 1. It matches the value stored in the top bit of the cursor only after the previous packet's data has been written. One poll does not cross from one large buffer into the next. Switching buffers and matching the new flag is done once, before the batch.
+
+The header also carries error flags. AND them with a mask first. A zero result is a normal packet, and there is no need to decode each flag to see which error it is.
+
+An idle buffer has a fixed 64-bit value written where the payload starts. To see whether the next packet has arrived, load that value. If it is still there, the NIC has not written this slot yet. Prefetch the cache lines that follow, and return the same value kept on the stack beside the poll state. With no packet waiting, the program reads that stack value, and does not touch a buffer that has already left the cache just to confirm the miss. When the value changes, the NIC has written the slot, and the payload can be read before the consumer index moves. When the buffer is given back, write the fixed value again, one packet at a time. Waiting until the whole buffer is idle and then writing every packet at once dirties many cache lines in the same moment, and that poll takes a sudden jump in time.
+
+```cpp
+#include <cstdint>
+
+struct SlotHdr {
+    uint32_t generation;
+    uint32_t nbytes;
+    uint64_t status;
+    uint64_t mark;
+};
+
+struct CutRx {
+    static constexpr uint64_t kPoison = 0xD1E2C301D1E2C301ull;
+    static constexpr uint32_t kPktBits = 9;
+    uint8_t* base{};
+    uint32_t stride_shift{6};
+    uint32_t per_chunk{1u << kPktBits};
+    uint32_t meta{0};
+    uint64_t err_mask{0};
+
+    uint8_t* slot(uint32_t id) const {
+        return base + (static_cast<uint64_t>(id) << stride_shift);
+    }
+
+    const volatile uint64_t* peek(const volatile uint64_t* local_poison) const {
+        uint32_t id = meta & 0x7fffffffu;
+        if ((id & ((1u << kPktBits) - 1)) >= per_chunk) return local_poison;
+        auto* mark = reinterpret_cast<volatile uint64_t*>(slot(id) + 16);
+        if (*mark == kPoison) {
+            __builtin_prefetch(reinterpret_cast<const char*>(slot(id)) + 64, 0, 1);
+            return local_poison;
+        }
+        return mark;
+    }
+
+    bool ready() const {
+        uint32_t id = meta & 0x7fffffffu;
+        auto* hdr = reinterpret_cast<const volatile SlotHdr*>(slot(id));
+        return hdr->generation == (meta >> 31);
+    }
+
+    int budget(int cap) const {
+        uint32_t idx = (meta & 0x7fffffffu) & ((1u << kPktBits) - 1);
+        uint32_t left = per_chunk - idx;
+        return left < static_cast<uint32_t>(cap) ? static_cast<int>(left) : cap;
+    }
+
+    bool clean(uint64_t status) const { return (status & err_mask) == 0; }
+
+    void release(uint32_t id) {
+        *reinterpret_cast<volatile uint64_t*>(slot(id) + 16) = kPoison;
+    }
+};
+```
+
+**One poll leaves room to refill the receive ring**
+
+Draining the event queue to empty means receive descriptors are not refilled until that batch and the work after it have finished. The ring is empty for that whole interval, and the NIC drops new frames. Cap a single poll at about sixteen events, refill, then poll again.
+
+Handling lags fetching by one packet. When the current event is read, the previous packet is handled, so the time to bring that payload back from the outer cache overlaps the next fetch. The last packet is handled outside the loop, and the ring is refilled immediately after.
+
+```cpp
+#include <cstdint>
+
+struct PktView { const uint8_t* p; uint16_t n; };
+struct Ev { bool ok; PktView pkt; };
+
+struct RxRing {
+    bool pop(Ev* e);
+    void kick_posted();
+};
+
+template <class Fn>
+int drain_some(RxRing& rx, Fn&& handle) {
+    constexpr int kCap = 16;
+    PktView held{};
+    bool have = false;
+    int n = 0;
+    Ev ev;
+    while (n < kCap && rx.pop(&ev) && ev.ok) {
+        if (have) handle(held);
+        held = ev.pkt;
+        have = true;
+        ++n;
+    }
+    if (have) handle(held);
+    rx.kick_posted();
+    return n;
+}
+```
+
+
+**Copy the event out before decoding it, and write the empty value one cache line behind**
+
+While a slot has no new event, both the high 32 bits and the low 32 bits are all ones. Some chips write an 8-byte event as two 4-byte stores, and they do not promise which half lands first. Checking only one half accepts a half-written slot as a new event. The event is complete only when neither half is still all ones.
+
+Copy the event into a local variable before decoding it, and decode the copy. When the NIC writes the next event, it pushes this slot's cache line out of the CPU cache. Changing the event in the ring changes a line that is about to be dropped.
+
+After handling the event, do not immediately write all-ones back into the current slot. The current slot and the next slots the NIC is filling often share one 64-byte cache line. A CPU store to a few bytes of that line makes the whole line dirty, and the NIC's next write has to pull the line back first, which is an extra cache transfer. On a machine with more than one memory node, the all-ones store goes 8 events behind the current index, one full cache line back. On a machine with a single memory node, writing the current slot is enough.
+
+The slot written back to all-ones on the previous step must still be all-ones. If it is an event again, the NIC has filled the ring for a whole lap and a new event has landed on a slot that was not finished, so this poll is an overflow.
+
+If the current slot is still all-ones and the next slot already holds an event, issue a read barrier and read the current slot again. If it is still all-ones, skip the empty slot and continue from the next one.
+
+```cpp
+#include <cstdint>
+
+struct EvRing {
+    volatile uint64_t* slot{};
+    uint32_t mask{0};
+    uint32_t ptr{0};
+    int behind{0};
+
+    static bool live(uint64_t w) {
+        auto lo = static_cast<uint32_t>(w);
+        auto hi = static_cast<uint32_t>(w >> 32);
+        return lo != 0xffffffffu && hi != 0xffffffffu;
+    }
+
+    uint64_t load(int off) const {
+        return slot[(ptr + static_cast<uint32_t>(off)) & mask];
+    }
+
+    int poll(uint64_t* out, int cap) {
+        if (live(load(behind - 1))) return -1;
+        uint64_t ev = load(0);
+        if (!live(ev)) {
+            if (live(load(1))) {
+                asm volatile("" ::: "memory");
+                if (!live(load(0))) {
+                    ++ptr;
+                    ev = load(0);
+                }
+            }
+            if (!live(ev)) return 0;
+        }
+        int n = 0;
+        do {
+            out[n++] = ev;
+            slot[(ptr + static_cast<uint32_t>(behind)) & mask] = ~0ull;
+            ++ptr;
+            if (n == cap) break;
+            ev = load(0);
+        } while (live(ev));
+        return n;
+    }
+};
+```
+
+**The event read index is written back before the thread sleeps**
+
+Do not arm the interrupt while the thread is spinning. An interrupt per packet puts the latency back on the kernel path. When the spin budget is exhausted and the thread is about to sleep, round the current event index down to a multiple of 8 and write it to the NIC's event-queue read register. The NIC raises an interrupt only when it writes an event past that index. After waking, spin again, and write the register again only before the next sleep.
+
+On some NICs a direct write to that read register locks the device. Leave the register alone. Split the index into its high 8 bits and its low 8 bits and deliver them as two doorbell stores, each with an opcode. On x86 the two uncached stores are already ordered. The barrier between them stops the compiler from collapsing them into one store.
+
+```cpp
+#include <cstdint>
+
+inline void arm_direct(volatile uint32_t* evq_rptr, uint32_t ev_off, uint32_t mask) {
+    *evq_rptr = (ev_off & mask) / 8u;
+}
+
+inline void arm_split(volatile uint32_t* door, uint32_t ev_off, uint32_t mask) {
+    uint32_t idx = (ev_off & mask) / 8u;
+    *door = (1u << 12) | ((idx >> 8) & 0xffu);
+    asm volatile("" ::: "memory");
+    *door = (2u << 12) | (idx & 0xffu);
+}
+```
+
+
+**After packets stop, program the NIC timer at a fixed interval**
+
+Retransmit and timeout still have to run when no packet is arriving. An interrupt on every packet does not provide that. The NIC has its own timer. After the register is written, the timer counts, and it raises one interrupt once the quiet interval has elapsed. It does not raise again during that interval. If a packet event arrives in the meantime, the event-queue read index written earlier still decides whether the thread is interrupted.
+
+The value written is the interval converted from microseconds into the NIC's own tick, rounded up. The field is 14 bits wide. A larger result is stored as the maximum.
+
+Do not write this register on every poll. If the cycles since the last write are still inside the gap, skip the write. The gap is half the timeout. When the timeout interrupt arrives, write the register once and record the time. The poll that follows sees that the gap has not elapsed, and does not write it a second time. If the gap elapses while the thread is still spinning, enter one poll and run the software timeout checks there.
+
+```cpp
+#include <cstdint>
+
+struct EvTimer {
+    volatile uint32_t* reg{};
+    uint64_t last{0};
+    uint64_t gap{0};
+    uint32_t quanta{0};
+    static constexpr uint32_t kHold = 1u << 14;
+
+    void arm(uint64_t now) {
+        if (now - last <= gap) return;
+        *reg = quanta | kHold;
+        last = now;
+    }
+
+    void on_timeout(uint64_t now) {
+        *reg = quanta | kHold;
+        last = now;
+    }
+};
+```
+
+**An alternate send queue is released or dropped with one store**
+
+While the signal is still undecided, write the order descriptors into a side queue. One select descriptor steers the following descriptors into that queue, and another select descriptor steers them back to the main queue. When the signal fires, one store to the doorbell register releases the staged descriptors onto the wire. If the signal is cancelled, one store drops them and the main queue is left as it was. A third command halts the side queue.
+
+The side queue has a finite depth. When it is full, stop staging. Do not block the hot path. Release and drop are each a single 4-byte uncached store.
+
+```cpp
+#include <cstdint>
+
+enum class SideOp : uint32_t { Release = 1, Drop = 2, Halt = 3 };
+
+struct SideBurst {
+    volatile uint32_t* cmd;
+    uint64_t* desc;
+    uint32_t* posted;
+    uint32_t mask;
+    uint32_t id;
+
+    void select(uint32_t which) {
+        uint32_t slot = (*posted)++ & mask;
+        desc[slot] = (1ull << 63) | (uint64_t)which;
+    }
+
+    void stage(uint64_t word) {
+        uint32_t slot = (*posted)++ & mask;
+        desc[slot] = word;
+    }
+
+    void poke(SideOp op) {
+        *cmd = (static_cast<uint32_t>(op) << 8) | (id & 0x1fu);
+    }
+};
+```
+
+
+### 38. Quiescent-state reclamation
+
+After a node is unlinked from a lock-free structure, its memory waits until every core that might still read it has passed a point where it holds no such pointer. Each reader has a counter on its own cache line. Zero means the core is offline and is not waited for. A global epoch sits on its own line and increases from 1.
+
+A reader reports quiescence only after it has dropped every shared pointer. It acquire-loads the epoch and release-stores it into its counter only when the two differ. An unchanged epoch does not write, so an idle loop does not dirty the reader's line. Going offline also requires that every pointer has been dropped; offline stores zero. Coming back online stores the epoch of that moment, and only then takes new pointers.
+
+After the writer has finished its update it adds one to the epoch. The release makes the update visible before the new epoch. The returned value is the token for this reclamation. A check first looks at the lowest epoch already confirmed. A token at or below that floor is done. Otherwise each counter is acquire-loaded: zero, or a value at least the token, means that reader is past this update. A smaller value means it is still in the old epoch. Without waiting, the check returns false and the caller tries again later. With waiting, it pauses and rereads. When every reader has passed, the smallest online counter is relaxed-stored as the new floor. Writers do not compare-and-exchange that floor; a low store only makes the next check scan once more. The counters are 64 bits wide and are not wrapped.
+
+Unlinked nodes join a queue with their tokens, oldest at the head. Reclamation frees from the head and stops at the first token that has not elapsed. A writer that is also a reader reports its own quiescence before it waits, or it will wait for itself.
+
+```cpp
+#include <atomic>
+#include <cstdint>
+#include <immintrin.h>
+
+struct alignas(64) QSlot {
+    std::atomic<uint64_t> seen{0};
+};
+
+struct Grace {
+    alignas(64) std::atomic<uint64_t> epoch{1};
+    alignas(64) std::atomic<uint64_t> floor_seen{0};
+    QSlot* slot{nullptr};
+    uint32_t n{0};
+
+    void online(uint32_t id) {
+        uint64_t e = epoch.load(std::memory_order_acquire);
+        slot[id].seen.store(e, std::memory_order_release);
+    }
+
+    void offline(uint32_t id) {
+        slot[id].seen.store(0, std::memory_order_release);
+    }
+
+    void quiesce(uint32_t id) {
+        uint64_t e = epoch.load(std::memory_order_acquire);
+        if (e != slot[id].seen.load(std::memory_order_relaxed))
+            slot[id].seen.store(e, std::memory_order_release);
+    }
+
+    uint64_t bump() {
+        return epoch.fetch_add(1, std::memory_order_release) + 1;
+    }
+
+    bool elapsed(uint64_t token, bool wait) {
+        if (token <= floor_seen.load(std::memory_order_relaxed)) return true;
+        uint64_t least = ~uint64_t{0};
+        for (uint32_t i = 0; i < n; ++i) {
+            for (;;) {
+                uint64_t c = slot[i].seen.load(std::memory_order_acquire);
+                if (c == 0 || c >= token) {
+                    if (c != 0 && c < least) least = c;
+                    break;
+                }
+                if (!wait) return false;
+                _mm_pause();
+            }
+        }
+        if (least != ~uint64_t{0})
+            floor_seen.store(least, std::memory_order_relaxed);
+        return true;
+    }
+};
+
+struct Retired {
+    Retired* next;
+    uint64_t token;
+    void (*release)(Retired*);
+};
+
+struct RetireQ {
+    Retired* head{nullptr};
+    Retired* tail{nullptr};
+
+    void shelve(Grace& g, Retired* node) {
+        node->token = g.bump();
+        node->next = nullptr;
+        if (tail == nullptr) head = tail = node;
+        else { tail->next = node; tail = node; }
+    }
+
+    void reclaim(Grace& g) {
+        while (head != nullptr && g.elapsed(head->token, false)) {
+            Retired* n = head;
+            head = n->next;
+            if (head == nullptr) tail = nullptr;
+            n->release(n);
+        }
+    }
+};
+```
+
+### 39. Sequence-window reordering
+
+A downstream stage restores a contiguous sequence from objects that arrive out of order. The window length is a power of two. `min_seq` is the smallest sequence not yet delivered, and it sits at `head` in the ring. The slot of a new object is the unsigned difference `offset = seq - min_seq`, so wraparound falls out of the subtraction.
+
+When `offset` is below the window length, the object is stored at `head + offset`. That is the steady path. A slot that is already occupied keeps the first arrival and returns 1, and the caller frees the later one. Return 0 means this call stored the object. Return -1 means the ready queue is full: drain it and retry. Return -2 means the sequence is far from the window.
+
+When `offset` is below twice the window, the new sequence has just slid past the window, usually because an earlier sequence was lost and an empty slot is holding the window still. Slide the window forward by `offset + 1 - window`. Runs of arrived objects move into a ready queue; empty slots are skipped. If the ready queue cannot take the arrived objects that follow, stop the slide and return failure. The caller drains the ready queue and retries with the same object. After a full slide, recompute `offset` from the new `min_seq` and store the object.
+
+When `offset` is at least twice the window, the sequence is far from the current window. Treat it as a late duplicate or a bad sequence and leave it out.
+
+Delivery drains the ready queue first, then takes a contiguous run of occupied slots from the window head. The first empty slot stops delivery. Objects that have already arrived behind that hole stay where they are.
+
+```cpp
+#include <cstdint>
+
+struct SeqWin {
+    static constexpr uint32_t N = 256;
+    static constexpr uint32_t M = N - 1;
+    void* order[N]{};
+    void* ready[N]{};
+    uint32_t min_seq{0};
+    uint32_t head{0};
+    uint32_t rh{0};
+    uint32_t rt{0};
+    bool live{false};
+
+    bool ready_full() const { return ((rh + 1) & M) == rt; }
+
+    uint32_t slide(uint32_t need) {
+        uint32_t adv = 0;
+        while (adv < need) {
+            if (order[head] == nullptr) {
+                head = (head + 1) & M;
+                ++adv;
+                continue;
+            }
+            if (ready_full()) break;
+            ready[rh] = order[head];
+            order[head] = nullptr;
+            head = (head + 1) & M;
+            rh = (rh + 1) & M;
+            ++adv;
+        }
+        min_seq += adv;
+        return adv;
+    }
+
+    int push(void* obj, uint32_t seq) {
+        if (!live) {
+            min_seq = seq;
+            live = true;
+        }
+        uint32_t off = seq - min_seq;
+        if (off < N) {
+            void*& cell = order[(head + off) & M];
+            if (cell != nullptr) return 1;
+            cell = obj;
+            return 0;
+        }
+        if (off < 2 * N) {
+            uint32_t need = off + 1 - N;
+            if (slide(need) < need) return -1;
+            off = seq - min_seq;
+            void*& cell = order[(head + off) & M];
+            if (cell != nullptr) return 1;
+            cell = obj;
+            return 0;
+        }
+        return -2;
+    }
+
+    uint32_t pull(void** out, uint32_t cap) {
+        uint32_t n = 0;
+        while (n < cap && rt != rh) {
+            out[n++] = ready[rt];
+            ready[rt] = nullptr;
+            rt = (rt + 1) & M;
+        }
+        while (n < cap && order[head] != nullptr) {
+            out[n++] = order[head];
+            order[head] = nullptr;
+            head = (head + 1) & M;
+            ++min_seq;
+        }
+        return n;
+    }
+};
+```
+
+### 40. Fixed-stride per-core variables
+
+Counters, cursors, and stack tops that exist once per core, if left in thread-local storage, can be read from another core only through that thread's pointer, and a walk of several of them on the owner core need not hit adjacent lines. Lay them out in one buffer sliced by core. The distance between adjacent cores is a fixed stride, a multiple of a cache line, and at least as large as every variable that lives in the slice.
+
+Variables are allocated in order at startup. The handle is the address on core 0. Core `i` is the handle plus `i` times the stride. The variables of one core sit next to each other. A monitor computes the address from the core id. Alignment is a power of two and at most one cache line. The stride itself is cache-line aligned, so the alignment holds on every core. The memory is reserved at startup and is not freed later. The hot path does not allocate.
+
+```cpp
+#include <cstddef>
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <new>
+
+constexpr unsigned kCores = 64;
+constexpr size_t kStride = 64 * 1024;
+
+struct alignas(64) CoreBank {
+    char raw[kStride * kCores];
+    CoreBank* older;
+};
+
+CoreBank* g_bank = nullptr;
+size_t g_cursor = kStride;
+
+void* alloc_core_var(size_t size, size_t align) {
+    if (size == 0 || size > kStride) std::abort();
+    if (align == 0) align = alignof(std::max_align_t);
+    if (align > 64 || (align & (align - 1)) != 0) std::abort();
+    g_cursor = (g_cursor + align - 1) & ~(align - 1);
+    if (g_cursor + size > kStride) {
+        auto* b = new CoreBank;
+        b->older = g_bank;
+        g_bank = b;
+        g_cursor = 0;
+    }
+    void* handle = g_bank->raw + g_cursor;
+    g_cursor += size;
+    for (unsigned c = 0; c < kCores; ++c)
+        std::memset(static_cast<char*>(handle) + c * kStride, 0, size);
+    return handle;
+}
+
+template<class T>
+T* core_var(void* handle, unsigned core) {
+    return reinterpret_cast<T*>(static_cast<char*>(handle) + core * kStride);
+}
+```
+
+### 41. Signature-first bucket lookup
+
+A lookup hits the bucket before it hits the key. Each bucket has eight slots. The 16-bit signatures are packed at the front, 16 bytes, and one vector compare names the matching slots. Keys live in a separate array; the bucket stores indexes. A signature miss does not read the key. The bucket is cache-line aligned, and the signatures plus the indexes fit in that line, so a miss touches one line. Buckets start zeroed.
+
+The signature is the high 16 bits of the hash. Zero is reserved for an empty slot; a computed zero becomes one. Two independent hashes select a primary bucket and an alternate bucket. The alternate is consulted only when the primary misses.
+
+A batch of keys computes both buckets and prefetches them, then compares signatures and keys. The prefetch overlaps the bucket miss with the compares.
+
+When both buckets are full, one slot is displaced into its other bucket, with a bound on the number of displacements. An empty slot stores the index first and the signature after a release fence, so a reader that sees the signature also sees the index. A displacement clears the signature before the slot is reused. A key in the middle of a displacement can miss once; a caller that cannot drop it looks again. One writer installs.
+
+```cpp
+#include <atomic>
+#include <cstdint>
+#include <cstring>
+#include <immintrin.h>
+
+struct Key16 { uint8_t b[16]; };
+
+struct alignas(64) SigBucket {
+    uint16_t sig[8];
+    uint32_t key_ix[8];
+};
+
+struct SigTable {
+    SigBucket* tab;
+    Key16* keys;
+    uint32_t mask;
+
+    static uint32_t mix(const Key16& key, uint32_t seed) {
+        uint32_t h = seed;
+        for (uint8_t byte : key.b) {
+            h ^= byte;
+            h *= 16777619u;
+        }
+        return h;
+    }
+
+    static uint16_t sig16(uint32_t h) {
+        uint16_t s = uint16_t(h >> 16);
+        return s == 0 ? 1 : s;
+    }
+
+    int match(uint32_t b, uint16_t s, const Key16& key) const {
+        const SigBucket& bk = tab[b];
+        __m128i want = _mm_set1_epi16(static_cast<short>(s));
+        __m128i got = _mm_load_si128(reinterpret_cast<const __m128i*>(bk.sig));
+        int bits = _mm_movemask_epi8(_mm_cmpeq_epi16(want, got));
+        for (int lane = 0; lane < 8; ++lane) {
+            if ((bits & (1 << (2 * lane))) == 0) continue;
+            std::atomic_thread_fence(std::memory_order_acquire);
+            uint32_t ix = bk.key_ix[lane];
+            if (ix == 0) continue;
+            if (std::memcmp(keys[ix].b, key.b, 16) == 0) return int(ix);
+        }
+        return -1;
+    }
+
+    int find(const Key16& key) const {
+        uint32_t h1 = mix(key, 2166136261u);
+        uint32_t h2 = mix(key, 0x811c9dc5u);
+        uint16_t s = sig16(h1);
+        int id = match(h1 & mask, s, key);
+        return id >= 0 ? id : match(h2 & mask, s, key);
+    }
+
+    void find4(const Key16* key, int out[4]) const {
+        uint32_t b1[4], b2[4];
+        uint16_t sg[4];
+        for (int i = 0; i < 4; ++i) {
+            uint32_t h1 = mix(key[i], 2166136261u);
+            sg[i] = sig16(h1);
+            b1[i] = h1 & mask;
+            b2[i] = mix(key[i], 0x811c9dc5u) & mask;
+            __builtin_prefetch(&tab[b1[i]], 0, 3);
+            __builtin_prefetch(&tab[b2[i]], 0, 3);
+        }
+        for (int i = 0; i < 4; ++i) {
+            int id = match(b1[i], sg[i], key[i]);
+            out[i] = id >= 0 ? id : match(b2[i], sg[i], key[i]);
+        }
+    }
+
+    bool install(uint32_t ix, const Key16& key) {
+        keys[ix] = key;
+        uint32_t h1 = mix(key, 2166136261u);
+        uint16_t s = sig16(h1);
+        uint32_t b = h1 & mask;
+        for (int step = 0; step < 16; ++step) {
+            SigBucket& bk = tab[b];
+            for (int i = 0; i < 8; ++i) {
+                if (bk.sig[i] != 0) continue;
+                bk.key_ix[i] = ix;
+                std::atomic_thread_fence(std::memory_order_release);
+                bk.sig[i] = s;
+                return true;
+            }
+            int victim = int((h1 + uint32_t(step)) & 7u);
+            uint16_t old_s = bk.sig[victim];
+            uint32_t old_ix = bk.key_ix[victim];
+            bk.sig[victim] = 0;
+            std::atomic_thread_fence(std::memory_order_release);
+            bk.key_ix[victim] = ix;
+            std::atomic_thread_fence(std::memory_order_release);
+            bk.sig[victim] = s;
+            const Key16& old_key = keys[old_ix];
+            uint32_t primary = mix(old_key, 2166136261u) & mask;
+            b = (b == primary) ? (mix(old_key, 0x811c9dc5u) & mask) : primary;
+            ix = old_ix;
+            s = old_s;
+            h1 ^= 0x9e3779b9u;
+        }
+        return false;
+    }
+};
+```
+
+### 42. Staged ordered completion ring
+
+Claiming a slot and finishing it are two calls. Several workers take sequence numbers first and fill them later, and the finish order need not match the claim order. The exit walks in claim order. If sequence 5 is finished and sequence 4 is not, the exit stays on 4.
+
+The completion mark is a stage plus the sequence plus one. The worker for stage 0 writes the payload, then the sequence, then release-stores the stage as 1. The next stage waits until the stage is 1 and the sequence matches, does its work, and stores stage 2. Each stage has its own cursor. Each time the last stage takes an item, it publishes the freed sequence, and the claim side uses that to measure distance. To touch that line less often, publish every few items; the producer simply sees free space later. Capacity has to cover the distance from the oldest unfreed sequence to the newest claim. Otherwise two laps write the same slot, and an old completion mark is read as a new one.
+
+```cpp
+#include <atomic>
+#include <cstdint>
+
+struct StageRing {
+    static constexpr uint32_t Cap = 1024;
+    static constexpr uint32_t Mask = Cap - 1;
+
+    struct Cell {
+        alignas(64) std::atomic<uint32_t> stage{0};
+        std::atomic<uint32_t> seq_plus{0};
+        uint64_t body;
+    } cell[Cap];
+
+    alignas(64) std::atomic<uint32_t> claim{0};
+    alignas(64) std::atomic<uint32_t> freed{0};
+    uint32_t cursor[2]{};
+
+    bool acquire(uint32_t& seq) {
+        uint32_t h = claim.load(std::memory_order_relaxed);
+        for (;;) {
+            uint32_t done = freed.load(std::memory_order_acquire);
+            if (h - done >= Cap) return false;
+            if (claim.compare_exchange_weak(h, h + 1,
+                    std::memory_order_relaxed, std::memory_order_relaxed)) {
+                seq = h;
+                return true;
+            }
+        }
+    }
+
+    void finish(uint32_t seq, uint32_t stage, uint64_t body) {
+        Cell& c = cell[seq & Mask];
+        if (stage == 0) c.body = body;
+        c.seq_plus.store(seq + 1, std::memory_order_relaxed);
+        c.stage.store(stage + 1, std::memory_order_release);
+    }
+
+    bool take(uint32_t stage, uint32_t& seq, uint64_t& body) {
+        seq = cursor[stage];
+        Cell& c = cell[seq & Mask];
+        if (c.stage.load(std::memory_order_acquire) != stage + 1) return false;
+        if (c.seq_plus.load(std::memory_order_relaxed) != seq + 1) return false;
+        body = c.body;
+        cursor[stage] = seq + 1;
+        if (stage == 1)
+            freed.store(cursor[stage], std::memory_order_release);
+        return true;
+    }
+};
+```
+
+### 43. High-quality articles on system design
 [https://mp.weixin.qq.com/s/9OH1RA8POFidgQnvape6fQ](https://mp.weixin.qq.com/s/9OH1RA8POFidgQnvape6fQ)
 
 [https://mp.weixin.qq.com/s/PuG4ZFVZ-7hijS4Db8Z5jQ](https://mp.weixin.qq.com/s/PuG4ZFVZ-7hijS4Db8Z5jQ)
