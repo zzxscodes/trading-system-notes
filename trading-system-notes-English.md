@@ -5980,6 +5980,16 @@ Branch optimization should follow "**First eliminate, then predict, and finally 
 
 In high-frequency trading scenarios, the complete hot path (i.e., the transaction execution path) is actually a rare branch, so the reference value of historical branch data is limited. One solution is to run GCC in test mode to force the hot path to always perform "dummy-executed" transactions. Other early parts of the hot path in high-frequency trading (such as trading decision logic, which is always executed when market data is received) can still benefit from branch analysis.
 
+Profile feedback also treats a function that never ran during training as cold. Cold blocks can be moved into the cold section, and call sites are laid out as if the call almost never happens. Cancels, rejects, and disconnects are often absent from the training sample, so the first live entry pays for that layout. `-fprofile-partial-training` drops the assumption and leaves unexecuted functions in the ordinary layout. Logging and startup-only functions are still marked `cold` on their own. An entry that training does not cover, and that must stay in the hot region, is marked `hot`.
+
+```cpp
+__attribute__((hot))
+int cancel_live(uint32_t order_id, uint32_t leaves);
+
+__attribute__((cold))
+void audit_drop(uint32_t order_id, int why);
+```
+
 The main types of branching in C++ code include:
 
 + `if`statement and`if-else`statement;
@@ -6048,6 +6058,21 @@ int pick_side(int take_a, int a, int b) {
 }
 ```
 
+**Keep the compare next to the conditional branch**
+
+When `test` or `cmp` sits immediately before a conditional branch, a microarchitecture that fuses the pair issues them as one micro-op. GCC's scheduler checks whether the pair can fuse and places the two instructions next to each other when it can. Some microarchitectures also fuse add, sub, increment, and decrement with the following conditional branch. Or and xor do not fuse on every generation. An instruction that writes the flags, placed between the two, breaks the pair.
+
+The index check below is a `test` followed directly by `js` at `-O3`. If the cold side also makes an out-of-line call, the compiler may insert a `push` to save a register between the subtract and the jump on the sign flag. `sub` and `js` are then split, and the hot path pays a push and a pop.
+
+On Skylake, a fused conditional branch that crosses a 32-byte boundary clears the front end. Clang's `-mbranches-within-32B-boundaries` tells the assembler to pad fused branches, conditional branches, and unconditional jumps so they stay inside one 32-byte window. If an alignment directive already sits between the compare and the branch, the pair is treated as unfused and the padding does not tie them together.
+
+```cpp
+int read_slot(const int* col, int n) {
+    if (n < 0)
+        return 0;
+    return col[n];
+}
+```
 
 **5. Look-up table method to replace branch**
 
@@ -8421,6 +8446,107 @@ struct WcWindow {
             gate.clear(std::memory_order_release);
     }
 };
+```
+
+
+**Overlapping wide copies chosen by length**
+
+When the source range and the destination range do not overlap, pick a fixed width that does not exceed the length. Load that width at the start and the same width at the end into registers, and store both only after both loads have finished. The two pieces overlap on the destination; the later store covers the overlap, and the result matches a byte-by-byte copy. When the length equals the width, the two transfers are the same piece. The width taken at the end covers the tail. For a length of 8 to 16 bytes at a width of 8, the generated code is two 8-byte loads and two 8-byte stores, addressed at the start and at `start + length - 8`.
+
+A longer copy first moves the unaligned head, brings the destination up to an alignment boundary, loops at that width, and finishes with one width taken backward from the end. A very short copy whose length is known at compile time is already split by the compiler into a few `movdqu` and `mov` instructions. When the length is known only at run time, the call stays as `memcpy@PLT`. The message path picks the width itself.
+
+GCC leaves `rep movsb` unused when the expected length is under 4 bytes, because the startup of that instruction costs more than the copy. The Skylake strategy table sends a known length of at most 256 bytes to `rep movsb` and skips the alignment prologue; a longer copy goes to the library. The LLVM copy sets the `rep movsb` threshold to the maximum length by default, so that instruction is not selected. When the copy itself prefetches the source and the destination, keep the loop body at one cache line so the loop stays a loop. A string instruction has no place to put that prefetch.
+
+When the source range and the destination range overlap, the direction follows which address is lower. A lower destination is copied from low addresses toward high addresses. A higher destination is copied from the end backward.
+
+```cpp
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+
+void copy_span(unsigned char* dst, const unsigned char* src, size_t n) {
+    if (n == 0) return;
+    if (n < 4) {
+        for (size_t i = 0; i < n; ++i)
+            dst[i] = src[i];
+        return;
+    }
+    if (n <= 8) {
+        uint32_t head, tail;
+        std::memcpy(&head, src, 4);
+        std::memcpy(&tail, src + n - 4, 4);
+        std::memcpy(dst, &head, 4);
+        std::memcpy(dst + n - 4, &tail, 4);
+        return;
+    }
+    if (n <= 16) {
+        uint64_t head, tail;
+        std::memcpy(&head, src, 8);
+        std::memcpy(&tail, src + n - 8, 8);
+        std::memcpy(dst, &head, 8);
+        std::memcpy(dst + n - 8, &tail, 8);
+        return;
+    }
+    if (n <= 32) {
+        uint64_t h0, h1, t0, t1;
+        std::memcpy(&h0, src, 8);
+        std::memcpy(&h1, src + 8, 8);
+        std::memcpy(&t0, src + n - 16, 8);
+        std::memcpy(&t1, src + n - 8, 8);
+        std::memcpy(dst, &h0, 8);
+        std::memcpy(dst + 8, &h1, 8);
+        std::memcpy(dst + n - 16, &t0, 8);
+        std::memcpy(dst + n - 8, &t1, 8);
+        return;
+    }
+    uintptr_t mis = reinterpret_cast<uintptr_t>(dst) & 31u;
+    size_t off = 0;
+    if (mis != 0) {
+        off = 32 - mis;
+        std::memcpy(dst, src, off);
+    }
+    while (off + 32 <= n) {
+        std::memcpy(dst + off, src + off, 32);
+        off += 32;
+    }
+    if (off < n)
+        std::memcpy(dst + n - 32, src + n - 32, 32);
+}
+
+void shift_span(unsigned char* dst, const unsigned char* src, size_t n) {
+    if (n == 0 || dst == src) return;
+    uintptr_t d = reinterpret_cast<uintptr_t>(dst);
+    uintptr_t s = reinterpret_cast<uintptr_t>(src);
+    if (d + n <= s || s + n <= d) {
+        copy_span(dst, src, n);
+        return;
+    }
+    if (d < s) {
+        size_t i = 0;
+        while (i + 8 <= n) {
+            uint64_t w;
+            std::memcpy(&w, src + i, 8);
+            std::memcpy(dst + i, &w, 8);
+            i += 8;
+        }
+        while (i < n) {
+            dst[i] = src[i];
+            ++i;
+        }
+        return;
+    }
+    size_t i = n;
+    while (i >= 8) {
+        i -= 8;
+        uint64_t w;
+        std::memcpy(&w, src + i, 8);
+        std::memcpy(dst + i, &w, 8);
+    }
+    while (i > 0) {
+        --i;
+        dst[i] = src[i];
+    }
+}
 ```
 
 ### 18. Regarding potential optimizations of functions
@@ -12211,6 +12337,86 @@ inline void signal(volatile uint32_t* flag) {
 
 `notify_all()` / `pthread_cond_broadcast`, or looping `notify_one` for far more waiters than jobs, wakes more threads than can make progress: all race the mutex, most find the predicate false and sleep again—paying O(N) context switches, futex calls, and cross-core IPIs. `perf` often shows hot `futex_wake` / `try_to_wake_up` while `perf lock` hold/wait looks normal. Wake **exactly as many workers as there is work**, or move to a lock-free queue / work-stealing design instead of waking everyone then putting them back to sleep.
 
+
+**Spin a fixed count, then decide from elapsed time whether to enter the kernel**
+
+A short wait and a kernel wait are two phases. The first 64 attempts only load the flag and execute `pause`. They do not read the clock. A clock read reaches the time source and costs more than one `pause`; putting it on every spin stretches a wait that would otherwise be a few dozen cycles. After 64 misses, measure the time since the start. Under 4 microseconds, keep executing `pause`. Past 4 microseconds, wait on the address with a futex.
+
+On Linux the futex wait watches a 4-byte value. An 8-byte sequence cannot be the sleep word. Hash the address into a fixed table whose length is a power of two, and align each slot to a cache line. The slot holds a sleeper count and a 32-bit ticket that the kernel sleeps on, both in the same slot. Before sleeping, add one to the count, issue a sequentially consistent fence, and enter the futex with the ticket value just loaded. The fence is there because the system call itself does not separate the preceding ordinary memory operations. On wakeup, subtract the count. The publisher stores the real sequence with release, then adds one to the ticket, and calls `FUTEX_WAKE` only when the count is not zero. A zero count stays out of the kernel.
+
+When the width does not match and the sleep word is the ticket in the table, one publish wakes every waiter on that slot. Distinct sequences hash onto the same slot; an extra wakeup is harmless, and the waiter loads its own sequence again. A wait with no deadline still carries a 2-second timeout on the libc++ Linux path, and the return goes back to polling. A timeout and a spurious wakeup take the same path. The order thread stays on the user-space sequence. A background thread is the one that enters this table.
+
+```cpp
+#include <atomic>
+#include <cstdint>
+#include <ctime>
+#include <climits>
+#include <linux/futex.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+#include <immintrin.h>
+
+struct alignas(64) ParkSlot {
+    std::atomic<uint32_t> sleepers{0};
+    std::atomic<uint32_t> ticket{0};
+};
+
+inline constexpr uint32_t kParkSlots = 32;
+ParkSlot g_park[kParkSlots];
+
+ParkSlot& park_slot(const void* p) {
+    uintptr_t h = reinterpret_cast<uintptr_t>(p) >> 6;
+    h ^= h >> 11;
+    return g_park[h & (kParkSlots - 1)];
+}
+
+void publish_seq(std::atomic<uint64_t>& seq, uint64_t goal) {
+    seq.store(goal, std::memory_order_release);
+    ParkSlot& slot = park_slot(&seq);
+    slot.ticket.fetch_add(1, std::memory_order_seq_cst);
+    if (slot.sleepers.load(std::memory_order_seq_cst) == 0)
+        return;
+    syscall(SYS_futex, reinterpret_cast<uint32_t*>(&slot.ticket),
+            FUTEX_WAKE_PRIVATE, INT_MAX, nullptr, nullptr, 0);
+}
+
+bool wait_seq(std::atomic<uint64_t>& seq, uint64_t goal) {
+    for (int spin = 0; spin < 64; ++spin) {
+        if (seq.load(std::memory_order_acquire) == goal)
+            return true;
+        _mm_pause();
+    }
+    timespec origin{};
+    clock_gettime(CLOCK_MONOTONIC, &origin);
+    ParkSlot& slot = park_slot(&seq);
+    for (;;) {
+        if (seq.load(std::memory_order_acquire) == goal)
+            return true;
+        timespec now{};
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        int64_t us = (now.tv_sec - origin.tv_sec) * 1000000
+                   + (now.tv_nsec - origin.tv_nsec) / 1000;
+        if (us < 4) {
+            _mm_pause();
+            continue;
+        }
+        uint32_t seen = slot.ticket.load(std::memory_order_acquire);
+        if (seq.load(std::memory_order_acquire) == goal)
+            return true;
+        slot.sleepers.fetch_add(1, std::memory_order_relaxed);
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+        if (seq.load(std::memory_order_acquire) == goal) {
+            slot.sleepers.fetch_sub(1, std::memory_order_release);
+            return true;
+        }
+        timespec rel{2, 0};
+        syscall(SYS_futex, reinterpret_cast<uint32_t*>(&slot.ticket),
+                FUTEX_WAIT_PRIVATE, seen, &rel, nullptr, 0);
+        slot.sleepers.fetch_sub(1, std::memory_order_release);
+    }
+}
+```
+
 ### 26. Bit fields and bit operations
 **Bitfield** is a special `struct` member, which allows us to precisely define the number of binary digits occupied by a variable. Its core value in HFT is:
 
@@ -12479,6 +12685,48 @@ struct HoleMap {
         summary |= 1ull << s;
     }
 };
+```
+
+**Find a byte a word at a time**
+
+When searching a mapped byte range for a delimiter, a length under 16 bytes stays on the byte loop. Alignment and building the mask cost more than comparing bytes. Once the length is long enough, walk bytes until the address is 4-byte aligned, then load an `unsigned` at a time. The page size is a multiple of 4, so an aligned load does not cross a page. When fewer than 4 bytes remain, go back to bytes. The load does not extend past the buffer.
+
+To test whether a word contains a zero byte, subtract `0x01010101` from the word. A zero byte borrows from the next byte. AND the difference with the bitwise complement of the original word and with `0x80808080`. Only a zero byte leaves the high bit set. Compiled, the test is one `lea` for the subtract, one `not`, two `and`s, and a `setne`, with no branch in between. To search for a chosen byte, multiply that byte into every lane of the word, XOR it with the loaded word so the chosen byte becomes zero, and run the same test. After a hit, compare the four bytes one by one and stop at the index.
+
+When the starting alignment is unknown, the hot scan uses 4-byte words rather than 8-byte words. A wider load pays off only after alignment, and the alignment loop is longer.
+
+```cpp
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+
+inline bool zero_byte(uint32_t w) {
+    return ((w - 0x01010101u) & ~w & 0x80808080u) != 0u;
+}
+
+const unsigned char* find_byte(const unsigned char* p, size_t n, unsigned char needle) {
+    size_t i = 0;
+    if (n >= 16) {
+        while (i < n && (reinterpret_cast<uintptr_t>(p + i) & 3u) != 0) {
+            if (p[i] == needle)
+                return p + i;
+            ++i;
+        }
+        uint32_t splat = 0x01010101u * needle;
+        while (i + 4 <= n) {
+            uint32_t w;
+            std::memcpy(&w, p + i, 4);
+            if (zero_byte(w ^ splat))
+                break;
+            i += 4;
+        }
+    }
+    for (; i < n; ++i) {
+        if (p[i] == needle)
+            return p + i;
+    }
+    return nullptr;
+}
 ```
 
 ### 27. C++20 coroutine scheduling framework
@@ -13480,6 +13728,71 @@ struct WaitFreeCounter {
 ```
 
 Tip: Use high bit stealing to carry the state, and the read operation also participates in assistance; there is no loop, and the spin jitter is eliminated.
+
+**Hash a cache line to a lock when the update does not fit in one atomic instruction**
+
+For a length of at most 16 bytes, `__atomic_load` dispatches through a jump table indexed by the length. The indirect jump is `notrack`. A naturally aligned load of 1, 2, 4, or 8 bytes is an ordinary `mov` of that width, with no lock prefix. When the address is not aligned for that width, the helper aligns the address down, loads a wider aligned word that covers the object, and copies out the requested bytes. A 16-byte value that is 16-byte aligned goes through a 16-byte compare-exchange. A width above 16, or 16 bytes that are not aligned, takes the side lock.
+
+The side lock is a table. On the slow path the address is shifted right by 6 to get a line number, then masked with `0x3f`. That is 64 slots, one page divided by one line. Each slot occupies 64 bytes: the index is shifted left by 6, added to the table base, and passed to `pthread_mutex_lock`. The covered length is compared with `0x1000` and capped at one page with `cmovbe`. The library function loads the stack canary from `fs:0x28` on entry and checks it before returning. An aligned word on the hot path is stored directly and does not call this function.
+
+Counting lines from the byte length alone misses the next line when the object sits at the end of a line. Add the offset inside the line, then divide by the line size. Locking forward from the starting line and wrapping to 0 at the end of the table deadlocks with another span that locks upward from a low index. The wrapped part locks the low indices first, then the high indices, so both sides acquire in ascending order. An object longer than a page holds the whole table; the extra bytes do not take further locks.
+
+The table is hashed by virtual address. When one physical page is mapped at two virtual addresses, the two locks do not match and the critical sections do not exclude each other. An object in shared memory stays an aligned 8-byte or 16-byte word, and the lock prefix hits the object itself. `is_always_lock_free` is a compile-time check. A type that fails it stays on the slow path.
+
+```cpp
+#include <atomic>
+#include <cstdint>
+#include <immintrin.h>
+
+struct alignas(64) LineGate {
+    std::atomic<uint32_t> held{0};
+};
+
+inline constexpr uint32_t kGates = 64;
+LineGate g_gates[kGates];
+
+void grab(uint32_t i) {
+    while (g_gates[i].held.exchange(1, std::memory_order_acquire) != 0)
+        _mm_pause();
+}
+
+void drop_gate(uint32_t i) {
+    g_gates[i].held.store(0, std::memory_order_release);
+}
+
+void lock_span(void* p, size_t n, uint32_t* seq, uint32_t& used) {
+    constexpr uintptr_t kWatch = 64;
+    uintptr_t addr = reinterpret_cast<uintptr_t>(p);
+    uint32_t begin = static_cast<uint32_t>((addr / kWatch) & (kGates - 1));
+    uint32_t count = static_cast<uint32_t>(
+        (n + (addr & (kWatch - 1)) + kWatch - 1) / kWatch);
+    if (count > kGates)
+        count = kGates;
+    used = 0;
+    uint32_t step = 0;
+    if (begin + count > kGates) {
+        uint32_t low = begin + count - kGates;
+        for (; step < low; ++step)
+            seq[used++] = step;
+    }
+    uint32_t at = begin;
+    for (; step < count; ++step)
+        seq[used++] = at++;
+    for (uint32_t i = 0; i < used; ++i)
+        grab(seq[i]);
+}
+
+void unlock_span(const uint32_t* seq, uint32_t used) {
+    while (used > 0)
+        drop_gate(seq[--used]);
+}
+
+template <class T>
+void store_word(std::atomic<T>& cell, T next) {
+    static_assert(std::atomic<T>::is_always_lock_free);
+    cell.store(next, std::memory_order_release);
+}
+```
 
 
 ### 32. Linux kernel tuning and BIOS configuration
@@ -17354,6 +17667,31 @@ Compiler dynamic link option optimization
     - Disadvantage: cannot have public variables
     - **Solution**: Mark global variables and internal functions as`static`or`__attribute__((visibility("hidden")))`
 + **Avoid**:`-mcmodel=large`(Using 64-bit address, low efficiency)
+
+**An exported symbol may be replaced at load time**
+
+A shared library allows another module to replace an exported symbol at load time. The compiler therefore cannot inline a call to an exported function of the same library. The call stays on the PLT even when the definition is in the same translation unit. A function used only inside the library is given hidden visibility, or the library is built with `-fno-semantic-interposition`. After it is hidden, a call inside the library is a direct instruction, and later optimization can pull the body in. An entry that an outside `dlsym` must find keeps the default visibility. The other symbols stay unexported.
+
+With `-fPIC` and default visibility, `gate_order` calls `spread_ok@PLT`. With hidden visibility, or with `-fno-semantic-interposition`, that call disappears. The body is an `add`, a `cmp`, and a `jge`.
+
+```cpp
+struct BookView {
+    int bid;
+    int ask;
+};
+
+__attribute__((visibility("hidden")))
+int spread_ok(const BookView* book, int tick) {
+    return book->bid + tick < book->ask;
+}
+
+__attribute__((visibility("default")))
+int gate_order(const BookView* book, int px, int tick) {
+    if (!spread_ok(book, tick))
+        return 0;
+    return px > 0;
+}
+```
 
 
 ### 4. Special hardware instructions

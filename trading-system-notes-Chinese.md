@@ -5988,6 +5988,16 @@ GCC 具备在优化阶段存储和使用分支预测统计数据的能力，相�
 
 在高频交易场景中，完整的热路径（即交易执行路径）实际上是一条罕见分支，因此历史分支数据的参考价值有限。一种解决方案是：在测试模式下运行 GCC，强制热路径始终执行 “模拟交易”（dummy-executed）。高频交易中热路径的其他早期环节（例如交易决策逻辑，会在接收市场数据时始终执行）仍能从分支分析中获益。
 
+反馈编译还有一条默认假设：训练里一次都没执行的函数是冷函数。冷基本块可以挪进冷区，调用点按几乎不发生来布局。撤单、拒单、断线在训练样本里经常缺席，上线后第一次进入要走这份布局。`-fprofile-partial-training` 关掉这条假设，没跑到的函数保持普通布局。日志和只在启动时跑的函数仍然单独标 `cold`。训练覆盖不到、但必须留在热区里的入口标 `hot`。
+
+```cpp
+__attribute__((hot))
+int cancel_live(uint32_t order_id, uint32_t leaves);
+
+__attribute__((cold))
+void audit_drop(uint32_t order_id, int why);
+```
+
 C++ 代码中的主要分支类型包括：
 
 + `if`语句和`if-else`语句；
@@ -6056,6 +6066,21 @@ int pick_side(int take_a, int a, int b) {
 }
 ```
 
+**比较和条件跳转挨在一起**
+
+`test` 或 `cmp` 紧挨着条件跳转时，支持融合的微架构把这一对收成一条微操作。GCC 的调度会判断当前这对指令能不能融合，能融合就把它们排到相邻。部分微架构还能把加、减、自增、自减和后面的条件跳转合在一起。或、异或并不是每一代都能合。中间夹一条改标志的指令，融合就不成立。
+
+下面这个下标检查在 `-O3` 下是 `test` 后面直接 `js`。冷路径上如果还有一次外部调用，编译器可能为了保存寄存器，把 `push` 插到减法和对符号标志的跳转之间，`sub` 和 `js` 就被拆开，热路径上多一次入栈出栈。
+
+Skylake 上，融合之后的条件跳转若跨过 32 字节边界，前端会清空。Clang 用 `-mbranches-within-32B-boundaries` 让汇编器把融合分支、条件跳转和普通跳转垫进同一个 32 字节窗口。比较和跳转之间若已经插入对齐，这一对按没有融合处理，填充不会再把它们绑在一起。
+
+```cpp
+int read_slot(const int* col, int n) {
+    if (n < 0)
+        return 0;
+    return col[n];
+}
+```
 
 **5. 查表法替代分支**
 
@@ -8416,6 +8441,107 @@ struct WcWindow {
             gate.clear(std::memory_order_release);
     }
 };
+```
+
+
+**按长度做重叠的宽拷贝**
+
+源区间和目的区间不重叠时，按长度选一个固定宽度，宽度不超过这次的长度。先把起点的这一宽和末尾的这一宽读进寄存器，两次读都完成后再写回。两段在目的地上重叠，后写入的覆盖重叠部分，结果与逐字节拷贝相同。长度刚好等于宽度时，两次读写是同一段。末尾那一次宽度把尾巴盖住。长度为 8 到 16 字节、宽度取 8 时，生成的是两条 8 字节加载和两条 8 字节存储，地址分别是起点和 `起点 + 长度 - 8`。
+
+更长的拷贝先搬开头不足一个对齐单位的那段，把目的地址补齐，再按对齐后的宽度循环，最后从末尾倒扣一个宽度写完尾巴。编译期已知的很短拷贝，编译器自己会拆成几条 `movdqu` 和 `mov`。长度到运行时才知道时，调用留在 `memcpy@PLT`。报文热路径按长度分档自己写。
+
+GCC 在期望长度小于 4 字节时不用 `rep movsb`，这条指令的启动开销大于拷贝本身。Skylake 的策略表把估计长度不超过 256 字节、并且长度已知的拷贝派给 `rep movsb`，同时跳过为对齐写的序幕；更长的交给库。LLVM 的拷贝默认把 `rep movsb` 的阈值设成最大长度，这条指令不会被选中。拷贝途中要预取源和目的时，循环体保持一次一条缓存行，避免被收成 `rep movsb`，字符串指令中间放不进预取。
+
+源区间和目的区间重叠时，按地址高低选择方向。目的地址更低就从低地址往高地址搬，目的地址更高就从末尾往回搬。
+
+```cpp
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+
+void copy_span(unsigned char* dst, const unsigned char* src, size_t n) {
+    if (n == 0) return;
+    if (n < 4) {
+        for (size_t i = 0; i < n; ++i)
+            dst[i] = src[i];
+        return;
+    }
+    if (n <= 8) {
+        uint32_t head, tail;
+        std::memcpy(&head, src, 4);
+        std::memcpy(&tail, src + n - 4, 4);
+        std::memcpy(dst, &head, 4);
+        std::memcpy(dst + n - 4, &tail, 4);
+        return;
+    }
+    if (n <= 16) {
+        uint64_t head, tail;
+        std::memcpy(&head, src, 8);
+        std::memcpy(&tail, src + n - 8, 8);
+        std::memcpy(dst, &head, 8);
+        std::memcpy(dst + n - 8, &tail, 8);
+        return;
+    }
+    if (n <= 32) {
+        uint64_t h0, h1, t0, t1;
+        std::memcpy(&h0, src, 8);
+        std::memcpy(&h1, src + 8, 8);
+        std::memcpy(&t0, src + n - 16, 8);
+        std::memcpy(&t1, src + n - 8, 8);
+        std::memcpy(dst, &h0, 8);
+        std::memcpy(dst + 8, &h1, 8);
+        std::memcpy(dst + n - 16, &t0, 8);
+        std::memcpy(dst + n - 8, &t1, 8);
+        return;
+    }
+    uintptr_t mis = reinterpret_cast<uintptr_t>(dst) & 31u;
+    size_t off = 0;
+    if (mis != 0) {
+        off = 32 - mis;
+        std::memcpy(dst, src, off);
+    }
+    while (off + 32 <= n) {
+        std::memcpy(dst + off, src + off, 32);
+        off += 32;
+    }
+    if (off < n)
+        std::memcpy(dst + n - 32, src + n - 32, 32);
+}
+
+void shift_span(unsigned char* dst, const unsigned char* src, size_t n) {
+    if (n == 0 || dst == src) return;
+    uintptr_t d = reinterpret_cast<uintptr_t>(dst);
+    uintptr_t s = reinterpret_cast<uintptr_t>(src);
+    if (d + n <= s || s + n <= d) {
+        copy_span(dst, src, n);
+        return;
+    }
+    if (d < s) {
+        size_t i = 0;
+        while (i + 8 <= n) {
+            uint64_t w;
+            std::memcpy(&w, src + i, 8);
+            std::memcpy(dst + i, &w, 8);
+            i += 8;
+        }
+        while (i < n) {
+            dst[i] = src[i];
+            ++i;
+        }
+        return;
+    }
+    size_t i = n;
+    while (i >= 8) {
+        i -= 8;
+        uint64_t w;
+        std::memcpy(&w, src + i, 8);
+        std::memcpy(dst + i, &w, 8);
+    }
+    while (i > 0) {
+        --i;
+        dst[i] = src[i];
+    }
+}
 ```
 
 ### 18. 关于函数的潜在优化
@@ -12178,6 +12304,86 @@ inline void signal(volatile uint32_t* flag) {
 
 `notify_all()` / `pthread_cond_broadcast`，或对远超任务数的等待者循环 `notify_one`，会唤醒远多于能推进工作的线程：全部争抢互斥锁，多数发现谓词已不成立再睡回——代价是 O(N) 次上下文切换、futex 与跨核 IPI。`perf` 上常见 `futex_wake` / `try_to_wake_up` 偏热，而 `perf lock` 的 hold/wait 未必异常。应按**实际可消费的工作数**精确唤醒（一次只 wake 需要的个数），或改用无锁队列/工作窃取，避免“全员唤醒再全员睡回”。
 
+
+**先空转固定次数，再按经过时间决定是否进内核**
+
+短等和进内核分成两段。前 64 次只读标志并执行 `pause`，不读时钟。时钟读取会走到时钟源，比一次 `pause` 贵，放在每次空转里会把本来只有几十拍的等待拖长。64 次之后仍然看不到，再量从起点到现在的时间。没过 4 微秒就继续 `pause`。过了 4 微秒才对这个地址做 futex 等待。
+
+Linux 上 futex 等待看的是一个 4 字节的值。标志是 8 字节序号时，不能直接睡在序号上。按地址散列到一张固定长度的表，表长取 2 的幂，每一项按缓存行对齐。项里放等待人数，和一把供内核睡的 32 位计数，两样放在同一项里。进入等待前把人数加一，加一条全序栅栏，再带着刚才读到的计数值进 futex。栅栏是因为这次系统调用本身不保证和前面的普通读写隔开。醒来把人数减掉。发布侧先用 release 写下真正的序号，再把这把计数加一；人数不是 0 才 `FUTEX_WAKE`。人数是 0 就不要进内核。
+
+宽度对不上、改睡表内计数时，一次发布唤醒这一格上的全部等待者。不同的序号会散列到同一格，多醒一次没有关系，醒来必须重读自己的序号。没有截止时间的等待在 libc++ 的 Linux 路径上仍带 2 秒超时，返回后回到轮询。超时返回和虚假唤醒走同一条路。报单线程留在用户态的序号上，后台线程才进这张表。
+
+```cpp
+#include <atomic>
+#include <cstdint>
+#include <ctime>
+#include <climits>
+#include <linux/futex.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+#include <immintrin.h>
+
+struct alignas(64) ParkSlot {
+    std::atomic<uint32_t> sleepers{0};
+    std::atomic<uint32_t> ticket{0};
+};
+
+inline constexpr uint32_t kParkSlots = 32;
+ParkSlot g_park[kParkSlots];
+
+ParkSlot& park_slot(const void* p) {
+    uintptr_t h = reinterpret_cast<uintptr_t>(p) >> 6;
+    h ^= h >> 11;
+    return g_park[h & (kParkSlots - 1)];
+}
+
+void publish_seq(std::atomic<uint64_t>& seq, uint64_t goal) {
+    seq.store(goal, std::memory_order_release);
+    ParkSlot& slot = park_slot(&seq);
+    slot.ticket.fetch_add(1, std::memory_order_seq_cst);
+    if (slot.sleepers.load(std::memory_order_seq_cst) == 0)
+        return;
+    syscall(SYS_futex, reinterpret_cast<uint32_t*>(&slot.ticket),
+            FUTEX_WAKE_PRIVATE, INT_MAX, nullptr, nullptr, 0);
+}
+
+bool wait_seq(std::atomic<uint64_t>& seq, uint64_t goal) {
+    for (int spin = 0; spin < 64; ++spin) {
+        if (seq.load(std::memory_order_acquire) == goal)
+            return true;
+        _mm_pause();
+    }
+    timespec origin{};
+    clock_gettime(CLOCK_MONOTONIC, &origin);
+    ParkSlot& slot = park_slot(&seq);
+    for (;;) {
+        if (seq.load(std::memory_order_acquire) == goal)
+            return true;
+        timespec now{};
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        int64_t us = (now.tv_sec - origin.tv_sec) * 1000000
+                   + (now.tv_nsec - origin.tv_nsec) / 1000;
+        if (us < 4) {
+            _mm_pause();
+            continue;
+        }
+        uint32_t seen = slot.ticket.load(std::memory_order_acquire);
+        if (seq.load(std::memory_order_acquire) == goal)
+            return true;
+        slot.sleepers.fetch_add(1, std::memory_order_relaxed);
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+        if (seq.load(std::memory_order_acquire) == goal) {
+            slot.sleepers.fetch_sub(1, std::memory_order_release);
+            return true;
+        }
+        timespec rel{2, 0};
+        syscall(SYS_futex, reinterpret_cast<uint32_t*>(&slot.ticket),
+                FUTEX_WAIT_PRIVATE, seen, &rel, nullptr, 0);
+        slot.sleepers.fetch_sub(1, std::memory_order_release);
+    }
+}
+```
+
 ### 26. 位域与位运算
 **位域（Bitfield）** 是一种特殊的 `struct` 成员，它允许我们精确地定义一个变量占用的二进制位数。其在HFT中的核心价值在于：
 
@@ -12445,6 +12651,48 @@ struct HoleMap {
         summary |= 1ull << s;
     }
 };
+```
+
+**按字寻找一个字节**
+
+在一段已经映射好的字节里找分隔符，长度不到 16 字节时按字节走。对齐和造掩码的成本超过逐字节比较。长度够了，先按字节走到 4 字节对齐，再每次读一个 `unsigned`。页长是 4 的倍数，对齐之后的读不会跨页。剩余不足 4 字节时退回逐字节，不把读伸到缓冲区外面。
+
+判断一个字里有没有 0 字节，用 `0x01010101` 去减这个字。0 字节会向高位借位。再和原字的按位取反、`0x80808080` 相与，只有 0 字节留下高位。这个判断编译后是一次 `lea` 做减法、一次 `not`、两次 `and`、一次 `setne`，中间没有分支。找一个指定字节时，先把该字节乘进字的每一节，和读到的字异或，指定字节变成 0，再做同一次判断。命中之后在这 4 个字节里逐个对，定位到下标。
+
+起点对齐未知时，热路径用 4 字节而不是 8 字节做这块扫描。更宽的读要等对齐之后才有优势，对齐循环也更长。
+
+```cpp
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+
+inline bool zero_byte(uint32_t w) {
+    return ((w - 0x01010101u) & ~w & 0x80808080u) != 0u;
+}
+
+const unsigned char* find_byte(const unsigned char* p, size_t n, unsigned char needle) {
+    size_t i = 0;
+    if (n >= 16) {
+        while (i < n && (reinterpret_cast<uintptr_t>(p + i) & 3u) != 0) {
+            if (p[i] == needle)
+                return p + i;
+            ++i;
+        }
+        uint32_t splat = 0x01010101u * needle;
+        while (i + 4 <= n) {
+            uint32_t w;
+            std::memcpy(&w, p + i, 4);
+            if (zero_byte(w ^ splat))
+                break;
+            i += 4;
+        }
+    }
+    for (; i < n; ++i) {
+        if (p[i] == needle)
+            return p + i;
+    }
+    return nullptr;
+}
 ```
 
 ### 27. C++20协程调度框架
@@ -13448,6 +13696,71 @@ struct WaitFreeCounter {
 ```
 
 提示：用高位偷位携带状态，读操作也参与协助；无循环，自旋抖动被消除。
+
+**放不进一条原子指令时按缓存行加锁**
+
+长度不超过 16 字节时，`__atomic_load` 用一张以长度为下标的跳转表分派，间接跳转带 `notrack`。自然对齐的 1、2、4、8 字节加载是对应宽度的普通 `mov`，没有锁前缀。地址没有按这个宽度对齐时，先把地址向下对齐，读一个能盖住对象的更宽的对齐字，再把需要的字节拷出来。16 字节且按 16 对齐时走 16 字节的比较交换。宽度超过 16，或者 16 字节但没有对齐，就进入旁路锁。
+
+旁路锁是一张表。慢路径里地址右移 6 位得到行号，再和 `0x3f` 相与得到下标，一共 64 项，等于一页除以一行。每一项占 64 字节，下标再左移 6 位加上表基址，然后调用 `pthread_mutex_lock`。覆盖长度先和 `0x1000` 比较，用 `cmovbe` 截到一页。这个库函数入口从 `fs:0x28` 取栈保护字，返回前再比对。热路径上的对齐字直接写，不调用它。
+
+只按字节长度折算行数，对象贴着行尾时下一行不会被锁上。行内偏移要加进长度，再除以行长。从起始行往前锁、到表尾再绕回 0，会和从低下标往后锁的另一段互相等待。绕回的那段先锁表头，再锁高下标，两边都按从小到大的顺序拿。对象比一整页还长时，表被整张拿下，多出来的字节不再另加锁。
+
+这张表按虚拟地址散列。同一页物理内存映射到两个虚拟地址时，两把锁对不上，临界区并不互斥。共享内存上的对象收成对齐的 8 字节或 16 字节，锁前缀打在对象自己身上。编译期用 `is_always_lock_free` 卡住，过不了的类型留在慢路径。
+
+```cpp
+#include <atomic>
+#include <cstdint>
+#include <immintrin.h>
+
+struct alignas(64) LineGate {
+    std::atomic<uint32_t> held{0};
+};
+
+inline constexpr uint32_t kGates = 64;
+LineGate g_gates[kGates];
+
+void grab(uint32_t i) {
+    while (g_gates[i].held.exchange(1, std::memory_order_acquire) != 0)
+        _mm_pause();
+}
+
+void drop_gate(uint32_t i) {
+    g_gates[i].held.store(0, std::memory_order_release);
+}
+
+void lock_span(void* p, size_t n, uint32_t* seq, uint32_t& used) {
+    constexpr uintptr_t kWatch = 64;
+    uintptr_t addr = reinterpret_cast<uintptr_t>(p);
+    uint32_t begin = static_cast<uint32_t>((addr / kWatch) & (kGates - 1));
+    uint32_t count = static_cast<uint32_t>(
+        (n + (addr & (kWatch - 1)) + kWatch - 1) / kWatch);
+    if (count > kGates)
+        count = kGates;
+    used = 0;
+    uint32_t step = 0;
+    if (begin + count > kGates) {
+        uint32_t low = begin + count - kGates;
+        for (; step < low; ++step)
+            seq[used++] = step;
+    }
+    uint32_t at = begin;
+    for (; step < count; ++step)
+        seq[used++] = at++;
+    for (uint32_t i = 0; i < used; ++i)
+        grab(seq[i]);
+}
+
+void unlock_span(const uint32_t* seq, uint32_t used) {
+    while (used > 0)
+        drop_gate(seq[--used]);
+}
+
+template <class T>
+void store_word(std::atomic<T>& cell, T next) {
+    static_assert(std::atomic<T>::is_always_lock_free);
+    cell.store(next, std::memory_order_release);
+}
+```
 
 
 ### 32. Linux内核调优和BIOS配置
@@ -17326,6 +17639,30 @@ public:
     - **解决**：将全局变量、内部函数标记为`static`或`__attribute__((visibility("hidden")))`
 + **避免**：`-mcmodel=large`（使用64位地址，效率低）
 
+**导出符号默认允许在加载时被换掉**
+
+动态库默认允许别的模块在加载时换掉导出符号。编译器因此不能把对本库导出函数的调用收成内联。调用留在 PLT 上，哪怕定义就在同一个翻译单元里。只在库内使用的函数标成隐藏可见性，或者编译这个库时加上 `-fno-semantic-interposition`。隐藏之后，库内调用变成直接指令，后续优化还能把函数体嵌进来。要被外部 `dlsym` 到的入口保持默认可见，其余符号不要导出。
+
+`-fPIC` 且可见性为默认时，`gate_order` 对 `spread_ok` 的调用是 `call spread_ok@PLT`。隐藏可见性，或者加上 `-fno-semantic-interposition` 之后，这次调用消失，函数体是一条 `add`、一条 `cmp` 和一条 `jge`。
+
+```cpp
+struct BookView {
+    int bid;
+    int ask;
+};
+
+__attribute__((visibility("hidden")))
+int spread_ok(const BookView* book, int tick) {
+    return book->bid + tick < book->ask;
+}
+
+__attribute__((visibility("default")))
+int gate_order(const BookView* book, int px, int tick) {
+    if (!spread_ok(book, tick))
+        return 0;
+    return px > 0;
+}
+```
 
 
 ### 4. 特殊硬件指令
