@@ -665,6 +665,35 @@ void* open_lane_on_cpu(int cpu, std::size_t n) {
 }
 ```
 
+**Touch the pages ahead of the write cursor with a compare-exchange that stores the same value**
+
+An append mapping keeps meeting addresses that have no physical page yet. A background thread follows the current write position and writes each page inside a window ahead of it. A read of the page still leaves the fault from the first store on the business thread.
+
+The first 8 bytes of each page go through a compare-exchange whose expected value and new value are both 0. When the old value is 0, the exchange succeeds and those 8 bytes stay 0. When the old value is something else, the exchange fails and the bytes already stored on the page stay in place. That write takes the fault on the background thread. The window moves forward with the write position. A write that runs past the window, or a page the kernel has reclaimed, still faults on the business thread.
+
+```cpp
+#include <cstddef>
+#include <cstdint>
+
+struct AheadTouch {
+    static constexpr size_t kPage = 4096;
+    uint8_t* base = nullptr;
+    size_t touched = 0;
+
+    void advance(size_t cursor, size_t window) {
+        size_t end = cursor + window;
+        for (size_t page = touched; page < end; page += kPage) {
+            uint64_t expect = 0;
+            __atomic_compare_exchange_n(
+                reinterpret_cast<uint64_t*>(base + page),
+                &expect, uint64_t{0}, false,
+                __ATOMIC_RELAXED, __ATOMIC_RELAXED);
+            touched = page + kPage;
+        }
+    }
+};
+```
+
 **3. Management and optimization tools**
 
 1. `numactl` (most commonly used): Command line tool to specify the NUMA policy of an application when starting it.
@@ -14512,6 +14541,50 @@ struct ClockView {
 };
 ```
 
+**Bracket a device-clock sample between two cycle reads**
+
+Reading the clock on the NIC enters the kernel. The hot path reads only this core's cycle counter and converts it with a scale taken earlier. One calibration sample reads the cycle counter, then the device clock, then the cycle counter again. The device clock falls between the two cycle reads and is paired with their midpoint. Half the gap between those two reads is the uncertainty of the pair.
+
+The conversion stays in integers. Elapsed cycles are multiplied by the scale numerator. Half a divisor is added before the shift, the product is shifted by the scale's bit count, and the base device time is added. The scale comes from the deltas between two midpoints. Time sync changes the device clock's rate, so another pair is taken after a while.
+
+```cpp
+#include <cstdint>
+
+struct DevScale {
+    uint64_t base_tick = 0;
+    int64_t base_dev = 0;
+    uint32_t mult = 1;
+    uint32_t shift = 32;
+    uint64_t half_span = 0;
+
+    static uint64_t mid(uint64_t before, uint64_t after) {
+        return before + (after - before) / 2;
+    }
+
+    void anchor(uint64_t before, int64_t dev, uint64_t after) {
+        base_tick = mid(before, after);
+        base_dev = dev;
+        half_span = (after - before) / 2;
+    }
+
+    void slope(uint64_t before, int64_t dev, uint64_t after) {
+        uint64_t m2 = mid(before, after);
+        uint64_t dt = m2 - base_tick;
+        uint64_t dd = (uint64_t)(dev - base_dev);
+        unsigned __int128 num = dt ? ((unsigned __int128)dd << shift) / dt : 0;
+        if (num > 0xffffffffu) num = 0xffffffffu;
+        mult = (uint32_t)num;
+    }
+
+    int64_t to_dev(uint64_t tick) const {
+        uint64_t d = tick - base_tick;
+        unsigned __int128 prod = (unsigned __int128)d * mult;
+        if (shift) prod += (unsigned __int128)1 << (shift - 1);
+        return base_dev + (int64_t)(prod >> shift);
+    }
+};
+```
+
 **Two cadences for a poll loop**
 
 A caller sitting in a tight loop asks whether anything is ready. Walking every descriptor each time hits cache lines that were just read. Remember the cycle counter from the last walk. If the difference is still inside the fast gap, tell the caller there is nothing new. The first call has no previous counter, so it walks.
@@ -14559,6 +14632,27 @@ struct PollPace {
         return n <= 16 ? local : heap;
     }
 };
+```
+
+**A replay deadline is the origin plus that packet's offset, and the wait covers only what remains**
+
+Replay sends each packet at its arrival time relative to the first packet. This packet's deadline is the origin plus its own offset. When some time has already passed since the origin by the moment the packet is ready, the wait stops at that deadline. The next packet's deadline is the same origin plus its own offset. Extra wait from earlier packets stays in the time already elapsed.
+
+When the thread is already pinned to a dedicated core, this short wait spins. The loop reads a monotonic counter and leaves once the deadline is reached, with `pause` between the reads. A deadline already in the past returns at once.
+
+```cpp
+#include <cstdint>
+
+inline void pause_cpu() { asm volatile("pause"); }
+
+template <class Now>
+void wait_until(uint64_t deadline, Now&& now) {
+    while ((int64_t)(deadline - now()) > 0) pause_cpu();
+}
+
+uint64_t replay_deadline(uint64_t origin, uint64_t offset) {
+    return origin + offset;
+}
 ```
 
 **Per-core skiplist timers**
@@ -15214,6 +15308,49 @@ bool write_frame(uint8_t* frame, uint32_t nbytes, int64_t trigger_ns, Fill fill)
 }
 ```
 
+
+**Write the length negative first, and store the positive value last**
+
+A reader of the shared mapping looks at the frame length directly. After the space is reserved, the length is stored as a negative value. Its absolute value is the byte count of the header plus the body, and the type is stored as a data frame. The body is written before this publication. The last store uses release and changes the length to a positive value. The reader loads the length with acquire. A value that is not yet positive stops on this frame. After a positive value, the reader steps forward by the size rounded up to 32 bytes. A data frame hands the body to the application. A padding frame only advances the position.
+
+When the writer leaves while the length is still negative, the frame becomes padding. The type is changed to padding first, and the length is then published as a positive value. A positive length while the type is still a data frame makes the reader treat an unfinished body as a complete message.
+
+```cpp
+#include <atomic>
+#include <cstdint>
+
+enum class FrameLook : uint8_t { wait, data, skip };
+
+struct FrameWord {
+    std::atomic<int32_t> len;
+    int32_t kind;
+};
+
+inline uint32_t round32(uint32_t n) { return (n + 31u) & ~31u; }
+
+void open_len(FrameWord* w, int32_t raw) {
+    w->len.store(-raw, std::memory_order_relaxed);
+    w->kind = 1;
+}
+
+void seal_len(FrameWord* w, int32_t raw) {
+    w->len.store(raw, std::memory_order_release);
+}
+
+void seal_skip(FrameWord* w) {
+    int32_t raw = w->len.load(std::memory_order_relaxed);
+    if (raw >= 0) return;
+    w->kind = 2;
+    w->len.store(-raw, std::memory_order_release);
+}
+
+FrameLook read_len(const FrameWord* w, uint32_t& step) {
+    int32_t raw = w->len.load(std::memory_order_acquire);
+    if (raw <= 0) return FrameLook::wait;
+    step = round32((uint32_t)raw);
+    return w->kind == 2 ? FrameLook::skip : FrameLook::data;
+}
+```
 
 ### 36. Fail fast when shared capacity is exhausted
 
@@ -16068,6 +16205,22 @@ struct SideBurst {
 ```
 
 
+**Extend a 32-bit hardware stamp with the nearest 64-bit reading**
+
+The NIC records the low 32 bits of its own clock when the frame starts to arrive. When one frame is split across chunks, every chunk carries the same low 32 bits, and the value on the last chunk is the moment the frame started. The application fills in the high bits from the most recent 64-bit device-clock reading. The high half of that 64-bit value is joined with the low 32 bits into a candidate. A candidate that lands before the 64-bit reading by more than half the 32-bit range gains one 32-bit span. A candidate that lands after it by more than half the 32-bit range loses one 32-bit span.
+
+```cpp
+#include <cstdint>
+
+uint64_t widen32(uint32_t low, uint64_t recent) {
+    uint64_t base = recent & ~0xffffffffull;
+    uint64_t cand = base | low;
+    if (cand + 0x80000000ull < recent) cand += 0x100000000ull;
+    else if (recent + 0x80000000ull < cand) cand -= 0x100000000ull;
+    return cand;
+}
+```
+
 ### 38. Quiescent-state reclamation
 
 After a node is unlinked from a lock-free structure, its memory waits until every core that might still read it has passed a point where it holds no such pointer. Each reader has a counter on its own cache line. Zero means the core is offline and is not waited for. A global epoch sits on its own line and increases from 1.
@@ -16245,6 +16398,41 @@ struct SeqWin {
             ++min_seq;
         }
         return n;
+    }
+};
+```
+
+**Later bytes land at their own offset, and the hole is requested on its own**
+
+The receive buffer places bytes at the offset carried by the fragment. A later fragment that arrives first is written at its own offset, and that range is marked present. The contiguous position stops in front of the first hole. The highest offset seen moves on its own. While the contiguous position is still behind that highest offset, the bytes from the contiguous position up to the next present range are the start and length to ask the peer to send again. After those bytes arrive, the contiguous position moves forward.
+
+```cpp
+#include <cstdint>
+#include <cstring>
+
+struct GapLog {
+    static constexpr uint32_t kCap = 4096;
+    uint8_t mem[kCap]{};
+    uint8_t got[kCap]{};
+    uint32_t contig = 0;
+    uint32_t high = 0;
+
+    bool land(uint32_t off, const uint8_t* src, uint32_t n) {
+        if ((uint64_t)off + n > kCap) return false;
+        std::memcpy(mem + off, src, n);
+        std::memset(got + off, 1, n);
+        if (off + n > high) high = off + n;
+        while (contig < high && got[contig]) ++contig;
+        return true;
+    }
+
+    bool hole(uint32_t& from, uint32_t& len) const {
+        if (contig >= high) return false;
+        from = contig;
+        uint32_t e = contig;
+        while (e < high && !got[e]) ++e;
+        len = e - contig;
+        return len != 0;
     }
 };
 ```
@@ -16467,6 +16655,54 @@ struct StageRing {
         if (stage == 1)
             freed.store(cursor[stage], std::memory_order_release);
         return true;
+    }
+};
+```
+
+**The send limit counts only the readers still in the set**
+
+The publish limit is the minimum progress among the readers in the set, plus the window length. A side reader whose progress falls behind by more than a quarter of the window, and whose quiet time reaches the hold, leaves the set. A reader that has to follow every message is marked resident, and its progress stays in the minimum. A reader that left joins again from the publish position of that moment.
+
+```cpp
+#include <cstdint>
+
+struct GateSet {
+    static constexpr int kSlots = 8;
+    static constexpr uint64_t kWin = 128 * 1024;
+    uint64_t pos[kSlots]{};
+    uint64_t quiet_since[kSlots]{};
+    uint8_t in_set[kSlots]{};
+    uint8_t sticky[kSlots]{};
+    int count = 0;
+
+    uint64_t limit(uint64_t published, uint64_t now, uint64_t hold) {
+        uint64_t slow = 0;
+        bool any = false;
+        for (int i = 0; i < count; ++i) {
+            if (!in_set[i]) continue;
+            if (!sticky[i]) {
+                uint64_t lag = published - pos[i];
+                if (lag > (kWin >> 2)) {
+                    if (quiet_since[i] == 0) quiet_since[i] = now;
+                    if (now - quiet_since[i] >= hold) {
+                        in_set[i] = 0;
+                        continue;
+                    }
+                } else {
+                    quiet_since[i] = 0;
+                }
+            }
+            if (!any || pos[i] < slow) slow = pos[i];
+            any = true;
+        }
+        if (!any) return published + kWin;
+        return slow + kWin;
+    }
+
+    void rejoin(int i, uint64_t at) {
+        pos[i] = at;
+        quiet_since[i] = 0;
+        in_set[i] = 1;
     }
 };
 ```
@@ -33922,6 +34158,42 @@ struct Page {
 };
 ```
 
+
+**Three equal partitions rotate, and the byte position keeps increasing**
+
+One publication session keeps its log in three partitions of equal length. The length is a power of two. The writer appends at the end of the current partition. When the space left in that partition is smaller than the fragment, the writer moves to the next partition and the offset inside it starts again at 0. The older partitions stay where they are, so a reader or a retransmission still loads the original position. The same three partitions are reused, and the logical id increases by one on each switch.
+
+The byte position is the logical id shifted by the partition-length bits, ored with the offset inside the partition. After a switch the byte position continues upward. A lookup takes the logical id modulo 3 to choose the partition, and the position anded with the length mask is the offset inside it. Two sessions can report the same byte position, and each one lands in its own partitions.
+
+```cpp
+#include <cstdint>
+
+struct TurnLog {
+    static constexpr uint32_t kShift = 16;
+    static constexpr uint32_t kBytes = 1u << kShift;
+    static constexpr uint32_t kMask = kBytes - 1;
+    uint8_t* part[3]{};
+    uint32_t lap = 0;
+    uint32_t off = 0;
+
+    uint8_t* locate(uint64_t pos) const {
+        uint32_t id = (uint32_t)(pos >> kShift);
+        return part[id % 3] + (pos & kMask);
+    }
+
+    uint8_t* reserve(uint32_t n, uint64_t& pos) {
+        if (n == 0 || n > kBytes) return nullptr;
+        if (off + n > kBytes) {
+            ++lap;
+            off = 0;
+        }
+        pos = (uint64_t(lap) << kShift) | off;
+        uint8_t* p = part[lap % 3] + off;
+        off += n;
+        return p;
+    }
+};
+```
 
 ### 19. Bilateral order-id index on the trade bridge
 
