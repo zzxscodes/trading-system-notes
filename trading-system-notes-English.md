@@ -44,12 +44,13 @@
   - [35. In-place ring writes to avoid large-object copies](#35-in-place-ring-writes-to-avoid-large-object-copies)
   - [36. Fail fast when shared capacity is exhausted](#36-fail-fast-when-shared-capacity-is-exhausted)
   - [37. User-space NIC I/O and in-order bypass handoff](#37-user-space-nic-io-and-in-order-bypass-handoff)
-  - [38. Quiescent-state reclamation](#38-quiescent-state-reclamation)
-  - [39. Sequence-window reordering](#39-sequence-window-reordering)
-  - [40. Fixed-stride per-core variables](#40-fixed-stride-per-core-variables)
-  - [41. Signature-first bucket lookup](#41-signature-first-bucket-lookup)
-  - [42. Staged ordered completion ring](#42-staged-ordered-completion-ring)
-  - [43. High-quality articles on system design](#43-high-quality-articles-on-system-design)
+  - [38. Kernel async I/O on shared submit and completion rings](#38-kernel-async-io-on-shared-submit-and-completion-rings)
+  - [39. Quiescent-state reclamation](#39-quiescent-state-reclamation)
+  - [40. Sequence-window reordering](#40-sequence-window-reordering)
+  - [41. Fixed-stride per-core variables](#41-fixed-stride-per-core-variables)
+  - [42. Signature-first bucket lookup](#42-signature-first-bucket-lookup)
+  - [43. Staged ordered completion ring](#43-staged-ordered-completion-ring)
+  - [44. High-quality articles on system design](#44-high-quality-articles-on-system-design)
 - [Common performance bottlenecks and optimization directions](#common-performance-bottlenecks-and-optimization-directions)
   - [1. roofline model](#1-roofline-model)
     - [Memory Bound optimization](#memory-bound-optimization)
@@ -4108,6 +4109,48 @@ public:
         tail_.store(tail_.load(std::memory_order_relaxed) + 1, std::memory_order_release);
     }
 };
+```
+
+Progress counts how many successful pushes or pops have happened since init; the array index is only that progress modulo capacity. A legal state always keeps the occupancy in 0 through N. The program stores progress modulo the counter modulus `M`. When `N < M`, unsigned subtraction yields the true occupancy: empty is 0, full is `N`. For capacity `2^k`, the slot needs `k` bits; one extra counter bit makes `M = 2N`, so the same slot number can mean empty or full and the spare high bit is the phase. Counters may wrap to zero repeatedly: modular reduction drops lap count, not a bounded distance smaller than `M`. Do not reinterpret the unsigned occupancy as a signed gap to decide who is ahead; a full queue sits at exactly `M/2`, on the signed boundary. To test wrapping, shrink the counter to just one bit wider than the slot index and repeatedly fill then empty so the path crosses the wrap edge on purpose.
+
+```cpp
+template <class T, std::size_t N, class Ctr = std::uint32_t>
+class WrapGate {
+  static_assert(std::is_unsigned_v<Ctr> && !std::is_same_v<Ctr, bool>);
+  static_assert(N != 0 && (N & (N - 1)) == 0);
+  static_assert(N <= std::numeric_limits<Ctr>::max() / 2 + 1);
+  std::array<T, N> cell_{};
+  Ctr take_{0};
+  Ctr put_{0};
+public:
+  Ctr depth() const noexcept { return static_cast<Ctr>(put_ - take_); }
+  bool vacant() const noexcept { return take_ == put_; }
+  bool saturated() const noexcept { return depth() == N; }
+  bool offer(const T& v) {
+    if (saturated()) return false;
+    cell_[put_ & (N - 1)] = v;
+    put_ = static_cast<Ctr>(put_ + std::uintmax_t{1});
+    return true;
+  }
+  bool take(T& v) {
+    if (vacant()) return false;
+    v = cell_[take_ & (N - 1)];
+    take_ = static_cast<Ctr>(take_ + std::uintmax_t{1});
+    return true;
+  }
+};
+
+// N=128 needs 7 index bits; Ctr=uint8_t is exactly one bit wider. Fill/empty cycles cross 255→0 many times.
+void probe_wrap() {
+  WrapGate<unsigned, 128, std::uint8_t> q;
+  unsigned w = 0, r = 0, v = 0;
+  for (unsigned round = 0; round < 200; ++round) {
+    for (unsigned i = 0; i < 128; ++i) q.offer(w++);
+    q.take(v); ++r;
+    q.offer(w++);
+    for (unsigned i = 0; i < 128; ++i) { q.take(v); ++r; }
+  }
+}
 ```
 
 **Construct the slot only after the push is accepted**
@@ -16308,7 +16351,199 @@ uint64_t widen32(uint32_t low, uint64_t recent) {
 }
 ```
 
-### 38. Quiescent-state reclamation
+### 38. Kernel async I/O on shared submit and completion rings
+
+A socket hot path that enters the kernel per message pays syscall and file-table cost on the tail. User space and the kernel share a submit ring and a completion ring: requests are written into shared slots, results are read back from shared slots, and enter is skipped while the rings hold live work. Submit occupancy is a progress difference, so every slot is usable. The completion ring must be sized on its own; overflow pulls the hot path back into the kernel to flush.
+
+For a single issuing thread, enable solo-issuer and deferred task run, and size the completion ring several times the submit depth. Task work runs when the thread waits or submit-waits, so unrelated syscall returns do not interrupt it. Dropping the submit index indirection table makes the slot number the index.
+
+```cpp
+enum : uint32_t {
+  kSoloIssuer = 1u << 0,
+  kDeferRun   = 1u << 1,
+  kWideFin    = 1u << 2,
+  kNoIdxTable = 1u << 3,
+  kRewindSub  = 1u << 4,
+  kAppPages   = 1u << 5,
+};
+
+struct OpenSpec {
+  uint32_t sub_depth{256};
+  uint32_t fin_depth{1024};
+  uint32_t flags{kSoloIssuer | kDeferRun | kWideFin | kNoIdxTable};
+};
+```
+
+Peek the completion ring before deciding to enter. Advance the completion head once with release for a harvested batch. A fixed-file table skips per-request fd lookup; accepts can land directly in table slots. A supply buffer ring hands empty buffers to the kernel; completions carry a buffer id in the flags, and the buffer is returned to the ring after use.
+
+```cpp
+struct JobSlot {
+  uint32_t op{};
+  uint32_t fd{};
+  uint32_t buf{};
+  uint32_t len{};
+  uint64_t cookie{};
+};
+
+struct DoneSlot {
+  int32_t result{};
+  uint32_t flags{};
+  uint64_t cookie{};
+};
+
+struct SharedProg {
+  alignas(64) std::atomic<uint32_t> head{0};
+  alignas(64) std::atomic<uint32_t> tail{0};
+};
+
+template <uint32_t N>
+struct SubRing {
+  static_assert((N & (N - 1)) == 0);
+  JobSlot jobs[N]{};
+  SharedProg prog{};
+  uint32_t local_tail{0};
+  static constexpr uint32_t mask = N - 1;
+  uint32_t pending() const {
+    return local_tail - prog.head.load(std::memory_order_relaxed);
+  }
+  uint32_t room() const { return N - pending(); }
+  JobSlot* claim() {
+    if (room() == 0) return nullptr;
+    return &jobs[local_tail & mask];
+  }
+  void note_filled() { ++local_tail; }
+  uint32_t publish() {
+    uint32_t t = local_tail;
+    prog.tail.store(t, std::memory_order_release);
+    return t - prog.head.load(std::memory_order_relaxed);
+  }
+};
+
+template <uint32_t N>
+struct FinRing {
+  static_assert((N & (N - 1)) == 0);
+  DoneSlot done[N]{};
+  SharedProg prog{};
+  static constexpr uint32_t mask = N - 1;
+  template <class Fn>
+  uint32_t harvest(uint32_t cap, Fn&& fn) {
+    uint32_t h = prog.head.load(std::memory_order_relaxed);
+    uint32_t t = prog.tail.load(std::memory_order_acquire);
+    uint32_t n = 0;
+    while (h != t && n < cap) {
+      fn(done[h & mask]);
+      ++h; ++n;
+    }
+    if (n) prog.head.store(h, std::memory_order_release);
+    return n;
+  }
+};
+
+template <uint16_t Depth>
+struct SupplyRing {
+  struct BufOffer { uint8_t* ptr; uint32_t len; uint16_t bid; };
+  BufOffer slot[Depth]{};
+  alignas(64) std::atomic<uint16_t> head{0};
+  alignas(64) std::atomic<uint16_t> tail{0};
+  void post(uint8_t* p, uint32_t n, uint16_t id) {
+    uint16_t t = tail.load(std::memory_order_relaxed);
+    slot[t % Depth] = {p, n, id};
+    tail.store(static_cast<uint16_t>(t + 1), std::memory_order_release);
+  }
+  void recycle(uint16_t id, uint8_t* p, uint32_t n) { post(p, n, id); }
+};
+```
+
+When completions also return supply buffers, advance the buffer tail and the completion head on one path to avoid a second atomic update. While busy-peeking, silence completion event notifications; re-arm them only before blocking so a spin is not interrupted by useless wakes.
+
+```cpp
+template <uint32_t SubN, uint32_t FinN>
+struct TwinAdvance {
+  SubRing<SubN>* sub{};
+  FinRing<FinN>* fin{};
+  SupplyRing<256>* supply{};
+  void retire(uint32_t n, const uint16_t* bids) {
+    for (uint32_t i = 0; i < n; ++i)
+      supply->recycle(bids[i], nullptr, 0);
+    uint16_t t = supply->tail.load(std::memory_order_relaxed);
+    supply->tail.store(t, std::memory_order_release);
+    uint32_t h = fin->prog.head.load(std::memory_order_relaxed);
+    fin->prog.head.store(h + n, std::memory_order_release);
+  }
+};
+
+struct WakeGate {
+  std::atomic<uint32_t> flags{0};
+  static constexpr uint32_t kQuiet = 1u;
+  void hush() { flags.fetch_or(kQuiet, std::memory_order_relaxed); }
+  void arm()  { flags.fetch_and(~kQuiet, std::memory_order_relaxed); }
+  bool loud() const {
+    return (flags.load(std::memory_order_relaxed) & kQuiet) == 0;
+  }
+};
+```
+
+Keep wait parameters in a registered page and pass only a page index into enter, instead of copying a timeout struct every time. A minimum wait states “at least this many completions or this many microseconds,” with a hard timeout still capping the sleep. After attaching a busy-poll hint on the NIC path, a zero-timeout submit-wait can warm the NAPI path from user space.
+
+```cpp
+struct WaitPage {
+  uint64_t hard_ns{};
+  uint32_t min_wait_us{};
+  uint32_t want{};
+};
+
+struct WaitBook {
+  WaitPage page[4]{};
+  void set(uint32_t i, uint64_t hard_ns, uint32_t min_us, uint32_t want) {
+    page[i] = {hard_ns, min_us, want};
+  }
+  const WaitPage& pick(uint32_t i) const { return page[i]; }
+};
+
+struct NapiHint {
+  uint32_t poll_us{50};
+  bool prefer_busy{true};
+};
+```
+
+Send zerocopy delivers a second notification completion before the payload has fully left the stack. The first completion reports length; the buffer is reusable only after the notification. Build the rings in application huge pages, and rewind submits onto low-index slots so small batches keep hitting the same hot lines; that mode does not mix with a kernel submit-poll thread. Pinned buffers on a primary ring can be adopted by a worker ring without pinning again.
+
+```cpp
+enum : uint32_t { kNotif = 2u };
+
+struct ZcTrack {
+  bool in_flight{false};
+  void on_done(const DoneSlot& d) {
+    if (d.flags & kNotif) { in_flight = false; return; }
+    in_flight = true;
+  }
+  bool free_to_reuse() const { return !in_flight; }
+};
+
+struct RewindBatch {
+  JobSlot* base{};
+  uint32_t filled{0};
+  void reset() { filled = 0; }
+  JobSlot* next() { return &base[filled++]; }
+  uint32_t submit_from_zero() {
+    uint32_t n = filled;
+    filled = 0;
+    return n;
+  }
+};
+
+struct PinSet {
+  void* pages[8]{};
+  uint32_t n{0};
+};
+
+struct WorkerRing {
+  PinSet pins{};
+  void adopt(const PinSet& src) { pins = src; }
+};
+```
+
+### 39. Quiescent-state reclamation
 
 After a node is unlinked from a lock-free structure, its memory waits until every core that might still read it has passed a point where it holds no such pointer. Each reader has a counter on its own cache line. Zero means the core is offline and is not waited for. A global epoch sits on its own line and increases from 1.
 
@@ -16400,7 +16635,7 @@ struct RetireQ {
 };
 ```
 
-### 39. Sequence-window reordering
+### 40. Sequence-window reordering
 
 A downstream stage restores a contiguous sequence from objects that arrive out of order. The window length is a power of two. `min_seq` is the smallest sequence not yet delivered, and it sits at `head` in the ring. The slot of a new object is the unsigned difference `offset = seq - min_seq`, so wraparound falls out of the subtraction.
 
@@ -16524,7 +16759,7 @@ struct GapLog {
 };
 ```
 
-### 40. Fixed-stride per-core variables
+### 41. Fixed-stride per-core variables
 
 Counters, cursors, and stack tops that exist once per core, if left in thread-local storage, can be read from another core only through that thread's pointer, and a walk of several of them on the owner core need not hit adjacent lines. Lay them out in one buffer sliced by core. The distance between adjacent cores is a fixed stride, a multiple of a cache line, and at least as large as every variable that lives in the slice.
 
@@ -16572,7 +16807,7 @@ T* core_var(void* handle, unsigned core) {
 }
 ```
 
-### 41. Signature-first bucket lookup
+### 42. Signature-first bucket lookup
 
 A lookup hits the bucket before it hits the key. Each bucket has eight slots. The 16-bit signatures are packed at the front, 16 bytes, and one vector compare names the matching slots. Keys live in a separate array; the bucket stores indexes. A signature miss does not read the key. The bucket is cache-line aligned, and the signatures plus the indexes fit in that line, so a miss touches one line. Buckets start zeroed.
 
@@ -16787,7 +17022,7 @@ struct QuadTab {
 };
 ```
 
-### 42. Staged ordered completion ring
+### 43. Staged ordered completion ring
 
 Claiming a slot and finishing it are two calls. Several workers take sequence numbers first and fill them later, and the finish order need not match the claim order. The exit walks in claim order. If sequence 5 is finished and sequence 4 is not, the exit stays on 4.
 
@@ -16893,7 +17128,7 @@ struct GateSet {
 };
 ```
 
-### 43. High-quality articles on system design
+### 44. High-quality articles on system design
 [https://mp.weixin.qq.com/s/9OH1RA8POFidgQnvape6fQ](https://mp.weixin.qq.com/s/9OH1RA8POFidgQnvape6fQ)
 
 [https://mp.weixin.qq.com/s/PuG4ZFVZ-7hijS4Db8Z5jQ](https://mp.weixin.qq.com/s/PuG4ZFVZ-7hijS4Db8Z5jQ)
