@@ -50,7 +50,8 @@ English version：[https://github.com/zzxscodes/trading-system-notes/blob/main/t
   - [41. 每核变量的固定步长](#41-每核变量的固定步长)
   - [42. 签名前置的桶查找](#42-签名前置的桶查找)
   - [43. 分阶段完成的有序环](#43-分阶段完成的有序环)
-  - [44. 系统设计优质文章](#44-系统设计优质文章)
+  - [44. 用户态块设备收发与提交完成交接](#44-用户态块设备收发与提交完成交接)
+  - [45. 系统设计优质文章](#45-系统设计优质文章)
 - [常见性能瓶颈与优化方向](#常见性能瓶颈与优化方向)
   - [1. roofline model](#1-roofline-model)
     - [Memory Bound优化](#memory-bound优化)
@@ -1614,6 +1615,30 @@ _ReadWriteBarrier();  // 编译器屏障
 2. **判断是否需要“同步关系”**：若需“线程A的写操作被线程B看到”（如指针发布、锁），用`acquire/release`；
 3. **仅在必要时用强内存序**：若需“全局一致性”（如分布式系统的状态同步），才用`seq_cst`，且需评估性能代价；
 4. **避免“默认使用seq_cst”**：C++原子操作默认`seq_cst`，但90%的场景无需此强约束，手动指定弱内存序可大幅提升性能。
+
+**设备和核间用两套屏障**
+
+对设备可见的写，和只对另一个 CPU 核可见的写，不要共用同一种屏障。x86 上，提交描述符之后、敲门铃之前，用 `sfence` 把写合并缓冲排空，设备才能按顺序看见。读设备映射、或要对设备读和后续读做全序时，用 `lfence` 或 `mfence`。
+
+核和核之间，x86 的 TSO 已经拦住写后写、读后读这类乱序。读写屏障多数时候只要挡住编译器重排。需要一条真正的核间全屏障时，不要默认上 `mfence`。对栈上地址做一次带锁的加零，例如 `lock addl $0, -128(%rsp)`，就可以把前面的写推到其他核看得见，开销通常低于 `mfence`。把 `-128(%rsp)` 放在红区里，不碰真正的栈帧。
+
+对设备门铃寄存器的普通 `volatile` 写，本身已经是一次总线事务。它外面再包编译器屏障，防止相邻的普通写被挪到门铃前后。不要在门铃前后无故加 `mfence`。
+
+```cpp
+inline void device_wmb() {
+    __asm__ __volatile__("sfence" ::: "memory");
+}
+
+inline void smp_mb() {
+    __asm__ __volatile__("lock addl $0, -128(%%rsp)" ::: "memory");
+}
+
+inline void kick(volatile uint32_t* door, uint32_t idx) {
+    device_wmb();
+    __asm__ __volatile__("" ::: "memory");
+    *door = idx;
+}
+```
 
 
 缓存一致性协议讲解参考：
@@ -12491,6 +12516,60 @@ struct HoleMap {
 };
 ```
 
+**位图末尾留哨兵字，编号池记住最低空闲位**
+
+在字数组真实长度后面再多放一个字，内容写成 `0b10`。找第一个 0 或第一个 1 时，循环不必每步判断是否越界：扫到末尾之外，一定会碰到这个哨兵里的 0 和 1。找到的下标如果已经大于等于真实位数，就按“没有”处理。
+
+编号池在位图外面再记两个数：当前最低的空闲位，以及还剩多少空闲。分配直接拿走最低空闲位，再从它往后扫下一个 0。归还时清掉这一位；若这一位比记下的最低空闲还小，就把最低空闲改成它。热路径上多数时候不必从头扫整张图。
+
+```cpp
+#include <cstdint>
+
+struct BitWords {
+    uint32_t bits{0};
+    uint64_t* w{};
+
+    void bind(uint64_t* words, uint32_t nbits) {
+        bits = nbits;
+        w = words;
+        uint32_t nw = (nbits + 63u) / 64u;
+        w[nw] = 0x2ull;
+    }
+
+    uint32_t find_zero(uint32_t from) const {
+        if (from >= bits) return bits;
+        uint32_t wi = from >> 6;
+        uint64_t mask = ~((1ull << (from & 63u)) - 1ull);
+        uint64_t x = (~w[wi]) & mask;
+        while (x == 0) x = ~w[++wi];
+        uint32_t i = (wi << 6) + (uint32_t)__builtin_ctzll(x);
+        return i < bits ? i : bits;
+    }
+};
+
+struct IdPool {
+    BitWords map{};
+    uint32_t lowest{0};
+    uint32_t free_n{0};
+
+    uint32_t take() {
+        uint32_t i = lowest;
+        if (i >= map.bits) return ~0u;
+        map.w[i >> 6] |= 1ull << (i & 63u);
+        --free_n;
+        lowest = map.find_zero(i + 1);
+        return i;
+    }
+
+    void give(uint32_t i) {
+        map.w[i >> 6] &= ~(1ull << (i & 63u));
+        ++free_n;
+        if (i < lowest) lowest = i;
+    }
+};
+```
+
+
 ### 27. C++20协程调度框架
 [https://zplutor.github.io/2022/03/25/cpp-coroutine-beginner/](https://zplutor.github.io/2022/03/25/cpp-coroutine-beginner/)
 
@@ -13492,6 +13571,35 @@ struct WaitFreeCounter {
 ```
 
 提示：用高位偷位携带状态，读操作也参与协助；无循环，自旋抖动被消除。
+
+**紧急路径只占一个函数指针槽**
+
+普通跨线程消息走队列。停机、熔断这类必须立刻执行、又不能和普通消息挤在一起的命令，单独留一个指针槽。发送方用比较交换把空指针换成回调。已经有人占着，就失败，不要排队。接收方每次轮询先看这个槽：非空就调用，再清成空。普通消息和定时器都排在它后面。
+
+槽里只装函数指针，不带参数。需要上下文时，回调闭包里自己带。同一时刻最多一条紧急命令在路上。
+
+```cpp
+#include <atomic>
+#include <cstdint>
+
+struct UrgentSlot {
+    using Fn = void (*)(void*);
+    std::atomic<Fn> slot{nullptr};
+    void* arg{nullptr};
+
+    bool post(Fn fn, void* a) {
+        Fn expect = nullptr;
+        arg = a;
+        return slot.compare_exchange_strong(
+            expect, fn, std::memory_order_seq_cst, std::memory_order_seq_cst);
+    }
+
+    void run_first() {
+        Fn fn = slot.exchange(nullptr, std::memory_order_seq_cst);
+        if (fn) fn(arg);
+    }
+};
+```
 
 
 ### 32. Linux内核调优和BIOS配置
@@ -15268,6 +15376,67 @@ struct SpikeRing {
     }
 };
 ```
+
+**每个核一条无锁共享内存轨迹**
+
+热路径上的打点不要进同一条全局队列。每个核在共享内存里有一段定长环，写序号只由本核推进。打开开关时，先看一张位图里这一类事件是否启用；未启用就直接返回，热路径上多一次位测试。启用时写入时间戳、事件号和若干参数。参数装不下当前槽时，顺延占用后面的槽，那些槽的事件号写成一个不会和真实事件冲突的哨兵值，时间戳与第一条相同。整条记录写完之后，再推进本核的写序号。核间用写屏障保证轨迹工具读到的字段已经落稳。
+
+离线工具按核映射同一段共享内存回放。热路径上没有锁，也没有跨核缓存行争用。
+
+```cpp
+#include <cstdint>
+
+struct TraceSlot {
+    uint64_t tsc;
+    uint16_t kind;
+    uint16_t owner;
+    uint32_t size;
+    uint64_t obj;
+    uint8_t data[32];
+};
+
+struct CoreTrace {
+    static constexpr uint32_t kMask = 4095;
+    static constexpr uint16_t kCont = 0xffff;
+    TraceSlot* slot{};
+    uint32_t next{0};
+    uint64_t enable_mask{0};
+
+    bool on(uint16_t kind) const {
+        return (enable_mask & (1ull << (kind & 63))) != 0;
+    }
+
+    void record(uint64_t tsc, uint16_t kind, uint64_t obj,
+                const void* bytes, uint32_t nbytes) {
+        if (!on(kind)) return;
+        uint32_t i = next & kMask;
+        TraceSlot& e = slot[i];
+        e.tsc = tsc;
+        e.kind = kind;
+        e.obj = obj;
+        e.size = nbytes;
+        uint32_t n = 1;
+        uint32_t off = 0;
+        while (off < nbytes) {
+            if (off > 0) {
+                TraceSlot& c = slot[(i + n) & kMask];
+                c.tsc = tsc;
+                c.kind = kCont;
+                ++n;
+            }
+            TraceSlot& cur = slot[(i + (off ? n - 1 : 0)) & kMask];
+            uint32_t chunk = nbytes - off;
+            if (chunk > sizeof(cur.data)) chunk = sizeof(cur.data);
+            for (uint32_t k = 0; k < chunk; ++k)
+                cur.data[k] = static_cast<const uint8_t*>(bytes)[off + k];
+            off += chunk;
+        }
+        __asm__ __volatile__("" ::: "memory");
+        next += n;
+    }
+};
+```
+
 
 ### 35. 环缓冲就地写入减少大对象拷贝
 
@@ -17096,7 +17265,224 @@ struct GateSet {
 };
 ```
 
-### 44. 系统设计优质文章
+### 44. 用户态块设备收发与提交完成交接
+
+极速落盘和设备侧加速不把热路径放在内核块层上。队列映射进用户态：提交环写命令，完成环读结果，门铃寄存器通知设备。过滤器、文件表查找和通用块调度都不在这条路上。
+
+提交按代价排。命令先写进主机内存里的提交环，门铃可以攒到收完成时再敲。设备若提供影子门铃和事件下标，多数时候只改主机内存，不必上 PCIe。完成环用相位位判断新旧，并预取下一条命令的本地句柄。跟踪块按页对齐，命令号就是下标。用户缓冲拆成物理段时，相邻段并进同一条分散聚集项。
+
+下面几条都在同一条热路径上，合在一个要点里写。
+
+**提交先写环，门铃留到轮询时再敲**
+
+命令复制进提交环之后，尾下标先在本地前进。门铃可以立刻写，也可以等到下一次收完成时，发现尾下标相对上次敲门又前进了，再写一次。一批提交共用一次门铃，PCIe 往返少很多。两条必须成对发出的命令，第一笔不要敲门铃，等第二笔进环后再敲。
+
+```cpp
+#include <cstdint>
+
+struct SubmitQ {
+    uint64_t* cmd{};
+    volatile uint32_t* door{};
+    uint32_t mask{0};
+    uint32_t tail{0};
+    uint32_t last_kick{0};
+    bool defer{true};
+
+    void post(uint64_t word) {
+        cmd[tail & mask] = word;
+        ++tail;
+        if (!defer) {
+            __asm__ __volatile__("sfence" ::: "memory");
+            *door = tail & mask;
+            last_kick = tail;
+        }
+    }
+
+    void flush_if_moved() {
+        if (tail == last_kick) return;
+        __asm__ __volatile__("sfence" ::: "memory");
+        *door = tail & mask;
+        last_kick = tail;
+    }
+};
+```
+
+**影子门铃和事件下标决定要不要上 PCIe**
+
+设备若提供主机内存里的影子门铃，以及一个事件下标，就先把新的尾或头写进影子门铃，再读事件下标。无符号差值 `(new - event) <= (new - old)` 不成立时，设备这一轮并不需要被叫醒，省掉这次 MMIO。成立时再对真正的门铃寄存器写一次。影子门铃的写和事件下标的读之间要有全屏障，避免 CPU 先读到旧的事件下标。
+
+```cpp
+#include <cstdint>
+
+inline bool need_kick(uint16_t event, uint16_t neu, uint16_t old) {
+    return (uint16_t)(neu - event) <= (uint16_t)(neu - old);
+}
+
+inline bool shadow_then_maybe_mmio(volatile uint32_t* shadow,
+                                   volatile uint32_t* eventidx,
+                                   volatile uint32_t* mmio,
+                                   uint16_t value) {
+    __asm__ __volatile__("sfence" ::: "memory");
+    uint16_t old = (uint16_t)*shadow;
+    *shadow = value;
+    __asm__ __volatile__("mfence" ::: "memory");
+    if (!need_kick((uint16_t)*eventidx, value, old)) return false;
+    __asm__ __volatile__("sfence" ::: "memory");
+    *mmio = value;
+    return true;
+}
+```
+
+**完成环靠相位位判断，下一条的句柄提前取进缓存**
+
+完成槽里有一位相位。它和本端记住的相位相同，这一槽才是新完成。环绕回起点时，本端把期望相位取反。不必读设备上的头下标。
+
+认定当前槽有效之后，先算下一槽的下标和下一圈的相位，看下一槽是否已经到达。到了就把下一槽里的命令编号对应的本地句柄做一次预取。当前这条处理完，下一条句柄多半已经在缓存里。单次轮询收完成的条数要封顶，常见取队列深度的四分之一，并且不超过 128。同时在途的命令数要小于队列深度减去这个上限，否则完成环在门铃写回之前可能被写满一圈，新旧相位分不清。
+
+命令写入提交环时，用非临时存储按 16 字节写满 64 字节命令。这些槽设备会用 DMA 读走，本核几乎不会再读，不必占满写者的缓存。
+
+```cpp
+#include <cstdint>
+#include <immintrin.h>
+
+struct Cpl {
+    uint16_t cid;
+    uint16_t phase_bit;
+};
+
+struct Track {
+    void* req;
+    uint8_t pad[56];
+};
+
+struct CplQ {
+    Cpl* cpl{};
+    Track* tr{};
+    volatile uint32_t* door{};
+    uint32_t mask{0};
+    uint32_t head{0};
+    uint32_t phase{1};
+    uint32_t cap{64};
+
+    static void store_cmd(void* dst, const void* src) {
+        auto* d = reinterpret_cast<__m128i*>(dst);
+        auto* s = reinterpret_cast<const __m128i*>(src);
+        _mm_stream_si128(&d[0], _mm_load_si128(&s[0]));
+        _mm_stream_si128(&d[1], _mm_load_si128(&s[1]));
+        _mm_stream_si128(&d[2], _mm_load_si128(&s[2]));
+        _mm_stream_si128(&d[3], _mm_load_si128(&s[3]));
+    }
+
+    uint32_t drain(void (*done)(void*)) {
+        uint32_t n = 0;
+        bool next_ok = false;
+        while (n < cap) {
+            Cpl cur = cpl[head & mask];
+            if (!next_ok && cur.phase_bit != phase) break;
+            uint32_t nh = (head + 1) & mask;
+            uint32_t np = (head + 1) <= mask ? phase : phase ^ 1u;
+            Cpl nxt = cpl[nh];
+            next_ok = (nxt.phase_bit == np);
+            if (next_ok) __builtin_prefetch(&tr[nxt.cid], 0, 3);
+            if (++head > mask) {
+                head = 0;
+                phase ^= 1u;
+            }
+            if (tr[cur.cid].req) {
+                __builtin_prefetch(&tr[cur.cid].req, 0, 3);
+                done(tr[cur.cid].req);
+                tr[cur.cid].req = nullptr;
+            }
+            ++n;
+        }
+        if (n) *door = head & mask;
+        return n;
+    }
+};
+```
+
+**命令跟踪块按页对齐，完成用命令号直接取回**
+
+每条在途命令对应一块跟踪内存。块长做成整页，页内嵌着分散聚集表或页链表，保证这些表不会跨过 4KiB。启动时按队列深度一次分配，下标就是命令号。完成环带回命令号，本端用数组下标取回跟踪块，不必再查哈希表。空闲跟踪块挂在一条本地链上，提交时取下一块，完成时还回去。
+
+```cpp
+#include <cstdint>
+#include <new>
+
+struct CmdTrack {
+    void* req;
+    uint64_t bus_addr;
+    uint64_t sge[508];
+    uint8_t pad[16];
+};
+static_assert(sizeof(CmdTrack) == 4096);
+
+struct TrackBank {
+    CmdTrack* tr{};
+    uint16_t* free_id{};
+    uint32_t free_n{0};
+    uint32_t depth{0};
+
+    bool setup(uint32_t n) {
+        void* p = ::operator new(n * sizeof(CmdTrack), std::align_val_t{4096});
+        tr = static_cast<CmdTrack*>(p);
+        free_id = new uint16_t[n];
+        depth = n;
+        free_n = n;
+        for (uint32_t i = 0; i < n; ++i) {
+            free_id[i] = static_cast<uint16_t>(i);
+            tr[i].req = nullptr;
+        }
+        return true;
+    }
+
+    CmdTrack* take(uint16_t* id) {
+        if (free_n == 0) return nullptr;
+        *id = free_id[--free_n];
+        return &tr[*id];
+    }
+
+    void give(uint16_t id) {
+        tr[id].req = nullptr;
+        free_id[free_n++] = id;
+    }
+
+    CmdTrack* at(uint16_t id) { return &tr[id]; }
+};
+```
+
+**相邻物理段并进同一条分散聚集项**
+
+用户缓冲区可能拆成多段物理页。构造设备认的分散聚集表时，若下一段的物理起点正好接在上一段终点，就把长度累加到上一项，不新开一项。段数少，设备侧遍历短。只有一段时，命令里直接带上这一项，不必再挂一张外链表。关闭合并时，每一段都单独成项，便于对照硬件行为。
+
+```cpp
+#include <cstdint>
+
+struct Sge {
+    uint64_t addr;
+    uint32_t len;
+};
+
+struct SgeList {
+    Sge* out{};
+    uint32_t n{0};
+    bool merge{true};
+
+    void push(uint64_t addr, uint32_t len) {
+        if (merge && n > 0) {
+            Sge& prev = out[n - 1];
+            if (prev.addr + prev.len == addr) {
+                prev.len += len;
+                return;
+            }
+        }
+        out[n++] = {addr, len};
+    }
+};
+```
+
+
+### 45. 系统设计优质文章
 [https://mp.weixin.qq.com/s/9OH1RA8POFidgQnvape6fQ](https://mp.weixin.qq.com/s/9OH1RA8POFidgQnvape6fQ)
 
 [https://mp.weixin.qq.com/s/PuG4ZFVZ-7hijS4Db8Z5jQ](https://mp.weixin.qq.com/s/PuG4ZFVZ-7hijS4Db8Z5jQ)
