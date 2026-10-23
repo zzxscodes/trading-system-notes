@@ -116,6 +116,7 @@ English version：[https://github.com/zzxscodes/trading-system-notes/blob/main/t
   - [34. 品种大类费用与冻结价回填](#34-品种大类费用与冻结价回填)
   - [35. 监控进程的只读追赶与发布水位](#35-监控进程的只读追赶与发布水位)
   - [36. 交易进程的启停与主机采样](#36-交易进程的启停与主机采样)
+  - [37. 配对执行的挂单量、腿价格和手数门槛](#37-配对执行的挂单量腿价格和手数门槛)
 - [业务逻辑设计-计算](#业务逻辑设计-计算)
   - [1. 对数收益率(百分比非对称性)](#1-对数收益率百分比非对称性)
   - [2. 市场趋势和波动率的状态变化](#2-市场趋势和波动率的状态变化)
@@ -35857,6 +35858,57 @@ bool normalize_ticket(Ticket& t) {
 }
 ```
 
+**按代码前缀判定品种**
+
+合约写成代码加点号再加交易所。没有点号就是未知，开平规整不会把它收成现货。后缀是大商所、上期所、中金所、郑商所或能源中心时直接记期货。沪港通、深港通和港交所直接记股票。后缀对不上这些交易所，记未知。
+
+沪市按更长的前缀先匹配。00 是指数，所以 000 开头的指数不会落到后面的 0。其余 0 开头和 1 开头是债券，1000 开头先收成股票期权。2 开头是回购，5 开头是基金，688 和 689 是科创板。剩下的是普通股票，600、601、603 走这里。
+
+深市 15、16、18 开头是基金，13 开头是回购，1 开头是债券，9000 开头是股票期权。000、002、300 这些没有单独前缀，记成普通股票。
+
+```cpp
+enum class Inst : int { Unknown = -1, Stock, Future, Bond, Option, Fund, Tech, Index, Repo };
+
+Inst classify_symbol(std::string_view sym) {
+    auto dot = sym.rfind('.');
+    if (dot == std::string_view::npos) return Inst::Unknown;
+    auto code = sym.substr(0, dot);
+    auto venue = sym.substr(dot + 1);
+    if (venue == "DCE" || venue == "SHF" || venue == "CFE" || venue == "CZC" || venue == "INE")
+        return Inst::Future;
+    if (venue == "HKSH" || venue == "HKSZ" || venue == "HK")
+        return Inst::Stock;
+    auto lead = [&](std::string_view p) { return code.size() >= p.size() && code.substr(0, p.size()) == p; };
+    if (venue == "SH") {
+        if (lead("00")) return Inst::Index;
+        if (lead("1000")) return Inst::Option;
+        if (lead("0") || lead("1")) return Inst::Bond;
+        if (lead("2")) return Inst::Repo;
+        if (lead("5")) return Inst::Fund;
+        if (lead("688") || lead("689")) return Inst::Tech;
+        return Inst::Stock;
+    }
+    if (venue == "SZ") {
+        if (lead("15") || lead("16") || lead("18")) return Inst::Fund;
+        if (lead("13")) return Inst::Repo;
+        if (lead("9000")) return Inst::Option;
+        if (lead("1")) return Inst::Bond;
+        return Inst::Stock;
+    }
+    return Inst::Unknown;
+}
+```
+
+期货品种是第一个数字前面的那一段字母。`rb2410.SHF` 得到 `rb`，`IF2403.CFE` 得到 `IF`。整段里没有数字，品种留空。
+
+```cpp
+std::string product_root(std::string_view sym) {
+    auto cut = sym.find_first_of("0123456789");
+    if (cut == std::string_view::npos || cut == 0) return {};
+    return std::string(sym.substr(0, cut));
+}
+```
+
 **按持仓把一笔手数拆开**
 
 上一节只改开平标志。期货还要把策略给出的手数拆成几张单。正数是买，负数是卖；买去平空头，卖去平多头。今仓可平等于今仓减去同方向未成的平今，昨仓可平等于总仓减今仓，再减去同方向未成的平仓和平昨。每一段的手数取可平仓、剩余请求、限价单最大手数里的最小正数，小于最小手数的这一段不发。
@@ -36559,6 +36611,90 @@ def merge_roster(old, incoming):
             out[key] = incoming[key]
     out["apps"] = list(by_name.values())
     return out
+```
+
+
+### 37. 配对执行的挂单量、腿价格和手数门槛
+
+一笔配对带着若干腿和一份执行参数。每条腿有合约、账户、柜台、产品、币种、汇率、手数权重、行情系数、保证金率、标的、最小变动价位、每手数量和品种。执行参数给出目标价、目标手数、允许挂被动单的合约、组合方式、各腿方向、最大挂单量、挂单相对打单的偏移、撤单偏移、改单偏移、打单让出的档数、撤单间隔、强制配平的秒数、替代价格、价差、追价方式、定价方式、限价方式和限价档数。
+
+```cpp
+struct PairLeg {
+    std::string symbol;
+    double fx{1};
+    int weight{1};
+    double feed{1};
+    double tick{0.01};
+};
+
+struct PairSheet {
+    double aim_px{0};
+    int aim_qty{0};
+    int hit_mode{0};
+    int rest_cap{0};
+    int take_ticks{0};
+    int flatten_sec{0};
+    double spread{0};
+    int price_mode{0};
+};
+```
+
+组合方式不为 0 时两腿一起打，不再留被动单。挂单量取 0 和最大挂单量里较小的那个，最大挂单量为正时就是 0。拆开做时，某一腿的挂单量等于权重绝对值乘目标手数，减去该腿净持仓的绝对值，再减去已经挂出还没成交的数量，最后不超过最大挂单量。
+
+```cpp
+struct LegBook {
+    int weight{0};
+    int net_pos{0};
+    int resting{0};
+};
+
+int resting_qty(bool hit_together, int cap, int goal, const LegBook& leg) {
+    if (hit_together)
+        return std::min(0, cap);
+    int room = std::abs(leg.weight) * goal - std::abs(leg.net_pos) - leg.resting;
+    return std::min(room, cap);
+}
+```
+
+批量切片把这一腿的权重和本次比例相乘。负数先取绝对值，加上 0.500001 后向零截断，再乘回符号，用来把刚好一半的数量进位，同时躲开浮点落在半档下面。截断结果不超过这一腿的总量，再减去已经成交的数量。差值大于 0 才发这一刀。
+
+```cpp
+bool slice_qty(float ratio, int weight, int lot_cap, int filled, int& out) {
+    double raw = static_cast<double>(weight) * static_cast<double>(ratio);
+    double mag = std::abs(raw) + 0.500001;
+    int rounded = static_cast<int>(raw < 0 ? -mag : mag);
+    if (rounded > lot_cap) rounded = lot_cap;
+    out = rounded - filled;
+    return out > 0;
+}
+```
+
+定价有相加和相除两条路径，都要读行情、汇率、最小变动价位和买卖方向。写回某一腿的价格时，先把传入价格收成单精度再拉回双精度，除以该腿的行情系数，再按最小变动价位对齐。余数加上 1e-6，达到半个价位就多进一格。买和卖各算一遍，结果按合约放进价格表。
+
+```cpp
+double leg_price(double raw, double feed_coeff, double tick) {
+    float narrowed = static_cast<float>(raw);
+    double scaled = static_cast<double>(narrowed) / feed_coeff;
+    if (tick <= 0) return scaled;
+    int steps = static_cast<int>(scaled / tick);
+    double remain = scaled - static_cast<double>(steps) * tick;
+    if (remain + 1e-6 >= tick * 0.5)
+        ++steps;
+    return static_cast<double>(steps) * tick;
+}
+```
+
+配对单进执行前先看目标手数。不是沪深的，大于 0 即可。沪深代码里，688 和 689 开头至少 180，1000 和 9000 开头大于 0，其余至少 80。不够就整笔不进。
+
+```cpp
+bool admit_pair_qty(std::string_view venue, std::string_view code, long qty) {
+    if (qty <= 0) return false;
+    if (venue != "SH" && venue != "SZ") return true;
+    auto lead = [&](std::string_view p) { return code.size() >= p.size() && code.substr(0, p.size()) == p; };
+    if (lead("688") || lead("689")) return qty >= 180;
+    if (lead("1000") || lead("9000")) return true;
+    return qty >= 80;
+}
 ```
 
 
