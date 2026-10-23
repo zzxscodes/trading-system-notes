@@ -116,6 +116,7 @@
   - [34. Instrument-class fees and frozen-price backfill](#34-instrument-class-fees-and-frozen-price-backfill)
   - [35. Read-only catch-up and publish watermark on the monitor](#35-read-only-catch-up-and-publish-watermark-on-the-monitor)
   - [36. Process lifecycle control and host sampling](#36-process-lifecycle-control-and-host-sampling)
+  - [37. Pair resting size, leg price, and size gate](#37-pair-resting-size-leg-price-and-size-gate)
 - [Business logic design-calculation](#business-logic-design-calculation)
   - [1. Log return (percent asymmetry)](#1-log-return-percent-asymmetry)
   - [2. Changes in state of market trends and volatility](#2-changes-in-state-of-market-trends-and-volatility)
@@ -35870,6 +35871,57 @@ bool normalize_ticket(Ticket& t) {
 }
 ```
 
+**Classify an instrument from the code prefix**
+
+A symbol is the code, a dot, then the venue. No dot means unknown, and offset normalization does not treat it as cash. DCE, SHF, CFE, CZC, and INE are futures with no further prefix test. HKSH, HKSZ, and HK are stocks. Any other venue is unknown.
+
+Shanghai matches the longer prefix first. A leading 00 is an index, so a 000 index does not fall through into the single 0 rule. Any other leading 0 or 1 is a bond, except a leading 1000, which is a stock option. A leading 2 is a repo, a leading 5 is a fund, and 688 or 689 is a tech board name. Everything else on Shanghai is a common stock, which is where 600, 601, and 603 land.
+
+On Shenzhen, 15, 16, and 18 are funds, 13 is a repo, 1 is a bond, and 9000 is a stock option. Names with no prefix of their own, including 000, 002, and 300, stay common stocks.
+
+```cpp
+enum class Inst : int { Unknown = -1, Stock, Future, Bond, Option, Fund, Tech, Index, Repo };
+
+Inst classify_symbol(std::string_view sym) {
+    auto dot = sym.rfind('.');
+    if (dot == std::string_view::npos) return Inst::Unknown;
+    auto code = sym.substr(0, dot);
+    auto venue = sym.substr(dot + 1);
+    if (venue == "DCE" || venue == "SHF" || venue == "CFE" || venue == "CZC" || venue == "INE")
+        return Inst::Future;
+    if (venue == "HKSH" || venue == "HKSZ" || venue == "HK")
+        return Inst::Stock;
+    auto lead = [&](std::string_view p) { return code.size() >= p.size() && code.substr(0, p.size()) == p; };
+    if (venue == "SH") {
+        if (lead("00")) return Inst::Index;
+        if (lead("1000")) return Inst::Option;
+        if (lead("0") || lead("1")) return Inst::Bond;
+        if (lead("2")) return Inst::Repo;
+        if (lead("5")) return Inst::Fund;
+        if (lead("688") || lead("689")) return Inst::Tech;
+        return Inst::Stock;
+    }
+    if (venue == "SZ") {
+        if (lead("15") || lead("16") || lead("18")) return Inst::Fund;
+        if (lead("13")) return Inst::Repo;
+        if (lead("9000")) return Inst::Option;
+        if (lead("1")) return Inst::Bond;
+        return Inst::Stock;
+    }
+    return Inst::Unknown;
+}
+```
+
+A futures product root is the letter run before the first digit. `rb2410.SHF` yields `rb`, and `IF2403.CFE` yields `IF`. A symbol with no digit keeps an empty root.
+
+```cpp
+std::string product_root(std::string_view sym) {
+    auto cut = sym.find_first_of("0123456789");
+    if (cut == std::string_view::npos || cut == 0) return {};
+    return std::string(sym.substr(0, cut));
+}
+```
+
 **Split one size by position**
 
 The previous section only rewrites the offset flag. Futures also split the size the strategy asked for into several orders. A positive size is a buy and a negative size is a sell; a buy closes shorts and a sell closes longs. Free today is today’s position minus resting close-today on that side. Free yesterday is total minus today, then minus resting plain-close and close-yesterday on that side. Each slice is the smallest positive of free position, remaining size, and the limit-order maximum; a slice below the minimum is not sent.
@@ -36572,6 +36624,90 @@ def merge_roster(old, incoming):
             out[key] = incoming[key]
     out["apps"] = list(by_name.values())
     return out
+```
+
+
+### 37. Pair resting size, leg price, and size gate
+
+A pair order carries several legs and one execution sheet. Each leg has a symbol, account, counter, product, currency, exchange rate, size weight, feed coefficient, margin rate, underlying, tick size, board lot, and instrument kind. The sheet carries the target price, target size, the symbols allowed to rest, the combined-hit flag, each leg’s side, the resting cap, the resting offset against the taking price, the cancel offset, the amend offset, how many ticks the taker gives up, the cancel interval, the seconds before a forced balance, the alternate price, the spread, the chase mode, the pricing mode, the limit mode, and the limit-tick count.
+
+```cpp
+struct PairLeg {
+    std::string symbol;
+    double fx{1};
+    int weight{1};
+    double feed{1};
+    double tick{0.01};
+};
+
+struct PairSheet {
+    double aim_px{0};
+    int aim_qty{0};
+    int hit_mode{0};
+    int rest_cap{0};
+    int take_ticks{0};
+    int flatten_sec{0};
+    double spread{0};
+    int price_mode{0};
+};
+```
+
+A non-zero combined-hit flag takes both legs and leaves no resting order. The resting size is the smaller of 0 and the cap, which is 0 whenever the cap is positive. When the legs are split, one leg’s resting size is the absolute weight times the target size, minus the absolute net position, minus size already resting and not yet filled, then capped.
+
+```cpp
+struct LegBook {
+    int weight{0};
+    int net_pos{0};
+    int resting{0};
+};
+
+int resting_qty(bool hit_together, int cap, int goal, const LegBook& leg) {
+    if (hit_together)
+        return std::min(0, cap);
+    int room = std::abs(leg.weight) * goal - std::abs(leg.net_pos) - leg.resting;
+    return std::min(room, cap);
+}
+```
+
+A batch slice multiplies that leg’s weight by the current ratio. A negative product is rounded on its magnitude: add 0.500001, truncate toward zero, then put the sign back. The bias steps a half-unit up and keeps a value that lands just under a half from sticking. The truncated size cannot exceed the leg’s total, and filled size is subtracted. The slice is sent only when the difference is positive.
+
+```cpp
+bool slice_qty(float ratio, int weight, int lot_cap, int filled, int& out) {
+    double raw = static_cast<double>(weight) * static_cast<double>(ratio);
+    double mag = std::abs(raw) + 0.500001;
+    int rounded = static_cast<int>(raw < 0 ? -mag : mag);
+    if (rounded > lot_cap) rounded = lot_cap;
+    out = rounded - filled;
+    return out > 0;
+}
+```
+
+Pricing has an add path and a divide path. Both read the quote, the exchange rate, the tick size, and the side. The price written for a leg is narrowed to single precision and widened again, divided by that leg’s feed coefficient, then aligned to the tick. A remainder that reaches half a tick after adding 1e-6 steps one tick further. Buy and sell each run once, and the result is stored by symbol.
+
+```cpp
+double leg_price(double raw, double feed_coeff, double tick) {
+    float narrowed = static_cast<float>(raw);
+    double scaled = static_cast<double>(narrowed) / feed_coeff;
+    if (tick <= 0) return scaled;
+    int steps = static_cast<int>(scaled / tick);
+    double remain = scaled - static_cast<double>(steps) * tick;
+    if (remain + 1e-6 >= tick * 0.5)
+        ++steps;
+    return static_cast<double>(steps) * tick;
+}
+```
+
+A pair is admitted on target size before execution. Off Shanghai and Shenzhen, any size above zero passes. On those two venues a 688 or 689 code needs at least 180, a 1000 or 9000 code needs only a positive size, and every other code needs at least 80. A short size keeps the whole pair out.
+
+```cpp
+bool admit_pair_qty(std::string_view venue, std::string_view code, long qty) {
+    if (qty <= 0) return false;
+    if (venue != "SH" && venue != "SZ") return true;
+    auto lead = [&](std::string_view p) { return code.size() >= p.size() && code.substr(0, p.size()) == p; };
+    if (lead("688") || lead("689")) return qty >= 180;
+    if (lead("1000") || lead("9000")) return true;
+    return qty >= 80;
+}
 ```
 
 
