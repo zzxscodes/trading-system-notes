@@ -43,13 +43,13 @@
   - [34. End-to-end latency tracing layout](#34-end-to-end-latency-tracing-layout)
   - [35. In-place ring writes to avoid large-object copies](#35-in-place-ring-writes-to-avoid-large-object-copies)
   - [36. Fail fast when shared capacity is exhausted](#36-fail-fast-when-shared-capacity-is-exhausted)
-  - [37. User-space NIC I/O and in-order bypass handoff](#37-user-space-nic-io-and-in-order-bypass-handoff)
-  - [38. Kernel async I/O on shared submit and completion rings](#38-kernel-async-io-on-shared-submit-and-completion-rings)
-  - [39. Quiescent-state reclamation](#39-quiescent-state-reclamation)
-  - [40. Sequence-window reordering](#40-sequence-window-reordering)
-  - [41. Fixed-stride per-core variables](#41-fixed-stride-per-core-variables)
-  - [42. Signature-first bucket lookup](#42-signature-first-bucket-lookup)
-  - [43. Staged ordered completion ring](#43-staged-ordered-completion-ring)
+  - [37. Fixed-stride per-core variables](#37-fixed-stride-per-core-variables)
+  - [38. Signature-first bucket lookup](#38-signature-first-bucket-lookup)
+  - [39. Staged ordered completion ring](#39-staged-ordered-completion-ring)
+  - [40. Quiescent-state reclamation](#40-quiescent-state-reclamation)
+  - [41. User-space NIC I/O and in-order bypass handoff](#41-user-space-nic-io-and-in-order-bypass-handoff)
+  - [42. Sequence-window reordering](#42-sequence-window-reordering)
+  - [43. Kernel async I/O on shared submit and completion rings](#43-kernel-async-io-on-shared-submit-and-completion-rings)
   - [44. User-space block-device I/O and submit-completion handoff](#44-user-space-block-device-io-and-submit-completion-handoff)
   - [45. High-quality articles on system design](#45-high-quality-articles-on-system-design)
 - [Common performance bottlenecks and optimization directions](#common-performance-bottlenecks-and-optimization-directions)
@@ -15717,8 +15717,468 @@ public:
 };
 ```
 
+### 37. Fixed-stride per-core variables
 
-### 37. User-space NIC I/O and in-order bypass handoff
+Counters, cursors, and stack tops that exist once per core, if left in thread-local storage, can be read from another core only through that thread's pointer, and a walk of several of them on the owner core need not hit adjacent lines. Lay them out in one buffer sliced by core. The distance between adjacent cores is a fixed stride, a multiple of a cache line, and at least as large as every variable that lives in the slice.
+
+Variables are allocated in order at startup. The handle is the address on core 0. Core `i` is the handle plus `i` times the stride. The variables of one core sit next to each other. A monitor computes the address from the core id. Alignment is a power of two and at most one cache line. The stride itself is cache-line aligned, so the alignment holds on every core. The memory is reserved at startup and is not freed later. The hot path does not allocate.
+
+```cpp
+#include <cstddef>
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <new>
+
+constexpr unsigned kCores = 64;
+constexpr size_t kStride = 64 * 1024;
+
+struct alignas(64) CoreBank {
+    char raw[kStride * kCores];
+    CoreBank* older;
+};
+
+CoreBank* g_bank = nullptr;
+size_t g_cursor = kStride;
+
+void* alloc_core_var(size_t size, size_t align) {
+    if (size == 0 || size > kStride) std::abort();
+    if (align == 0) align = alignof(std::max_align_t);
+    if (align > 64 || (align & (align - 1)) != 0) std::abort();
+    g_cursor = (g_cursor + align - 1) & ~(align - 1);
+    if (g_cursor + size > kStride) {
+        auto* b = new CoreBank;
+        b->older = g_bank;
+        g_bank = b;
+        g_cursor = 0;
+    }
+    void* handle = g_bank->raw + g_cursor;
+    g_cursor += size;
+    for (unsigned c = 0; c < kCores; ++c)
+        std::memset(static_cast<char*>(handle) + c * kStride, 0, size);
+    return handle;
+}
+
+template<class T>
+T* core_var(void* handle, unsigned core) {
+    return reinterpret_cast<T*>(static_cast<char*>(handle) + core * kStride);
+}
+```
+
+### 38. Signature-first bucket lookup
+
+A lookup hits the bucket before it hits the key. Each bucket has eight slots. The 16-bit signatures are packed at the front, 16 bytes, and one vector compare names the matching slots. Keys live in a separate array; the bucket stores indexes. A signature miss does not read the key. The bucket is cache-line aligned, and the signatures plus the indexes fit in that line, so a miss touches one line. Buckets start zeroed.
+
+The signature is the high 16 bits of the hash. Zero is reserved for an empty slot; a computed zero becomes one. Two independent hashes select a primary bucket and an alternate bucket. The alternate is consulted only when the primary misses.
+
+A batch of keys computes both buckets and prefetches them, then compares signatures and keys. The prefetch overlaps the bucket miss with the compares.
+
+When both buckets are full, one slot is displaced into its other bucket, with a bound on the number of displacements. An empty slot stores the index first and the signature after a release fence, so a reader that sees the signature also sees the index. A displacement clears the signature before the slot is reused. A key in the middle of a displacement can miss once; a caller that cannot drop it looks again. One writer installs.
+
+```cpp
+#include <atomic>
+#include <cstdint>
+#include <cstring>
+#include <immintrin.h>
+
+struct Key16 { uint8_t b[16]; };
+
+struct alignas(64) SigBucket {
+    uint16_t sig[8];
+    uint32_t key_ix[8];
+};
+
+struct SigTable {
+    SigBucket* tab;
+    Key16* keys;
+    uint32_t mask;
+
+    static uint32_t mix(const Key16& key, uint32_t seed) {
+        uint32_t h = seed;
+        for (uint8_t byte : key.b) {
+            h ^= byte;
+            h *= 16777619u;
+        }
+        return h;
+    }
+
+    static uint16_t sig16(uint32_t h) {
+        uint16_t s = uint16_t(h >> 16);
+        return s == 0 ? 1 : s;
+    }
+
+    int match(uint32_t b, uint16_t s, const Key16& key) const {
+        const SigBucket& bk = tab[b];
+        __m128i want = _mm_set1_epi16(static_cast<short>(s));
+        __m128i got = _mm_load_si128(reinterpret_cast<const __m128i*>(bk.sig));
+        int bits = _mm_movemask_epi8(_mm_cmpeq_epi16(want, got));
+        for (int lane = 0; lane < 8; ++lane) {
+            if ((bits & (1 << (2 * lane))) == 0) continue;
+            std::atomic_thread_fence(std::memory_order_acquire);
+            uint32_t ix = bk.key_ix[lane];
+            if (ix == 0) continue;
+            if (std::memcmp(keys[ix].b, key.b, 16) == 0) return int(ix);
+        }
+        return -1;
+    }
+
+    int find(const Key16& key) const {
+        uint32_t h1 = mix(key, 2166136261u);
+        uint32_t h2 = mix(key, 0x811c9dc5u);
+        uint16_t s = sig16(h1);
+        int id = match(h1 & mask, s, key);
+        return id >= 0 ? id : match(h2 & mask, s, key);
+    }
+
+    void find4(const Key16* key, int out[4]) const {
+        uint32_t b1[4], b2[4];
+        uint16_t sg[4];
+        for (int i = 0; i < 4; ++i) {
+            uint32_t h1 = mix(key[i], 2166136261u);
+            sg[i] = sig16(h1);
+            b1[i] = h1 & mask;
+            b2[i] = mix(key[i], 0x811c9dc5u) & mask;
+            __builtin_prefetch(&tab[b1[i]], 0, 3);
+            __builtin_prefetch(&tab[b2[i]], 0, 3);
+        }
+        for (int i = 0; i < 4; ++i) {
+            int id = match(b1[i], sg[i], key[i]);
+            out[i] = id >= 0 ? id : match(b2[i], sg[i], key[i]);
+        }
+    }
+
+    bool install(uint32_t ix, const Key16& key) {
+        keys[ix] = key;
+        uint32_t h1 = mix(key, 2166136261u);
+        uint16_t s = sig16(h1);
+        uint32_t b = h1 & mask;
+        for (int step = 0; step < 16; ++step) {
+            SigBucket& bk = tab[b];
+            for (int i = 0; i < 8; ++i) {
+                if (bk.sig[i] != 0) continue;
+                bk.key_ix[i] = ix;
+                std::atomic_thread_fence(std::memory_order_release);
+                bk.sig[i] = s;
+                return true;
+            }
+            int victim = int((h1 + uint32_t(step)) & 7u);
+            uint16_t old_s = bk.sig[victim];
+            uint32_t old_ix = bk.key_ix[victim];
+            bk.sig[victim] = 0;
+            std::atomic_thread_fence(std::memory_order_release);
+            bk.key_ix[victim] = ix;
+            std::atomic_thread_fence(std::memory_order_release);
+            bk.sig[victim] = s;
+            const Key16& old_key = keys[old_ix];
+            uint32_t primary = mix(old_key, 2166136261u) & mask;
+            b = (b == primary) ? (mix(old_key, 0x811c9dc5u) & mask) : primary;
+            ix = old_ix;
+            s = old_s;
+            h1 ^= 0x9e3779b9u;
+        }
+        return false;
+    }
+};
+```
+
+**A bounded id becomes a dense index from a word prefix plus popcount**
+
+When the original ids fit in one bitmap, a set bit is an id that takes part in the mapping. In front of each 64-bit word is the number of set bits in the earlier words. A lookup checks the target bit. When that bit is set, the dense index is the word prefix, plus the number of set bits in this word from bit 0 through the target bit, minus one. Each additional valid id increases that count, and the index increases with it. An id past the end of the word array ends the lookup.
+
+```cpp
+#include <cstdint>
+
+struct RankBits {
+    uint64_t* bits = nullptr;
+    uint32_t* prefix = nullptr;
+    uint32_t words = 0;
+
+    void build(const uint32_t* ids, uint32_t n) {
+        for (uint32_t i = 0; i < n; ++i)
+            bits[ids[i] >> 6] |= 1ull << (ids[i] & 63);
+        uint32_t run = 0;
+        for (uint32_t w = 0; w < words; ++w) {
+            prefix[w] = run;
+            run += (uint32_t)__builtin_popcountll(bits[w]);
+        }
+    }
+
+    int find(uint32_t id) const {
+        uint32_t w = id >> 6;
+        if (w >= words) return -1;
+        uint32_t b = id & 63;
+        uint64_t word = bits[w];
+        if ((word & (1ull << b)) == 0) return -1;
+        uint64_t lower = ~0ull >> (63 - b);
+        return (int)(prefix[w] + (uint32_t)__builtin_popcountll(word & lower) - 1);
+    }
+};
+```
+
+**A static set puts four keys in one cache line**
+
+The keys are fixed at startup. The build tries seeds and places keys into lines until every line holds at most four. A lookup mixes the key with that seed to get the line, reads the four 64-bit keys, and compares them with the target in two vector compares. A hit returns that lane's slot across the whole table. State lives at that slot, and an unused lane is an empty slot in the table. The compare runs only up to the number of keys stored in the line.
+
+```cpp
+#include <cstdint>
+#include <cstring>
+#include <emmintrin.h>
+#include <smmintrin.h>
+
+struct alignas(64) QuadLine {
+    uint64_t key[4]{};
+    uint32_t n = 0;
+};
+static_assert(sizeof(QuadLine) == 64, "one cache line");
+
+struct QuadTab {
+    QuadLine* line = nullptr;
+    uint32_t mask = 0;
+    uint64_t seed = 0;
+
+    static uint64_t mix(uint64_t k, uint64_t s) {
+        k ^= s;
+        k *= 0x9E3779B97F4A7C15ull;
+        k ^= k >> 32;
+        return k;
+    }
+
+    bool seat(const uint64_t* keys, uint32_t n, uint8_t* cnt) {
+        uint32_t buckets = mask + 1;
+        for (uint64_t s = 1; s < 4096; ++s) {
+            std::memset(cnt, 0, buckets);
+            bool ok = true;
+            for (uint32_t i = 0; i < n; ++i) {
+                uint32_t b = (uint32_t)(mix(keys[i], s) & mask);
+                if (++cnt[b] > 4) { ok = false; break; }
+            }
+            if (!ok) continue;
+            for (uint32_t b = 0; b < buckets; ++b) line[b].n = 0;
+            for (uint32_t i = 0; i < n; ++i) {
+                QuadLine& L = line[(uint32_t)(mix(keys[i], s) & mask)];
+                L.key[L.n++] = keys[i];
+            }
+            seed = s;
+            return true;
+        }
+        return false;
+    }
+
+    int find(uint64_t k) const {
+        uint32_t b = (uint32_t)(mix(k, seed) & mask);
+        const QuadLine& L = line[b];
+        __m128i want = _mm_set1_epi64x((long long)k);
+        __m128i lo = _mm_load_si128(reinterpret_cast<const __m128i*>(L.key));
+        __m128i hi = _mm_load_si128(reinterpret_cast<const __m128i*>(L.key + 2));
+        int bits = _mm_movemask_pd(_mm_castsi128_pd(_mm_cmpeq_epi64(lo, want)));
+        bits |= _mm_movemask_pd(_mm_castsi128_pd(_mm_cmpeq_epi64(hi, want))) << 2;
+        for (uint32_t i = 0; i < L.n; ++i) {
+            if (bits & (1 << i)) return (int)((b << 2) + i);
+        }
+        return -1;
+    }
+};
+```
+
+### 39. Staged ordered completion ring
+
+Claiming a slot and finishing it are two calls. Several workers take sequence numbers first and fill them later, and the finish order need not match the claim order. The exit walks in claim order. If sequence 5 is finished and sequence 4 is not, the exit stays on 4.
+
+The completion mark is a stage plus the sequence plus one. The worker for stage 0 writes the payload, then the sequence, then release-stores the stage as 1. The next stage waits until the stage is 1 and the sequence matches, does its work, and stores stage 2. Each stage has its own cursor. Each time the last stage takes an item, it publishes the freed sequence, and the claim side uses that to measure distance. To touch that line less often, publish every few items; the producer simply sees free space later. Capacity has to cover the distance from the oldest unfreed sequence to the newest claim. Otherwise two laps write the same slot, and an old completion mark is read as a new one.
+
+```cpp
+#include <atomic>
+#include <cstdint>
+
+struct StageRing {
+    static constexpr uint32_t Cap = 1024;
+    static constexpr uint32_t Mask = Cap - 1;
+
+    struct Cell {
+        alignas(64) std::atomic<uint32_t> stage{0};
+        std::atomic<uint32_t> seq_plus{0};
+        uint64_t body;
+    } cell[Cap];
+
+    alignas(64) std::atomic<uint32_t> claim{0};
+    alignas(64) std::atomic<uint32_t> freed{0};
+    uint32_t cursor[2]{};
+
+    bool acquire(uint32_t& seq) {
+        uint32_t h = claim.load(std::memory_order_relaxed);
+        for (;;) {
+            uint32_t done = freed.load(std::memory_order_acquire);
+            if (h - done >= Cap) return false;
+            if (claim.compare_exchange_weak(h, h + 1,
+                    std::memory_order_relaxed, std::memory_order_relaxed)) {
+                seq = h;
+                return true;
+            }
+        }
+    }
+
+    void finish(uint32_t seq, uint32_t stage, uint64_t body) {
+        Cell& c = cell[seq & Mask];
+        if (stage == 0) c.body = body;
+        c.seq_plus.store(seq + 1, std::memory_order_relaxed);
+        c.stage.store(stage + 1, std::memory_order_release);
+    }
+
+    bool take(uint32_t stage, uint32_t& seq, uint64_t& body) {
+        seq = cursor[stage];
+        Cell& c = cell[seq & Mask];
+        if (c.stage.load(std::memory_order_acquire) != stage + 1) return false;
+        if (c.seq_plus.load(std::memory_order_relaxed) != seq + 1) return false;
+        body = c.body;
+        cursor[stage] = seq + 1;
+        if (stage == 1)
+            freed.store(cursor[stage], std::memory_order_release);
+        return true;
+    }
+};
+```
+
+**The send limit counts only the readers still in the set**
+
+The publish limit is the minimum progress among the readers in the set, plus the window length. A side reader whose progress falls behind by more than a quarter of the window, and whose quiet time reaches the hold, leaves the set. A reader that has to follow every message is marked resident, and its progress stays in the minimum. A reader that left joins again from the publish position of that moment.
+
+```cpp
+#include <cstdint>
+
+struct GateSet {
+    static constexpr int kSlots = 8;
+    static constexpr uint64_t kWin = 128 * 1024;
+    uint64_t pos[kSlots]{};
+    uint64_t quiet_since[kSlots]{};
+    uint8_t in_set[kSlots]{};
+    uint8_t sticky[kSlots]{};
+    int count = 0;
+
+    uint64_t limit(uint64_t published, uint64_t now, uint64_t hold) {
+        uint64_t slow = 0;
+        bool any = false;
+        for (int i = 0; i < count; ++i) {
+            if (!in_set[i]) continue;
+            if (!sticky[i]) {
+                uint64_t lag = published - pos[i];
+                if (lag > (kWin >> 2)) {
+                    if (quiet_since[i] == 0) quiet_since[i] = now;
+                    if (now - quiet_since[i] >= hold) {
+                        in_set[i] = 0;
+                        continue;
+                    }
+                } else {
+                    quiet_since[i] = 0;
+                }
+            }
+            if (!any || pos[i] < slow) slow = pos[i];
+            any = true;
+        }
+        if (!any) return published + kWin;
+        return slow + kWin;
+    }
+
+    void rejoin(int i, uint64_t at) {
+        pos[i] = at;
+        quiet_since[i] = 0;
+        in_set[i] = 1;
+    }
+};
+```
+
+### 40. Quiescent-state reclamation
+
+After a node is unlinked from a lock-free structure, its memory waits until every core that might still read it has passed a point where it holds no such pointer. Each reader has a counter on its own cache line. Zero means the core is offline and is not waited for. A global epoch sits on its own line and increases from 1.
+
+A reader reports quiescence only after it has dropped every shared pointer. It acquire-loads the epoch and release-stores it into its counter only when the two differ. An unchanged epoch does not write, so an idle loop does not dirty the reader's line. Going offline also requires that every pointer has been dropped; offline stores zero. Coming back online stores the epoch of that moment, and only then takes new pointers.
+
+After the writer has finished its update it adds one to the epoch. The release makes the update visible before the new epoch. The returned value is the token for this reclamation. A check first looks at the lowest epoch already confirmed. A token at or below that floor is done. Otherwise each counter is acquire-loaded: zero, or a value at least the token, means that reader is past this update. A smaller value means it is still in the old epoch. Without waiting, the check returns false and the caller tries again later. With waiting, it pauses and rereads. When every reader has passed, the smallest online counter is relaxed-stored as the new floor. Writers do not compare-and-exchange that floor; a low store only makes the next check scan once more. The counters are 64 bits wide and are not wrapped.
+
+Unlinked nodes join a queue with their tokens, oldest at the head. Reclamation frees from the head and stops at the first token that has not elapsed. A writer that is also a reader reports its own quiescence before it waits, or it will wait for itself.
+
+```cpp
+#include <atomic>
+#include <cstdint>
+#include <immintrin.h>
+
+struct alignas(64) QSlot {
+    std::atomic<uint64_t> seen{0};
+};
+
+struct Grace {
+    alignas(64) std::atomic<uint64_t> epoch{1};
+    alignas(64) std::atomic<uint64_t> floor_seen{0};
+    QSlot* slot{nullptr};
+    uint32_t n{0};
+
+    void online(uint32_t id) {
+        uint64_t e = epoch.load(std::memory_order_acquire);
+        slot[id].seen.store(e, std::memory_order_release);
+    }
+
+    void offline(uint32_t id) {
+        slot[id].seen.store(0, std::memory_order_release);
+    }
+
+    void quiesce(uint32_t id) {
+        uint64_t e = epoch.load(std::memory_order_acquire);
+        if (e != slot[id].seen.load(std::memory_order_relaxed))
+            slot[id].seen.store(e, std::memory_order_release);
+    }
+
+    uint64_t bump() {
+        return epoch.fetch_add(1, std::memory_order_release) + 1;
+    }
+
+    bool elapsed(uint64_t token, bool wait) {
+        if (token <= floor_seen.load(std::memory_order_relaxed)) return true;
+        uint64_t least = ~uint64_t{0};
+        for (uint32_t i = 0; i < n; ++i) {
+            for (;;) {
+                uint64_t c = slot[i].seen.load(std::memory_order_acquire);
+                if (c == 0 || c >= token) {
+                    if (c != 0 && c < least) least = c;
+                    break;
+                }
+                if (!wait) return false;
+                _mm_pause();
+            }
+        }
+        if (least != ~uint64_t{0})
+            floor_seen.store(least, std::memory_order_relaxed);
+        return true;
+    }
+};
+
+struct Retired {
+    Retired* next;
+    uint64_t token;
+    void (*release)(Retired*);
+};
+
+struct RetireQ {
+    Retired* head{nullptr};
+    Retired* tail{nullptr};
+
+    void shelve(Grace& g, Retired* node) {
+        node->token = g.bump();
+        node->next = nullptr;
+        if (tail == nullptr) head = tail = node;
+        else { tail->next = node; tail = node; }
+    }
+
+    void reclaim(Grace& g) {
+        while (head != nullptr && g.elapsed(head->token, false)) {
+            Retired* n = head;
+            head = n->next;
+            if (head == nullptr) tail = nullptr;
+            n->release(n);
+        }
+    }
+};
+```
+
+### 41. User-space NIC I/O and in-order bypass handoff
 
 Fast market data and fast order entry do not put the hot path on a kernel socket. Receive polls the NIC event queue in user space. The filter is installed for a local address or a full 4-tuple, so unrelated packets never enter the queue. Each packet carries a hardware timestamp and a clock-sync flag. Downstream uses that time instead of taking another clock sample inside the callback.
 
@@ -16553,7 +17013,131 @@ uint64_t widen32(uint32_t low, uint64_t recent) {
 }
 ```
 
-### 38. Kernel async I/O on shared submit and completion rings
+### 42. Sequence-window reordering
+
+A downstream stage restores a contiguous sequence from objects that arrive out of order. The window length is a power of two. `min_seq` is the smallest sequence not yet delivered, and it sits at `head` in the ring. The slot of a new object is the unsigned difference `offset = seq - min_seq`, so wraparound falls out of the subtraction.
+
+When `offset` is below the window length, the object is stored at `head + offset`. That is the steady path. A slot that is already occupied keeps the first arrival and returns 1, and the caller frees the later one. Return 0 means this call stored the object. Return -1 means the ready queue is full: drain it and retry. Return -2 means the sequence is far from the window.
+
+When `offset` is below twice the window, the new sequence has just slid past the window, usually because an earlier sequence was lost and an empty slot is holding the window still. Slide the window forward by `offset + 1 - window`. Runs of arrived objects move into a ready queue; empty slots are skipped. If the ready queue cannot take the arrived objects that follow, stop the slide and return failure. The caller drains the ready queue and retries with the same object. After a full slide, recompute `offset` from the new `min_seq` and store the object.
+
+When `offset` is at least twice the window, the sequence is far from the current window. Treat it as a late duplicate or a bad sequence and leave it out.
+
+Delivery drains the ready queue first, then takes a contiguous run of occupied slots from the window head. The first empty slot stops delivery. Objects that have already arrived behind that hole stay where they are.
+
+```cpp
+#include <cstdint>
+
+struct SeqWin {
+    static constexpr uint32_t N = 256;
+    static constexpr uint32_t M = N - 1;
+    void* order[N]{};
+    void* ready[N]{};
+    uint32_t min_seq{0};
+    uint32_t head{0};
+    uint32_t rh{0};
+    uint32_t rt{0};
+    bool live{false};
+
+    bool ready_full() const { return ((rh + 1) & M) == rt; }
+
+    uint32_t slide(uint32_t need) {
+        uint32_t adv = 0;
+        while (adv < need) {
+            if (order[head] == nullptr) {
+                head = (head + 1) & M;
+                ++adv;
+                continue;
+            }
+            if (ready_full()) break;
+            ready[rh] = order[head];
+            order[head] = nullptr;
+            head = (head + 1) & M;
+            rh = (rh + 1) & M;
+            ++adv;
+        }
+        min_seq += adv;
+        return adv;
+    }
+
+    int push(void* obj, uint32_t seq) {
+        if (!live) {
+            min_seq = seq;
+            live = true;
+        }
+        uint32_t off = seq - min_seq;
+        if (off < N) {
+            void*& cell = order[(head + off) & M];
+            if (cell != nullptr) return 1;
+            cell = obj;
+            return 0;
+        }
+        if (off < 2 * N) {
+            uint32_t need = off + 1 - N;
+            if (slide(need) < need) return -1;
+            off = seq - min_seq;
+            void*& cell = order[(head + off) & M];
+            if (cell != nullptr) return 1;
+            cell = obj;
+            return 0;
+        }
+        return -2;
+    }
+
+    uint32_t pull(void** out, uint32_t cap) {
+        uint32_t n = 0;
+        while (n < cap && rt != rh) {
+            out[n++] = ready[rt];
+            ready[rt] = nullptr;
+            rt = (rt + 1) & M;
+        }
+        while (n < cap && order[head] != nullptr) {
+            out[n++] = order[head];
+            order[head] = nullptr;
+            head = (head + 1) & M;
+            ++min_seq;
+        }
+        return n;
+    }
+};
+```
+
+**Later bytes land at their own offset, and the hole is requested on its own**
+
+The receive buffer places bytes at the offset carried by the fragment. A later fragment that arrives first is written at its own offset, and that range is marked present. The contiguous position stops in front of the first hole. The highest offset seen moves on its own. While the contiguous position is still behind that highest offset, the bytes from the contiguous position up to the next present range are the start and length to ask the peer to send again. After those bytes arrive, the contiguous position moves forward.
+
+```cpp
+#include <cstdint>
+#include <cstring>
+
+struct GapLog {
+    static constexpr uint32_t kCap = 4096;
+    uint8_t mem[kCap]{};
+    uint8_t got[kCap]{};
+    uint32_t contig = 0;
+    uint32_t high = 0;
+
+    bool land(uint32_t off, const uint8_t* src, uint32_t n) {
+        if ((uint64_t)off + n > kCap) return false;
+        std::memcpy(mem + off, src, n);
+        std::memset(got + off, 1, n);
+        if (off + n > high) high = off + n;
+        while (contig < high && got[contig]) ++contig;
+        return true;
+    }
+
+    bool hole(uint32_t& from, uint32_t& len) const {
+        if (contig >= high) return false;
+        from = contig;
+        uint32_t e = contig;
+        while (e < high && !got[e]) ++e;
+        len = e - contig;
+        return len != 0;
+    }
+};
+```
+
+### 43. Kernel async I/O on shared submit and completion rings
 
 A socket hot path that enters the kernel per message pays syscall and file-table cost on the tail. User space and the kernel share a submit ring and a completion ring: requests are written into shared slots, results are read back from shared slots, and enter is skipped while the rings hold live work. Submit occupancy is a progress difference, so every slot is usable. The completion ring must be sized on its own; overflow pulls the hot path back into the kernel to flush.
 
@@ -16742,591 +17326,6 @@ struct PinSet {
 struct WorkerRing {
   PinSet pins{};
   void adopt(const PinSet& src) { pins = src; }
-};
-```
-
-### 39. Quiescent-state reclamation
-
-After a node is unlinked from a lock-free structure, its memory waits until every core that might still read it has passed a point where it holds no such pointer. Each reader has a counter on its own cache line. Zero means the core is offline and is not waited for. A global epoch sits on its own line and increases from 1.
-
-A reader reports quiescence only after it has dropped every shared pointer. It acquire-loads the epoch and release-stores it into its counter only when the two differ. An unchanged epoch does not write, so an idle loop does not dirty the reader's line. Going offline also requires that every pointer has been dropped; offline stores zero. Coming back online stores the epoch of that moment, and only then takes new pointers.
-
-After the writer has finished its update it adds one to the epoch. The release makes the update visible before the new epoch. The returned value is the token for this reclamation. A check first looks at the lowest epoch already confirmed. A token at or below that floor is done. Otherwise each counter is acquire-loaded: zero, or a value at least the token, means that reader is past this update. A smaller value means it is still in the old epoch. Without waiting, the check returns false and the caller tries again later. With waiting, it pauses and rereads. When every reader has passed, the smallest online counter is relaxed-stored as the new floor. Writers do not compare-and-exchange that floor; a low store only makes the next check scan once more. The counters are 64 bits wide and are not wrapped.
-
-Unlinked nodes join a queue with their tokens, oldest at the head. Reclamation frees from the head and stops at the first token that has not elapsed. A writer that is also a reader reports its own quiescence before it waits, or it will wait for itself.
-
-```cpp
-#include <atomic>
-#include <cstdint>
-#include <immintrin.h>
-
-struct alignas(64) QSlot {
-    std::atomic<uint64_t> seen{0};
-};
-
-struct Grace {
-    alignas(64) std::atomic<uint64_t> epoch{1};
-    alignas(64) std::atomic<uint64_t> floor_seen{0};
-    QSlot* slot{nullptr};
-    uint32_t n{0};
-
-    void online(uint32_t id) {
-        uint64_t e = epoch.load(std::memory_order_acquire);
-        slot[id].seen.store(e, std::memory_order_release);
-    }
-
-    void offline(uint32_t id) {
-        slot[id].seen.store(0, std::memory_order_release);
-    }
-
-    void quiesce(uint32_t id) {
-        uint64_t e = epoch.load(std::memory_order_acquire);
-        if (e != slot[id].seen.load(std::memory_order_relaxed))
-            slot[id].seen.store(e, std::memory_order_release);
-    }
-
-    uint64_t bump() {
-        return epoch.fetch_add(1, std::memory_order_release) + 1;
-    }
-
-    bool elapsed(uint64_t token, bool wait) {
-        if (token <= floor_seen.load(std::memory_order_relaxed)) return true;
-        uint64_t least = ~uint64_t{0};
-        for (uint32_t i = 0; i < n; ++i) {
-            for (;;) {
-                uint64_t c = slot[i].seen.load(std::memory_order_acquire);
-                if (c == 0 || c >= token) {
-                    if (c != 0 && c < least) least = c;
-                    break;
-                }
-                if (!wait) return false;
-                _mm_pause();
-            }
-        }
-        if (least != ~uint64_t{0})
-            floor_seen.store(least, std::memory_order_relaxed);
-        return true;
-    }
-};
-
-struct Retired {
-    Retired* next;
-    uint64_t token;
-    void (*release)(Retired*);
-};
-
-struct RetireQ {
-    Retired* head{nullptr};
-    Retired* tail{nullptr};
-
-    void shelve(Grace& g, Retired* node) {
-        node->token = g.bump();
-        node->next = nullptr;
-        if (tail == nullptr) head = tail = node;
-        else { tail->next = node; tail = node; }
-    }
-
-    void reclaim(Grace& g) {
-        while (head != nullptr && g.elapsed(head->token, false)) {
-            Retired* n = head;
-            head = n->next;
-            if (head == nullptr) tail = nullptr;
-            n->release(n);
-        }
-    }
-};
-```
-
-### 40. Sequence-window reordering
-
-A downstream stage restores a contiguous sequence from objects that arrive out of order. The window length is a power of two. `min_seq` is the smallest sequence not yet delivered, and it sits at `head` in the ring. The slot of a new object is the unsigned difference `offset = seq - min_seq`, so wraparound falls out of the subtraction.
-
-When `offset` is below the window length, the object is stored at `head + offset`. That is the steady path. A slot that is already occupied keeps the first arrival and returns 1, and the caller frees the later one. Return 0 means this call stored the object. Return -1 means the ready queue is full: drain it and retry. Return -2 means the sequence is far from the window.
-
-When `offset` is below twice the window, the new sequence has just slid past the window, usually because an earlier sequence was lost and an empty slot is holding the window still. Slide the window forward by `offset + 1 - window`. Runs of arrived objects move into a ready queue; empty slots are skipped. If the ready queue cannot take the arrived objects that follow, stop the slide and return failure. The caller drains the ready queue and retries with the same object. After a full slide, recompute `offset` from the new `min_seq` and store the object.
-
-When `offset` is at least twice the window, the sequence is far from the current window. Treat it as a late duplicate or a bad sequence and leave it out.
-
-Delivery drains the ready queue first, then takes a contiguous run of occupied slots from the window head. The first empty slot stops delivery. Objects that have already arrived behind that hole stay where they are.
-
-```cpp
-#include <cstdint>
-
-struct SeqWin {
-    static constexpr uint32_t N = 256;
-    static constexpr uint32_t M = N - 1;
-    void* order[N]{};
-    void* ready[N]{};
-    uint32_t min_seq{0};
-    uint32_t head{0};
-    uint32_t rh{0};
-    uint32_t rt{0};
-    bool live{false};
-
-    bool ready_full() const { return ((rh + 1) & M) == rt; }
-
-    uint32_t slide(uint32_t need) {
-        uint32_t adv = 0;
-        while (adv < need) {
-            if (order[head] == nullptr) {
-                head = (head + 1) & M;
-                ++adv;
-                continue;
-            }
-            if (ready_full()) break;
-            ready[rh] = order[head];
-            order[head] = nullptr;
-            head = (head + 1) & M;
-            rh = (rh + 1) & M;
-            ++adv;
-        }
-        min_seq += adv;
-        return adv;
-    }
-
-    int push(void* obj, uint32_t seq) {
-        if (!live) {
-            min_seq = seq;
-            live = true;
-        }
-        uint32_t off = seq - min_seq;
-        if (off < N) {
-            void*& cell = order[(head + off) & M];
-            if (cell != nullptr) return 1;
-            cell = obj;
-            return 0;
-        }
-        if (off < 2 * N) {
-            uint32_t need = off + 1 - N;
-            if (slide(need) < need) return -1;
-            off = seq - min_seq;
-            void*& cell = order[(head + off) & M];
-            if (cell != nullptr) return 1;
-            cell = obj;
-            return 0;
-        }
-        return -2;
-    }
-
-    uint32_t pull(void** out, uint32_t cap) {
-        uint32_t n = 0;
-        while (n < cap && rt != rh) {
-            out[n++] = ready[rt];
-            ready[rt] = nullptr;
-            rt = (rt + 1) & M;
-        }
-        while (n < cap && order[head] != nullptr) {
-            out[n++] = order[head];
-            order[head] = nullptr;
-            head = (head + 1) & M;
-            ++min_seq;
-        }
-        return n;
-    }
-};
-```
-
-**Later bytes land at their own offset, and the hole is requested on its own**
-
-The receive buffer places bytes at the offset carried by the fragment. A later fragment that arrives first is written at its own offset, and that range is marked present. The contiguous position stops in front of the first hole. The highest offset seen moves on its own. While the contiguous position is still behind that highest offset, the bytes from the contiguous position up to the next present range are the start and length to ask the peer to send again. After those bytes arrive, the contiguous position moves forward.
-
-```cpp
-#include <cstdint>
-#include <cstring>
-
-struct GapLog {
-    static constexpr uint32_t kCap = 4096;
-    uint8_t mem[kCap]{};
-    uint8_t got[kCap]{};
-    uint32_t contig = 0;
-    uint32_t high = 0;
-
-    bool land(uint32_t off, const uint8_t* src, uint32_t n) {
-        if ((uint64_t)off + n > kCap) return false;
-        std::memcpy(mem + off, src, n);
-        std::memset(got + off, 1, n);
-        if (off + n > high) high = off + n;
-        while (contig < high && got[contig]) ++contig;
-        return true;
-    }
-
-    bool hole(uint32_t& from, uint32_t& len) const {
-        if (contig >= high) return false;
-        from = contig;
-        uint32_t e = contig;
-        while (e < high && !got[e]) ++e;
-        len = e - contig;
-        return len != 0;
-    }
-};
-```
-
-### 41. Fixed-stride per-core variables
-
-Counters, cursors, and stack tops that exist once per core, if left in thread-local storage, can be read from another core only through that thread's pointer, and a walk of several of them on the owner core need not hit adjacent lines. Lay them out in one buffer sliced by core. The distance between adjacent cores is a fixed stride, a multiple of a cache line, and at least as large as every variable that lives in the slice.
-
-Variables are allocated in order at startup. The handle is the address on core 0. Core `i` is the handle plus `i` times the stride. The variables of one core sit next to each other. A monitor computes the address from the core id. Alignment is a power of two and at most one cache line. The stride itself is cache-line aligned, so the alignment holds on every core. The memory is reserved at startup and is not freed later. The hot path does not allocate.
-
-```cpp
-#include <cstddef>
-#include <cstdint>
-#include <cstdlib>
-#include <cstring>
-#include <new>
-
-constexpr unsigned kCores = 64;
-constexpr size_t kStride = 64 * 1024;
-
-struct alignas(64) CoreBank {
-    char raw[kStride * kCores];
-    CoreBank* older;
-};
-
-CoreBank* g_bank = nullptr;
-size_t g_cursor = kStride;
-
-void* alloc_core_var(size_t size, size_t align) {
-    if (size == 0 || size > kStride) std::abort();
-    if (align == 0) align = alignof(std::max_align_t);
-    if (align > 64 || (align & (align - 1)) != 0) std::abort();
-    g_cursor = (g_cursor + align - 1) & ~(align - 1);
-    if (g_cursor + size > kStride) {
-        auto* b = new CoreBank;
-        b->older = g_bank;
-        g_bank = b;
-        g_cursor = 0;
-    }
-    void* handle = g_bank->raw + g_cursor;
-    g_cursor += size;
-    for (unsigned c = 0; c < kCores; ++c)
-        std::memset(static_cast<char*>(handle) + c * kStride, 0, size);
-    return handle;
-}
-
-template<class T>
-T* core_var(void* handle, unsigned core) {
-    return reinterpret_cast<T*>(static_cast<char*>(handle) + core * kStride);
-}
-```
-
-### 42. Signature-first bucket lookup
-
-A lookup hits the bucket before it hits the key. Each bucket has eight slots. The 16-bit signatures are packed at the front, 16 bytes, and one vector compare names the matching slots. Keys live in a separate array; the bucket stores indexes. A signature miss does not read the key. The bucket is cache-line aligned, and the signatures plus the indexes fit in that line, so a miss touches one line. Buckets start zeroed.
-
-The signature is the high 16 bits of the hash. Zero is reserved for an empty slot; a computed zero becomes one. Two independent hashes select a primary bucket and an alternate bucket. The alternate is consulted only when the primary misses.
-
-A batch of keys computes both buckets and prefetches them, then compares signatures and keys. The prefetch overlaps the bucket miss with the compares.
-
-When both buckets are full, one slot is displaced into its other bucket, with a bound on the number of displacements. An empty slot stores the index first and the signature after a release fence, so a reader that sees the signature also sees the index. A displacement clears the signature before the slot is reused. A key in the middle of a displacement can miss once; a caller that cannot drop it looks again. One writer installs.
-
-```cpp
-#include <atomic>
-#include <cstdint>
-#include <cstring>
-#include <immintrin.h>
-
-struct Key16 { uint8_t b[16]; };
-
-struct alignas(64) SigBucket {
-    uint16_t sig[8];
-    uint32_t key_ix[8];
-};
-
-struct SigTable {
-    SigBucket* tab;
-    Key16* keys;
-    uint32_t mask;
-
-    static uint32_t mix(const Key16& key, uint32_t seed) {
-        uint32_t h = seed;
-        for (uint8_t byte : key.b) {
-            h ^= byte;
-            h *= 16777619u;
-        }
-        return h;
-    }
-
-    static uint16_t sig16(uint32_t h) {
-        uint16_t s = uint16_t(h >> 16);
-        return s == 0 ? 1 : s;
-    }
-
-    int match(uint32_t b, uint16_t s, const Key16& key) const {
-        const SigBucket& bk = tab[b];
-        __m128i want = _mm_set1_epi16(static_cast<short>(s));
-        __m128i got = _mm_load_si128(reinterpret_cast<const __m128i*>(bk.sig));
-        int bits = _mm_movemask_epi8(_mm_cmpeq_epi16(want, got));
-        for (int lane = 0; lane < 8; ++lane) {
-            if ((bits & (1 << (2 * lane))) == 0) continue;
-            std::atomic_thread_fence(std::memory_order_acquire);
-            uint32_t ix = bk.key_ix[lane];
-            if (ix == 0) continue;
-            if (std::memcmp(keys[ix].b, key.b, 16) == 0) return int(ix);
-        }
-        return -1;
-    }
-
-    int find(const Key16& key) const {
-        uint32_t h1 = mix(key, 2166136261u);
-        uint32_t h2 = mix(key, 0x811c9dc5u);
-        uint16_t s = sig16(h1);
-        int id = match(h1 & mask, s, key);
-        return id >= 0 ? id : match(h2 & mask, s, key);
-    }
-
-    void find4(const Key16* key, int out[4]) const {
-        uint32_t b1[4], b2[4];
-        uint16_t sg[4];
-        for (int i = 0; i < 4; ++i) {
-            uint32_t h1 = mix(key[i], 2166136261u);
-            sg[i] = sig16(h1);
-            b1[i] = h1 & mask;
-            b2[i] = mix(key[i], 0x811c9dc5u) & mask;
-            __builtin_prefetch(&tab[b1[i]], 0, 3);
-            __builtin_prefetch(&tab[b2[i]], 0, 3);
-        }
-        for (int i = 0; i < 4; ++i) {
-            int id = match(b1[i], sg[i], key[i]);
-            out[i] = id >= 0 ? id : match(b2[i], sg[i], key[i]);
-        }
-    }
-
-    bool install(uint32_t ix, const Key16& key) {
-        keys[ix] = key;
-        uint32_t h1 = mix(key, 2166136261u);
-        uint16_t s = sig16(h1);
-        uint32_t b = h1 & mask;
-        for (int step = 0; step < 16; ++step) {
-            SigBucket& bk = tab[b];
-            for (int i = 0; i < 8; ++i) {
-                if (bk.sig[i] != 0) continue;
-                bk.key_ix[i] = ix;
-                std::atomic_thread_fence(std::memory_order_release);
-                bk.sig[i] = s;
-                return true;
-            }
-            int victim = int((h1 + uint32_t(step)) & 7u);
-            uint16_t old_s = bk.sig[victim];
-            uint32_t old_ix = bk.key_ix[victim];
-            bk.sig[victim] = 0;
-            std::atomic_thread_fence(std::memory_order_release);
-            bk.key_ix[victim] = ix;
-            std::atomic_thread_fence(std::memory_order_release);
-            bk.sig[victim] = s;
-            const Key16& old_key = keys[old_ix];
-            uint32_t primary = mix(old_key, 2166136261u) & mask;
-            b = (b == primary) ? (mix(old_key, 0x811c9dc5u) & mask) : primary;
-            ix = old_ix;
-            s = old_s;
-            h1 ^= 0x9e3779b9u;
-        }
-        return false;
-    }
-};
-```
-
-**A bounded id becomes a dense index from a word prefix plus popcount**
-
-When the original ids fit in one bitmap, a set bit is an id that takes part in the mapping. In front of each 64-bit word is the number of set bits in the earlier words. A lookup checks the target bit. When that bit is set, the dense index is the word prefix, plus the number of set bits in this word from bit 0 through the target bit, minus one. Each additional valid id increases that count, and the index increases with it. An id past the end of the word array ends the lookup.
-
-```cpp
-#include <cstdint>
-
-struct RankBits {
-    uint64_t* bits = nullptr;
-    uint32_t* prefix = nullptr;
-    uint32_t words = 0;
-
-    void build(const uint32_t* ids, uint32_t n) {
-        for (uint32_t i = 0; i < n; ++i)
-            bits[ids[i] >> 6] |= 1ull << (ids[i] & 63);
-        uint32_t run = 0;
-        for (uint32_t w = 0; w < words; ++w) {
-            prefix[w] = run;
-            run += (uint32_t)__builtin_popcountll(bits[w]);
-        }
-    }
-
-    int find(uint32_t id) const {
-        uint32_t w = id >> 6;
-        if (w >= words) return -1;
-        uint32_t b = id & 63;
-        uint64_t word = bits[w];
-        if ((word & (1ull << b)) == 0) return -1;
-        uint64_t lower = ~0ull >> (63 - b);
-        return (int)(prefix[w] + (uint32_t)__builtin_popcountll(word & lower) - 1);
-    }
-};
-```
-
-**A static set puts four keys in one cache line**
-
-The keys are fixed at startup. The build tries seeds and places keys into lines until every line holds at most four. A lookup mixes the key with that seed to get the line, reads the four 64-bit keys, and compares them with the target in two vector compares. A hit returns that lane's slot across the whole table. State lives at that slot, and an unused lane is an empty slot in the table. The compare runs only up to the number of keys stored in the line.
-
-```cpp
-#include <cstdint>
-#include <cstring>
-#include <emmintrin.h>
-#include <smmintrin.h>
-
-struct alignas(64) QuadLine {
-    uint64_t key[4]{};
-    uint32_t n = 0;
-};
-static_assert(sizeof(QuadLine) == 64, "one cache line");
-
-struct QuadTab {
-    QuadLine* line = nullptr;
-    uint32_t mask = 0;
-    uint64_t seed = 0;
-
-    static uint64_t mix(uint64_t k, uint64_t s) {
-        k ^= s;
-        k *= 0x9E3779B97F4A7C15ull;
-        k ^= k >> 32;
-        return k;
-    }
-
-    bool seat(const uint64_t* keys, uint32_t n, uint8_t* cnt) {
-        uint32_t buckets = mask + 1;
-        for (uint64_t s = 1; s < 4096; ++s) {
-            std::memset(cnt, 0, buckets);
-            bool ok = true;
-            for (uint32_t i = 0; i < n; ++i) {
-                uint32_t b = (uint32_t)(mix(keys[i], s) & mask);
-                if (++cnt[b] > 4) { ok = false; break; }
-            }
-            if (!ok) continue;
-            for (uint32_t b = 0; b < buckets; ++b) line[b].n = 0;
-            for (uint32_t i = 0; i < n; ++i) {
-                QuadLine& L = line[(uint32_t)(mix(keys[i], s) & mask)];
-                L.key[L.n++] = keys[i];
-            }
-            seed = s;
-            return true;
-        }
-        return false;
-    }
-
-    int find(uint64_t k) const {
-        uint32_t b = (uint32_t)(mix(k, seed) & mask);
-        const QuadLine& L = line[b];
-        __m128i want = _mm_set1_epi64x((long long)k);
-        __m128i lo = _mm_load_si128(reinterpret_cast<const __m128i*>(L.key));
-        __m128i hi = _mm_load_si128(reinterpret_cast<const __m128i*>(L.key + 2));
-        int bits = _mm_movemask_pd(_mm_castsi128_pd(_mm_cmpeq_epi64(lo, want)));
-        bits |= _mm_movemask_pd(_mm_castsi128_pd(_mm_cmpeq_epi64(hi, want))) << 2;
-        for (uint32_t i = 0; i < L.n; ++i) {
-            if (bits & (1 << i)) return (int)((b << 2) + i);
-        }
-        return -1;
-    }
-};
-```
-
-### 43. Staged ordered completion ring
-
-Claiming a slot and finishing it are two calls. Several workers take sequence numbers first and fill them later, and the finish order need not match the claim order. The exit walks in claim order. If sequence 5 is finished and sequence 4 is not, the exit stays on 4.
-
-The completion mark is a stage plus the sequence plus one. The worker for stage 0 writes the payload, then the sequence, then release-stores the stage as 1. The next stage waits until the stage is 1 and the sequence matches, does its work, and stores stage 2. Each stage has its own cursor. Each time the last stage takes an item, it publishes the freed sequence, and the claim side uses that to measure distance. To touch that line less often, publish every few items; the producer simply sees free space later. Capacity has to cover the distance from the oldest unfreed sequence to the newest claim. Otherwise two laps write the same slot, and an old completion mark is read as a new one.
-
-```cpp
-#include <atomic>
-#include <cstdint>
-
-struct StageRing {
-    static constexpr uint32_t Cap = 1024;
-    static constexpr uint32_t Mask = Cap - 1;
-
-    struct Cell {
-        alignas(64) std::atomic<uint32_t> stage{0};
-        std::atomic<uint32_t> seq_plus{0};
-        uint64_t body;
-    } cell[Cap];
-
-    alignas(64) std::atomic<uint32_t> claim{0};
-    alignas(64) std::atomic<uint32_t> freed{0};
-    uint32_t cursor[2]{};
-
-    bool acquire(uint32_t& seq) {
-        uint32_t h = claim.load(std::memory_order_relaxed);
-        for (;;) {
-            uint32_t done = freed.load(std::memory_order_acquire);
-            if (h - done >= Cap) return false;
-            if (claim.compare_exchange_weak(h, h + 1,
-                    std::memory_order_relaxed, std::memory_order_relaxed)) {
-                seq = h;
-                return true;
-            }
-        }
-    }
-
-    void finish(uint32_t seq, uint32_t stage, uint64_t body) {
-        Cell& c = cell[seq & Mask];
-        if (stage == 0) c.body = body;
-        c.seq_plus.store(seq + 1, std::memory_order_relaxed);
-        c.stage.store(stage + 1, std::memory_order_release);
-    }
-
-    bool take(uint32_t stage, uint32_t& seq, uint64_t& body) {
-        seq = cursor[stage];
-        Cell& c = cell[seq & Mask];
-        if (c.stage.load(std::memory_order_acquire) != stage + 1) return false;
-        if (c.seq_plus.load(std::memory_order_relaxed) != seq + 1) return false;
-        body = c.body;
-        cursor[stage] = seq + 1;
-        if (stage == 1)
-            freed.store(cursor[stage], std::memory_order_release);
-        return true;
-    }
-};
-```
-
-**The send limit counts only the readers still in the set**
-
-The publish limit is the minimum progress among the readers in the set, plus the window length. A side reader whose progress falls behind by more than a quarter of the window, and whose quiet time reaches the hold, leaves the set. A reader that has to follow every message is marked resident, and its progress stays in the minimum. A reader that left joins again from the publish position of that moment.
-
-```cpp
-#include <cstdint>
-
-struct GateSet {
-    static constexpr int kSlots = 8;
-    static constexpr uint64_t kWin = 128 * 1024;
-    uint64_t pos[kSlots]{};
-    uint64_t quiet_since[kSlots]{};
-    uint8_t in_set[kSlots]{};
-    uint8_t sticky[kSlots]{};
-    int count = 0;
-
-    uint64_t limit(uint64_t published, uint64_t now, uint64_t hold) {
-        uint64_t slow = 0;
-        bool any = false;
-        for (int i = 0; i < count; ++i) {
-            if (!in_set[i]) continue;
-            if (!sticky[i]) {
-                uint64_t lag = published - pos[i];
-                if (lag > (kWin >> 2)) {
-                    if (quiet_since[i] == 0) quiet_since[i] = now;
-                    if (now - quiet_since[i] >= hold) {
-                        in_set[i] = 0;
-                        continue;
-                    }
-                } else {
-                    quiet_since[i] = 0;
-                }
-            }
-            if (!any || pos[i] < slow) slow = pos[i];
-            any = true;
-        }
-        if (!any) return published + kWin;
-        return slow + kWin;
-    }
-
-    void rejoin(int i, uint64_t at) {
-        pos[i] = at;
-        quiet_since[i] = 0;
-        in_set[i] = 1;
-    }
 };
 ```
 
@@ -17546,12 +17545,10 @@ struct SgeList {
 };
 ```
 
-
 ### 45. High-quality articles on system design
 [https://mp.weixin.qq.com/s/9OH1RA8POFidgQnvape6fQ](https://mp.weixin.qq.com/s/9OH1RA8POFidgQnvape6fQ)
 
 [https://mp.weixin.qq.com/s/PuG4ZFVZ-7hijS4Db8Z5jQ](https://mp.weixin.qq.com/s/PuG4ZFVZ-7hijS4Db8Z5jQ)
-
 
 ## Common performance bottlenecks and optimization directions
 
