@@ -43,13 +43,13 @@ English version：[https://github.com/zzxscodes/trading-system-notes/blob/main/t
   - [34. 全链路延时打点结构设计](#34-全链路延时打点结构设计)
   - [35. 环缓冲就地写入减少大对象拷贝](#35-环缓冲就地写入减少大对象拷贝)
   - [36. 共享资源容量耗尽时快速失败](#36-共享资源容量耗尽时快速失败)
-  - [37. 用户态网卡收发与旁路有序交接](#37-用户态网卡收发与旁路有序交接)
-  - [38. 共享提交完成环上的内核异步收发](#38-共享提交完成环上的内核异步收发)
-  - [39. 用户态静默期回收](#39-用户态静默期回收)
-  - [40. 序号窗口重排](#40-序号窗口重排)
-  - [41. 每核变量的固定步长](#41-每核变量的固定步长)
-  - [42. 签名前置的桶查找](#42-签名前置的桶查找)
-  - [43. 分阶段完成的有序环](#43-分阶段完成的有序环)
+  - [37. 每核变量的固定步长](#37-每核变量的固定步长)
+  - [38. 签名前置的桶查找](#38-签名前置的桶查找)
+  - [39. 分阶段完成的有序环](#39-分阶段完成的有序环)
+  - [40. 用户态静默期回收](#40-用户态静默期回收)
+  - [41. 用户态网卡收发与旁路有序交接](#41-用户态网卡收发与旁路有序交接)
+  - [42. 序号窗口重排](#42-序号窗口重排)
+  - [43. 共享提交完成环上的内核异步收发](#43-共享提交完成环上的内核异步收发)
   - [44. 用户态块设备收发与提交完成交接](#44-用户态块设备收发与提交完成交接)
   - [45. 系统设计优质文章](#45-系统设计优质文章)
 - [常见性能瓶颈与优化方向](#常见性能瓶颈与优化方向)
@@ -15688,8 +15688,468 @@ public:
 };
 ```
 
+### 37. 每核变量的固定步长
 
-### 37. 用户态网卡收发与旁路有序交接
+每个核一份的计数、游标、栈顶，如果散落在各自的线程局部存储里，别的核要读只能先拿到对方的线程指针，本核连续碰多项时也不一定落在相邻的缓存行。换成一块按核切开的缓冲：相邻两核之间的距离是固定步长，步长是缓存行的整数倍，并且不小于这一条里要放的全部变量。
+
+变量在启动时按顺序分配。返回的句柄是第 0 核上的地址，核 `i` 的地址是句柄加上 `i` 乘以步长。本核的变量彼此相邻。监控线程用核号直接算地址。对齐不超过一条缓存行，并且是 2 的幂；步长本身按缓存行对齐，所以每个核上的对齐都成立。这段内存在启动时分完，运行期不释放，热路径上没有分配。
+
+```cpp
+#include <cstddef>
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <new>
+
+constexpr unsigned kCores = 64;
+constexpr size_t kStride = 64 * 1024;
+
+struct alignas(64) CoreBank {
+    char raw[kStride * kCores];
+    CoreBank* older;
+};
+
+CoreBank* g_bank = nullptr;
+size_t g_cursor = kStride;
+
+void* alloc_core_var(size_t size, size_t align) {
+    if (size == 0 || size > kStride) std::abort();
+    if (align == 0) align = alignof(std::max_align_t);
+    if (align > 64 || (align & (align - 1)) != 0) std::abort();
+    g_cursor = (g_cursor + align - 1) & ~(align - 1);
+    if (g_cursor + size > kStride) {
+        auto* b = new CoreBank;
+        b->older = g_bank;
+        g_bank = b;
+        g_cursor = 0;
+    }
+    void* handle = g_bank->raw + g_cursor;
+    g_cursor += size;
+    for (unsigned c = 0; c < kCores; ++c)
+        std::memset(static_cast<char*>(handle) + c * kStride, 0, size);
+    return handle;
+}
+
+template<class T>
+T* core_var(void* handle, unsigned core) {
+    return reinterpret_cast<T*>(static_cast<char*>(handle) + core * kStride);
+}
+```
+
+### 38. 签名前置的桶查找
+
+键的查找先碰到桶，不先碰到键。每个桶固定 8 个槽，16 位签名紧挨着放在桶头，一共 16 字节，一次向量比较得到命中的槽。键放在另一块数组里，桶里只留下标。签名不同就不读键。桶按缓存行对齐，签名加上下标放得进一条缓存行，未命中只碰这一条。桶在使用前清零。
+
+签名取哈希的高 16 位。0 留给空槽，算出来是 0 就改成 1。两个独立哈希对应主桶和备用桶，主桶没有再查备用桶。
+
+一批键一起查时，先把这批的两个桶算出来并预取，再做签名比较和键比较。预取把桶的缓存缺失叠到比较的后面。
+
+两个桶都满时，挑一个槽把原来的条目踢到它的另一个桶，踢的次数有上限。写空槽时先写下标，再用 release 栅栏写签名，读者看到签名时下标已经可见。踢出之前先把签名清成 0。正在被踢的键可能有一次查不到，不能漏的调用方再查一次。插入侧一个写者。
+
+```cpp
+#include <atomic>
+#include <cstdint>
+#include <cstring>
+#include <immintrin.h>
+
+struct Key16 { uint8_t b[16]; };
+
+struct alignas(64) SigBucket {
+    uint16_t sig[8];
+    uint32_t key_ix[8];
+};
+
+struct SigTable {
+    SigBucket* tab;
+    Key16* keys;
+    uint32_t mask;
+
+    static uint32_t mix(const Key16& key, uint32_t seed) {
+        uint32_t h = seed;
+        for (uint8_t byte : key.b) {
+            h ^= byte;
+            h *= 16777619u;
+        }
+        return h;
+    }
+
+    static uint16_t sig16(uint32_t h) {
+        uint16_t s = uint16_t(h >> 16);
+        return s == 0 ? 1 : s;
+    }
+
+    int match(uint32_t b, uint16_t s, const Key16& key) const {
+        const SigBucket& bk = tab[b];
+        __m128i want = _mm_set1_epi16(static_cast<short>(s));
+        __m128i got = _mm_load_si128(reinterpret_cast<const __m128i*>(bk.sig));
+        int bits = _mm_movemask_epi8(_mm_cmpeq_epi16(want, got));
+        for (int lane = 0; lane < 8; ++lane) {
+            if ((bits & (1 << (2 * lane))) == 0) continue;
+            std::atomic_thread_fence(std::memory_order_acquire);
+            uint32_t ix = bk.key_ix[lane];
+            if (ix == 0) continue;
+            if (std::memcmp(keys[ix].b, key.b, 16) == 0) return int(ix);
+        }
+        return -1;
+    }
+
+    int find(const Key16& key) const {
+        uint32_t h1 = mix(key, 2166136261u);
+        uint32_t h2 = mix(key, 0x811c9dc5u);
+        uint16_t s = sig16(h1);
+        int id = match(h1 & mask, s, key);
+        return id >= 0 ? id : match(h2 & mask, s, key);
+    }
+
+    void find4(const Key16* key, int out[4]) const {
+        uint32_t b1[4], b2[4];
+        uint16_t sg[4];
+        for (int i = 0; i < 4; ++i) {
+            uint32_t h1 = mix(key[i], 2166136261u);
+            sg[i] = sig16(h1);
+            b1[i] = h1 & mask;
+            b2[i] = mix(key[i], 0x811c9dc5u) & mask;
+            __builtin_prefetch(&tab[b1[i]], 0, 3);
+            __builtin_prefetch(&tab[b2[i]], 0, 3);
+        }
+        for (int i = 0; i < 4; ++i) {
+            int id = match(b1[i], sg[i], key[i]);
+            out[i] = id >= 0 ? id : match(b2[i], sg[i], key[i]);
+        }
+    }
+
+    bool install(uint32_t ix, const Key16& key) {
+        keys[ix] = key;
+        uint32_t h1 = mix(key, 2166136261u);
+        uint16_t s = sig16(h1);
+        uint32_t b = h1 & mask;
+        for (int step = 0; step < 16; ++step) {
+            SigBucket& bk = tab[b];
+            for (int i = 0; i < 8; ++i) {
+                if (bk.sig[i] != 0) continue;
+                bk.key_ix[i] = ix;
+                std::atomic_thread_fence(std::memory_order_release);
+                bk.sig[i] = s;
+                return true;
+            }
+            int victim = int((h1 + uint32_t(step)) & 7u);
+            uint16_t old_s = bk.sig[victim];
+            uint32_t old_ix = bk.key_ix[victim];
+            bk.sig[victim] = 0;
+            std::atomic_thread_fence(std::memory_order_release);
+            bk.key_ix[victim] = ix;
+            std::atomic_thread_fence(std::memory_order_release);
+            bk.sig[victim] = s;
+            const Key16& old_key = keys[old_ix];
+            uint32_t primary = mix(old_key, 2166136261u) & mask;
+            b = (b == primary) ? (mix(old_key, 0x811c9dc5u) & mask) : primary;
+            ix = old_ix;
+            s = old_s;
+            h1 ^= 0x9e3779b9u;
+        }
+        return false;
+    }
+};
+```
+
+**有界编号用字前缀加 popcount 得到稠密下标**
+
+原始编号的取值范围装得进一张位图。位为 1 的编号才参与映射。每个 64 位字前面存着更早的字里 1 的个数。查询先看目标位。这一位是 1 时，稠密下标等于字前缀，加上本字从最低位到这一位（含这一位）的 1 的个数，再减 1。合法编号每多一个，这个数就增加，下标跟着变大。编号超出字数组的范围，查询就结束。
+
+```cpp
+#include <cstdint>
+
+struct RankBits {
+    uint64_t* bits = nullptr;
+    uint32_t* prefix = nullptr;
+    uint32_t words = 0;
+
+    void build(const uint32_t* ids, uint32_t n) {
+        for (uint32_t i = 0; i < n; ++i)
+            bits[ids[i] >> 6] |= 1ull << (ids[i] & 63);
+        uint32_t run = 0;
+        for (uint32_t w = 0; w < words; ++w) {
+            prefix[w] = run;
+            run += (uint32_t)__builtin_popcountll(bits[w]);
+        }
+    }
+
+    int find(uint32_t id) const {
+        uint32_t w = id >> 6;
+        if (w >= words) return -1;
+        uint32_t b = id & 63;
+        uint64_t word = bits[w];
+        if ((word & (1ull << b)) == 0) return -1;
+        uint64_t lower = ~0ull >> (63 - b);
+        return (int)(prefix[w] + (uint32_t)__builtin_popcountll(word & lower) - 1);
+    }
+};
+```
+
+**静态集合把一条缓存行放四个键**
+
+键在启动时固定。构建时更换种子，把键分进行，直到每一行至多四个。查询用这个种子算出行号，一次读入四个 64 位键，分成两次向量比较。命中的那一格给出它在整张表上的槽号。状态放在这个槽号上，空着的格就是表里的空位。比较只走到这一行实际写入的个数。
+
+```cpp
+#include <cstdint>
+#include <cstring>
+#include <emmintrin.h>
+#include <smmintrin.h>
+
+struct alignas(64) QuadLine {
+    uint64_t key[4]{};
+    uint32_t n = 0;
+};
+static_assert(sizeof(QuadLine) == 64, "one cache line");
+
+struct QuadTab {
+    QuadLine* line = nullptr;
+    uint32_t mask = 0;
+    uint64_t seed = 0;
+
+    static uint64_t mix(uint64_t k, uint64_t s) {
+        k ^= s;
+        k *= 0x9E3779B97F4A7C15ull;
+        k ^= k >> 32;
+        return k;
+    }
+
+    bool seat(const uint64_t* keys, uint32_t n, uint8_t* cnt) {
+        uint32_t buckets = mask + 1;
+        for (uint64_t s = 1; s < 4096; ++s) {
+            std::memset(cnt, 0, buckets);
+            bool ok = true;
+            for (uint32_t i = 0; i < n; ++i) {
+                uint32_t b = (uint32_t)(mix(keys[i], s) & mask);
+                if (++cnt[b] > 4) { ok = false; break; }
+            }
+            if (!ok) continue;
+            for (uint32_t b = 0; b < buckets; ++b) line[b].n = 0;
+            for (uint32_t i = 0; i < n; ++i) {
+                QuadLine& L = line[(uint32_t)(mix(keys[i], s) & mask)];
+                L.key[L.n++] = keys[i];
+            }
+            seed = s;
+            return true;
+        }
+        return false;
+    }
+
+    int find(uint64_t k) const {
+        uint32_t b = (uint32_t)(mix(k, seed) & mask);
+        const QuadLine& L = line[b];
+        __m128i want = _mm_set1_epi64x((long long)k);
+        __m128i lo = _mm_load_si128(reinterpret_cast<const __m128i*>(L.key));
+        __m128i hi = _mm_load_si128(reinterpret_cast<const __m128i*>(L.key + 2));
+        int bits = _mm_movemask_pd(_mm_castsi128_pd(_mm_cmpeq_epi64(lo, want)));
+        bits |= _mm_movemask_pd(_mm_castsi128_pd(_mm_cmpeq_epi64(hi, want))) << 2;
+        for (uint32_t i = 0; i < L.n; ++i) {
+            if (bits & (1 << i)) return (int)((b << 2) + i);
+        }
+        return -1;
+    }
+};
+```
+
+### 39. 分阶段完成的有序环
+
+占槽和填完分成两次。多个工人可以先占到序号，再各自去填，填完的顺序不必等于占槽的顺序。出口按占槽顺序往外取，序号 5 已经完成、序号 4 还没有，出口仍停在 4。
+
+完成标记分成阶段和序号加一。阶段 0 的工人写好载荷，再写序号，最后用 release 把阶段写成 1。下一段的工人等到阶段变成 1 且序号匹配，处理完把阶段写成 2。每一段都有自己的游标。最后一段每取走一条，就把已释放序号发布出去，占槽一侧用它判断距离。想少碰这条缓存行时，可以攒几条再发布，生产者只是更晚看见空位。槽位容量要盖住从最早未释放的序号到最新占槽的距离，否则两圈写到同一个槽，旧的完成标记会被看成新的。
+
+```cpp
+#include <atomic>
+#include <cstdint>
+
+struct StageRing {
+    static constexpr uint32_t Cap = 1024;
+    static constexpr uint32_t Mask = Cap - 1;
+
+    struct Cell {
+        alignas(64) std::atomic<uint32_t> stage{0};
+        std::atomic<uint32_t> seq_plus{0};
+        uint64_t body;
+    } cell[Cap];
+
+    alignas(64) std::atomic<uint32_t> claim{0};
+    alignas(64) std::atomic<uint32_t> freed{0};
+    uint32_t cursor[2]{};
+
+    bool acquire(uint32_t& seq) {
+        uint32_t h = claim.load(std::memory_order_relaxed);
+        for (;;) {
+            uint32_t done = freed.load(std::memory_order_acquire);
+            if (h - done >= Cap) return false;
+            if (claim.compare_exchange_weak(h, h + 1,
+                    std::memory_order_relaxed, std::memory_order_relaxed)) {
+                seq = h;
+                return true;
+            }
+        }
+    }
+
+    void finish(uint32_t seq, uint32_t stage, uint64_t body) {
+        Cell& c = cell[seq & Mask];
+        if (stage == 0) c.body = body;
+        c.seq_plus.store(seq + 1, std::memory_order_relaxed);
+        c.stage.store(stage + 1, std::memory_order_release);
+    }
+
+    bool take(uint32_t stage, uint32_t& seq, uint64_t& body) {
+        seq = cursor[stage];
+        Cell& c = cell[seq & Mask];
+        if (c.stage.load(std::memory_order_acquire) != stage + 1) return false;
+        if (c.seq_plus.load(std::memory_order_relaxed) != seq + 1) return false;
+        body = c.body;
+        cursor[stage] = seq + 1;
+        if (stage == 1)
+            freed.store(cursor[stage], std::memory_order_release);
+        return true;
+    }
+};
+```
+
+**限速只统计还留在集合里的读者**
+
+发布上限是集合里各读者进度的最小值，再加上窗口长度。旁路读者的进度落后超过窗口的四分之一，安静时间达到时限，就退出集合。必须逐条跟上的读者标成常驻，进度一直参与最小值。退出的读者从当时的发布位置重新加入。
+
+```cpp
+#include <cstdint>
+
+struct GateSet {
+    static constexpr int kSlots = 8;
+    static constexpr uint64_t kWin = 128 * 1024;
+    uint64_t pos[kSlots]{};
+    uint64_t quiet_since[kSlots]{};
+    uint8_t in_set[kSlots]{};
+    uint8_t sticky[kSlots]{};
+    int count = 0;
+
+    uint64_t limit(uint64_t published, uint64_t now, uint64_t hold) {
+        uint64_t slow = 0;
+        bool any = false;
+        for (int i = 0; i < count; ++i) {
+            if (!in_set[i]) continue;
+            if (!sticky[i]) {
+                uint64_t lag = published - pos[i];
+                if (lag > (kWin >> 2)) {
+                    if (quiet_since[i] == 0) quiet_since[i] = now;
+                    if (now - quiet_since[i] >= hold) {
+                        in_set[i] = 0;
+                        continue;
+                    }
+                } else {
+                    quiet_since[i] = 0;
+                }
+            }
+            if (!any || pos[i] < slow) slow = pos[i];
+            any = true;
+        }
+        if (!any) return published + kWin;
+        return slow + kWin;
+    }
+
+    void rejoin(int i, uint64_t at) {
+        pos[i] = at;
+        quiet_since[i] = 0;
+        in_set[i] = 1;
+    }
+};
+```
+
+### 40. 用户态静默期回收
+
+无锁结构上摘下一个节点之后，要等每个还在读的核都走过一个不再持有该指针的点，才能把内存还回去。每个读者一条独占缓存行的计数，0 表示这个核已经离线，不参与等待。全局代单独放一条缓存行，从 1 开始单调增加。
+
+读者在已经放下所有共享指针的位置报告一次静默。它先 acquire 读全局代，只有和自己的计数不同才用 release 写回去。代没变就不写，空转不会刷自己的缓存行。离线前同样必须已经放下指针，离线把计数写成 0。重新上线时把计数写成当时的全局代，上线之后再去取新指针。
+
+写者修改完结构，把全局代加一，release 保证修改先于新代被看见。返回值是这次回收的令牌。检查时先看已经确认过的最低代，令牌不大于它就直接通过。否则逐个 acquire 读计数：0 或者大于等于令牌，这个读者已经越过本次修改；否则它还停在旧代上。不等待就返回失败，调用方下次再查；等待就 pause 之后重读。全部通过后，把在线读者计数里最小的一个 relaxed 写回最低代。多个写者不必用比较交换去抢这个值，写小了只是让下一次检查多扫一遍。计数用 64 位，不处理回绕。
+
+摘下的节点连同令牌按先后放进一条链，链头是最老的。回收从链头往下取，遇到第一个令牌还没通过的就停。写者自己也在读者名单里时，先报告自己的静默再等待，否则它会等自己。
+
+```cpp
+#include <atomic>
+#include <cstdint>
+#include <immintrin.h>
+
+struct alignas(64) QSlot {
+    std::atomic<uint64_t> seen{0};
+};
+
+struct Grace {
+    alignas(64) std::atomic<uint64_t> epoch{1};
+    alignas(64) std::atomic<uint64_t> floor_seen{0};
+    QSlot* slot{nullptr};
+    uint32_t n{0};
+
+    void online(uint32_t id) {
+        uint64_t e = epoch.load(std::memory_order_acquire);
+        slot[id].seen.store(e, std::memory_order_release);
+    }
+
+    void offline(uint32_t id) {
+        slot[id].seen.store(0, std::memory_order_release);
+    }
+
+    void quiesce(uint32_t id) {
+        uint64_t e = epoch.load(std::memory_order_acquire);
+        if (e != slot[id].seen.load(std::memory_order_relaxed))
+            slot[id].seen.store(e, std::memory_order_release);
+    }
+
+    uint64_t bump() {
+        return epoch.fetch_add(1, std::memory_order_release) + 1;
+    }
+
+    bool elapsed(uint64_t token, bool wait) {
+        if (token <= floor_seen.load(std::memory_order_relaxed)) return true;
+        uint64_t least = ~uint64_t{0};
+        for (uint32_t i = 0; i < n; ++i) {
+            for (;;) {
+                uint64_t c = slot[i].seen.load(std::memory_order_acquire);
+                if (c == 0 || c >= token) {
+                    if (c != 0 && c < least) least = c;
+                    break;
+                }
+                if (!wait) return false;
+                _mm_pause();
+            }
+        }
+        if (least != ~uint64_t{0})
+            floor_seen.store(least, std::memory_order_relaxed);
+        return true;
+    }
+};
+
+struct Retired {
+    Retired* next;
+    uint64_t token;
+    void (*release)(Retired*);
+};
+
+struct RetireQ {
+    Retired* head{nullptr};
+    Retired* tail{nullptr};
+
+    void shelve(Grace& g, Retired* node) {
+        node->token = g.bump();
+        node->next = nullptr;
+        if (tail == nullptr) head = tail = node;
+        else { tail->next = node; tail = node; }
+    }
+
+    void reclaim(Grace& g) {
+        while (head != nullptr && g.elapsed(head->token, false)) {
+            Retired* n = head;
+            head = n->next;
+            if (head == nullptr) tail = nullptr;
+            n->release(n);
+        }
+    }
+};
+```
+
+### 41. 用户态网卡收发与旁路有序交接
 
 极速行情和极速报单不把热路径放在内核套接字上。收包在用户态轮询网卡事件队列：过滤器按本地地址或完整四元组建好，无关报文进不了队列。每条报文带硬件时间戳和时钟同步标志，下游用这个时间，不在回调里再取一次时钟。
 
@@ -16521,7 +16981,131 @@ uint64_t widen32(uint32_t low, uint64_t recent) {
 }
 ```
 
-### 38. 共享提交完成环上的内核异步收发
+### 42. 序号窗口重排
+
+下游要按序号把乱序到达的对象恢复成连续序列。窗口长度是 2 的幂。还没送出的最小序号是 `min_seq`，它落在环形数组的 `head` 上。新对象的槽位用无符号差：`offset = seq - min_seq`，回绕由减法自己处理。
+
+`offset` 小于窗口长度，对象放进 `head + offset`。这是正常路径。同一槽已经有对象则留下先到的那个，返回 1，调用方回收后到的这份。返回 0 表示这次放入。返回 -1 表示待取队列满，先取走再重试。返回 -2 表示序号离窗口太远。
+
+`offset` 小于两倍窗口，新序号刚刚滑出窗口，多半是前面丢了一个序号，窗口被空槽卡住。先把窗口往前挪 `offset + 1 - 窗口长度` 格：连续已到达的对象挪进一条待取队列，空槽直接跳过。待取队列放不下后面那些已经到达的对象时，挪到放不下为止并返回失败，调用方先把待取队列排空，再拿着原来的对象重试。挪完之后按新的 `min_seq` 重算 `offset` 再放入。
+
+`offset` 大于等于两倍窗口，序号离当前窗口太远，按迟到的旧序号或错误序号丢掉，不放进窗口。
+
+往外取时先排空待取队列，再从窗口头连续取非空槽。遇到空槽就停，后面已经到达的对象也不越过这个洞。
+
+```cpp
+#include <cstdint>
+
+struct SeqWin {
+    static constexpr uint32_t N = 256;
+    static constexpr uint32_t M = N - 1;
+    void* order[N]{};
+    void* ready[N]{};
+    uint32_t min_seq{0};
+    uint32_t head{0};
+    uint32_t rh{0};
+    uint32_t rt{0};
+    bool live{false};
+
+    bool ready_full() const { return ((rh + 1) & M) == rt; }
+
+    uint32_t slide(uint32_t need) {
+        uint32_t adv = 0;
+        while (adv < need) {
+            if (order[head] == nullptr) {
+                head = (head + 1) & M;
+                ++adv;
+                continue;
+            }
+            if (ready_full()) break;
+            ready[rh] = order[head];
+            order[head] = nullptr;
+            head = (head + 1) & M;
+            rh = (rh + 1) & M;
+            ++adv;
+        }
+        min_seq += adv;
+        return adv;
+    }
+
+    int push(void* obj, uint32_t seq) {
+        if (!live) {
+            min_seq = seq;
+            live = true;
+        }
+        uint32_t off = seq - min_seq;
+        if (off < N) {
+            void*& cell = order[(head + off) & M];
+            if (cell != nullptr) return 1;
+            cell = obj;
+            return 0;
+        }
+        if (off < 2 * N) {
+            uint32_t need = off + 1 - N;
+            if (slide(need) < need) return -1;
+            off = seq - min_seq;
+            void*& cell = order[(head + off) & M];
+            if (cell != nullptr) return 1;
+            cell = obj;
+            return 0;
+        }
+        return -2;
+    }
+
+    uint32_t pull(void** out, uint32_t cap) {
+        uint32_t n = 0;
+        while (n < cap && rt != rh) {
+            out[n++] = ready[rt];
+            ready[rt] = nullptr;
+            rt = (rt + 1) & M;
+        }
+        while (n < cap && order[head] != nullptr) {
+            out[n++] = order[head];
+            order[head] = nullptr;
+            head = (head + 1) & M;
+            ++min_seq;
+        }
+        return n;
+    }
+};
+```
+
+**后到的字节按偏移放下，空洞单独去要**
+
+接收缓冲按偏移落位。后面的片段先到，就写在自己的偏移上，并记下这一段已经到达。连续位置停在第一个空洞前面。见过的最高偏移单独往前走。连续位置还没追上最高偏移时，从连续位置起数到下一段已到达的字节，这一段就是向对端重发的起点和长度。重发的字节补上之后，连续位置再往前走。
+
+```cpp
+#include <cstdint>
+#include <cstring>
+
+struct GapLog {
+    static constexpr uint32_t kCap = 4096;
+    uint8_t mem[kCap]{};
+    uint8_t got[kCap]{};
+    uint32_t contig = 0;
+    uint32_t high = 0;
+
+    bool land(uint32_t off, const uint8_t* src, uint32_t n) {
+        if ((uint64_t)off + n > kCap) return false;
+        std::memcpy(mem + off, src, n);
+        std::memset(got + off, 1, n);
+        if (off + n > high) high = off + n;
+        while (contig < high && got[contig]) ++contig;
+        return true;
+    }
+
+    bool hole(uint32_t& from, uint32_t& len) const {
+        if (contig >= high) return false;
+        from = contig;
+        uint32_t e = contig;
+        while (e < high && !got[e]) ++e;
+        len = e - contig;
+        return len != 0;
+    }
+};
+```
+
+### 43. 共享提交完成环上的内核异步收发
 
 套接字热路径若每条报文都进内核，系统调用和文件表查找会抬高尾延迟。用户态与内核共享同一对提交环、完成环：请求写进共享槽，结果从共享槽读回，环上有活数据时不必 enter。提交侧占用数用进度差计算，槽位全部可用。完成环容量要单独放大，溢出会把热路径拽回内核冲刷。
 
@@ -16710,591 +17294,6 @@ struct PinSet {
 struct WorkerRing {
   PinSet pins{};
   void adopt(const PinSet& src) { pins = src; }
-};
-```
-
-### 39. 用户态静默期回收
-
-无锁结构上摘下一个节点之后，要等每个还在读的核都走过一个不再持有该指针的点，才能把内存还回去。每个读者一条独占缓存行的计数，0 表示这个核已经离线，不参与等待。全局代单独放一条缓存行，从 1 开始单调增加。
-
-读者在已经放下所有共享指针的位置报告一次静默。它先 acquire 读全局代，只有和自己的计数不同才用 release 写回去。代没变就不写，空转不会刷自己的缓存行。离线前同样必须已经放下指针，离线把计数写成 0。重新上线时把计数写成当时的全局代，上线之后再去取新指针。
-
-写者修改完结构，把全局代加一，release 保证修改先于新代被看见。返回值是这次回收的令牌。检查时先看已经确认过的最低代，令牌不大于它就直接通过。否则逐个 acquire 读计数：0 或者大于等于令牌，这个读者已经越过本次修改；否则它还停在旧代上。不等待就返回失败，调用方下次再查；等待就 pause 之后重读。全部通过后，把在线读者计数里最小的一个 relaxed 写回最低代。多个写者不必用比较交换去抢这个值，写小了只是让下一次检查多扫一遍。计数用 64 位，不处理回绕。
-
-摘下的节点连同令牌按先后放进一条链，链头是最老的。回收从链头往下取，遇到第一个令牌还没通过的就停。写者自己也在读者名单里时，先报告自己的静默再等待，否则它会等自己。
-
-```cpp
-#include <atomic>
-#include <cstdint>
-#include <immintrin.h>
-
-struct alignas(64) QSlot {
-    std::atomic<uint64_t> seen{0};
-};
-
-struct Grace {
-    alignas(64) std::atomic<uint64_t> epoch{1};
-    alignas(64) std::atomic<uint64_t> floor_seen{0};
-    QSlot* slot{nullptr};
-    uint32_t n{0};
-
-    void online(uint32_t id) {
-        uint64_t e = epoch.load(std::memory_order_acquire);
-        slot[id].seen.store(e, std::memory_order_release);
-    }
-
-    void offline(uint32_t id) {
-        slot[id].seen.store(0, std::memory_order_release);
-    }
-
-    void quiesce(uint32_t id) {
-        uint64_t e = epoch.load(std::memory_order_acquire);
-        if (e != slot[id].seen.load(std::memory_order_relaxed))
-            slot[id].seen.store(e, std::memory_order_release);
-    }
-
-    uint64_t bump() {
-        return epoch.fetch_add(1, std::memory_order_release) + 1;
-    }
-
-    bool elapsed(uint64_t token, bool wait) {
-        if (token <= floor_seen.load(std::memory_order_relaxed)) return true;
-        uint64_t least = ~uint64_t{0};
-        for (uint32_t i = 0; i < n; ++i) {
-            for (;;) {
-                uint64_t c = slot[i].seen.load(std::memory_order_acquire);
-                if (c == 0 || c >= token) {
-                    if (c != 0 && c < least) least = c;
-                    break;
-                }
-                if (!wait) return false;
-                _mm_pause();
-            }
-        }
-        if (least != ~uint64_t{0})
-            floor_seen.store(least, std::memory_order_relaxed);
-        return true;
-    }
-};
-
-struct Retired {
-    Retired* next;
-    uint64_t token;
-    void (*release)(Retired*);
-};
-
-struct RetireQ {
-    Retired* head{nullptr};
-    Retired* tail{nullptr};
-
-    void shelve(Grace& g, Retired* node) {
-        node->token = g.bump();
-        node->next = nullptr;
-        if (tail == nullptr) head = tail = node;
-        else { tail->next = node; tail = node; }
-    }
-
-    void reclaim(Grace& g) {
-        while (head != nullptr && g.elapsed(head->token, false)) {
-            Retired* n = head;
-            head = n->next;
-            if (head == nullptr) tail = nullptr;
-            n->release(n);
-        }
-    }
-};
-```
-
-### 40. 序号窗口重排
-
-下游要按序号把乱序到达的对象恢复成连续序列。窗口长度是 2 的幂。还没送出的最小序号是 `min_seq`，它落在环形数组的 `head` 上。新对象的槽位用无符号差：`offset = seq - min_seq`，回绕由减法自己处理。
-
-`offset` 小于窗口长度，对象放进 `head + offset`。这是正常路径。同一槽已经有对象则留下先到的那个，返回 1，调用方回收后到的这份。返回 0 表示这次放入。返回 -1 表示待取队列满，先取走再重试。返回 -2 表示序号离窗口太远。
-
-`offset` 小于两倍窗口，新序号刚刚滑出窗口，多半是前面丢了一个序号，窗口被空槽卡住。先把窗口往前挪 `offset + 1 - 窗口长度` 格：连续已到达的对象挪进一条待取队列，空槽直接跳过。待取队列放不下后面那些已经到达的对象时，挪到放不下为止并返回失败，调用方先把待取队列排空，再拿着原来的对象重试。挪完之后按新的 `min_seq` 重算 `offset` 再放入。
-
-`offset` 大于等于两倍窗口，序号离当前窗口太远，按迟到的旧序号或错误序号丢掉，不放进窗口。
-
-往外取时先排空待取队列，再从窗口头连续取非空槽。遇到空槽就停，后面已经到达的对象也不越过这个洞。
-
-```cpp
-#include <cstdint>
-
-struct SeqWin {
-    static constexpr uint32_t N = 256;
-    static constexpr uint32_t M = N - 1;
-    void* order[N]{};
-    void* ready[N]{};
-    uint32_t min_seq{0};
-    uint32_t head{0};
-    uint32_t rh{0};
-    uint32_t rt{0};
-    bool live{false};
-
-    bool ready_full() const { return ((rh + 1) & M) == rt; }
-
-    uint32_t slide(uint32_t need) {
-        uint32_t adv = 0;
-        while (adv < need) {
-            if (order[head] == nullptr) {
-                head = (head + 1) & M;
-                ++adv;
-                continue;
-            }
-            if (ready_full()) break;
-            ready[rh] = order[head];
-            order[head] = nullptr;
-            head = (head + 1) & M;
-            rh = (rh + 1) & M;
-            ++adv;
-        }
-        min_seq += adv;
-        return adv;
-    }
-
-    int push(void* obj, uint32_t seq) {
-        if (!live) {
-            min_seq = seq;
-            live = true;
-        }
-        uint32_t off = seq - min_seq;
-        if (off < N) {
-            void*& cell = order[(head + off) & M];
-            if (cell != nullptr) return 1;
-            cell = obj;
-            return 0;
-        }
-        if (off < 2 * N) {
-            uint32_t need = off + 1 - N;
-            if (slide(need) < need) return -1;
-            off = seq - min_seq;
-            void*& cell = order[(head + off) & M];
-            if (cell != nullptr) return 1;
-            cell = obj;
-            return 0;
-        }
-        return -2;
-    }
-
-    uint32_t pull(void** out, uint32_t cap) {
-        uint32_t n = 0;
-        while (n < cap && rt != rh) {
-            out[n++] = ready[rt];
-            ready[rt] = nullptr;
-            rt = (rt + 1) & M;
-        }
-        while (n < cap && order[head] != nullptr) {
-            out[n++] = order[head];
-            order[head] = nullptr;
-            head = (head + 1) & M;
-            ++min_seq;
-        }
-        return n;
-    }
-};
-```
-
-**后到的字节按偏移放下，空洞单独去要**
-
-接收缓冲按偏移落位。后面的片段先到，就写在自己的偏移上，并记下这一段已经到达。连续位置停在第一个空洞前面。见过的最高偏移单独往前走。连续位置还没追上最高偏移时，从连续位置起数到下一段已到达的字节，这一段就是向对端重发的起点和长度。重发的字节补上之后，连续位置再往前走。
-
-```cpp
-#include <cstdint>
-#include <cstring>
-
-struct GapLog {
-    static constexpr uint32_t kCap = 4096;
-    uint8_t mem[kCap]{};
-    uint8_t got[kCap]{};
-    uint32_t contig = 0;
-    uint32_t high = 0;
-
-    bool land(uint32_t off, const uint8_t* src, uint32_t n) {
-        if ((uint64_t)off + n > kCap) return false;
-        std::memcpy(mem + off, src, n);
-        std::memset(got + off, 1, n);
-        if (off + n > high) high = off + n;
-        while (contig < high && got[contig]) ++contig;
-        return true;
-    }
-
-    bool hole(uint32_t& from, uint32_t& len) const {
-        if (contig >= high) return false;
-        from = contig;
-        uint32_t e = contig;
-        while (e < high && !got[e]) ++e;
-        len = e - contig;
-        return len != 0;
-    }
-};
-```
-
-### 41. 每核变量的固定步长
-
-每个核一份的计数、游标、栈顶，如果散落在各自的线程局部存储里，别的核要读只能先拿到对方的线程指针，本核连续碰多项时也不一定落在相邻的缓存行。换成一块按核切开的缓冲：相邻两核之间的距离是固定步长，步长是缓存行的整数倍，并且不小于这一条里要放的全部变量。
-
-变量在启动时按顺序分配。返回的句柄是第 0 核上的地址，核 `i` 的地址是句柄加上 `i` 乘以步长。本核的变量彼此相邻。监控线程用核号直接算地址。对齐不超过一条缓存行，并且是 2 的幂；步长本身按缓存行对齐，所以每个核上的对齐都成立。这段内存在启动时分完，运行期不释放，热路径上没有分配。
-
-```cpp
-#include <cstddef>
-#include <cstdint>
-#include <cstdlib>
-#include <cstring>
-#include <new>
-
-constexpr unsigned kCores = 64;
-constexpr size_t kStride = 64 * 1024;
-
-struct alignas(64) CoreBank {
-    char raw[kStride * kCores];
-    CoreBank* older;
-};
-
-CoreBank* g_bank = nullptr;
-size_t g_cursor = kStride;
-
-void* alloc_core_var(size_t size, size_t align) {
-    if (size == 0 || size > kStride) std::abort();
-    if (align == 0) align = alignof(std::max_align_t);
-    if (align > 64 || (align & (align - 1)) != 0) std::abort();
-    g_cursor = (g_cursor + align - 1) & ~(align - 1);
-    if (g_cursor + size > kStride) {
-        auto* b = new CoreBank;
-        b->older = g_bank;
-        g_bank = b;
-        g_cursor = 0;
-    }
-    void* handle = g_bank->raw + g_cursor;
-    g_cursor += size;
-    for (unsigned c = 0; c < kCores; ++c)
-        std::memset(static_cast<char*>(handle) + c * kStride, 0, size);
-    return handle;
-}
-
-template<class T>
-T* core_var(void* handle, unsigned core) {
-    return reinterpret_cast<T*>(static_cast<char*>(handle) + core * kStride);
-}
-```
-
-### 42. 签名前置的桶查找
-
-键的查找先碰到桶，不先碰到键。每个桶固定 8 个槽，16 位签名紧挨着放在桶头，一共 16 字节，一次向量比较得到命中的槽。键放在另一块数组里，桶里只留下标。签名不同就不读键。桶按缓存行对齐，签名加上下标放得进一条缓存行，未命中只碰这一条。桶在使用前清零。
-
-签名取哈希的高 16 位。0 留给空槽，算出来是 0 就改成 1。两个独立哈希对应主桶和备用桶，主桶没有再查备用桶。
-
-一批键一起查时，先把这批的两个桶算出来并预取，再做签名比较和键比较。预取把桶的缓存缺失叠到比较的后面。
-
-两个桶都满时，挑一个槽把原来的条目踢到它的另一个桶，踢的次数有上限。写空槽时先写下标，再用 release 栅栏写签名，读者看到签名时下标已经可见。踢出之前先把签名清成 0。正在被踢的键可能有一次查不到，不能漏的调用方再查一次。插入侧一个写者。
-
-```cpp
-#include <atomic>
-#include <cstdint>
-#include <cstring>
-#include <immintrin.h>
-
-struct Key16 { uint8_t b[16]; };
-
-struct alignas(64) SigBucket {
-    uint16_t sig[8];
-    uint32_t key_ix[8];
-};
-
-struct SigTable {
-    SigBucket* tab;
-    Key16* keys;
-    uint32_t mask;
-
-    static uint32_t mix(const Key16& key, uint32_t seed) {
-        uint32_t h = seed;
-        for (uint8_t byte : key.b) {
-            h ^= byte;
-            h *= 16777619u;
-        }
-        return h;
-    }
-
-    static uint16_t sig16(uint32_t h) {
-        uint16_t s = uint16_t(h >> 16);
-        return s == 0 ? 1 : s;
-    }
-
-    int match(uint32_t b, uint16_t s, const Key16& key) const {
-        const SigBucket& bk = tab[b];
-        __m128i want = _mm_set1_epi16(static_cast<short>(s));
-        __m128i got = _mm_load_si128(reinterpret_cast<const __m128i*>(bk.sig));
-        int bits = _mm_movemask_epi8(_mm_cmpeq_epi16(want, got));
-        for (int lane = 0; lane < 8; ++lane) {
-            if ((bits & (1 << (2 * lane))) == 0) continue;
-            std::atomic_thread_fence(std::memory_order_acquire);
-            uint32_t ix = bk.key_ix[lane];
-            if (ix == 0) continue;
-            if (std::memcmp(keys[ix].b, key.b, 16) == 0) return int(ix);
-        }
-        return -1;
-    }
-
-    int find(const Key16& key) const {
-        uint32_t h1 = mix(key, 2166136261u);
-        uint32_t h2 = mix(key, 0x811c9dc5u);
-        uint16_t s = sig16(h1);
-        int id = match(h1 & mask, s, key);
-        return id >= 0 ? id : match(h2 & mask, s, key);
-    }
-
-    void find4(const Key16* key, int out[4]) const {
-        uint32_t b1[4], b2[4];
-        uint16_t sg[4];
-        for (int i = 0; i < 4; ++i) {
-            uint32_t h1 = mix(key[i], 2166136261u);
-            sg[i] = sig16(h1);
-            b1[i] = h1 & mask;
-            b2[i] = mix(key[i], 0x811c9dc5u) & mask;
-            __builtin_prefetch(&tab[b1[i]], 0, 3);
-            __builtin_prefetch(&tab[b2[i]], 0, 3);
-        }
-        for (int i = 0; i < 4; ++i) {
-            int id = match(b1[i], sg[i], key[i]);
-            out[i] = id >= 0 ? id : match(b2[i], sg[i], key[i]);
-        }
-    }
-
-    bool install(uint32_t ix, const Key16& key) {
-        keys[ix] = key;
-        uint32_t h1 = mix(key, 2166136261u);
-        uint16_t s = sig16(h1);
-        uint32_t b = h1 & mask;
-        for (int step = 0; step < 16; ++step) {
-            SigBucket& bk = tab[b];
-            for (int i = 0; i < 8; ++i) {
-                if (bk.sig[i] != 0) continue;
-                bk.key_ix[i] = ix;
-                std::atomic_thread_fence(std::memory_order_release);
-                bk.sig[i] = s;
-                return true;
-            }
-            int victim = int((h1 + uint32_t(step)) & 7u);
-            uint16_t old_s = bk.sig[victim];
-            uint32_t old_ix = bk.key_ix[victim];
-            bk.sig[victim] = 0;
-            std::atomic_thread_fence(std::memory_order_release);
-            bk.key_ix[victim] = ix;
-            std::atomic_thread_fence(std::memory_order_release);
-            bk.sig[victim] = s;
-            const Key16& old_key = keys[old_ix];
-            uint32_t primary = mix(old_key, 2166136261u) & mask;
-            b = (b == primary) ? (mix(old_key, 0x811c9dc5u) & mask) : primary;
-            ix = old_ix;
-            s = old_s;
-            h1 ^= 0x9e3779b9u;
-        }
-        return false;
-    }
-};
-```
-
-**有界编号用字前缀加 popcount 得到稠密下标**
-
-原始编号的取值范围装得进一张位图。位为 1 的编号才参与映射。每个 64 位字前面存着更早的字里 1 的个数。查询先看目标位。这一位是 1 时，稠密下标等于字前缀，加上本字从最低位到这一位（含这一位）的 1 的个数，再减 1。合法编号每多一个，这个数就增加，下标跟着变大。编号超出字数组的范围，查询就结束。
-
-```cpp
-#include <cstdint>
-
-struct RankBits {
-    uint64_t* bits = nullptr;
-    uint32_t* prefix = nullptr;
-    uint32_t words = 0;
-
-    void build(const uint32_t* ids, uint32_t n) {
-        for (uint32_t i = 0; i < n; ++i)
-            bits[ids[i] >> 6] |= 1ull << (ids[i] & 63);
-        uint32_t run = 0;
-        for (uint32_t w = 0; w < words; ++w) {
-            prefix[w] = run;
-            run += (uint32_t)__builtin_popcountll(bits[w]);
-        }
-    }
-
-    int find(uint32_t id) const {
-        uint32_t w = id >> 6;
-        if (w >= words) return -1;
-        uint32_t b = id & 63;
-        uint64_t word = bits[w];
-        if ((word & (1ull << b)) == 0) return -1;
-        uint64_t lower = ~0ull >> (63 - b);
-        return (int)(prefix[w] + (uint32_t)__builtin_popcountll(word & lower) - 1);
-    }
-};
-```
-
-**静态集合把一条缓存行放四个键**
-
-键在启动时固定。构建时更换种子，把键分进行，直到每一行至多四个。查询用这个种子算出行号，一次读入四个 64 位键，分成两次向量比较。命中的那一格给出它在整张表上的槽号。状态放在这个槽号上，空着的格就是表里的空位。比较只走到这一行实际写入的个数。
-
-```cpp
-#include <cstdint>
-#include <cstring>
-#include <emmintrin.h>
-#include <smmintrin.h>
-
-struct alignas(64) QuadLine {
-    uint64_t key[4]{};
-    uint32_t n = 0;
-};
-static_assert(sizeof(QuadLine) == 64, "one cache line");
-
-struct QuadTab {
-    QuadLine* line = nullptr;
-    uint32_t mask = 0;
-    uint64_t seed = 0;
-
-    static uint64_t mix(uint64_t k, uint64_t s) {
-        k ^= s;
-        k *= 0x9E3779B97F4A7C15ull;
-        k ^= k >> 32;
-        return k;
-    }
-
-    bool seat(const uint64_t* keys, uint32_t n, uint8_t* cnt) {
-        uint32_t buckets = mask + 1;
-        for (uint64_t s = 1; s < 4096; ++s) {
-            std::memset(cnt, 0, buckets);
-            bool ok = true;
-            for (uint32_t i = 0; i < n; ++i) {
-                uint32_t b = (uint32_t)(mix(keys[i], s) & mask);
-                if (++cnt[b] > 4) { ok = false; break; }
-            }
-            if (!ok) continue;
-            for (uint32_t b = 0; b < buckets; ++b) line[b].n = 0;
-            for (uint32_t i = 0; i < n; ++i) {
-                QuadLine& L = line[(uint32_t)(mix(keys[i], s) & mask)];
-                L.key[L.n++] = keys[i];
-            }
-            seed = s;
-            return true;
-        }
-        return false;
-    }
-
-    int find(uint64_t k) const {
-        uint32_t b = (uint32_t)(mix(k, seed) & mask);
-        const QuadLine& L = line[b];
-        __m128i want = _mm_set1_epi64x((long long)k);
-        __m128i lo = _mm_load_si128(reinterpret_cast<const __m128i*>(L.key));
-        __m128i hi = _mm_load_si128(reinterpret_cast<const __m128i*>(L.key + 2));
-        int bits = _mm_movemask_pd(_mm_castsi128_pd(_mm_cmpeq_epi64(lo, want)));
-        bits |= _mm_movemask_pd(_mm_castsi128_pd(_mm_cmpeq_epi64(hi, want))) << 2;
-        for (uint32_t i = 0; i < L.n; ++i) {
-            if (bits & (1 << i)) return (int)((b << 2) + i);
-        }
-        return -1;
-    }
-};
-```
-
-### 43. 分阶段完成的有序环
-
-占槽和填完分成两次。多个工人可以先占到序号，再各自去填，填完的顺序不必等于占槽的顺序。出口按占槽顺序往外取，序号 5 已经完成、序号 4 还没有，出口仍停在 4。
-
-完成标记分成阶段和序号加一。阶段 0 的工人写好载荷，再写序号，最后用 release 把阶段写成 1。下一段的工人等到阶段变成 1 且序号匹配，处理完把阶段写成 2。每一段都有自己的游标。最后一段每取走一条，就把已释放序号发布出去，占槽一侧用它判断距离。想少碰这条缓存行时，可以攒几条再发布，生产者只是更晚看见空位。槽位容量要盖住从最早未释放的序号到最新占槽的距离，否则两圈写到同一个槽，旧的完成标记会被看成新的。
-
-```cpp
-#include <atomic>
-#include <cstdint>
-
-struct StageRing {
-    static constexpr uint32_t Cap = 1024;
-    static constexpr uint32_t Mask = Cap - 1;
-
-    struct Cell {
-        alignas(64) std::atomic<uint32_t> stage{0};
-        std::atomic<uint32_t> seq_plus{0};
-        uint64_t body;
-    } cell[Cap];
-
-    alignas(64) std::atomic<uint32_t> claim{0};
-    alignas(64) std::atomic<uint32_t> freed{0};
-    uint32_t cursor[2]{};
-
-    bool acquire(uint32_t& seq) {
-        uint32_t h = claim.load(std::memory_order_relaxed);
-        for (;;) {
-            uint32_t done = freed.load(std::memory_order_acquire);
-            if (h - done >= Cap) return false;
-            if (claim.compare_exchange_weak(h, h + 1,
-                    std::memory_order_relaxed, std::memory_order_relaxed)) {
-                seq = h;
-                return true;
-            }
-        }
-    }
-
-    void finish(uint32_t seq, uint32_t stage, uint64_t body) {
-        Cell& c = cell[seq & Mask];
-        if (stage == 0) c.body = body;
-        c.seq_plus.store(seq + 1, std::memory_order_relaxed);
-        c.stage.store(stage + 1, std::memory_order_release);
-    }
-
-    bool take(uint32_t stage, uint32_t& seq, uint64_t& body) {
-        seq = cursor[stage];
-        Cell& c = cell[seq & Mask];
-        if (c.stage.load(std::memory_order_acquire) != stage + 1) return false;
-        if (c.seq_plus.load(std::memory_order_relaxed) != seq + 1) return false;
-        body = c.body;
-        cursor[stage] = seq + 1;
-        if (stage == 1)
-            freed.store(cursor[stage], std::memory_order_release);
-        return true;
-    }
-};
-```
-
-**限速只统计还留在集合里的读者**
-
-发布上限是集合里各读者进度的最小值，再加上窗口长度。旁路读者的进度落后超过窗口的四分之一，安静时间达到时限，就退出集合。必须逐条跟上的读者标成常驻，进度一直参与最小值。退出的读者从当时的发布位置重新加入。
-
-```cpp
-#include <cstdint>
-
-struct GateSet {
-    static constexpr int kSlots = 8;
-    static constexpr uint64_t kWin = 128 * 1024;
-    uint64_t pos[kSlots]{};
-    uint64_t quiet_since[kSlots]{};
-    uint8_t in_set[kSlots]{};
-    uint8_t sticky[kSlots]{};
-    int count = 0;
-
-    uint64_t limit(uint64_t published, uint64_t now, uint64_t hold) {
-        uint64_t slow = 0;
-        bool any = false;
-        for (int i = 0; i < count; ++i) {
-            if (!in_set[i]) continue;
-            if (!sticky[i]) {
-                uint64_t lag = published - pos[i];
-                if (lag > (kWin >> 2)) {
-                    if (quiet_since[i] == 0) quiet_since[i] = now;
-                    if (now - quiet_since[i] >= hold) {
-                        in_set[i] = 0;
-                        continue;
-                    }
-                } else {
-                    quiet_since[i] = 0;
-                }
-            }
-            if (!any || pos[i] < slow) slow = pos[i];
-            any = true;
-        }
-        if (!any) return published + kWin;
-        return slow + kWin;
-    }
-
-    void rejoin(int i, uint64_t at) {
-        pos[i] = at;
-        quiet_since[i] = 0;
-        in_set[i] = 1;
-    }
 };
 ```
 
@@ -17514,12 +17513,10 @@ struct SgeList {
 };
 ```
 
-
 ### 45. 系统设计优质文章
 [https://mp.weixin.qq.com/s/9OH1RA8POFidgQnvape6fQ](https://mp.weixin.qq.com/s/9OH1RA8POFidgQnvape6fQ)
 
 [https://mp.weixin.qq.com/s/PuG4ZFVZ-7hijS4Db8Z5jQ](https://mp.weixin.qq.com/s/PuG4ZFVZ-7hijS4Db8Z5jQ)
-
 
 ## 常见性能瓶颈与优化方向
 ### 1. roofline model
