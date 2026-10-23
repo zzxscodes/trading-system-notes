@@ -44,12 +44,13 @@ English version：[https://github.com/zzxscodes/trading-system-notes/blob/main/t
   - [35. 环缓冲就地写入减少大对象拷贝](#35-环缓冲就地写入减少大对象拷贝)
   - [36. 共享资源容量耗尽时快速失败](#36-共享资源容量耗尽时快速失败)
   - [37. 用户态网卡收发与旁路有序交接](#37-用户态网卡收发与旁路有序交接)
-  - [38. 用户态静默期回收](#38-用户态静默期回收)
-  - [39. 序号窗口重排](#39-序号窗口重排)
-  - [40. 每核变量的固定步长](#40-每核变量的固定步长)
-  - [41. 签名前置的桶查找](#41-签名前置的桶查找)
-  - [42. 分阶段完成的有序环](#42-分阶段完成的有序环)
-  - [43. 系统设计优质文章](#43-系统设计优质文章)
+  - [38. 共享提交完成环上的内核异步收发](#38-共享提交完成环上的内核异步收发)
+  - [39. 用户态静默期回收](#39-用户态静默期回收)
+  - [40. 序号窗口重排](#40-序号窗口重排)
+  - [41. 每核变量的固定步长](#41-每核变量的固定步长)
+  - [42. 签名前置的桶查找](#42-签名前置的桶查找)
+  - [43. 分阶段完成的有序环](#43-分阶段完成的有序环)
+  - [44. 系统设计优质文章](#44-系统设计优质文章)
 - [常见性能瓶颈与优化方向](#常见性能瓶颈与优化方向)
   - [1. roofline model](#1-roofline-model)
     - [Memory Bound优化](#memory-bound优化)
@@ -4116,6 +4117,48 @@ public:
         tail_.store(tail_.load(std::memory_order_relaxed) + 1, std::memory_order_release);
     }
 };
+```
+
+进度计数记录从初始化起成功写入或读出了多少次，数组下标只是进度对容量取模。合法状态始终满足占用数落在 0 到 N。程序保存的是进度对计数器模数 M 的余数。只要 N 小于 M，无符号相减得到的占用数就等于真实距离，空是 0，满是 N。容量为 2 的 k 次方时，定位槽位只要 k 位；计数器再多一位，M 等于 2N，同一槽位编号可以对应空或满，靠多出的那一位相位区分。计数器可以反复回到零：取模丢掉的是圈数，不是小于 M 的受限距离。不要把无符号占用数改成有符号差来判断谁在前面；满队列时距离恰好是 M 的一半，已经落在有符号边界。验证时把计数器收成刚好多一位的窄类型，反复写满再读空，主动穿过回绕边界。
+
+```cpp
+template <class T, std::size_t N, class Ctr = std::uint32_t>
+class WrapGate {
+  static_assert(std::is_unsigned_v<Ctr> && !std::is_same_v<Ctr, bool>);
+  static_assert(N != 0 && (N & (N - 1)) == 0);
+  static_assert(N <= std::numeric_limits<Ctr>::max() / 2 + 1);
+  std::array<T, N> cell_{};
+  Ctr take_{0};
+  Ctr put_{0};
+public:
+  Ctr depth() const noexcept { return static_cast<Ctr>(put_ - take_); }
+  bool vacant() const noexcept { return take_ == put_; }
+  bool saturated() const noexcept { return depth() == N; }
+  bool offer(const T& v) {
+    if (saturated()) return false;
+    cell_[put_ & (N - 1)] = v;
+    put_ = static_cast<Ctr>(put_ + std::uintmax_t{1});
+    return true;
+  }
+  bool take(T& v) {
+    if (vacant()) return false;
+    v = cell_[take_ & (N - 1)];
+    take_ = static_cast<Ctr>(take_ + std::uintmax_t{1});
+    return true;
+  }
+};
+
+// N=128 needs 7 index bits; Ctr=uint8_t is exactly one bit wider. Fill/empty cycles cross 255→0 many times.
+void probe_wrap() {
+  WrapGate<unsigned, 128, std::uint8_t> q;
+  unsigned w = 0, r = 0, v = 0;
+  for (unsigned round = 0; round < 200; ++round) {
+    for (unsigned i = 0; i < 128; ++i) q.offer(w++);
+    q.take(v); ++r;
+    q.offer(w++);
+    for (unsigned i = 0; i < 128; ++i) { q.take(v); ++r; }
+  }
+}
 ```
 
 **槽位延迟构造**
@@ -16276,7 +16319,199 @@ uint64_t widen32(uint32_t low, uint64_t recent) {
 }
 ```
 
-### 38. 用户态静默期回收
+### 38. 共享提交完成环上的内核异步收发
+
+套接字热路径若每条报文都进内核，系统调用和文件表查找会抬高尾延迟。用户态与内核共享同一对提交环、完成环：请求写进共享槽，结果从共享槽读回，环上有活数据时不必 enter。提交侧占用数用进度差计算，槽位全部可用。完成环容量要单独放大，溢出会把热路径拽回内核冲刷。
+
+单线程发布时打开单发布者与推迟任务运行，完成环按提交深度数倍配置。任务工作推到主动等待或提交等待时再跑，避免无关系统调用返回时被打断。去掉提交下标间接表后，槽号就是下标。
+
+```cpp
+enum : uint32_t {
+  kSoloIssuer = 1u << 0,
+  kDeferRun   = 1u << 1,
+  kWideFin    = 1u << 2,
+  kNoIdxTable = 1u << 3,
+  kRewindSub  = 1u << 4,
+  kAppPages   = 1u << 5,
+};
+
+struct OpenSpec {
+  uint32_t sub_depth{256};
+  uint32_t fin_depth{1024};
+  uint32_t flags{kSoloIssuer | kDeferRun | kWideFin | kNoIdxTable};
+};
+```
+
+先窥完成环再决定是否 enter。一批结果用一次 release 推进完成头。固定文件表省掉每次请求的 fd 查找；接受连接可以直接落入表项。供给缓冲环把空缓冲交给内核，完成时从标志里取出缓冲号，用完再还回环。
+
+```cpp
+struct JobSlot {
+  uint32_t op{};
+  uint32_t fd{};
+  uint32_t buf{};
+  uint32_t len{};
+  uint64_t cookie{};
+};
+
+struct DoneSlot {
+  int32_t result{};
+  uint32_t flags{};
+  uint64_t cookie{};
+};
+
+struct SharedProg {
+  alignas(64) std::atomic<uint32_t> head{0};
+  alignas(64) std::atomic<uint32_t> tail{0};
+};
+
+template <uint32_t N>
+struct SubRing {
+  static_assert((N & (N - 1)) == 0);
+  JobSlot jobs[N]{};
+  SharedProg prog{};
+  uint32_t local_tail{0};
+  static constexpr uint32_t mask = N - 1;
+  uint32_t pending() const {
+    return local_tail - prog.head.load(std::memory_order_relaxed);
+  }
+  uint32_t room() const { return N - pending(); }
+  JobSlot* claim() {
+    if (room() == 0) return nullptr;
+    return &jobs[local_tail & mask];
+  }
+  void note_filled() { ++local_tail; }
+  uint32_t publish() {
+    uint32_t t = local_tail;
+    prog.tail.store(t, std::memory_order_release);
+    return t - prog.head.load(std::memory_order_relaxed);
+  }
+};
+
+template <uint32_t N>
+struct FinRing {
+  static_assert((N & (N - 1)) == 0);
+  DoneSlot done[N]{};
+  SharedProg prog{};
+  static constexpr uint32_t mask = N - 1;
+  template <class Fn>
+  uint32_t harvest(uint32_t cap, Fn&& fn) {
+    uint32_t h = prog.head.load(std::memory_order_relaxed);
+    uint32_t t = prog.tail.load(std::memory_order_acquire);
+    uint32_t n = 0;
+    while (h != t && n < cap) {
+      fn(done[h & mask]);
+      ++h; ++n;
+    }
+    if (n) prog.head.store(h, std::memory_order_release);
+    return n;
+  }
+};
+
+template <uint16_t Depth>
+struct SupplyRing {
+  struct BufOffer { uint8_t* ptr; uint32_t len; uint16_t bid; };
+  BufOffer slot[Depth]{};
+  alignas(64) std::atomic<uint16_t> head{0};
+  alignas(64) std::atomic<uint16_t> tail{0};
+  void post(uint8_t* p, uint32_t n, uint16_t id) {
+    uint16_t t = tail.load(std::memory_order_relaxed);
+    slot[t % Depth] = {p, n, id};
+    tail.store(static_cast<uint16_t>(t + 1), std::memory_order_release);
+  }
+  void recycle(uint16_t id, uint8_t* p, uint32_t n) { post(p, n, id); }
+};
+```
+
+处理完成项时若同时归还供给缓冲，把缓冲尾与完成头放在同一条推进路径里，少一次独立原子更新。忙等窥环期间关掉完成事件通知，准备阻塞再打开，避免自旋时被无用唤醒打断。
+
+```cpp
+template <uint32_t SubN, uint32_t FinN>
+struct TwinAdvance {
+  SubRing<SubN>* sub{};
+  FinRing<FinN>* fin{};
+  SupplyRing<256>* supply{};
+  void retire(uint32_t n, const uint16_t* bids) {
+    for (uint32_t i = 0; i < n; ++i)
+      supply->recycle(bids[i], nullptr, 0);
+    uint16_t t = supply->tail.load(std::memory_order_relaxed);
+    supply->tail.store(t, std::memory_order_release);
+    uint32_t h = fin->prog.head.load(std::memory_order_relaxed);
+    fin->prog.head.store(h + n, std::memory_order_release);
+  }
+};
+
+struct WakeGate {
+  std::atomic<uint32_t> flags{0};
+  static constexpr uint32_t kQuiet = 1u;
+  void hush() { flags.fetch_or(kQuiet, std::memory_order_relaxed); }
+  void arm()  { flags.fetch_and(~kQuiet, std::memory_order_relaxed); }
+  bool loud() const {
+    return (flags.load(std::memory_order_relaxed) & kQuiet) == 0;
+  }
+};
+```
+
+等待参数放进注册页，enter 时只传页内下标，不再每次拷贝超时结构。最短等待把“至少等到若干完成或过了这段微秒”说清楚，硬超时仍封顶。网卡侧挂上忙轮询提示后，零超时的提交等待可以在用户态把 NAPI 路径跑热。
+
+```cpp
+struct WaitPage {
+  uint64_t hard_ns{};
+  uint32_t min_wait_us{};
+  uint32_t want{};
+};
+
+struct WaitBook {
+  WaitPage page[4]{};
+  void set(uint32_t i, uint64_t hard_ns, uint32_t min_us, uint32_t want) {
+    page[i] = {hard_ns, min_us, want};
+  }
+  const WaitPage& pick(uint32_t i) const { return page[i]; }
+};
+
+struct NapiHint {
+  uint32_t poll_us{50};
+  bool prefer_busy{true};
+};
+```
+
+发送零拷贝在数据真正离开协议栈之前还会再给一次通知完成。第一次完成只说明长度，缓冲要等通知完成才能复用。环建在应用提供的大页上，提交可以回卷到低地址槽，小批量总是打同一组热缓存行；该模式与内核提交轮询线程互斥。主环钉住的缓冲可以克隆给工作环，不必二次钉页。
+
+```cpp
+enum : uint32_t { kNotif = 2u };
+
+struct ZcTrack {
+  bool in_flight{false};
+  void on_done(const DoneSlot& d) {
+    if (d.flags & kNotif) { in_flight = false; return; }
+    in_flight = true;
+  }
+  bool free_to_reuse() const { return !in_flight; }
+};
+
+struct RewindBatch {
+  JobSlot* base{};
+  uint32_t filled{0};
+  void reset() { filled = 0; }
+  JobSlot* next() { return &base[filled++]; }
+  uint32_t submit_from_zero() {
+    uint32_t n = filled;
+    filled = 0;
+    return n;
+  }
+};
+
+struct PinSet {
+  void* pages[8]{};
+  uint32_t n{0};
+};
+
+struct WorkerRing {
+  PinSet pins{};
+  void adopt(const PinSet& src) { pins = src; }
+};
+```
+
+### 39. 用户态静默期回收
 
 无锁结构上摘下一个节点之后，要等每个还在读的核都走过一个不再持有该指针的点，才能把内存还回去。每个读者一条独占缓存行的计数，0 表示这个核已经离线，不参与等待。全局代单独放一条缓存行，从 1 开始单调增加。
 
@@ -16368,7 +16603,7 @@ struct RetireQ {
 };
 ```
 
-### 39. 序号窗口重排
+### 40. 序号窗口重排
 
 下游要按序号把乱序到达的对象恢复成连续序列。窗口长度是 2 的幂。还没送出的最小序号是 `min_seq`，它落在环形数组的 `head` 上。新对象的槽位用无符号差：`offset = seq - min_seq`，回绕由减法自己处理。
 
@@ -16492,7 +16727,7 @@ struct GapLog {
 };
 ```
 
-### 40. 每核变量的固定步长
+### 41. 每核变量的固定步长
 
 每个核一份的计数、游标、栈顶，如果散落在各自的线程局部存储里，别的核要读只能先拿到对方的线程指针，本核连续碰多项时也不一定落在相邻的缓存行。换成一块按核切开的缓冲：相邻两核之间的距离是固定步长，步长是缓存行的整数倍，并且不小于这一条里要放的全部变量。
 
@@ -16540,7 +16775,7 @@ T* core_var(void* handle, unsigned core) {
 }
 ```
 
-### 41. 签名前置的桶查找
+### 42. 签名前置的桶查找
 
 键的查找先碰到桶，不先碰到键。每个桶固定 8 个槽，16 位签名紧挨着放在桶头，一共 16 字节，一次向量比较得到命中的槽。键放在另一块数组里，桶里只留下标。签名不同就不读键。桶按缓存行对齐，签名加上下标放得进一条缓存行，未命中只碰这一条。桶在使用前清零。
 
@@ -16755,7 +16990,7 @@ struct QuadTab {
 };
 ```
 
-### 42. 分阶段完成的有序环
+### 43. 分阶段完成的有序环
 
 占槽和填完分成两次。多个工人可以先占到序号，再各自去填，填完的顺序不必等于占槽的顺序。出口按占槽顺序往外取，序号 5 已经完成、序号 4 还没有，出口仍停在 4。
 
@@ -16861,7 +17096,7 @@ struct GateSet {
 };
 ```
 
-### 43. 系统设计优质文章
+### 44. 系统设计优质文章
 [https://mp.weixin.qq.com/s/9OH1RA8POFidgQnvape6fQ](https://mp.weixin.qq.com/s/9OH1RA8POFidgQnvape6fQ)
 
 [https://mp.weixin.qq.com/s/PuG4ZFVZ-7hijS4Db8Z5jQ](https://mp.weixin.qq.com/s/PuG4ZFVZ-7hijS4Db8Z5jQ)
