@@ -115,9 +115,7 @@ English version：[https://github.com/zzxscodes/trading-system-notes/blob/main/t
   - [31. 信号窗口驱动自动母单](#31-信号窗口驱动自动母单)
   - [32. 平今平昨与股票可卖冻结](#32-平今平昨与股票可卖冻结)
   - [33. 品种大类费用与冻结价回填](#33-品种大类费用与冻结价回填)
-  - [34. 监控进程的只读消费与发布限速](#34-监控进程的只读消费与发布限速)
-  - [35. 交易进程的启停与主机采样](#35-交易进程的启停与主机采样)
-  - [36. 配对执行的挂单量、腿价格和手数门槛](#36-配对执行的挂单量腿价格和手数门槛)
+  - [34. 配对执行的挂单量、腿价格和手数门槛](#34-配对执行的挂单量腿价格和手数门槛)
 - [业务逻辑设计-计算](#业务逻辑设计-计算)
   - [1. 对数收益率(百分比非对称性)](#1-对数收益率百分比非对称性)
   - [2. 市场趋势和波动率的状态变化](#2-市场趋势和波动率的状态变化)
@@ -147,6 +145,9 @@ English version：[https://github.com/zzxscodes/trading-system-notes/blob/main/t
   - [9. 无偏交易模拟](#9-无偏交易模拟)
   - [10. 约束模拟交易日的日历与风控文档](#10-约束模拟交易日的日历与风控文档)
   - [11. 模拟持仓与资金的柜台查询回报](#11-模拟持仓与资金的柜台查询回报)
+- [业务逻辑设计-监控](#业务逻辑设计-监控)
+  - [1. 监控进程的只读消费与发布限速](#1-监控进程的只读消费与发布限速)
+  - [2. 交易进程的启停与主机采样](#2-交易进程的启停与主机采样)
 - [业务逻辑设计-清算](#业务逻辑设计-清算)
   - [1. 日终清算流水线](#1-日终清算流水线)
   - [2. 清算成交类型与方向](#2-清算成交类型与方向)
@@ -36348,191 +36349,7 @@ bool backfill_lock(double& lock_px, int64_t& lock_qty, int64_t qty,
 }
 ```
 
-### 34. 监控进程的只读消费与发布限速
-监控和落盘放在独立进程里。池子容量不大于 0 时跳过。剩余槽位低于容量的 5% 时打一条告警，比较的是剩余量。
-
-对外发布和消费回调各用一条事件循环。漏桶在发布线程上：水位减去费率乘经过的毫秒，小于 0 就归零；水位仍低于容量就加 1 并放行一条，否则这条留在待发队列里等下一个定时器。心跳用非持久投递，启停命令的应答用持久投递。属性上报凑满 100 条，或距离上次发送超过 15 秒，再打成一包；日志上报到达即转发。落盘侧预分配固定条数的数组，下标前移，刷盘时按条数乘步长一次写出，然后清零整段并把下标归零。
-
-```cpp
-void watch_pool(const char* name, int64_t used, int64_t cap) {
-    if (cap <= 0) return;
-    if (static_cast<double>(cap - used) < static_cast<double>(cap) * 0.05)
-        raise_pool(name, used, cap);
-}
-```
-
-```cpp
-bool leak_one(int64_t& level, int64_t& last_ms, int64_t now_ms, int rate, int cap) {
-    int64_t dt = now_ms - last_ms;
-    last_ms = now_ms;
-    level -= static_cast<int64_t>(rate) * dt;
-    if (level < 0) level = 0;
-    if (level >= cap) return false;
-    ++level;
-    return true;
-}
-
-struct PropBatch {
-    int n{0};
-    int64_t last_ms{0};
-    bool due(int64_t now_ms) const {
-        return n > 100 || now_ms - last_ms > 15000;
-    }
-};
-
-struct Slab {
-    static constexpr int CAP = 1000000;
-    char* rec{nullptr};
-    int n{0};
-    size_t stride{0};
-    void flush(std::ostream& out) {
-        out.write(rec, static_cast<std::streamsize>(n * stride));
-        std::memset(rec, 0, stride * CAP);
-        n = 0;
-    }
-};
-```
-
-晚到的行情订阅先放进一张按标的索引的待补表。每笔行情到来时先看这张表，空表直接返回。标的在表里时，把当前这一笔装进一条消息，带上类型、编码、压缩方式、正文和正文字节数，发给该标的下挂着的每一条路由。发完把这个标的从表里删掉。之后的行情按原路径转发。
-
-```cpp
-void push_fresh(std::unordered_map<std::string, std::vector<std::string>>& fresh,
-                const std::string& sym, const Quote& q) {
-    if (fresh.empty()) return;
-    auto it = fresh.find(sym);
-    if (it == fresh.end() || it->second.empty()) return;
-    for (const auto& route : it->second) {
-        Envelope env;
-        env.kind = "mkt.quote";
-        env.codec = "json";
-        env.pack = "none";
-        env.body = dump_one(q);
-        env.body_n = static_cast<int>(env.body.size());
-        send_one(route, env);
-    }
-    fresh.erase(it);
-}
-```
-
-
-### 35. 交易进程的启停与主机采样
-启停和主机采样放在两个进程里。命令进程管定时拉起、停止和改配置，上报进程管主机计数和共享内存日志。共享内存要等生产进程把段建好，读者才挂上去。开盘只改配置里的读者开关，上报进程继续跑，下一次起来时按这个开关挂上。收盘先停业务进程，把开关写回假，再重启上报进程，映射在生产端退出前卸掉。
-
-进程用完整命令行的结尾来认。`/proc/pid/status` 里的名字只留十几个字符，带分钟后缀的备份文件又和正本共前缀，短名和前缀都会对到别人身上。查询先丢掉查询命令自己那一行，只留命令行以目标文件名结尾的 pid。Python 进程认脚本名。这个 pid 已经在，就不再拉起。停止先发普通终止，等半秒再查，还在的发强制终止。整组拉起先整组停掉，空出几秒让共享内存和端口放开，再按序号逐个拉起。中间有一个失败，后面的继续。控制进程不进这条路径。拉起前把工作目录切到该进程的安装目录，目录插到库路径最前面，子进程带着这套环境起来；起来之后工作目录切回控制进程自己的目录。
-
-一天可以排多段开收盘时刻。命令进程起来时，已经过去的时刻改到下一天，排在还没到的时刻后面，中午起来的控制进程不会把早上那次启动再跑一遍。启动和停止各有一段星期范围，当天在范围外就把这条时刻推到下一天。跑完的时刻推到下一天的同一钟点。拉起和重启进只有一个工人的池子，停止和改配置留在请求线程上，启动间隔里的睡眠留在池子里。命令先对站点号，对不上就回失败。
-
-CPU 占用取上次调用到这次的差值，这次调用不睡。温度读一轮要十几秒，逐核占用留在周期采样外面。网速放在上报线程里，隔一秒读两次计数再相减。磁盘用累计字节除累计忙时间，得到开机以来的平均吞吐。阈值写 0 的项直接跳过。内存里单独记共享内存占用。共享内存日志由一条几乎不睡的线程抽进发送队列，主机状态按一百毫秒上报一次。状态报文非持久，共享内存日志持久。发布连接的心跳设成 60 秒。心跳写成 0 时，发送失败不抛错，重连不会被带起来。发布侧打开送达确认，消费侧限制预取。队列名和路由键都带站点号。
-
-```python
-def session_open(cfg_path):
-    patch_flag(cfg_path, reader=True)
-
-def session_close(cfg_path, reporter):
-    stop_fleet()
-    patch_flag(cfg_path, reader=False)
-    restart(reporter)
-```
-
-```python
-def live_pids(binary):
-    pids = []
-    text = run(f"pgrep -af {binary}")
-    for line in text.splitlines():
-        if "pgrep -af" in line:
-            continue
-        if line.endswith(binary):
-            pids.append(line.split()[0])
-    return pids
-
-def stop_one(binary):
-    for pid in live_pids(binary):
-        run(f"kill {pid}")
-    time.sleep(0.5)
-    for pid in live_pids(binary):
-        run(f"kill -9 {pid}")
-
-def bring_up(apps, self_name, self_home):
-    stop_fleet(apps)
-    time.sleep(5)
-    for app in sorted(apps, key=lambda a: a["order"]):
-        if not app["on"] or app["name"] == self_name:
-            continue
-        os.chdir(app["home"])
-        prepend("LD_LIBRARY_PATH", app["home"])
-        if not live_pids(app["name"]):
-            run(f"nohup ./{app['name']} >/dev/null 2>&1 &")
-        os.chdir(self_home)
-        time.sleep(app.get("gap", 5))
-```
-
-```python
-def load_clocks(clocks, now):
-    pending, late = [], []
-    for item in clocks:
-        (pending if item["when"] > now else late).append(item)
-    pending.sort(key=lambda x: x["when"])
-    late.sort(key=lambda x: x["when"])
-    for item in late:
-        item["when"] = item["when"] + timedelta(days=1)
-        pending.append(item)
-    return pending
-
-def fire(item, start_days, stop_days):
-    wd = item["when"].isoweekday()
-    window = start_days if item["opening"] else stop_days
-    if wd < window[0] or wd > window[1]:
-        item["when"] = item["when"] + timedelta(days=1)
-        return False
-    run_open() if item["opening"] else run_close()
-    item["when"] = item["when"] + timedelta(days=1)
-    return True
-```
-
-```python
-def sample_host(prev_net, unit):
-    cpu = psutil.cpu_percent(interval=None)
-    wait = psutil.cpu_times_percent().iowait
-    shared = psutil.virtual_memory().shared / unit
-    time.sleep(1)
-    now = psutil.net_io_counters(nowrap=True)
-    up = (now.bytes_sent - prev_net.bytes_sent) / unit
-    return cpu, wait, shared, up
-
-def breached(value, limit):
-    if math.isclose(limit, 0.0):
-        return False
-    return value >= limit
-```
-
-安装包先解到旁路目录。包内目录名和配置里的进程名不一致时，先把解压出来的可执行文件改成配置名，再整目录覆盖到安装路径。覆盖前把安装目录里同名可执行文件按分钟时间戳拷到旁边。配置文件同样先留一份带时间戳的副本，再写新内容。整棵安装树按版本号拷进备份目录，回退时把那一版整棵拷回安装路径。应用清单按进程名合并：这次报文里出现的进程覆盖同名项；报文里空着的开收盘时刻、星期范围和公共库路径保持原值。
-
-```python
-def install_tree(home, name, unpacked, stamp):
-    live = os.path.join(home, name)
-    if os.path.exists(live):
-        shutil.copy(live, f"{live}_{stamp}")
-    inner = os.path.join(unpacked, os.listdir(unpacked)[0])
-    packed = os.path.join(inner, os.path.basename(inner))
-    if os.path.basename(inner) != name and os.path.exists(packed):
-        os.rename(packed, os.path.join(inner, name))
-    for entry in os.listdir(inner):
-        copy_over(os.path.join(inner, entry), home)
-
-def merge_roster(old, incoming):
-    by_name = {a["name"]: a for a in old.get("apps", [])}
-    for app in incoming.get("apps", []):
-        by_name[app["name"]] = app
-    out = dict(old)
-    for key in ("open_days", "close_days", "clocks", "shared_libs"):
-        if incoming.get(key):
-            out[key] = incoming[key]
-    out["apps"] = list(by_name.values())
-    return out
-```
-
-
-### 36. 配对执行的挂单量、腿价格和手数门槛
+### 34. 配对执行的挂单量、腿价格和手数门槛
 一笔配对带着若干腿和一份执行参数。每条腿有合约、账户、柜台、产品、币种、汇率、手数权重、行情系数、保证金率、标的、最小变动价位、每手数量和品种。执行参数给出目标价、目标手数、允许挂被动单的合约、组合方式、各腿方向、最大挂单量、挂单相对打单的偏移、撤单偏移、改单偏移、打单让出的档数、撤单间隔、强制配平的秒数、替代价格、价差、追价方式、定价方式、限价方式和限价档数。
 
 ```cpp
@@ -44550,6 +44367,190 @@ struct AstBody {
 void fill_route(char* out, int n, const char* counter) {
     std::snprintf(out, n, "%s_back_respond_routing", counter);
 }
+```
+
+## 业务逻辑设计-监控
+
+### 1. 监控进程的只读消费与发布限速
+监控和落盘放在独立进程里。池子容量不大于 0 时跳过。剩余槽位低于容量的 5% 时打一条告警，比较的是剩余量。
+
+对外发布和消费回调各用一条事件循环。漏桶在发布线程上：水位减去费率乘经过的毫秒，小于 0 就归零；水位仍低于容量就加 1 并放行一条，否则这条留在待发队列里等下一个定时器。心跳用非持久投递，启停命令的应答用持久投递。属性上报凑满 100 条，或距离上次发送超过 15 秒，再打成一包；日志上报到达即转发。落盘侧预分配固定条数的数组，下标前移，刷盘时按条数乘步长一次写出，然后清零整段并把下标归零。
+
+```cpp
+void watch_pool(const char* name, int64_t used, int64_t cap) {
+    if (cap <= 0) return;
+    if (static_cast<double>(cap - used) < static_cast<double>(cap) * 0.05)
+        raise_pool(name, used, cap);
+}
+```
+
+```cpp
+bool leak_one(int64_t& level, int64_t& last_ms, int64_t now_ms, int rate, int cap) {
+    int64_t dt = now_ms - last_ms;
+    last_ms = now_ms;
+    level -= static_cast<int64_t>(rate) * dt;
+    if (level < 0) level = 0;
+    if (level >= cap) return false;
+    ++level;
+    return true;
+}
+
+struct PropBatch {
+    int n{0};
+    int64_t last_ms{0};
+    bool due(int64_t now_ms) const {
+        return n > 100 || now_ms - last_ms > 15000;
+    }
+};
+
+struct Slab {
+    static constexpr int CAP = 1000000;
+    char* rec{nullptr};
+    int n{0};
+    size_t stride{0};
+    void flush(std::ostream& out) {
+        out.write(rec, static_cast<std::streamsize>(n * stride));
+        std::memset(rec, 0, stride * CAP);
+        n = 0;
+    }
+};
+```
+
+晚到的行情订阅先放进一张按标的索引的待补表。每笔行情到来时先看这张表，空表直接返回。标的在表里时，把当前这一笔装进一条消息，带上类型、编码、压缩方式、正文和正文字节数，发给该标的下挂着的每一条路由。发完把这个标的从表里删掉。之后的行情按原路径转发。
+
+```cpp
+void push_fresh(std::unordered_map<std::string, std::vector<std::string>>& fresh,
+                const std::string& sym, const Quote& q) {
+    if (fresh.empty()) return;
+    auto it = fresh.find(sym);
+    if (it == fresh.end() || it->second.empty()) return;
+    for (const auto& route : it->second) {
+        Envelope env;
+        env.kind = "mkt.quote";
+        env.codec = "json";
+        env.pack = "none";
+        env.body = dump_one(q);
+        env.body_n = static_cast<int>(env.body.size());
+        send_one(route, env);
+    }
+    fresh.erase(it);
+}
+```
+
+### 2. 交易进程的启停与主机采样
+启停和主机采样放在两个进程里。命令进程管定时拉起、停止和改配置，上报进程管主机计数和共享内存日志。共享内存要等生产进程把段建好，读者才挂上去。开盘只改配置里的读者开关，上报进程继续跑，下一次起来时按这个开关挂上。收盘先停业务进程，把开关写回假，再重启上报进程，映射在生产端退出前卸掉。
+
+进程用完整命令行的结尾来认。`/proc/pid/status` 里的名字只留十几个字符，带分钟后缀的备份文件又和正本共前缀，短名和前缀都会对到别人身上。查询先丢掉查询命令自己那一行，只留命令行以目标文件名结尾的 pid。Python 进程认脚本名。这个 pid 已经在，就不再拉起。停止先发普通终止，等半秒再查，还在的发强制终止。整组拉起先整组停掉，空出几秒让共享内存和端口放开，再按序号逐个拉起。中间有一个失败，后面的继续。控制进程不进这条路径。拉起前把工作目录切到该进程的安装目录，目录插到库路径最前面，子进程带着这套环境起来；起来之后工作目录切回控制进程自己的目录。
+
+一天可以排多段开收盘时刻。命令进程起来时，已经过去的时刻改到下一天，排在还没到的时刻后面，中午起来的控制进程不会把早上那次启动再跑一遍。启动和停止各有一段星期范围，当天在范围外就把这条时刻推到下一天。跑完的时刻推到下一天的同一钟点。拉起和重启进只有一个工人的池子，停止和改配置留在请求线程上，启动间隔里的睡眠留在池子里。命令先对站点号，对不上就回失败。
+
+CPU 占用取上次调用到这次的差值，这次调用不睡。温度读一轮要十几秒，逐核占用留在周期采样外面。网速放在上报线程里，隔一秒读两次计数再相减。磁盘用累计字节除累计忙时间，得到开机以来的平均吞吐。阈值写 0 的项直接跳过。内存里单独记共享内存占用。共享内存日志由一条几乎不睡的线程抽进发送队列，主机状态按一百毫秒上报一次。状态报文非持久，共享内存日志持久。发布连接的心跳设成 60 秒。心跳写成 0 时，发送失败不抛错，重连不会被带起来。发布侧打开送达确认，消费侧限制预取。队列名和路由键都带站点号。
+
+```python
+def session_open(cfg_path):
+    patch_flag(cfg_path, reader=True)
+
+def session_close(cfg_path, reporter):
+    stop_fleet()
+    patch_flag(cfg_path, reader=False)
+    restart(reporter)
+```
+
+```python
+def live_pids(binary):
+    pids = []
+    text = run(f"pgrep -af {binary}")
+    for line in text.splitlines():
+        if "pgrep -af" in line:
+            continue
+        if line.endswith(binary):
+            pids.append(line.split()[0])
+    return pids
+
+def stop_one(binary):
+    for pid in live_pids(binary):
+        run(f"kill {pid}")
+    time.sleep(0.5)
+    for pid in live_pids(binary):
+        run(f"kill -9 {pid}")
+
+def bring_up(apps, self_name, self_home):
+    stop_fleet(apps)
+    time.sleep(5)
+    for app in sorted(apps, key=lambda a: a["order"]):
+        if not app["on"] or app["name"] == self_name:
+            continue
+        os.chdir(app["home"])
+        prepend("LD_LIBRARY_PATH", app["home"])
+        if not live_pids(app["name"]):
+            run(f"nohup ./{app['name']} >/dev/null 2>&1 &")
+        os.chdir(self_home)
+        time.sleep(app.get("gap", 5))
+```
+
+```python
+def load_clocks(clocks, now):
+    pending, late = [], []
+    for item in clocks:
+        (pending if item["when"] > now else late).append(item)
+    pending.sort(key=lambda x: x["when"])
+    late.sort(key=lambda x: x["when"])
+    for item in late:
+        item["when"] = item["when"] + timedelta(days=1)
+        pending.append(item)
+    return pending
+
+def fire(item, start_days, stop_days):
+    wd = item["when"].isoweekday()
+    window = start_days if item["opening"] else stop_days
+    if wd < window[0] or wd > window[1]:
+        item["when"] = item["when"] + timedelta(days=1)
+        return False
+    run_open() if item["opening"] else run_close()
+    item["when"] = item["when"] + timedelta(days=1)
+    return True
+```
+
+```python
+def sample_host(prev_net, unit):
+    cpu = psutil.cpu_percent(interval=None)
+    wait = psutil.cpu_times_percent().iowait
+    shared = psutil.virtual_memory().shared / unit
+    time.sleep(1)
+    now = psutil.net_io_counters(nowrap=True)
+    up = (now.bytes_sent - prev_net.bytes_sent) / unit
+    return cpu, wait, shared, up
+
+def breached(value, limit):
+    if math.isclose(limit, 0.0):
+        return False
+    return value >= limit
+```
+
+安装包先解到旁路目录。包内目录名和配置里的进程名不一致时，先把解压出来的可执行文件改成配置名，再整目录覆盖到安装路径。覆盖前把安装目录里同名可执行文件按分钟时间戳拷到旁边。配置文件同样先留一份带时间戳的副本，再写新内容。整棵安装树按版本号拷进备份目录，回退时把那一版整棵拷回安装路径。应用清单按进程名合并：这次报文里出现的进程覆盖同名项；报文里空着的开收盘时刻、星期范围和公共库路径保持原值。
+
+```python
+def install_tree(home, name, unpacked, stamp):
+    live = os.path.join(home, name)
+    if os.path.exists(live):
+        shutil.copy(live, f"{live}_{stamp}")
+    inner = os.path.join(unpacked, os.listdir(unpacked)[0])
+    packed = os.path.join(inner, os.path.basename(inner))
+    if os.path.basename(inner) != name and os.path.exists(packed):
+        os.rename(packed, os.path.join(inner, name))
+    for entry in os.listdir(inner):
+        copy_over(os.path.join(inner, entry), home)
+
+def merge_roster(old, incoming):
+    by_name = {a["name"]: a for a in old.get("apps", [])}
+    for app in incoming.get("apps", []):
+        by_name[app["name"]] = app
+    out = dict(old)
+    for key in ("open_days", "close_days", "clocks", "shared_libs"):
+        if incoming.get(key):
+            out[key] = incoming[key]
+    out["apps"] = list(by_name.values())
+    return out
 ```
 
 ## 业务逻辑设计-清算
