@@ -137,6 +137,24 @@
   - [15. EMA and EMASTDEV (time smoothing)](#15-ema-and-emastdev-time-smoothing)
   - [16. Avellaneda-Stoikov market making strategy](#16-avellaneda-stoikov-market-making-strategy)
   - [17. Fixed point number of trading system](#17-fixed-point-number-of-trading-system)
+- [Business logic design-clearing](#business-logic-design-clearing)
+  - [1. Day-end clearing pipeline](#1-day-end-clearing-pipeline)
+  - [2. Clearing fill kinds and sides](#2-clearing-fill-kinds-and-sides)
+  - [3. Account-class match routing](#3-account-class-match-routing)
+  - [4. FIFO lots and dual settle/close cost](#4-fifo-lots-and-dual-settleclose-cost)
+  - [5. Commission, stamp tax, and futures day-fee share](#5-commission-stamp-tax-and-futures-day-fee-share)
+  - [6. Local, settle, and base FX ladder with unsettled PnL settle](#6-local-settle-and-base-fx-ladder-with-unsettled-pnl-settle)
+  - [7. Clearing valuation row merge](#7-clearing-valuation-row-merge)
+  - [8. Corporate actions: bonus shares and cash dividends](#8-corporate-actions-bonus-shares-and-cash-dividends)
+  - [9. Bond repo interest as PnL](#9-bond-repo-interest-as-pnl)
+  - [10. ETF create/redeem cash substitution across days](#10-etf-createredeem-cash-substitution-across-days)
+  - [11. Margin interest from settle-detail deltas](#11-margin-interest-from-settle-detail-deltas)
+  - [12. Product unit NAV and share changes](#12-product-unit-nav-and-share-changes)
+  - [13. Position, fee, and NAV verifies](#13-position-fee-and-nav-verifies)
+  - [14. Year-end cost carry](#14-year-end-cost-carry)
+  - [15. Strategy-follow notional and tracking error](#15-strategy-follow-notional-and-tracking-error)
+  - [16. Custody-report fee deltas](#16-custody-report-fee-deltas)
+  - [17. Two algorithms for strategy-follow model PnL](#17-two-algorithms-for-strategy-follow-model-pnl)
 - [digital currency](#digital-currency)
   - [1. uniswap-v2](#1-uniswap-v2)
   - [2. uniswap-v3](#2-uniswap-v3)
@@ -44258,6 +44276,501 @@ int main() {
     // Before sending an order: quantize to int64_t fixed-point by exchange tick / PRICE_SCALE;
     // never feed cpp_bin_float straight into the matcher
     return 0;
+}
+```
+
+## Business logic design-clearing
+
+Buy-side clearing turns post-trade fills into a reconcilable book of multi-asset lots, realized PnL, fees, and product NAV. The pipeline advances by trade day: import fills and charges, match lots under account rules, mark and merge, then verify against the broker and the custodian. A live subscription only matches incrementally and buffers marks; corporate actions, full merges, and verifies stay on the day-end job.
+
+### 1. Day-end clearing pipeline
+
+Each trade day in the requested range runs in series. Load account fee tables and the prior day-end lots, rewrite those lots for corporate actions on the day, load that day’s clearing fills sorted by trade time, and for futures accounts also load full-day volume and fees for allocation. Matching produces lots and realized breakdowns; merge them into valuation rows keyed by product, strategy, trader, counter, account, symbol, and side; process explicit FX-settle fills; then persist day-end lots, realized PnL, and valuation detail. Non-trading days are skipped.
+
+```cpp
+enum class PipeStep { LoadFees, LoadPrevLots, CorpAction, LoadFills, Match, Merge, FxSettle, Persist };
+
+struct DayJob {
+    int ymd{0};
+    bool trading{true};
+};
+
+bool run_day(DayJob& job, auto&& load_fees, auto&& load_prev, auto&& corp,
+             auto&& load_fills, auto&& match, auto&& merge, auto&& fx, auto&& save) {
+    if (!job.trading) return true;
+    if (!load_fees(job.ymd)) return false;
+    if (!load_prev(job.ymd)) return false;
+    if (!corp(job.ymd)) return false;
+    if (!load_fills(job.ymd)) return false;
+    if (!match()) return false;
+    if (!merge()) return false;
+    if (!fx()) return false;
+    return save(job.ymd);
+}
+```
+
+### 2. Clearing fill kinds and sides
+
+Clearing fills come in three kinds. A book fill enters open/close matching and commission. A cash-only fill records cash PnL without a lot—custody charges, margin interest deltas, cash dividends, and similar. An FX-settle fill converts a stated amount of unsettled realized PnL into the settled book. Sides include buy and sell, margin buy, short sell, repay cash, repay stock, and ETF create or redeem. Flags such as settle-now, internal match, and front-supplied commission are read during match and fee.
+
+```cpp
+enum class FillKind { Book, CashOnly, FxSettle };
+enum class FillSide {
+    Buy, Sell, MarginBuy, ShortSell, RepayCash, RepayStock, Create, Redeem
+};
+
+struct ClearFill {
+    FillKind kind{FillKind::Book};
+    FillSide side{FillSide::Buy};
+    int64_t lots{0};
+    double settle_px{0};
+    double front_fee{0};
+    bool fx_now{false};
+    bool internal{false};
+    char local_ccy[8]{};
+    char settle_ccy[8]{};
+    char base_ccy[8]{};
+};
+
+bool opens_lot(FillKind k) { return k == FillKind::Book; }
+bool cash_only(FillKind k) { return k == FillKind::CashOnly; }
+```
+
+### 3. Account-class match routing
+
+The same symbol uses different engines by account class. Futures: offshore accounts use the offshore futures engine, others the domestic futures engine; stock options follow the futures fee and match path. Repo symbols use the repo engine. Credit accounts use the margin engine, with a few accounts remapped to a virtual-credit engine. Hong Kong and offshore stock accounts use the overseas stock engine. Remaining A-share cash accounts use a flippable stock engine. Routing depends only on account class and symbol class, not on strategy name.
+
+```cpp
+enum class AcctKind { CashA, Credit, Future, Hk, Offshore };
+enum class SymKind { Equity, Future, Repo, Opt };
+
+enum class Engine { StockFlip, Credit, VirtCredit, Future, OffFuture, OffStock, Repo };
+
+Engine pick_engine(AcctKind a, SymKind s) {
+    if (s == SymKind::Future)
+        return (a == AcctKind::Hk || a == AcctKind::Offshore) ? Engine::OffFuture : Engine::Future;
+    if (s == SymKind::Repo) return Engine::Repo;
+    if (s == SymKind::Opt) return Engine::Future;
+    if (a == AcctKind::Credit) return Engine::Credit;
+    if (a == AcctKind::Hk || a == AcctKind::Offshore) return Engine::OffStock;
+    return Engine::StockFlip;
+}
+```
+
+### 4. FIFO lots and dual settle/close cost
+
+Positions sit in two time-ordered queues per six-key book, long and short. Closes consume the oldest open lot first. Each close writes settle-basis and close-basis realized PnL: the fill price is the settle trade price; open cost uses the lot’s settle open and close open; the direction factor is plus one for long and minus one for short. The two costs match at open and diverge only after year carry. NAV and external PnL use settle; futures strategy checks often use close. Classic long-only stock requires a sell to clear against lots; flippable stock opens when there is no opposite lot, otherwise closes first and opens the residual the other way; futures do the same; margin pairing is stricter on residuals.
+
+```cpp
+struct Lot {
+    int64_t open_id{0};
+    int64_t qty{0};
+    double open_settle{0};
+    double open_close{0};
+    int dir{1}; // +1 long, -1 short
+};
+
+struct Realized {
+    int64_t qty{0};
+    double pnl_settle{0};
+    double pnl_close{0};
+};
+
+Realized take_fifo(Lot& lot, int64_t& remain, double fill_settle) {
+    Realized r{};
+    r.qty = remain < lot.qty ? remain : lot.qty;
+    r.pnl_settle = double(r.qty) * (fill_settle - lot.open_settle) * double(lot.dir);
+    r.pnl_close = double(r.qty) * (fill_settle - lot.open_close) * double(lot.dir);
+    remain -= r.qty;
+    lot.qty -= r.qty;
+    return r;
+}
+```
+
+### 5. Commission, stamp tax, and futures day-fee share
+
+Equity-like fees start from settle price times matched quantity. Stock Connect adds stamp on both sides on top of the rate. Hong Kong equities, funds, and bonds usually take rate times amount only; Shanghai bonds without a one-yuan waiver raise commission below one yuan up to one yuan. Plain A-share buys take the rate alone; sells add stamp tax, halved after a configured calendar date. When local and settle currencies are both CNY and the five-yuan floor is not waived, commission below five yuan becomes five. Front-supplied commission, internal matches, or fee-exempt fund symbols prorate the front commission by matched quantity over original quantity. Domestic futures do not reprice from a per-fill table; they take the account-symbol day fee times matched quantity over day volume. Offshore futures use rate times amount times contract multiplier. Repo fees follow tenor buckets.
+
+```cpp
+struct FeeRule {
+    double rate{0};
+    bool waive_floor5{false};
+    bool waive_floor1{false};
+    double stamp{0.0005};
+    double connect_stamp{0.001};
+};
+
+enum class FeePath { Connect, RateOnly, AShare };
+
+double equity_fee(const FeeRule& r, double amount, bool sell, bool cny_pair,
+                  bool sh_bond, FeePath path) {
+    double fee = 0;
+    if (path == FeePath::Connect) fee = (r.rate + r.connect_stamp) * amount;
+    else if (path == FeePath::RateOnly) {
+        fee = r.rate * amount;
+        if (sh_bond && !r.waive_floor1 && fee < 1.0) fee = 1.0;
+    } else if (sell) fee = (r.rate + r.stamp) * amount;
+    else fee = r.rate * amount;
+    if (!r.waive_floor5 && cny_pair && fee < 5.0) fee = 5.0;
+    return fee;
+}
+
+double future_share_fee(int64_t match_lots, int64_t day_lots, double day_fee) {
+    if (day_lots <= 0) return 0;
+    return day_fee * double(match_lots) / double(day_lots);
+}
+```
+
+### 6. Local, settle, and base FX ladder with unsettled PnL settle
+
+Market value and open cost move through a local-to-settle market FX, then a settle-to-base valuation FX. Unsettled realized PnL and unsettled fees use a local-to-base unsettled valuation FX. Fills marked settle-now put realized PnL into the settled book immediately; otherwise it stays unsettled. An FX-settle fill names a local amount to convert; it must share sign with net unsettled and not exceed its absolute value. Lots are ordered by unsettled balance and the slice is moved into settled realized at the settle rate.
+
+```cpp
+struct FxLadder {
+    double local_to_settle{1};
+    double settle_to_base{1};
+    double unsettle_to_base{1};
+};
+
+double mtm_settle(int64_t qty, double mkt_local, double avg_settle, const FxLadder& fx, double mult) {
+    return double(qty) * (mkt_local * fx.local_to_settle - avg_settle) * fx.settle_to_base * mult;
+}
+
+struct UnsettleSlice { double local_pnl{0}; };
+
+bool apply_fx_settle(std::vector<UnsettleSlice>& lots, double want_local, double settle_rate,
+                     double& moved_base) {
+    double net = 0;
+    for (auto& x : lots) net += x.local_pnl;
+    if (want_local * net <= 0) return false;
+    if (std::fabs(want_local) > std::fabs(net) + 1e-9) return false;
+    std::sort(lots.begin(), lots.end(),
+              [](const UnsettleSlice& a, const UnsettleSlice& b) {
+                  return std::fabs(a.local_pnl) > std::fabs(b.local_pnl);
+              });
+    double left = want_local;
+    moved_base = 0;
+    for (auto& x : lots) {
+        if (left == 0) break;
+        double take = (std::fabs(left) < std::fabs(x.local_pnl)) ? left : x.local_pnl;
+        x.local_pnl -= take;
+        left -= take;
+        moved_base += take * settle_rate;
+    }
+    return true;
+}
+```
+
+### 7. Clearing valuation row merge
+
+Matched lots and realized breakdowns merge into valuation rows keyed by product, strategy, trader, counter, account, symbol, and side. Remaining quantity keeps weighted-average settle and close costs. Settled realized PnL for the day enters today PnL without mark; unsettled realized PnL and unsettled commission stay on local-currency fields. Marking uses settle and close prices for unrealized, adds settled realized and unsettled realized converted at the unsettled FX, and forms base total PnL; today PnL is total minus the prior day’s total. For external query display, today PnL then subtracts shown commission for the day. FX may come from prior values, report values, or specified values.
+
+```cpp
+struct EvalRow {
+    int64_t qty{0};
+    double avg_settle{0};
+    double avg_close{0};
+    double realized_settled{0};
+    double realized_unsettle{0};
+    double fee_settled{0};
+    double fee_unsettle{0};
+    double prev_total{0};
+};
+
+struct EvalOut {
+    double u_settle{0};
+    double u_close{0};
+    double total{0};
+    double today{0};
+};
+
+EvalOut mark_row(const EvalRow& r, double settle_px, double close_px, const FxLadder& fx, double mult) {
+    EvalOut o{};
+    o.u_settle = double(r.qty) * (settle_px * fx.local_to_settle - r.avg_settle) * fx.settle_to_base * mult;
+    o.u_close = double(r.qty) * (close_px * fx.local_to_settle - r.avg_close) * fx.settle_to_base * mult;
+    double unsettle_base = r.realized_unsettle * fx.unsettle_to_base;
+    o.total = r.realized_settled * fx.settle_to_base + o.u_settle + unsettle_base;
+    o.today = o.total - r.prev_total;
+    double show_fee = r.fee_settled * fx.settle_to_base + r.fee_unsettle * fx.unsettle_to_base;
+    o.today -= show_fee; // display / query net of shown commission
+    return o;
+}
+```
+
+### 8. Corporate actions: bonus shares and cash dividends
+
+Only the day-end job rewrites prior day-end lots on the dividend date; the live subscription does not, to avoid double counting. Bonus and transfer issues add a new lot at open price zero; equity quantity truncates, fund quantity rounds. Shanghai, Shenzhen, Stock Connect, and Hong Kong symbols remap before the new lot is attached. Cash dividends book realized PnL as cash per share times quantity; longs also book a ten-percent dividend tax as commission unless net account-symbol position is non-positive, the symbol is on the exempt list, or the counter is OTC-exempt. Short cash dividends book negative PnL.
+
+```cpp
+struct LotView { int64_t qty{0}; int dir{1}; };
+
+struct CorpEvent {
+    double bonus_rate{0};
+    double cash_per_share{0};
+    bool fund_unit{false};
+};
+
+int64_t bonus_lots(int64_t qty, double rate, bool fund_unit) {
+    double x = double(qty) * rate;
+    return fund_unit ? int64_t(std::llround(x)) : int64_t(x);
+}
+
+struct CashDvd { double pnl{0}; double tax{0}; };
+
+CashDvd cash_dividend(const LotView& lot, double cps, double fx_local_to_settle,
+                      bool tax_exempt) {
+    CashDvd d{};
+    d.pnl = double(lot.dir) * cps * double(lot.qty) * fx_local_to_settle;
+    if (lot.dir > 0 && !tax_exempt) d.tax = 0.1 * cps * double(lot.qty) * fx_local_to_settle;
+    return d;
+}
+```
+
+### 9. Bond repo interest as PnL
+
+Repo does not keep inventory. Each fill yields one realized breakdown: tenor n comes from the contract code. Occupy start is the next session after the trade day; arrival is trade day plus n calendar days rolled onto a session day, then the next session after that. Occupy days are the calendar span from start to arrival. If the year-carry date sits between start and arrival, or between the trade day and start, that boundary advances by one more session day. Interest is volume times price times occupy days over 365. Buys book negative PnL, sells positive, plus a tenor-bucket commission.
+
+```cpp
+int tenor_days(std::string_view code); // from contract code
+
+int occupy_days(int trade_ymd, int tenor, auto&& next_trade, auto&& add_cal_days,
+                auto&& is_trade, int year_carry_ymd) {
+    int start = next_trade(trade_ymd);              // T+1 session
+    int t_n = add_cal_days(trade_ymd, tenor);       // trade day + n calendar days
+    while (!is_trade(t_n)) t_n = add_cal_days(t_n, 1);
+    int arrive = next_trade(t_n);                   // T+n+1 session
+    if (start <= year_carry_ymd && year_carry_ymd <= arrive)
+        arrive = next_trade(arrive);
+    if (trade_ymd <= year_carry_ymd && year_carry_ymd <= start)
+        start = next_trade(start);
+    return cal_diff(start, arrive);
+}
+
+double repo_pnl(int side_buy, double volume, double price, int days) {
+    double interest = volume * price * double(days) / 365.0;
+    return side_buy ? -interest : interest;
+}
+```
+
+### 10. ETF create/redeem cash substitution across days
+
+After comparing the creation basket to booked quantity, the gap is filled with cash-substitution fills. The cycle spans several clearing days: estimated cash on T, cash difference on T+1, a sell on T to cover the gap, a buy at close on T+2, and a broker settle true-up on T+3. Cross-market substitution is a separate tag. When broker settle detail exists, its amounts are preferred over estimates.
+
+```cpp
+enum class PrTag {
+    TEstCash, T1CashGap, BasketFill, TSellGap, T2BuyClose, T3BrokerTrueUp, CrossMkt
+};
+
+struct PrPatch {
+    PrTag tag{PrTag::TEstCash};
+    double cash{0};
+    int64_t qty{0};
+};
+
+std::vector<PrPatch> build_cash_sub(int64_t basket_need, int64_t cts_qty,
+                                    double est_cash, double broker_t3,
+                                    bool have_broker) {
+    std::vector<PrPatch> out;
+    int64_t gap = basket_need - cts_qty;
+    if (gap != 0) out.push_back({PrTag::TSellGap, 0, gap});
+    out.push_back({PrTag::TEstCash, est_cash, 0});
+    if (have_broker) out.push_back({PrTag::T3BrokerTrueUp, broker_t3, 0});
+    return out;
+}
+```
+
+### 11. Margin interest from settle-detail deltas
+
+Margin interest is not accrued from a daily book rate. It comes from broker settle-detail deltas: today’s sum of margin cash debt, short debt, special short, and paid interest, minus the prior day’s same sum without paid items, then negated, yields today’s fee. The fee must be non-positive; a positive result means settle-detail anomaly and the fill is not booked. After the check it is written as a cash-only clearing fill under an interest subject.
+
+```cpp
+struct DebtLine {
+    double margin_cash{0};
+    double margin_short{0};
+    double special_short{0};
+    double paid_interest{0};
+};
+
+bool margin_fee_today(const DebtLine& t, const DebtLine& y, double& fee) {
+    double today = t.margin_cash + t.margin_short + t.special_short + t.paid_interest;
+    double prev = y.margin_cash + y.margin_short + y.special_short;
+    fee = -(today - prev);
+    return fee <= 0; // false: settle-detail anomaly, do not book
+}
+```
+
+### 12. Product unit NAV and share changes
+
+Unit NAV takes prior net assets plus today PnL and holiday PnL, plus a share-change adjustment, divided by the latest fund share. The share adjustment is the share delta times prior unit NAV. Accumulated unit NAV adds the custody gap between accumulated and unit NAV after dividends. A and B share NAVs are supported, with optional reverse correction from subscription amounts. Holiday PnL accumulates between two A-share sessions.
+
+```cpp
+struct FundNv {
+    double pre_nav{0};
+    double today_pnl{0};
+    double holiday_pnl{0};
+    double share_t{0};
+    double share_y{0};
+    double pre_unit{0};
+    double custody_gap{0};
+};
+
+struct UnitNv { double unit{0}; double accu{0}; };
+
+UnitNv product_unit(const FundNv& f) {
+    UnitNv o{};
+    if (f.share_t <= 0) return o;
+    double share_adj = (f.share_t - f.share_y) * f.pre_unit;
+    o.unit = (f.pre_nav + f.today_pnl + f.holiday_pnl + share_adj) / f.share_t;
+    o.accu = o.unit + f.custody_gap;
+    return o;
+}
+```
+
+### 13. Position, fee, and NAV verifies
+
+Day-end clearing lots are compared to the broker position API by account and symbol. Clearing commission is compared to broker settle fees by account. Product unit NAV is compared to the custody valuation report. Internal marked PnL can also be aligned to prime-broker or swap-desk monthly and yearly statements. These checks are operational; they do not reject orders.
+
+```cpp
+struct PosKey { std::string acct; std::string sym; };
+
+struct Diff {
+    PosKey key;
+    int64_t clear_qty{0};
+    int64_t broker_qty{0};
+};
+
+bool pos_ok(int64_t a, int64_t b, int64_t tol) {
+    int64_t d = a > b ? a - b : b - a;
+    return d <= tol;
+}
+
+std::vector<Diff> list_pos_breaks(
+    const std::map<PosKey, int64_t>& clear_book,
+    const std::map<PosKey, int64_t>& broker_book,
+    int64_t tol) {
+    std::vector<Diff> out;
+    for (const auto& [k, q] : clear_book) {
+        int64_t b = 0;
+        auto it = broker_book.find(k);
+        if (it != broker_book.end()) b = it->second;
+        if (!pos_ok(q, b, tol)) out.push_back({k, q, b});
+    }
+    return out;
+}
+```
+
+### 14. Year-end cost carry
+
+On the year-carry date a synthetic trade day is inserted. By default open costs on remaining lots are rewritten to that day’s settle and close prices so the new year’s realized PnL starts at zero. If the lot already settles immediately and settle currency differs from base, the open cost is kept. Named FX symbols are excluded from carry. Product NAV is aligned to the prior custody day. Carry changes cost and calendar only; it does not invent fill quantity.
+
+```cpp
+struct CarryLot {
+    double open_settle{0};
+    double open_close{0};
+    bool settle_now{false};
+    char settle_ccy[8]{};
+    char base_ccy[8]{};
+};
+
+bool keep_open_cost(const CarryLot& lot) {
+    return lot.settle_now && std::strcmp(lot.settle_ccy, lot.base_ccy) != 0;
+}
+
+bool skip_carry_symbol(std::string_view sym) {
+    return sym == "USDHKD.FX" || sym == "USDCNH.FX";
+}
+
+void year_carry(CarryLot& lot, double settle_px, double close_px) {
+    if (keep_open_cost(lot)) return;
+    lot.open_settle = settle_px;
+    lot.open_close = close_px;
+}
+```
+
+### 15. Strategy-follow notional and tracking error
+
+Strategy following does not rematch the clearing book. It consumes clearing marks and recomputes a model return from target positions or fill replay, then compares that to live clearing PnL. Notional has four modes: fixed, clearing long market value, long-plus-short market value, and fund NAV times weight. When clearing market value is the denominator, yesterday’s value is used so today PnL is divided by prior capital. When custody NAV lags, the last custody scale plus subsequent clearing day PnL fills the gap. The valuation window runs from prior 15:00 to today 15:00 so overnight mark sits in the first interval. Commodity night times map onto the next session morning, matching futures trade-day ownership. Live day NAV on the report is close-basis today PnL over notional plus one; model day NAV compounds the same way; their difference is tracking error.
+
+```cpp
+enum class ScaleMode { Fixed, LongMv, GrossMv, FundShare };
+
+double day_nav(double pnl, double scale) {
+    if (std::fabs(scale) < 1e-9) return 1.0;
+    return pnl / scale + 1.0;
+}
+
+double shift_scale(double mv_yesterday) { return mv_yesterday; }
+
+double fill_custody_lag(double last_custody, const std::vector<double>& clear_pnl_after) {
+    double s = last_custody;
+    for (double p : clear_pnl_after) s += p;
+    return s;
+}
+
+struct TrackRow { double live_nav{1}; double model_nav{1}; };
+
+double track_gap(const TrackRow& r) { return r.model_nav - r.live_nav; }
+```
+
+### 16. Custody-report fee deltas
+
+Custody, manager, and sales-service payables on the custody valuation report are differenced by product: if today’s payable is below yesterday’s, book the negative full payable; otherwise book the negative of today minus yesterday. VAT is monthly: include today’s tax only when it is non-zero and yesterday’s tax is zero; floating estimated tax takes today estimate minus yesterday estimate. Two cash-only fills record the tax subject and the custody-fee subject; negative amounts are product expense.
+
+```cpp
+struct CustodySnap {
+    double custody{0};
+    double manager{0};
+    double sales{0};
+    double tax{0};
+    double tax_est{0};
+};
+
+double day_delta_fee(double today, double yesterday) {
+    if (today < yesterday) return -today;
+    return -(today - yesterday);
+}
+
+struct CustodyCash {
+    double fee_bundle{0};
+    double tax_bundle{0};
+};
+
+CustodyCash custody_fees(const CustodySnap& t, const CustodySnap& y) {
+    CustodyCash o{};
+    o.fee_bundle = day_delta_fee(t.custody, y.custody)
+                 + day_delta_fee(t.manager, y.manager)
+                 + day_delta_fee(t.sales, y.sales);
+    double tax_month = (!near0(t.tax) && near0(y.tax)) ? t.tax : 0;
+    o.tax_bundle = -((t.tax_est - y.tax_est) + tax_month);
+    return o;
+}
+```
+
+### 17. Two algorithms for strategy-follow model PnL
+
+The model side does not read clearing lots. It builds a PnL rate from target positions or fill replay. Normal mode takes prior quantity times multiplier times (mark minus cost), subtracts absolute trade quantity times trade price times trade cost, then scales by the display factor over notional. Assigned buy/sell lines sum holding, buy, and sell PnL before fees. Trade-record mode rebuilds quantity and cost from fills in the window; with no fills it uses floating holding PnL. Hong Kong prices may apply FX. Live comparison still uses clearing close-basis today PnL.
+
+```cpp
+struct FollowPnL {
+    int64_t pre_qty{0};
+    double cost{0};
+    double mark{0};
+    int64_t trade_qty{0};
+    double trade_px{0};
+    double trade_cost{0};
+    double mult{1};
+    double scale{1};
+    double show_k{10000};
+};
+
+double normal_rate(const FollowPnL& x) {
+    double hold = double(x.pre_qty) * x.mult * (x.mark - x.cost);
+    double fee = double(std::llabs(x.trade_qty)) * x.mult * x.trade_px * x.trade_cost;
+    return (hold - fee) * x.show_k / x.scale;
+}
+
+double floating_rate(int64_t qty, double mult, double mark, double cost, double show_k, double scale) {
+    return double(qty) * mult * (mark - cost) * show_k / scale;
 }
 ```
 

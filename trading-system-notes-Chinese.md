@@ -137,6 +137,24 @@ English version：[https://github.com/zzxscodes/trading-system-notes/blob/main/t
   - [15. EMA和EMASTDEV(时间平滑)](#15-ema和emastdev时间平滑)
   - [16. Avellaneda-Stoikov做市策略](#16-avellaneda-stoikov做市策略)
   - [17. 交易系统的定点数](#17-交易系统的定点数)
+- [业务逻辑设计-清算](#业务逻辑设计-清算)
+  - [1. 日终清算流水线](#1-日终清算流水线)
+  - [2. 清算成交类型与方向](#2-清算成交类型与方向)
+  - [3. 账户类别驱动的撮合路由](#3-账户类别驱动的撮合路由)
+  - [4. 批次先进先出与结算价、收盘价双成本](#4-批次先进先出与结算价收盘价双成本)
+  - [5. 佣金印花税与期货日费分摊](#5-佣金印花税与期货日费分摊)
+  - [6. 本地币、结算币、本币三层汇率与未结盈亏结汇](#6-本地币结算币本币三层汇率与未结盈亏结汇)
+  - [7. 清算估值明细归并](#7-清算估值明细归并)
+  - [8. 公司行为：送转与现金分红](#8-公司行为送转与现金分红)
+  - [9. 债券回购利息记盈亏](#9-债券回购利息记盈亏)
+  - [10. ETF 申赎现金替代跨日](#10-etf-申赎现金替代跨日)
+  - [11. 两融息费从交收明细差分](#11-两融息费从交收明细差分)
+  - [12. 产品单位净值与份额变动](#12-产品单位净值与份额变动)
+  - [13. 持仓、费用、净值三路核对](#13-持仓费用净值三路核对)
+  - [14. 跨年成本结转](#14-跨年成本结转)
+  - [15. 策略跟踪名义规模与跟踪误差](#15-策略跟踪名义规模与跟踪误差)
+  - [16. 托管报表费用差分](#16-托管报表费用差分)
+  - [17. 策略跟踪理论盈亏的两种算法](#17-策略跟踪理论盈亏的两种算法)
 - [数字货币](#数字货币)
   - [1. uniswap-v2](#1-uniswap-v2)
   - [2. uniswap-v3](#2-uniswap-v3)
@@ -44245,6 +44263,501 @@ int main() {
 
     // 最终若要报单：再按交易所 tick / PRICE_SCALE 量化为 int64_t 定点，勿把 cpp_bin_float 直接送撮合
     return 0;
+}
+```
+
+## 业务逻辑设计-清算
+
+买方清算在成交之后把多品种持仓、实现盈亏、费用与产品净值收成可对账的账本。流水线按交易日推进：导入成交与费用、按账户规则撮合批次、估值归并、再与柜台和托管核对。实时订阅只做增量撮合与缓冲估值；公司行为、完整归并与核对留在日终任务。
+
+### 1. 日终清算流水线
+
+对区间内每个交易日串行处理。先装入账户费率与上一交易日终批次，再按当日公司行为改写昨仓，装入当日清算成交并按成交时间排序，期货账户另取全日成交量与费用用于分摊。撮合得到批次与实现盈亏明细后，按产品、策略、交易员、柜台、账户、标的与多空方向归并成估值行，再处理专门的结汇成交，最后落库当日终仓、实现盈亏与估值明细。非交易日跳过。
+
+```cpp
+enum class PipeStep { LoadFees, LoadPrevLots, CorpAction, LoadFills, Match, Merge, FxSettle, Persist };
+
+struct DayJob {
+    int ymd{0};
+    bool trading{true};
+};
+
+bool run_day(DayJob& job, auto&& load_fees, auto&& load_prev, auto&& corp,
+             auto&& load_fills, auto&& match, auto&& merge, auto&& fx, auto&& save) {
+    if (!job.trading) return true;
+    if (!load_fees(job.ymd)) return false;
+    if (!load_prev(job.ymd)) return false;
+    if (!corp(job.ymd)) return false;
+    if (!load_fills(job.ymd)) return false;
+    if (!match()) return false;
+    if (!merge()) return false;
+    if (!fx()) return false;
+    return save(job.ymd);
+}
+```
+
+### 2. 清算成交类型与方向
+
+清算成交分三类。普通成交进入开平撮合并计佣金。资产类成交只记现金盈亏，不形成批次，托管费、两融息差、现金分红等走这条。结汇成交把未结实现盈亏按指定金额换成已结口径。方向除买卖外，还有融资买入、融券卖出、卖券还款、买券还券，以及 ETF 申购与赎回。另有是否立即结汇、是否内部撮合、前端是否已带佣金等标记，撮合与计费时读取。
+
+```cpp
+enum class FillKind { Book, CashOnly, FxSettle };
+enum class FillSide {
+    Buy, Sell, MarginBuy, ShortSell, RepayCash, RepayStock, Create, Redeem
+};
+
+struct ClearFill {
+    FillKind kind{FillKind::Book};
+    FillSide side{FillSide::Buy};
+    int64_t lots{0};
+    double settle_px{0};
+    double front_fee{0};
+    bool fx_now{false};
+    bool internal{false};
+    char local_ccy[8]{};
+    char settle_ccy[8]{};
+    char base_ccy[8]{};
+};
+
+bool opens_lot(FillKind k) { return k == FillKind::Book; }
+bool cash_only(FillKind k) { return k == FillKind::CashOnly; }
+```
+
+### 3. 账户类别驱动的撮合路由
+
+同一标的在不同账户类别上走不同执行器。期货标的：境外账户走境外期货，其余走国内期货；股票期权的费用与撮合按期货处理。回购标的走回购执行器。信用账户走两融执行器，个别账户再映射到虚拟两融。港股与境外股票账户走境外股票。其余 A 股账户走可翻转的股票执行器。路由只看账户类别与标的类别，不看策略名。
+
+```cpp
+enum class AcctKind { CashA, Credit, Future, Hk, Offshore };
+enum class SymKind { Equity, Future, Repo, Opt };
+
+enum class Engine { StockFlip, Credit, VirtCredit, Future, OffFuture, OffStock, Repo };
+
+Engine pick_engine(AcctKind a, SymKind s) {
+    if (s == SymKind::Future)
+        return (a == AcctKind::Hk || a == AcctKind::Offshore) ? Engine::OffFuture : Engine::Future;
+    if (s == SymKind::Repo) return Engine::Repo;
+    if (s == SymKind::Opt) return Engine::Future;
+    if (a == AcctKind::Credit) return Engine::Credit;
+    if (a == AcctKind::Hk || a == AcctKind::Offshore) return Engine::OffStock;
+    return Engine::StockFlip;
+}
+```
+
+### 4. 批次先进先出与结算价、收盘价双成本
+
+持仓按六维键分多空两条时间序队列。平仓从最早开仓批次扣量。每笔平仓同时记结算口径与收盘口径实现盈亏：成交价用结算成交价，开仓成本分别用批次上的结算开仓价与收盘开仓价，多头因子为加一、空头为减一。两套成本在开仓时相同，跨年结转后才会分开。净值与对外盈亏用结算口径；策略核对期货时常用收盘口径。经典多头股票要求卖出必须找齐批次；可翻转股票在无对手批次时开仓，有对手则先平，余量再开反向；期货同样按对手批次平，余量开反向；两融按方向配对，余量规则更严。
+
+```cpp
+struct Lot {
+    int64_t open_id{0};
+    int64_t qty{0};
+    double open_settle{0};
+    double open_close{0};
+    int dir{1}; // +1 long, -1 short
+};
+
+struct Realized {
+    int64_t qty{0};
+    double pnl_settle{0};
+    double pnl_close{0};
+};
+
+Realized take_fifo(Lot& lot, int64_t& remain, double fill_settle) {
+    Realized r{};
+    r.qty = remain < lot.qty ? remain : lot.qty;
+    r.pnl_settle = double(r.qty) * (fill_settle - lot.open_settle) * double(lot.dir);
+    r.pnl_close = double(r.qty) * (fill_settle - lot.open_close) * double(lot.dir);
+    remain -= r.qty;
+    lot.qty -= r.qty;
+    return r;
+}
+```
+
+### 5. 佣金印花税与期货日费分摊
+
+权益类默认按结算成交价乘撮合量得到金额。港股通在费率上另加双边印花税。港股、基金、债券一般只乘费率；沪市债券在未申请免一最低时佣金不足一元按一元收。普通 A 股买入只乘费率，卖出再加印花税；印花税在指定日期之后减半。本地币与结算币均为人民币且未免五时，佣金不足五元按五元收。前端已带佣金、内部撮合或免扣基金标的时，按撮合量占原始量的比例分摊前端佣金。国内期货不按单笔费率表重算，而用账户标的全日费用乘撮合量占全日成交量的比例。境外期货按费率乘金额再乘合约乘数。回购另按期限档计费。
+
+```cpp
+struct FeeRule {
+    double rate{0};
+    bool waive_floor5{false};
+    bool waive_floor1{false};
+    double stamp{0.0005};
+    double connect_stamp{0.001};
+};
+
+enum class FeePath { Connect, RateOnly, AShare };
+
+double equity_fee(const FeeRule& r, double amount, bool sell, bool cny_pair,
+                  bool sh_bond, FeePath path) {
+    double fee = 0;
+    if (path == FeePath::Connect) fee = (r.rate + r.connect_stamp) * amount;
+    else if (path == FeePath::RateOnly) {
+        fee = r.rate * amount;
+        if (sh_bond && !r.waive_floor1 && fee < 1.0) fee = 1.0;
+    } else if (sell) fee = (r.rate + r.stamp) * amount;
+    else fee = r.rate * amount;
+    if (!r.waive_floor5 && cny_pair && fee < 5.0) fee = 5.0;
+    return fee;
+}
+
+double future_share_fee(int64_t match_lots, int64_t day_lots, double day_fee) {
+    if (day_lots <= 0) return 0;
+    return day_fee * double(match_lots) / double(day_lots);
+}
+```
+
+### 6. 本地币、结算币、本币三层汇率与未结盈亏结汇
+
+市值与开仓成本先经本地币到结算币的行情汇率，再经结算币到本币的估值汇率。尚未结汇的实现盈亏与未结费用走本地币到本币的未结估值汇率。立即结汇标记为真的成交，实现盈亏直接进已结；否则留在未结。结汇成交指定要结的本地币金额，要求与未结合计同号且绝对值不超过未结净额，按未结余额从大到小摊到批次，把对应份额乘结算汇率记入已结实现盈亏。
+
+```cpp
+struct FxLadder {
+    double local_to_settle{1};
+    double settle_to_base{1};
+    double unsettle_to_base{1};
+};
+
+double mtm_settle(int64_t qty, double mkt_local, double avg_settle, const FxLadder& fx, double mult) {
+    return double(qty) * (mkt_local * fx.local_to_settle - avg_settle) * fx.settle_to_base * mult;
+}
+
+struct UnsettleSlice { double local_pnl{0}; };
+
+bool apply_fx_settle(std::vector<UnsettleSlice>& lots, double want_local, double settle_rate,
+                     double& moved_base) {
+    double net = 0;
+    for (auto& x : lots) net += x.local_pnl;
+    if (want_local * net <= 0) return false;
+    if (std::fabs(want_local) > std::fabs(net) + 1e-9) return false;
+    std::sort(lots.begin(), lots.end(),
+              [](const UnsettleSlice& a, const UnsettleSlice& b) {
+                  return std::fabs(a.local_pnl) > std::fabs(b.local_pnl);
+              });
+    double left = want_local;
+    moved_base = 0;
+    for (auto& x : lots) {
+        if (left == 0) break;
+        double take = (std::fabs(left) < std::fabs(x.local_pnl)) ? left : x.local_pnl;
+        x.local_pnl -= take;
+        left -= take;
+        moved_base += take * settle_rate;
+    }
+    return true;
+}
+```
+
+### 7. 清算估值明细归并
+
+撮合后的批次与实现盈亏明细归并成估值行，键为产品、策略、交易员、柜台、账户、标的再加多空。剩余仓用加权平均保留结算成本与收盘成本。当日已结实现盈亏进入不含估值的当日盈亏；未结实现盈亏与未结佣金留在本地币字段。估值阶段用结算价与收盘价分别算浮盈，加上已结实现与按未结汇率折算的未结实现，得到本币总盈亏；当日盈亏等于总盈亏减上一交易日总盈亏。对外查询展示时，当日盈亏再减去当日展示佣金。汇率可用昨值、报表值或指定值。
+
+```cpp
+struct EvalRow {
+    int64_t qty{0};
+    double avg_settle{0};
+    double avg_close{0};
+    double realized_settled{0};
+    double realized_unsettle{0};
+    double fee_settled{0};
+    double fee_unsettle{0};
+    double prev_total{0};
+};
+
+struct EvalOut {
+    double u_settle{0};
+    double u_close{0};
+    double total{0};
+    double today{0};
+};
+
+EvalOut mark_row(const EvalRow& r, double settle_px, double close_px, const FxLadder& fx, double mult) {
+    EvalOut o{};
+    o.u_settle = double(r.qty) * (settle_px * fx.local_to_settle - r.avg_settle) * fx.settle_to_base * mult;
+    o.u_close = double(r.qty) * (close_px * fx.local_to_settle - r.avg_close) * fx.settle_to_base * mult;
+    double unsettle_base = r.realized_unsettle * fx.unsettle_to_base;
+    o.total = r.realized_settled * fx.settle_to_base + o.u_settle + unsettle_base;
+    o.today = o.total - r.prev_total;
+    double show_fee = r.fee_settled * fx.settle_to_base + r.fee_unsettle * fx.unsettle_to_base;
+    o.today -= show_fee; // display / query net of shown commission
+    return o;
+}
+```
+
+### 8. 公司行为：送转与现金分红
+
+仅日终任务在股权登记日改写昨终批次；实时订阅不做，避免重复。送转按比率增发新批次，开仓价记零，股票数量取整，基金数量四舍五入。沪深与港股通、港股代码按映射表改写后再挂批次。现金分红按每股金额乘持仓记实现盈亏，多头另计一成红利税作佣金，除非账户标的净仓不大于零、标的在免扣名单、或柜台属于场外豁免。空头现金分红记负盈亏。
+
+```cpp
+struct LotView { int64_t qty{0}; int dir{1}; };
+
+struct CorpEvent {
+    double bonus_rate{0};
+    double cash_per_share{0};
+    bool fund_unit{false};
+};
+
+int64_t bonus_lots(int64_t qty, double rate, bool fund_unit) {
+    double x = double(qty) * rate;
+    return fund_unit ? int64_t(std::llround(x)) : int64_t(x);
+}
+
+struct CashDvd { double pnl{0}; double tax{0}; };
+
+CashDvd cash_dividend(const LotView& lot, double cps, double fx_local_to_settle,
+                      bool tax_exempt) {
+    CashDvd d{};
+    d.pnl = double(lot.dir) * cps * double(lot.qty) * fx_local_to_settle;
+    if (lot.dir > 0 && !tax_exempt) d.tax = 0.1 * cps * double(lot.qty) * fx_local_to_settle;
+    return d;
+}
+```
+
+### 9. 债券回购利息记盈亏
+
+回购不成批次。每笔成交生成一条实现盈亏：由合约代码解析期限 n。占款起点是成交日的下一交易日；到账日是成交日加 n 个自然日滚到交易日后再取下一交易日。占款天数是起点到到账日的日历间隔。若起点与到账日之间、或成交日与起点之间夹着年度结转日，对应边界再顺延一个交易日。利息为成交量乘价格乘占款天数除以三百六十五。买入记负盈亏，卖出记正盈亏，并叠加期限档佣金。
+
+```cpp
+int tenor_days(std::string_view code); // from contract code
+
+int occupy_days(int trade_ymd, int tenor, auto&& next_trade, auto&& add_cal_days,
+                auto&& is_trade, int year_carry_ymd) {
+    int start = next_trade(trade_ymd);              // T+1 session
+    int t_n = add_cal_days(trade_ymd, tenor);       // trade day + n calendar days
+    while (!is_trade(t_n)) t_n = add_cal_days(t_n, 1);
+    int arrive = next_trade(t_n);                   // T+n+1 session
+    if (start <= year_carry_ymd && year_carry_ymd <= arrive)
+        arrive = next_trade(arrive);
+    if (trade_ymd <= year_carry_ymd && year_carry_ymd <= start)
+        start = next_trade(start);
+    return cal_diff(start, arrive);
+}
+
+double repo_pnl(int side_buy, double volume, double price, int days) {
+    double interest = volume * price * double(days) / 365.0;
+    return side_buy ? -interest : interest;
+}
+```
+
+### 10. ETF 申赎现金替代跨日
+
+申赎清单与成分成交对照后，差额用现金替代成交补齐。替代跨多个清算日：估值日估计现金、下一交易日现金差额、当日为补缺口卖出、再下一交易日按收盘买入、再下一交易日用券商交收明细轧差。跨市场替代单独成类。有券商交收明细时优先用明细金额，避免只靠估算。
+
+```cpp
+enum class PrTag {
+    TEstCash, T1CashGap, BasketFill, TSellGap, T2BuyClose, T3BrokerTrueUp, CrossMkt
+};
+
+struct PrPatch {
+    PrTag tag{PrTag::TEstCash};
+    double cash{0};
+    int64_t qty{0};
+};
+
+std::vector<PrPatch> build_cash_sub(int64_t basket_need, int64_t cts_qty,
+                                    double est_cash, double broker_t3,
+                                    bool have_broker) {
+    std::vector<PrPatch> out;
+    int64_t gap = basket_need - cts_qty;
+    if (gap != 0) out.push_back({PrTag::TSellGap, 0, gap});
+    out.push_back({PrTag::TEstCash, est_cash, 0});
+    if (have_broker) out.push_back({PrTag::T3BrokerTrueUp, broker_t3, 0});
+    return out;
+}
+```
+
+### 11. 两融息费从交收明细差分
+
+两融息费不在账本上按日利率计提，而从券商交收明细差分。当日融资负债、融券负债、专项融券与已付利息之和，减去上一交易日同类合计中去掉已付项后的余额，再取负号得到当日息费。息费必须非正；若差分后为正，视为交收明细异常，本笔不入账。通过校验后写成资产类清算成交，策略与标的记为息费科目。
+
+```cpp
+struct DebtLine {
+    double margin_cash{0};
+    double margin_short{0};
+    double special_short{0};
+    double paid_interest{0};
+};
+
+bool margin_fee_today(const DebtLine& t, const DebtLine& y, double& fee) {
+    double today = t.margin_cash + t.margin_short + t.special_short + t.paid_interest;
+    double prev = y.margin_cash + y.margin_short + y.special_short;
+    fee = -(today - prev);
+    return fee <= 0; // false: settle-detail anomaly, do not book
+}
+```
+
+### 12. 产品单位净值与份额变动
+
+单位净值用上一交易日净资产加当日盈亏与假日盈亏，再加份额变动调整，除以最新份额。份额变动调整为份额差乘上一交易日单位净值。累计单位净值在单位净值上加托管表里累计与单位的差额，用于分红落账后的桥接。支持 A、B 类份额净值，并可用申赎金额反校正。假日盈亏在两个 A 股交易日之间累加。
+
+```cpp
+struct FundNv {
+    double pre_nav{0};
+    double today_pnl{0};
+    double holiday_pnl{0};
+    double share_t{0};
+    double share_y{0};
+    double pre_unit{0};
+    double custody_gap{0};
+};
+
+struct UnitNv { double unit{0}; double accu{0}; };
+
+UnitNv product_unit(const FundNv& f) {
+    UnitNv o{};
+    if (f.share_t <= 0) return o;
+    double share_adj = (f.share_t - f.share_y) * f.pre_unit;
+    o.unit = (f.pre_nav + f.today_pnl + f.holiday_pnl + share_adj) / f.share_t;
+    o.accu = o.unit + f.custody_gap;
+    return o;
+}
+```
+
+### 13. 持仓、费用、净值三路核对
+
+清算终仓与柜台持仓接口按账户与标的比对。清算佣金与券商交收费用按账户比对。产品单位净值与托管估值报表比对。对外还可把内部估值盈亏与托管行或互换台的月报、年报盈亏对齐。核对是运营校验，不参与报单拒绝。
+
+```cpp
+struct PosKey { std::string acct; std::string sym; };
+
+struct Diff {
+    PosKey key;
+    int64_t clear_qty{0};
+    int64_t broker_qty{0};
+};
+
+bool pos_ok(int64_t a, int64_t b, int64_t tol) {
+    int64_t d = a > b ? a - b : b - a;
+    return d <= tol;
+}
+
+std::vector<Diff> list_pos_breaks(
+    const std::map<PosKey, int64_t>& clear_book,
+    const std::map<PosKey, int64_t>& broker_book,
+    int64_t tol) {
+    std::vector<Diff> out;
+    for (const auto& [k, q] : clear_book) {
+        int64_t b = 0;
+        auto it = broker_book.find(k);
+        if (it != broker_book.end()) b = it->second;
+        if (!pos_ok(q, b, tol)) out.push_back({k, q, b});
+    }
+    return out;
+}
+```
+
+### 14. 跨年成本结转
+
+在年度结转日插入合成交易日。默认把仍持有批次的开仓成本改写到结转日的结算价与收盘价，使新一年度实现盈亏从零起算。若该批次已立即结汇且结算币与本币不同，则保留原开仓成本，不再改写。指定汇率标的不参与结转。产品净值与托管上一交易日对齐。结转只改成本与日历，不虚构成交量。
+
+```cpp
+struct CarryLot {
+    double open_settle{0};
+    double open_close{0};
+    bool settle_now{false};
+    char settle_ccy[8]{};
+    char base_ccy[8]{};
+};
+
+bool keep_open_cost(const CarryLot& lot) {
+    return lot.settle_now && std::strcmp(lot.settle_ccy, lot.base_ccy) != 0;
+}
+
+bool skip_carry_symbol(std::string_view sym) {
+    return sym == "USDHKD.FX" || sym == "USDCNH.FX";
+}
+
+void year_carry(CarryLot& lot, double settle_px, double close_px) {
+    if (keep_open_cost(lot)) return;
+    lot.open_settle = settle_px;
+    lot.open_close = close_px;
+}
+```
+
+### 15. 策略跟踪名义规模与跟踪误差
+
+策略跟踪不重做清算撮合，只消费清算估值，并按目标仓或成交回放重算理论收益，与实盘清算收益比跟踪误差。名义规模有四种：固定名义、清算多头市值、多空市值之和、产品净资产乘权重。用清算市值作分母时取上一交易日市值，使当日盈亏除以上一日资本。托管净值落后时，用最后托管规模加上之后清算日盈亏累加补齐。估值窗从上一交易日十五点到当日十五点，隔夜浮盈落在首段。商品夜盘时刻映射到下一交易日早盘，与期货交易日归属一致。报告侧实盘日净值用收盘口径当日盈亏除以名义再加一；理论日净值同样滚动连乘，二者之差即跟踪误差。
+
+```cpp
+enum class ScaleMode { Fixed, LongMv, GrossMv, FundShare };
+
+double day_nav(double pnl, double scale) {
+    if (std::fabs(scale) < 1e-9) return 1.0;
+    return pnl / scale + 1.0;
+}
+
+double shift_scale(double mv_yesterday) { return mv_yesterday; }
+
+double fill_custody_lag(double last_custody, const std::vector<double>& clear_pnl_after) {
+    double s = last_custody;
+    for (double p : clear_pnl_after) s += p;
+    return s;
+}
+
+struct TrackRow { double live_nav{1}; double model_nav{1}; };
+
+double track_gap(const TrackRow& r) { return r.model_nav - r.live_nav; }
+```
+
+### 16. 托管报表费用差分
+
+托管估值报表上的应付托管费、管理费、销售服务费按产品做日差：当日应付小于昨应付时，当日费用记负的应付全额；否则记负的（今应付减昨应付）。增值税按月扣减：仅当今日税费非零且昨日税费为零时，把今日税费计入；浮动暂估税费另取今暂估减昨暂估。两笔资产类成交分别记税费科目与托管费用科目，金额为负表示产品支出。
+
+```cpp
+struct CustodySnap {
+    double custody{0};
+    double manager{0};
+    double sales{0};
+    double tax{0};
+    double tax_est{0};
+};
+
+double day_delta_fee(double today, double yesterday) {
+    if (today < yesterday) return -today;
+    return -(today - yesterday);
+}
+
+struct CustodyCash {
+    double fee_bundle{0};
+    double tax_bundle{0};
+};
+
+CustodyCash custody_fees(const CustodySnap& t, const CustodySnap& y) {
+    CustodyCash o{};
+    o.fee_bundle = day_delta_fee(t.custody, y.custody)
+                 + day_delta_fee(t.manager, y.manager)
+                 + day_delta_fee(t.sales, y.sales);
+    double tax_month = (!near0(t.tax) && near0(y.tax)) ? t.tax : 0;
+    o.tax_bundle = -((t.tax_est - y.tax_est) + tax_month);
+    return o;
+}
+```
+
+### 17. 策略跟踪理论盈亏的两种算法
+
+理论侧不读清算批次，而按目标仓或成交回放算盈亏率。普通模式用上一估值持仓乘合约乘数再乘（估值价减成本），减去成交量绝对值乘成交价乘交易成本，再乘展示乘数除以名义。指定买卖明细模式把持仓、买入、卖出三段盈亏相加后再扣费用。成交回放模式按区间内买卖重算持仓与成本；当日无成交时用持仓浮盈。港股价格可乘汇率。实盘对比仍取清算收盘口径当日盈亏。
+
+```cpp
+struct FollowPnL {
+    int64_t pre_qty{0};
+    double cost{0};
+    double mark{0};
+    int64_t trade_qty{0};
+    double trade_px{0};
+    double trade_cost{0};
+    double mult{1};
+    double scale{1};
+    double show_k{10000};
+};
+
+double normal_rate(const FollowPnL& x) {
+    double hold = double(x.pre_qty) * x.mult * (x.mark - x.cost);
+    double fee = double(std::llabs(x.trade_qty)) * x.mult * x.trade_px * x.trade_cost;
+    return (hold - fee) * x.show_k / x.scale;
+}
+
+double floating_rate(int64_t qty, double mult, double mark, double cost, double show_k, double scale) {
+    return double(qty) * mult * (mark - cost) * show_k / scale;
 }
 ```
 
