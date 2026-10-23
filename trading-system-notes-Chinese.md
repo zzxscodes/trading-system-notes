@@ -148,6 +148,9 @@ English version：[https://github.com/zzxscodes/trading-system-notes/blob/main/t
 - [业务逻辑设计-监控](#业务逻辑设计-监控)
   - [1. 监控进程的只读消费与发布限速](#1-监控进程的只读消费与发布限速)
   - [2. 交易进程的启停与主机采样](#2-交易进程的启停与主机采样)
+  - [3. 运维命令表与启停线程分工](#3-运维命令表与启停线程分工)
+  - [4. 主机阈值的首次越界告警](#4-主机阈值的首次越界告警)
+  - [5. 订单监视投影与订阅字段规则](#5-订单监视投影与订阅字段规则)
 - [业务逻辑设计-清算](#业务逻辑设计-清算)
   - [1. 日终清算流水线](#1-日终清算流水线)
   - [2. 清算成交类型与方向](#2-清算成交类型与方向)
@@ -34227,7 +34230,7 @@ public:
 
 + **注意**：共享内存布局一变，所有进程都要按版本对齐；订阅者超过 64 个时，确认位图要加宽；本系统自算账本与柜台查询不一致时，要有明确的对账办法。
 
-**6. 单写者页式日志**
+**10. 单写者页式日志**
 
 分池环和确认位图适合多方都要看见同一条记录。另一种落地是每个目的地一条只追加的日志：文件按固定页映射进来，页头记下页长和最后一帧的起点。帧头带产生时间、触发时间、消息类型、来源和目的地，正文紧跟帧头。写者写完一帧，把页头里的末帧起点改到这一帧；读者从自己记住的页号和偏移往前扫。来源和目的地用来路由。页写满就换下一页。
 
@@ -34269,7 +34272,7 @@ struct Page {
 ```
 
 
-**三块等长分区轮转，字节位置一直往前加**
+**11. 三块等长分区轮转，字节位置一直往前加**
 
 一份发布会话的日志是三块等长分区。分区长度是 2 的幂。写者往当前分区末尾追加。这一块剩下的空间小于这次要写的长度，就换下一块，块内偏移从 0 重新开始。旧的分区留在原地，读者和重传仍按原来的位置去读。这三块反复使用，逻辑编号每换一块加一。
 
@@ -34305,8 +34308,161 @@ struct TurnLog {
 };
 ```
 
+**12. 主循环内心跳、命名定时器与控制面**
+
+引擎主循环固定三步：尝试心跳、推进命名定时器、再跑子类环任务。定时器按事件名登记一个时刻，到点回调后从地图里摘掉；心跳间隔未到则立刻返回，不为运维另开线程。控制面请求与应答各占一条共享环，主循环里顺带抽完；报文带源进程名、目标进程名、动作类型和正文，供启停之外的通用指令使用。
+
+```cpp
+struct EngineLoop {
+    std::unordered_map<std::string, int64_t> timers;
+    int64_t last_beat_ms{0};
+    int beat_gap_ms{1000};
+
+    void add_timer(const std::string& name, int64_t when_ms) {
+        timers[name] = when_ms;
+    }
+
+    void tick(int64_t now_ms) {
+        if (now_ms - last_beat_ms >= beat_gap_ms) {
+            last_beat_ms = now_ms;
+            emit_beat();
+        }
+        for (auto it = timers.begin(); it != timers.end(); ) {
+            if (now_ms < it->second) {
+                ++it;
+                continue;
+            }
+            on_timer(it->first, it->second, now_ms);
+            it = timers.erase(it);
+        }
+        drain_control();
+        loop_task();
+    }
+};
+
+struct ControlMsg {
+    char from[32]{};
+    char to[32]{};
+    char kind[32]{};
+    char body[512]{};
+};
+```
+
+**13. 结构化日志与指标写入共享上报池**
+
+业务进程把重要日志和计数写进共享内存里的上报池，而不是直接连运维总线。日志池一条带等级与正文；指标池一条带名字、数值和类型。类型只区分累计与阈值：累计给下游做求和，阈值给下游做越界。监视读者挂上同一段后，日志到达即转发，指标按条数或时间打成一包。热路径上只做一次定长写入，序列化与投递留在监视进程。
+
+```cpp
+enum class MetricKind : uint8_t { Acc, Thresh };
+
+struct LogSlot {
+    int64_t when_ms{0};
+    int site{0};
+    char app[32]{};
+    int level{0};
+    char text[256]{};
+};
+
+struct MetricSlot {
+    int64_t when_ms{0};
+    int site{0};
+    char app[32]{};
+    char name[48]{};
+    double value{0};
+    MetricKind kind{MetricKind::Thresh};
+};
+
+void report_log(LogRing& ring, const char* app, int level, const char* text) {
+    LogSlot* s = ring.claim();
+    if (!s) return;
+    s->when_ms = wall_ms();
+    std::snprintf(s->app, sizeof(s->app), "%s", app);
+    s->level = level;
+    std::snprintf(s->text, sizeof(s->text), "%s", text);
+    ring.publish();
+}
+
+void report_metric(MetricRing& ring, const char* app, const char* name,
+                   double value, MetricKind kind) {
+    MetricSlot* s = ring.claim();
+    if (!s) return;
+    s->when_ms = wall_ms();
+    std::snprintf(s->app, sizeof(s->app), "%s", app);
+    std::snprintf(s->name, sizeof(s->name), "%s", name);
+    s->value = value;
+    s->kind = kind;
+    ring.publish();
+}
+```
+
+**14. 重启只读扫环恢复本地视图**
+
+正常消费会置确认位并前移读游标。进程刚起来时需要先按当前环内容重建本地索引，这时另走一条只读扫描：从下标 0 扫到写端，过滤条件仍可用，但不改确认位、也不改游标。扫完之后再进入带确认的热路径，避免把重启前别人已处理过的记录再次当成新消息，也避免空游标漏掉仍挂在环上的在途单。
+
+```cpp
+template <class Ring, class Pred, class Fn>
+void scan_once(Ring& ring, Pred skip, Fn on_item) {
+    const int64_t end = ring.end_index();
+    for (int64_t i = 0; i < end; ++i) {
+        auto& item = ring.at(i);
+        if (skip(item)) continue;
+        on_item(item);
+    }
+}
+
+void rebuild_open_orders(OrderRing& ring, std::unordered_map<uint64_t, Order*>& open) {
+    open.clear();
+    scan_once(ring,
+              [](const Order& o) { return is_final(o.state); },
+              [&](Order& o) { open[o.id] = &o; });
+}
+```
+
+**15. 行情进程写入报价、信号与高频因子**
+
+行情引擎主循环先抽订阅与信号订阅，再由柜台适配把到达的数据写成共享结构。十档报价、逐笔重建、高频因子向量和跨进程信号各走自己的写接口；写成功后策略侧按已订阅名字的游标去取，未订阅的名字不读。信号订阅与行情订阅分池，避免一笔全市场信号扫遍所有浅槽。
+
+```cpp
+struct MdEngine {
+    void loop_once() {
+        drain_quote_subs();
+        drain_signal_subs();
+    }
+
+    bool write_book(const BookTick& t) { return books_.publish(t); }
+    bool write_factor(const FactorRow* rows, size_t n) {
+        return factors_.publish_batch(rows, n);
+    }
+    bool write_signal(const SignalRow& s) { return signals_.publish(s); }
+};
+```
+
 ### 18. 交易桥双边订单号索引
-柜台回报里的订单号类型并不统一：有的是字符串，有的是 64 位整数，有的只有 32 位。同一柜台号还会从不同接口会话回来，键上再带一段固定长度的接口名。交易桥把柜台号和本系统号收成两张定长槽。回报线程只把一条短记录写进自己的环并发布序号，桥线程按序号改槽。报单成功时写入两侧；撤单与成交回报用柜台号在开放寻址槽里找回本地单；超时巡检扫状态仍为未确认的槽。环满时这一笔直接失败返回。
+柜台回报里的订单号类型并不统一：有的是字符串，有的是 64 位整数，有的只有 32 位。同一柜台号还会从不同接口会话回来，键上再带一段固定长度的接口名。交易桥把柜台号和本系统号收成两张定长槽。回报线程只把一条短记录写进自己的环并发布序号，桥线程按序号改槽。报单成功时写入两侧；撤单与成交回报用柜台号在开放寻址槽里找回本地单；超时巡检扫状态仍为未确认的槽。环满时这一笔直接失败返回。下单已送出未确认、撤单已送出未终态、以及整笔在途，各自用独立秒数；巡检按上次检查时刻节流，不必每笔回报都扫全表。
+
+```cpp
+struct AckTimers {
+    int place_sec{10};
+    int cancel_sec{5};
+    int64_t last_sweep_ms{0};
+    int sweep_gap_ms{200};
+
+    void sweep(int64_t now_ms,
+               const std::vector<Live*>& unacked,
+               const std::vector<Live*>& cancels) {
+        if (now_ms - last_sweep_ms < sweep_gap_ms) return;
+        last_sweep_ms = now_ms;
+        for (Live* o : unacked) {
+            if (now_ms - o->sent_ms > place_sec * 1000LL)
+                hang(*o, "place ack late");
+        }
+        for (Live* o : cancels) {
+            if (now_ms - o->cancel_ms > cancel_sec * 1000LL)
+                hang(*o, "cancel ack late");
+        }
+    }
+};
+```
 
 ```cpp
 struct VenueKey {
@@ -44374,7 +44530,7 @@ void fill_route(char* out, int n, const char* counter) {
 ### 1. 监控进程的只读消费与发布限速
 监控和落盘放在独立进程里。池子容量不大于 0 时跳过。剩余槽位低于容量的 5% 时打一条告警，比较的是剩余量。
 
-对外发布和消费回调各用一条事件循环。漏桶在发布线程上：水位减去费率乘经过的毫秒，小于 0 就归零；水位仍低于容量就加 1 并放行一条，否则这条留在待发队列里等下一个定时器。心跳用非持久投递，启停命令的应答用持久投递。属性上报凑满 100 条，或距离上次发送超过 15 秒，再打成一包；日志上报到达即转发。落盘侧预分配固定条数的数组，下标前移，刷盘时按条数乘步长一次写出，然后清零整段并把下标归零。
+对外发布和消费回调各用一条事件循环。漏桶在发布线程上：水位减去费率乘经过的毫秒，小于 0 就归零；水位仍低于容量就加 1 并放行一条，否则这条留在待发队列里等下一个定时器。心跳用非持久投递，启停命令的应答用持久投递。指标上报凑满 100 条，或距离上次发送超过 15 秒，再打成一包；日志上报到达即转发。指标值带类型：累计与阈值。累计供下游做计数汇总，阈值供下游做越界判定；上报侧只负责原样带上类型，不在发布前做聚合。落盘侧预分配固定条数的数组，下标前移，刷盘时按条数乘步长一次写出，然后清零整段并把下标归零。
 
 ```cpp
 void watch_pool(const char* name, int64_t used, int64_t cap) {
@@ -44395,11 +44551,27 @@ bool leak_one(int64_t& level, int64_t& last_ms, int64_t now_ms, int rate, int ca
     return true;
 }
 
+enum class MetricKind : uint8_t { Acc, Thresh };
+
+struct PropItem {
+    char name[48]{};
+    double value{0};
+    MetricKind kind{MetricKind::Thresh};
+};
+
 struct PropBatch {
     int n{0};
     int64_t last_ms{0};
+    PropItem buf[128]{};
     bool due(int64_t now_ms) const {
         return n > 100 || now_ms - last_ms > 15000;
+    }
+    void push(const char* name, double v, MetricKind k) {
+        if (n >= 128) return;
+        std::snprintf(buf[n].name, sizeof(buf[n].name), "%s", name);
+        buf[n].value = v;
+        buf[n].kind = k;
+        ++n;
     }
 };
 
@@ -44527,7 +44699,7 @@ def breached(value, limit):
     return value >= limit
 ```
 
-安装包先解到旁路目录。包内目录名和配置里的进程名不一致时，先把解压出来的可执行文件改成配置名，再整目录覆盖到安装路径。覆盖前把安装目录里同名可执行文件按分钟时间戳拷到旁边。配置文件同样先留一份带时间戳的副本，再写新内容。整棵安装树按版本号拷进备份目录，回退时把那一版整棵拷回安装路径。应用清单按进程名合并：这次报文里出现的进程覆盖同名项；报文里空着的开收盘时刻、星期范围和公共库路径保持原值。
+安装包先解到旁路目录。包内目录名和配置里的进程名不一致时，先把解压出来的可执行文件改成配置名，再整目录覆盖到安装路径。覆盖前把安装目录里同名可执行文件按分钟时间戳拷到旁边。配置文件同样先留一份带时间戳的副本，再写新内容。整棵安装树按版本号拷进备份目录，回退时把那一版整棵拷回安装路径。应用清单按进程名合并：这次报文里出现的进程覆盖同名项；报文里空着的开收盘时刻、星期范围和公共库路径保持原值。拉起前可执行一条前置 shell。Python 进程用配置里的解释器路径加脚本名后台启动，并把安装目录同时写入库路径与模块搜索路径；C++ 进程用本目录可执行文件加 `nohup`。
 
 ```python
 def install_tree(home, name, unpacked, stamp):
@@ -44551,6 +44723,149 @@ def merge_roster(old, incoming):
             out[key] = incoming[key]
     out["apps"] = list(by_name.values())
     return out
+```
+
+```python
+def launch_one(app, py_bin):
+    os.chdir(app["home"])
+    prepend("LD_LIBRARY_PATH", app["home"])
+    if app.get("pre"):
+        run(app["pre"])
+    if app.get("py"):
+        prepend("PYTHONPATH", app["home"])
+        run(f"{py_bin} {app['script']} >/dev/null 2>&1 &")
+    else:
+        run(f"nohup ./{app['name']} >/dev/null 2>&1 &")
+```
+
+### 3. 运维命令表与启停线程分工
+消费回调只把报文放进队列。请求线程按消息类型查表分发：安装、启停、改配置、查配置、回退版本、整组启停、远程 shell、改应用清单、开关共享内存上报。报文里的站点号必须与本机一致，对不上直接回失败。拉起、重启和整组拉起丢进只有一个工人的池子，启停间隔里的睡眠留在池子里；停止、改配置、查配置留在请求线程上同步做，避免和拉起交错改同一份进程表。远程 shell 去掉首尾空白后为空则拒绝；首词是交互式编辑器也拒绝。控制进程自己不走普通启停表项，重启只触发本目录下的启动脚本。开盘只把上报配置里的共享内存读者开关写成真，上报进程继续跑；收盘先停业务进程，把开关写回假，再重启上报进程卸掉映射。
+
+```python
+HANDLERS = {
+    "install_req": do_install,
+    "start_req": do_start,
+    "stop_req": do_stop,
+    "restart_req": do_restart,
+    "patch_cfg_req": do_patch_cfg,
+    "query_cfg_req": do_query_cfg,
+    "rollback_req": do_rollback,
+    "shell_req": do_shell,
+    "roster_req": do_roster,
+    "shm_on_req": do_shm_on,
+}
+
+POOL_KINDS = {"start_req", "restart_req", "start_all_req"}
+
+def dispatch(msg, site, pool):
+    if msg.get("site") != site:
+        return fail("site mismatch")
+    kind = msg.get("kind")
+    fn = HANDLERS.get(kind)
+    if fn is None:
+        return fail("unknown kind")
+    if kind in POOL_KINDS:
+        pool.submit(fn, msg.get("body") or {})
+        return ok()
+    return fn(msg.get("body") or {})
+
+def do_shell(body):
+    cmd = (body.get("cmd") or "").strip()
+    if not cmd:
+        return fail("empty")
+    head = cmd.split()[0]
+    if head in ("vim", "vi"):
+        return fail("blocked")
+    return run(cmd)
+
+def reopen_reader(cfg_path, reporter, opening):
+    if opening:
+        patch_flag(cfg_path, reader=True)
+        return
+    stop_fleet()
+    patch_flag(cfg_path, reader=False)
+    restart(reporter)
+```
+
+### 4. 主机阈值的首次越界告警
+CPU、内存、磁盘占用和上行网速各有一条阈值。写成 0 的项不做比较。采样照常上报主机状态；只有当前值越过阈值，且该指标在本上报进程生命周期里还没有报过，才额外打一条告警文案。告警一旦发出，同指标的标志保持为真；数值回落到阈值以下也不消警，直到上报进程重启，避免同一超限状态在周期采样里反复刷屏。告警文案走与共享内存日志相同的报文形状，落在主机状态路由上，前端按日志级别展示。
+
+```python
+class HostWatch:
+    def __init__(self):
+        self.fired = {
+            "cpu": False, "mem": False, "disk": False, "net": False,
+        }
+
+    def check(self, name, value, limit):
+        if math.isclose(limit, 0.0):
+            return None
+        if value < limit:
+            return None
+        if self.fired[name]:
+            return None
+        self.fired[name] = True
+        return f"{name}={value} over {limit}"
+
+def sample_and_alert(watch, cpu, mem, disk, up, limits):
+    status = {"cpu": cpu, "mem": mem, "disk": disk, "up": up}
+    alerts = []
+    for name, value in (("cpu", cpu), ("mem", mem), ("disk", disk), ("net", up)):
+        text = watch.check(name, value, limits[name])
+        if text:
+            alerts.append({"level": "error", "text": text})
+    return status, alerts
+```
+
+### 5. 订单监视投影与订阅字段规则
+监视发布进程只读共享内存里的订单环。标的代码含保留内部前缀的单直接丢掉。只保留本通道关心的少数状态，其余状态不进入对外报文。留下的订单先投影成精简监视记录：身份、标的、账户、量价、方向、状态与错误文案，再进入漏桶发布。行情与成交通道另挂订阅表：每条订阅带路由、标的和一组字段规则；规则写成名、比较符、值三元组，到达时逐条比对，全过才发往该路由。新订阅到来时，若该标的已有最新一笔，先按同一信封补发一次，再删掉待补项。
+
+```cpp
+enum class WatchState : int32_t { Route = 0, Acked = 3 };
+
+struct SlimOrder {
+    uint64_t id{0};
+    char symbol[32]{};
+    char account[32]{};
+    int64_t qty{0};
+    double px{0};
+    int32_t state{0};
+    char err[64]{};
+};
+
+bool drop_order(const char* symbol, int32_t state) {
+    if (std::strstr(symbol, "SYS") != nullptr) return true;
+    return state != int32_t(WatchState::Route) && state != int32_t(WatchState::Acked);
+}
+
+SlimOrder project(uint64_t id, const char* symbol, const char* account,
+                  int64_t qty, double px, int32_t state, const char* err) {
+    SlimOrder o;
+    o.id = id;
+    std::snprintf(o.symbol, sizeof(o.symbol), "%s", symbol);
+    std::snprintf(o.account, sizeof(o.account), "%s", account);
+    o.qty = qty;
+    o.px = px;
+    o.state = state;
+    std::snprintf(o.err, sizeof(o.err), "%s", err);
+    return o;
+}
+
+struct FieldRule {
+    std::string name;
+    std::string op;
+    std::string value;
+};
+
+bool match_rules(const std::vector<FieldRule>& rules,
+                 const std::function<std::string(const std::string&)>& get) {
+    for (const auto& r : rules) {
+        const std::string cur = get(r.name);
+        if (r.op == "==" && cur != r.value) return false;
+        if (r.op == "!=" && cur == r.value) return false;
+    }
+    return true;
+}
 ```
 
 ## 业务逻辑设计-清算

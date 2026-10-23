@@ -148,6 +148,9 @@
 - [Business logic design-monitoring](#business-logic-design-monitoring)
   - [1. Read-only consume and publish rate limit on the monitor](#1-read-only-consume-and-publish-rate-limit-on-the-monitor)
   - [2. Process lifecycle control and host sampling](#2-process-lifecycle-control-and-host-sampling)
+  - [3. Ops command table and start/stop thread split](#3-ops-command-table-and-startstop-thread-split)
+  - [4. First-breach host threshold alerts](#4-first-breach-host-threshold-alerts)
+  - [5. Order watch projection and subscription field rules](#5-order-watch-projection-and-subscription-field-rules)
 - [Business logic design-clearing](#business-logic-design-clearing)
   - [1. Day-end clearing pipeline](#1-day-end-clearing-pipeline)
   - [2. Clearing fill kinds and sides](#2-clearing-fill-kinds-and-sides)
@@ -34240,7 +34243,7 @@ public:
 
 + **Caveats**: every process must agree on shared-memory layout version; more than 64 subscribers need a wider confirm map; disagreement between local books and broker queries needs an explicit reconciliation policy.
 
-**6. Single-writer paged journal**
+**10. Single-writer paged journal**
 
 A pool of rings plus a confirm bitmap fits records that several processes must all observe. Another layout is one append-only journal per destination. The file is mapped in fixed pages. The page header stores the page length and the start of the last frame. The frame header carries generation time, trigger time, message type, source, and destination, and the body follows the header. After a frame is written, the last-frame start in the page header moves to that frame. A reader scans forward from the page id and offset it remembers. Source and destination do the routing. A full page is followed by the next page.
 
@@ -34282,7 +34285,7 @@ struct Page {
 ```
 
 
-**Three equal partitions rotate, and the byte position keeps increasing**
+**11. Three equal partitions rotate, and the byte position keeps increasing**
 
 One publication session keeps its log in three partitions of equal length. The length is a power of two. The writer appends at the end of the current partition. When the space left in that partition is smaller than the fragment, the writer moves to the next partition and the offset inside it starts again at 0. The older partitions stay where they are, so a reader or a retransmission still loads the original position. The same three partitions are reused, and the logical id increases by one on each switch.
 
@@ -34318,8 +34321,161 @@ struct TurnLog {
 };
 ```
 
+**12. Heartbeat, named timers, and control plane in the main loop**
+
+The engine main loop always does three steps: try a heartbeat, advance named timers, then run the subclass ring work. A timer stores one deadline under an event name and is removed after the callback fires. If the heartbeat interval has not elapsed, the beat returns immediately; no extra ops thread is started. Control requests and replies each own a shared ring and are drained in the same loop. Each control message carries source name, destination name, action kind, and body for general commands outside process start and stop.
+
+```cpp
+struct EngineLoop {
+    std::unordered_map<std::string, int64_t> timers;
+    int64_t last_beat_ms{0};
+    int beat_gap_ms{1000};
+
+    void add_timer(const std::string& name, int64_t when_ms) {
+        timers[name] = when_ms;
+    }
+
+    void tick(int64_t now_ms) {
+        if (now_ms - last_beat_ms >= beat_gap_ms) {
+            last_beat_ms = now_ms;
+            emit_beat();
+        }
+        for (auto it = timers.begin(); it != timers.end(); ) {
+            if (now_ms < it->second) {
+                ++it;
+                continue;
+            }
+            on_timer(it->first, it->second, now_ms);
+            it = timers.erase(it);
+        }
+        drain_control();
+        loop_task();
+    }
+};
+
+struct ControlMsg {
+    char from[32]{};
+    char to[32]{};
+    char kind[32]{};
+    char body[512]{};
+};
+```
+
+**13. Structured logs and metrics into shared report pools**
+
+Business processes write important logs and counters into shared-memory report pools instead of connecting to the ops bus directly. A log slot carries level and text. A metric slot carries name, value, and kind. Kind is only accumulate or threshold: accumulate for downstream sums, threshold for breach checks. After a monitor reader attaches to the same segment, logs forward as they arrive and metrics pack by count or time. The hot path only does one fixed-size write; serialization and delivery stay in the monitor process.
+
+```cpp
+enum class MetricKind : uint8_t { Acc, Thresh };
+
+struct LogSlot {
+    int64_t when_ms{0};
+    int site{0};
+    char app[32]{};
+    int level{0};
+    char text[256]{};
+};
+
+struct MetricSlot {
+    int64_t when_ms{0};
+    int site{0};
+    char app[32]{};
+    char name[48]{};
+    double value{0};
+    MetricKind kind{MetricKind::Thresh};
+};
+
+void report_log(LogRing& ring, const char* app, int level, const char* text) {
+    LogSlot* s = ring.claim();
+    if (!s) return;
+    s->when_ms = wall_ms();
+    std::snprintf(s->app, sizeof(s->app), "%s", app);
+    s->level = level;
+    std::snprintf(s->text, sizeof(s->text), "%s", text);
+    ring.publish();
+}
+
+void report_metric(MetricRing& ring, const char* app, const char* name,
+                   double value, MetricKind kind) {
+    MetricSlot* s = ring.claim();
+    if (!s) return;
+    s->when_ms = wall_ms();
+    std::snprintf(s->app, sizeof(s->app), "%s", app);
+    std::snprintf(s->name, sizeof(s->name), "%s", name);
+    s->value = value;
+    s->kind = kind;
+    ring.publish();
+}
+```
+
+**14. Read-only ring scan to rebuild local views after restart**
+
+Normal consume sets the ack bit and advances the read cursor. Right after a process comes up, local indexes must be rebuilt from the rings that are already there. That path uses a one-shot read-only scan: from index 0 to the write end, with the same filters, but without touching ack bits or cursors. Only after that scan does the process enter the acking hot path, so records already handled by peers are not treated as new, and an empty cursor does not miss in-flight orders still sitting on the ring.
+
+```cpp
+template <class Ring, class Pred, class Fn>
+void scan_once(Ring& ring, Pred skip, Fn on_item) {
+    const int64_t end = ring.end_index();
+    for (int64_t i = 0; i < end; ++i) {
+        auto& item = ring.at(i);
+        if (skip(item)) continue;
+        on_item(item);
+    }
+}
+
+void rebuild_open_orders(OrderRing& ring, std::unordered_map<uint64_t, Order*>& open) {
+    open.clear();
+    scan_once(ring,
+              [](const Order& o) { return is_final(o.state); },
+              [&](Order& o) { open[o.id] = &o; });
+}
+```
+
+**15. Market-data process writes books, signals, and high-frequency factors**
+
+The market-data engine loop drains quote subscriptions and signal subscriptions first, then the venue adapter writes arrived data into shared structs. Top-of-book quotes, rebuild ticks, high-frequency factor vectors, and cross-process signals each use their own write API. After a successful write, strategies read by the cursors of subscribed names and ignore names they never subscribed. Signal subscriptions sit in a separate pool from quote subscriptions so one market-wide signal does not walk every shallow book slot.
+
+```cpp
+struct MdEngine {
+    void loop_once() {
+        drain_quote_subs();
+        drain_signal_subs();
+    }
+
+    bool write_book(const BookTick& t) { return books_.publish(t); }
+    bool write_factor(const FactorRow* rows, size_t n) {
+        return factors_.publish_batch(rows, n);
+    }
+    bool write_signal(const SignalRow& s) { return signals_.publish(s); }
+};
+```
+
 ### 18. Bilateral order-id index on the trade bridge
-Venue ack ids are not uniform: some are strings, some uint64, some only 32-bit. The same venue id can also come back on a different API session, so the key carries a fixed-length API name as well. The trade bridge keeps venue ids and local ids in two fixed slot tables. The callback thread writes one short note into its own ring and publishes the index; the bridge thread applies notes in order. On successful submit both sides are written; cancel and fill callbacks find the local order by open-addressing the venue id; timeout sweeps scan slots still marked unacked. A full ring fails that note immediately.
+Venue ack ids are not uniform: some are strings, some uint64, some only 32-bit. The same venue id can also come back on a different API session, so the key carries a fixed-length API name as well. The trade bridge keeps venue ids and local ids in two fixed slot tables. The callback thread writes one short note into its own ring and publishes the index; the bridge thread applies notes in order. On successful submit both sides are written; cancel and fill callbacks find the local order by open-addressing the venue id; timeout sweeps scan slots still marked unacked. A full ring fails that note immediately. Place-sent-but-unacked, cancel-sent-but-not-final, and overall in-flight each use their own second budget. The sweep is paced by the last check time so every ack does not walk the whole table.
+
+```cpp
+struct AckTimers {
+    int place_sec{10};
+    int cancel_sec{5};
+    int64_t last_sweep_ms{0};
+    int sweep_gap_ms{200};
+
+    void sweep(int64_t now_ms,
+               const std::vector<Live*>& unacked,
+               const std::vector<Live*>& cancels) {
+        if (now_ms - last_sweep_ms < sweep_gap_ms) return;
+        last_sweep_ms = now_ms;
+        for (Live* o : unacked) {
+            if (now_ms - o->sent_ms > place_sec * 1000LL)
+                hang(*o, "place ack late");
+        }
+        for (Live* o : cancels) {
+            if (now_ms - o->cancel_ms > cancel_sec * 1000LL)
+                hang(*o, "cancel ack late");
+        }
+    }
+};
+```
 
 ```cpp
 struct VenueKey {
@@ -44387,7 +44543,7 @@ void fill_route(char* out, int n, const char* counter) {
 ### 1. Read-only consume and publish rate limit on the monitor
 Monitoring and disk capture run in their own processes. Pools with capacity at or below zero are skipped. When free slots fall below 5% of capacity, an alert is raised. The comparison uses the free count.
 
-Publish and consume callbacks sit on separate event loops. The leaky bucket runs on the publish thread. Water level drops by rate times elapsed milliseconds, and a negative level is clamped to zero. If the level is still under capacity, it increases by one and one message is released. Otherwise the message stays on the outbound queue until the next timer. Heartbeats use non-persistent delivery. Replies to start and stop commands use persistent delivery. Property reports are packed once the batch exceeds 100 items or 15 seconds have passed since the last send. Log reports are forwarded as they arrive. The capture side preallocates a fixed array, advances an integer index, writes count times stride in one call, then zeroes the whole slab and resets the index.
+Publish and consume callbacks sit on separate event loops. The leaky bucket runs on the publish thread. Water level drops by rate times elapsed milliseconds, and a negative level is clamped to zero. If the level is still under capacity, it increases by one and one message is released. Otherwise the message stays on the outbound queue until the next timer. Heartbeats use non-persistent delivery. Replies to start and stop commands use persistent delivery. Metric reports are packed once the batch exceeds 100 items or 15 seconds have passed since the last send. Log reports are forwarded as they arrive. Each metric value carries a type: accumulate or threshold. Accumulate is for downstream counters; threshold is for breach checks. The publisher only forwards the type and does not aggregate before send. The capture side preallocates a fixed array, advances an integer index, writes count times stride in one call, then zeroes the whole slab and resets the index.
 
 ```cpp
 void watch_pool(const char* name, int64_t used, int64_t cap) {
@@ -44408,11 +44564,27 @@ bool leak_one(int64_t& level, int64_t& last_ms, int64_t now_ms, int rate, int ca
     return true;
 }
 
+enum class MetricKind : uint8_t { Acc, Thresh };
+
+struct PropItem {
+    char name[48]{};
+    double value{0};
+    MetricKind kind{MetricKind::Thresh};
+};
+
 struct PropBatch {
     int n{0};
     int64_t last_ms{0};
+    PropItem buf[128]{};
     bool due(int64_t now_ms) const {
         return n > 100 || now_ms - last_ms > 15000;
+    }
+    void push(const char* name, double v, MetricKind k) {
+        if (n >= 128) return;
+        std::snprintf(buf[n].name, sizeof(buf[n].name), "%s", name);
+        buf[n].value = v;
+        buf[n].kind = k;
+        ++n;
     }
 };
 
@@ -44540,7 +44712,7 @@ def breached(value, limit):
     return value >= limit
 ```
 
-A package is unpacked into a side directory. When the directory name inside the archive differs from the configured process name, the extracted executable is renamed to the configured name before the tree is copied onto the install path. The executable already in the install directory is copied aside with a minute timestamp before that overwrite. A config file gets the same timestamped copy before the new body is written. The whole install tree is copied into a backup directory under a version name, and a rollback copies that version back onto the install path. The application roster merges by process name: a process present in the new message replaces the entry of the same name. Open and close clocks, weekday ranges, and the shared library path stay as they were when the new message leaves them empty.
+A package is unpacked into a side directory. When the directory name inside the archive differs from the configured process name, the extracted executable is renamed to the configured name before the tree is copied onto the install path. The executable already in the install directory is copied aside with a minute timestamp before that overwrite. A config file gets the same timestamped copy before the new body is written. The whole install tree is copied into a backup directory under a version name, and a rollback copies that version back onto the install path. The application roster merges by process name: a process present in the new message replaces the entry of the same name. Open and close clocks, weekday ranges, and the shared library path stay as they were when the new message leaves them empty. A start may run one pre-start shell first. A Python process starts with the configured interpreter path plus the script name in the background, and the install directory is prepended to both the library path and the module search path. A C++ process starts with `nohup` and the binary in that directory.
 
 ```python
 def install_tree(home, name, unpacked, stamp):
@@ -44564,6 +44736,149 @@ def merge_roster(old, incoming):
             out[key] = incoming[key]
     out["apps"] = list(by_name.values())
     return out
+```
+
+```python
+def launch_one(app, py_bin):
+    os.chdir(app["home"])
+    prepend("LD_LIBRARY_PATH", app["home"])
+    if app.get("pre"):
+        run(app["pre"])
+    if app.get("py"):
+        prepend("PYTHONPATH", app["home"])
+        run(f"{py_bin} {app['script']} >/dev/null 2>&1 &")
+    else:
+        run(f"nohup ./{app['name']} >/dev/null 2>&1 &")
+```
+
+### 3. Ops command table and start/stop thread split
+The consume callback only enqueues the body. The request thread looks up a handler by message kind: install, start and stop, config patch and query, version rollback, fleet start and stop, remote shell, roster update, and the shared-memory report switch. The site id in the body must match this host; a mismatch fails immediately. Start, restart, and fleet start go to a pool of one worker so the sleep between starts stays in the pool. Stop, config changes, and config queries stay on the request thread so they do not race the same process table against a start. A remote shell with empty text after trim is rejected. A first word that is an interactive editor is rejected. The control process itself is not started or stopped through the ordinary table; a restart only fires the start script in its own directory. At the open, only the shared-memory reader flag in the report config is written true and the report process keeps running. At the close, the business fleet stops first, the flag is written false, and the report process restarts so the mapping comes off.
+
+```python
+HANDLERS = {
+    "install_req": do_install,
+    "start_req": do_start,
+    "stop_req": do_stop,
+    "restart_req": do_restart,
+    "patch_cfg_req": do_patch_cfg,
+    "query_cfg_req": do_query_cfg,
+    "rollback_req": do_rollback,
+    "shell_req": do_shell,
+    "roster_req": do_roster,
+    "shm_on_req": do_shm_on,
+}
+
+POOL_KINDS = {"start_req", "restart_req", "start_all_req"}
+
+def dispatch(msg, site, pool):
+    if msg.get("site") != site:
+        return fail("site mismatch")
+    kind = msg.get("kind")
+    fn = HANDLERS.get(kind)
+    if fn is None:
+        return fail("unknown kind")
+    if kind in POOL_KINDS:
+        pool.submit(fn, msg.get("body") or {})
+        return ok()
+    return fn(msg.get("body") or {})
+
+def do_shell(body):
+    cmd = (body.get("cmd") or "").strip()
+    if not cmd:
+        return fail("empty")
+    head = cmd.split()[0]
+    if head in ("vim", "vi"):
+        return fail("blocked")
+    return run(cmd)
+
+def reopen_reader(cfg_path, reporter, opening):
+    if opening:
+        patch_flag(cfg_path, reader=True)
+        return
+    stop_fleet()
+    patch_flag(cfg_path, reader=False)
+    restart(reporter)
+```
+
+### 4. First-breach host threshold alerts
+CPU, memory, disk use, and uplink network speed each have a threshold. A threshold written as zero is skipped. Host status is still sampled on the normal interval. An alert text is emitted only when the current value crosses its limit and that metric has not yet alerted in this report-process lifetime. Once fired, the flag for that metric stays true; falling back under the limit does not clear it. The flag resets only when the report process restarts, so a sustained breach does not spam every sample. Alert text uses the same shape as a shared-memory log line and rides the host-status route so the front end shows it as an error-level log.
+
+```python
+class HostWatch:
+    def __init__(self):
+        self.fired = {
+            "cpu": False, "mem": False, "disk": False, "net": False,
+        }
+
+    def check(self, name, value, limit):
+        if math.isclose(limit, 0.0):
+            return None
+        if value < limit:
+            return None
+        if self.fired[name]:
+            return None
+        self.fired[name] = True
+        return f"{name}={value} over {limit}"
+
+def sample_and_alert(watch, cpu, mem, disk, up, limits):
+    status = {"cpu": cpu, "mem": mem, "disk": disk, "up": up}
+    alerts = []
+    for name, value in (("cpu", cpu), ("mem", mem), ("disk", disk), ("net", up)):
+        text = watch.check(name, value, limits[name])
+        if text:
+            alerts.append({"level": "error", "text": text})
+    return status, alerts
+```
+
+### 5. Order watch projection and subscription field rules
+The watch publisher reads the order rings in shared memory as a reader only. An order whose symbol contains a reserved internal token is dropped. Only a small set of statuses for that channel is kept; other statuses never enter the outbound message. A kept order is projected into a compact watch record—identity, symbol, account, size, price, side, status, and error text—then enters the leaky-bucket publish path. Quote and trade channels keep a subscription table: each row holds a route, a symbol, and a list of field rules. A rule is a name, an operator, and a value. On arrival every rule must match before the tick is sent on that route. When a subscription arrives late and the symbol already has a latest tick, that tick is sent once in the same envelope and the pending entry is removed.
+
+```cpp
+enum class WatchState : int32_t { Route = 0, Acked = 3 };
+
+struct SlimOrder {
+    uint64_t id{0};
+    char symbol[32]{};
+    char account[32]{};
+    int64_t qty{0};
+    double px{0};
+    int32_t state{0};
+    char err[64]{};
+};
+
+bool drop_order(const char* symbol, int32_t state) {
+    if (std::strstr(symbol, "SYS") != nullptr) return true;
+    return state != int32_t(WatchState::Route) && state != int32_t(WatchState::Acked);
+}
+
+SlimOrder project(uint64_t id, const char* symbol, const char* account,
+                  int64_t qty, double px, int32_t state, const char* err) {
+    SlimOrder o;
+    o.id = id;
+    std::snprintf(o.symbol, sizeof(o.symbol), "%s", symbol);
+    std::snprintf(o.account, sizeof(o.account), "%s", account);
+    o.qty = qty;
+    o.px = px;
+    o.state = state;
+    std::snprintf(o.err, sizeof(o.err), "%s", err);
+    return o;
+}
+
+struct FieldRule {
+    std::string name;
+    std::string op;
+    std::string value;
+};
+
+bool match_rules(const std::vector<FieldRule>& rules,
+                 const std::function<std::string(const std::string&)>& get) {
+    for (const auto& r : rules) {
+        const std::string cur = get(r.name);
+        if (r.op == "==" && cur != r.value) return false;
+        if (r.op == "!=" && cur == r.value) return false;
+    }
+    return true;
+}
 ```
 
 ## Business logic design-clearing
