@@ -155,6 +155,21 @@
   - [15. Strategy-follow notional and tracking error](#15-strategy-follow-notional-and-tracking-error)
   - [16. Custody-report fee deltas](#16-custody-report-fee-deltas)
   - [17. Two algorithms for strategy-follow model PnL](#17-two-algorithms-for-strategy-follow-model-pnl)
+- [Business logic design-trading terminal](#business-logic-design-trading-terminal)
+  - [1. Environment switch and multi-instance limit](#1-environment-switch-and-multi-instance-limit)
+  - [2. Login machine check and account load](#2-login-machine-check-and-account-load)
+  - [3. Quote subscribe and retry limit](#3-quote-subscribe-and-retry-limit)
+  - [4. Basket shared params and per-symbol exec params](#4-basket-shared-params-and-per-symbol-exec-params)
+  - [5. Basket load, position check, and top-up](#5-basket-load-position-check-and-top-up)
+  - [6. Net two baskets](#6-net-two-baskets)
+  - [7. Pair main leg and leg count](#7-pair-main-leg-and-leg-count)
+  - [8. Locked positions and unlock returns](#8-locked-positions-and-unlock-returns)
+  - [9. Order-flow limits and odd-lot cancel](#9-order-flow-limits-and-odd-lot-cancel)
+  - [10. Chase base, rehang, and bilateral wait](#10-chase-base-rehang-and-bilateral-wait)
+  - [11. Mid-desk positions and counter positions](#11-mid-desk-positions-and-counter-positions)
+  - [12. Stock pool, enquiry, and fund move](#12-stock-pool-enquiry-and-fund-move)
+  - [13. Pre-send checks on manual tickets](#13-pre-send-checks-on-manual-tickets)
+  - [14. Directory watch for basket files and backup](#14-directory-watch-for-basket-files-and-backup)
 - [digital currency](#digital-currency)
   - [1. uniswap-v2](#1-uniswap-v2)
   - [2. uniswap-v3](#2-uniswap-v3)
@@ -44771,6 +44786,419 @@ double normal_rate(const FollowPnL& x) {
 
 double floating_rate(int64_t qty, double mult, double mark, double cost, double show_k, double scale) {
     return double(qty) * mult * (mark - cost) * show_k / scale;
+}
+```
+
+## Business logic design-trading terminal
+
+A buy-side trading terminal handles environment choice, login checks, quote subscribe, manual and basket orders, pairs, lock unlock, position queries, and stock-pool and fund moves on the trader’s machine. Orders still leave through the trade bridge and algo processes; the terminal builds parameters, checks them before send, and lands returns on the screen.
+
+### 1. Environment switch and multi-instance limit
+
+Startup reads a local user profile with an environment id, display names, whether a second process is allowed, whether this is a developer build, and the config file name for each environment. The current id selects the file; that file points at system config for quote and order routing. When multi-instance is off, an already-running same-name process causes this launch to exit; when on, one machine may run live and test together, or different trader views. A developer build shows pages not yet open to everyone.
+
+```cpp
+struct LocalCfg {
+    int env{0};                // 0 live, 1 test, 2 sandbox
+    bool multi_ok{false};
+    bool is_dev{false};
+    char file_of_env[3][64]{};
+};
+
+const char* pick_cfg_file(const LocalCfg& c) {
+    if (c.env < 0 || c.env > 2) return c.file_of_env[0];
+    return c.file_of_env[c.env];
+}
+
+bool allow_start(bool multi_ok, int running_same_name) {
+    return multi_ok || running_same_name <= 1;
+}
+```
+
+### 2. Login machine check and account load
+
+Login takes the local NIC address and compares it with the machines registered for that trader. Missing address, or a machine not on the list, rejects the session. On success the client loads trader, roles, strategies, products, accounts, custom product accounts, security classes, FX, and message nodes in order. Missing trader-account tables, products, product accounts, or no target account yet keeps order entry closed. With peer-group query on, position and fill queries may include other traders in the group.
+
+```cpp
+struct LoginCheck {
+    char trader[32]{};
+    char registered_nic[32]{};
+    bool with_peers{false};
+};
+
+bool pass_login(const LoginCheck& c, const char* local_nic,
+                bool has_trader_acct, bool has_product, bool has_acct) {
+    if (!local_nic || !*local_nic) return false;
+    if (std::strcmp(local_nic, c.registered_nic) != 0) return false;
+    return has_trader_acct && has_product && has_acct;
+}
+
+struct LoadedScope {
+    std::vector<std::string> strategies;
+    std::vector<std::string> products;
+    std::vector<std::string> accounts;
+    std::vector<std::string> peer_traders;
+};
+```
+
+### 3. Quote subscribe and retry limit
+
+The quote client starts only after system config is loaded. Subscribe uses message nodes from config; the UI does not hard-code addresses. Within one login session, subscribe stops after five consecutive failures so a bad config cannot flood the bus. The client keeps last price by symbol, the subscribe list, last tick time, and a Hong Kong code map; parse or time-format errors only warn and leave the working limit alone. Picking bid, ask, last, up-limit, or down-limit on the book writes that price into the ticket.
+
+```cpp
+enum class BookPick { Bid, Ask, Last, UpLimit, DownLimit };
+
+struct QuoteState {
+    int tries{0};
+    static constexpr int k_max = 5;
+    std::unordered_map<std::string, double> last_px;
+    std::vector<std::string> sub_list;
+};
+
+bool send_subscribe(QuoteState& q, auto&& do_send) {
+    if (q.tries >= QuoteState::k_max) return false;
+    ++q.tries;
+    return do_send();
+}
+
+double price_from_book(BookPick p, double bid, double ask, double last,
+                       double up, double down) {
+    switch (p) {
+    case BookPick::Bid: return bid;
+    case BookPick::Ask: return ask;
+    case BookPick::Last: return last;
+    case BookPick::UpLimit: return up;
+    case BookPick::DownLimit: return down;
+    }
+    return last;
+}
+```
+
+### 4. Basket shared params and per-symbol exec params
+
+Basket parameters split into two layers. Shared params cover create, pause, resume, stop, update, and pass-through, sequential, or TWAP control; they also set begin and end time, timeout seconds, unit size, step interval, account sequence, buy/sell checks and imbalance, whether limit-up sell or limit-down buy is allowed, whether to fill that limit side in one shot, and whether to cancel working odd lots. Per-symbol params store run kind, price type, limit, chase ticks, rehang lag, and whether unfinished auction size rolls into continuous. Apply-to-all makes every symbol use the same shared params; otherwise only shared params change and each symbol’s exec params stay as set. Before submit both layers fold into a message body.
+
+```cpp
+enum class PackAct { Create, Pause, Resume, Stop, Update };
+enum class CtrlKind { Pass, Sequential, Twap };
+enum class RunKind { PassThru, Single, Twap, OpenAuc, CloseAuc };
+
+struct PackCtrl {
+    CtrlKind kind{CtrlKind::Twap};
+    int begin_hm{93000};
+    int end_hm{145700};
+    int timeout_sec{30};
+    int unit_lots{100};
+    int step_ms{1000};
+    bool buy_down_ok{false};
+    bool sell_up_ok{false};
+    bool cancel_odd_lot{true};
+};
+
+struct SymExec {
+    char symbol[32]{};
+    RunKind run{RunKind::Twap};
+    int px_type{0};
+    double px{0};
+    int chase_ticks{0};
+    int rehang_ms{500};
+    bool auc_to_cont{true};
+};
+
+struct PackDraft {
+    PackCtrl ctrl;
+    std::vector<SymExec> legs;
+    bool apply_ctrl_all{false};
+};
+```
+
+### 5. Basket load, position check, and top-up
+
+Baskets load from tabular, spreadsheet, or structured files, then build a single or merged package. A single-file name must carry the product code so the wrong product account is not hit. Before submit, available size is checked by account and symbol; incomplete basket params block a submittable package. Running packages may stop one or all and refresh status. Top-up requires the parent stopped or finished: sum remaining size on selected rows, optionally reverse, then build and submit a residual package. A timer watches fill progress and keeps top-up available while unfinished. Algo baskets may also watch a drop folder and read only after the file is stable.
+
+```cpp
+enum class PackState {
+    Created, Inited, Submitted, Running, Hanging,
+    PendingCancel, Done, Stopped, Error, Paused, Empty
+};
+
+struct SubmitReady {
+    bool name_has_product{false};
+    bool params_ok{false};
+    bool pos_ok{false};
+    PackState st{PackState::Created};
+};
+
+bool can_submit(const SubmitReady& g) {
+    return g.name_has_product && g.params_ok && g.pos_ok
+        && (g.st == PackState::Created || g.st == PackState::Inited);
+}
+
+bool can_top_up(PackState st) {
+    return st == PackState::Stopped || st == PackState::Done
+        || st == PackState::Error;
+}
+
+struct TopUp {
+    bool reverse{false};
+    bool sum_selected{true};
+    std::vector<int64_t> remain_lots;
+};
+```
+
+### 6. Net two baskets
+
+The netting page loads one basket on each side, binds strategy and trader, nets size by symbol and side into a third package, and may save it back to tabular or structured files. Hedge legs cancel on the machine first; only the residual leaves, so fewer useless crosses go out. Netting changes the intent to send; it does not rewrite the position book.
+
+```cpp
+struct IntentLine {
+    char symbol[32]{};
+    int side{1};          // +1 buy, -1 sell
+    int64_t lots{0};
+};
+
+std::vector<IntentLine> net_intents(const std::vector<IntentLine>& a,
+                                    const std::vector<IntentLine>& b) {
+    std::unordered_map<std::string, int64_t> signed_lots;
+    auto acc = [&](const IntentLine& x) {
+        signed_lots[x.symbol] += x.side * x.lots;
+    };
+    for (auto& x : a) acc(x);
+    for (auto& x : b) acc(x);
+    std::vector<IntentLine> out;
+    for (auto& kv : signed_lots) {
+        if (kv.second == 0) continue;
+        IntentLine y{};
+        std::snprintf(y.symbol, sizeof(y.symbol), "%s", kv.first.c_str());
+        y.side = kv.second > 0 ? 1 : -1;
+        y.lots = std::llabs(kv.second);
+        out.push_back(y);
+    }
+    return out;
+}
+```
+
+### 7. Pair main leg and leg count
+
+Creating or editing a pair combo first checks on the client: at least two symbols, and exactly one main leg. Combo fill may be one combo only, or several combos at once; price may be plus-minus or ratio. Max resting size, cancel/hit/amend offsets, chase and limit bases, force-balance seconds, and cancel intervals must be filled and pass checks before the pair package submits.
+
+```cpp
+struct PairLeg {
+    char symbol[32]{};
+    bool is_main{false};
+    int64_t share_lots{0};
+};
+
+struct PairCombo {
+    char name[64]{};
+    int trade_mode{0};
+    int price_mode{0};
+    std::vector<PairLeg> legs;
+};
+
+bool pair_ok(const PairCombo& p) {
+    if (p.legs.size() < 2) return false;
+    int mains = 0;
+    for (auto& leg : p.legs) if (leg.is_main) ++mains;
+    return mains == 1 && p.name[0] != '\0';
+}
+```
+
+### 8. Locked positions and unlock returns
+
+The lock page lists long/short, yesterday size, and current locked size by account, counter, and symbol. Unlock needs a selected account and symbol, and a positive integer quantity. Submit builds an unlock parent that may carry strategy and children; today’s unlocks stay queryable. Returns advance start, in progress, and end on the UI; an id not in the local list only warns and leaves state alone. Unfinished unlocks may stop one or all after confirm.
+
+```cpp
+struct LockRow {
+    char acct[32]{};
+    char symbol[32]{};
+    int64_t long_qty{0};
+    int64_t short_qty{0};
+    int64_t long_yd{0};
+    int64_t short_yd{0};
+    int64_t locked{0};
+};
+
+struct UnlockOrder {
+    char id[40]{};
+    char symbol[32]{};
+    int64_t qty{0};
+    int status{0};
+    std::vector<std::string> children;
+};
+
+bool unlock_qty_ok(int64_t q) { return q > 0; }
+
+bool apply_unlock_rsp(std::unordered_map<std::string, UnlockOrder>& book,
+                      const char* id, int new_st) {
+    auto it = book.find(id);
+    if (it == book.end()) return false;
+    it->second.status = new_st;
+    return true;
+}
+```
+
+### 9. Order-flow limits and odd-lot cancel
+
+The risk page shows run status, order-count caps, clear-period seconds, per-order and day order caps, buy-notional cap, and cancel-to-order and fill-to-order ratios. Values edit locally then leave on the control channel. Shared cancel-odd-lot works with cancel-all confirm: no working or finished orders yields a no-need-cancel hint; working orders need a second confirm before cancel goes out.
+
+```cpp
+struct FlowLimit {
+    bool running{true};
+    int order_cap{0};
+    int clear_sec{60};
+    int per_order_lots{0};
+    int day_order_cap{0};
+    double buy_notional_cap{0};
+    double cancel_to_order{0};
+    double fill_to_order{0};
+};
+
+bool ask_cancel_all(int working) { return working > 0; }
+
+bool cancel_odd_lot(bool pack_on, bool form_on) {
+    return pack_on || form_on;
+}
+```
+
+### 10. Chase base, rehang, and bilateral wait
+
+In pair and algo params, chase may use resting price or book price as base; buy and sell may each have tick offsets, positive more aggressive and negative more passive. After one side fills fully, a wait may delay the other side; when both rest there is a wait, and when both are empty a rehang interval can put them out again. Cancel, hit, and amend tick offsets, limit-band width, and whether auction and continuous each adjust sit beside them. Rehang lag and whether unfinished auction size continues live on per-symbol exec params and leave with the package.
+
+```cpp
+enum class ChaseBase { RestPx, BookPx };
+
+struct ChaseParam {
+    ChaseBase base{ChaseBase::RestPx};
+    int buy_ticks{0};
+    int sell_ticks{0};
+    int rehang_ms{300};
+    int after_leg_wait_ms{0};
+    int both_rest_wait_ms{0};
+    int both_empty_rehang_ms{0};
+    int cancel_ticks{0};
+    int hit_ticks{0};
+    int amend_ticks{0};
+    bool auc_adjust{true};
+    bool cont_adjust{true};
+};
+
+double chase_px(double anchor, int ticks, double tick_size, bool buy) {
+    double signed_ticks = buy ? double(ticks) : -double(ticks);
+    return anchor + signed_ticks * tick_size;
+}
+```
+
+### 11. Mid-desk positions and counter positions
+
+The terminal shows two position books. Mid-desk account positions come from the accounts loaded at login; counter cash and positions query over the message bus with states init, querying, ok, timeout, and error. Updates write a staging buffer first, then swap with the shown side so dense returns do not stall the UI. The counter page may include peer-group traders, export cash, positions, fills, and history, and sum fees. Columns include yesterday size, sellable, and update time; a return whose account is not in the local list is dropped.
+
+```cpp
+enum class QryState { Init, Querying, Ok, Timeout, Err };
+
+struct PosRow {
+    char acct[32]{};
+    char symbol[32]{};
+    int64_t qty{0};
+    int64_t yd{0};
+    int64_t sellable{0};
+    int64_t upd_ms{0};
+};
+
+struct PosView {
+    QryState st{QryState::Init};
+    std::vector<PosRow> shown;
+    std::vector<PosRow> staging;
+};
+
+void swap_to_ui(PosView& v) {
+    std::swap(v.shown, v.staging);
+    v.st = QryState::Ok;
+}
+
+bool acct_known(const std::unordered_set<std::string>& local, const char* acct) {
+    return local.count(acct) > 0;
+}
+```
+
+### 12. Stock pool, enquiry, and fund move
+
+Stock-loan ops use a separate control message family, not ordinary tickets: query pool, query quota, enquire and enquire performance, query enquiry results, fund move, and option combo. Pool rows carry name, kind, lendable size, and rate; enquiry rows carry ask size, knock size and rate, withdraw size, and status. A bad body only warns; local quota stays put. The margin manual page offers buy, sell, short sell, repay cash, and repay stock next to pool query and fund move.
+
+```cpp
+enum class CtrlKindMsg {
+    StockPool, Quota, Enquire, EnquirePerf, EnquiryQry,
+    FundMove, OptComb, PosQry
+};
+
+struct PoolRow {
+    char name[64]{};
+    int kind{0};
+    int64_t lendable{0};
+    double rate{0};
+};
+
+struct EnquiryRow {
+    char symbol[32]{};
+    int64_t ask_qty{0};
+    int64_t knock_qty{0};
+    double ask_rate{0};
+    double knock_rate{0};
+    int64_t cancel_qty{0};
+    int status{0};
+};
+
+bool take_ctrl_body(CtrlKindMsg t, const char* body, auto&& on_ok) {
+    if (!body || !*body) return false;
+    return on_ok(t, body);
+}
+```
+
+### 13. Pre-send checks on manual tickets
+
+Stock, futures, Hong Kong, and margin manual pages share the same send-time checks: account and strategy chosen, size greater than zero, and an optional confirm before send. The book shows ten levels; run kind, price type, limit-up/down tradability, run length, unit size, timeout, and chase ticks mean the same as the like-named shared basket fields. With run-by-minutes checked, begin is submit time and end is begin plus those minutes. Today’s manual tickets reload by instrument class into working and done lists, with single cancel and cancel-all.
+
+```cpp
+struct ManualOrder {
+    char acct[32]{};
+    char strategy[32]{};
+    char symbol[32]{};
+    int64_t lots{0};
+    int exec_minutes{0};
+    bool need_confirm{true};
+    bool buy_down_ok{false};
+    bool sell_up_ok{false};
+};
+
+bool ready_to_send(const ManualOrder& t) {
+    return t.acct[0] && t.strategy[0] && t.symbol[0] && t.lots > 0;
+}
+
+void set_run_window(const ManualOrder& t, int now_hm, int& begin_hm, int& end_hm) {
+    begin_hm = now_hm;
+    int add = t.exec_minutes > 0 ? t.exec_minutes : 0;
+    end_hm = now_hm + add * 100;
+}
+```
+
+### 14. Directory watch for basket files and backup
+
+File-order settings give a watch directory, a backup directory, and an enable switch. When on, the algo-basket window watches that folder; it reads only after size and mtime match twice in a row and are non-empty, so a half-written file is not loaded. On success the source moves to the backup directory and the path is shown; missing or unreadable directories stay off and report error. Manual file pick to load a basket remains available on the same window.
+
+```cpp
+struct FileWatch {
+    bool on{false};
+    char watch_dir[260]{};
+    char bak_dir[260]{};
+};
+
+bool file_ready(int64_t size1, int64_t mtime1,
+                int64_t size2, int64_t mtime2) {
+    return size1 == size2 && mtime1 == mtime2 && size1 > 0;
+}
+
+bool can_load_file(const FileWatch& c, bool dirs_ok, bool stable) {
+    return c.on && dirs_ok && stable;
 }
 ```
 

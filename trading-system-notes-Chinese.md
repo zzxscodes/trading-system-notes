@@ -155,6 +155,21 @@ English version：[https://github.com/zzxscodes/trading-system-notes/blob/main/t
   - [15. 策略跟踪名义规模与跟踪误差](#15-策略跟踪名义规模与跟踪误差)
   - [16. 托管报表费用差分](#16-托管报表费用差分)
   - [17. 策略跟踪理论盈亏的两种算法](#17-策略跟踪理论盈亏的两种算法)
+- [业务逻辑设计-交易终端](#业务逻辑设计-交易终端)
+  - [1. 环境切换与多开限制](#1-环境切换与多开限制)
+  - [2. 登录机器校验与账户装载](#2-登录机器校验与账户装载)
+  - [3. 行情订阅与重试上限](#3-行情订阅与重试上限)
+  - [4. 篮子公共参数与标的执行参数](#4-篮子公共参数与标的执行参数)
+  - [5. 篮子装入、持仓核对与补单](#5-篮子装入持仓核对与补单)
+  - [6. 两篮轧差](#6-两篮轧差)
+  - [7. 配对组合的主腿与标的数](#7-配对组合的主腿与标的数)
+  - [8. 对锁持仓与解锁回报](#8-对锁持仓与解锁回报)
+  - [9. 委托流控与不足一手撤单](#9-委托流控与不足一手撤单)
+  - [10. 追单基准、重挂与双边等待](#10-追单基准重挂与双边等待)
+  - [11. 中台持仓与柜台持仓](#11-中台持仓与柜台持仓)
+  - [12. 券池、询价与资金划转](#12-券池询价与资金划转)
+  - [13. 手工下单发出前检查](#13-手工下单发出前检查)
+  - [14. 监视目录装入篮子与备份](#14-监视目录装入篮子与备份)
 - [数字货币](#数字货币)
   - [1. uniswap-v2](#1-uniswap-v2)
   - [2. uniswap-v3](#2-uniswap-v3)
@@ -44758,6 +44773,419 @@ double normal_rate(const FollowPnL& x) {
 
 double floating_rate(int64_t qty, double mult, double mark, double cost, double show_k, double scale) {
     return double(qty) * mult * (mark - cost) * show_k / scale;
+}
+```
+
+## 业务逻辑设计-交易终端
+
+买方交易终端在本机完成环境选择、登录校验、行情订阅、手工与篮子下单、配对、对锁解锁、持仓查询、券池与资金划转。报单真正发出仍经交易桥与算法进程；终端侧把参数编好、在发出前做完校验，并把回报落到界面。
+
+### 1. 环境切换与多开限制
+
+启动先读本机用户配置，里面有环境序号、环境名称列表、是否允许多开、是否开发版，以及每个环境对应的配置文件名。按当前序号选中文件，再从该文件指向的系统配置里取行情与下单路由。禁止多开时，若已有同名进程在跑则本次启动退出；允许多开时，同一台机器可以同时挂实盘与测试，或不同交易员视图。开发版会多出尚未对全员开放的页面。
+
+```cpp
+struct LocalCfg {
+    int env{0};                // 0 实盘, 1 测试, 2 沙箱
+    bool multi_ok{false};
+    bool is_dev{false};
+    char file_of_env[3][64]{};
+};
+
+const char* pick_cfg_file(const LocalCfg& c) {
+    if (c.env < 0 || c.env > 2) return c.file_of_env[0];
+    return c.file_of_env[c.env];
+}
+
+bool allow_start(bool multi_ok, int running_same_name) {
+    return multi_ok || running_same_name <= 1;
+}
+```
+
+### 2. 登录机器校验与账户装载
+
+登录时取本机网卡地址，与该交易员在库里登记的登录机器比对。取不到地址，或本机不在登记表，直接拒绝。通过后依次装入交易员、角色、策略、产品、账户、自定义产品账户、证券类别、汇率和消息节点。缺交易员账户表、未建产品、未配产品账号，或尚未选定目标账户时，下单入口不打开。打开同组查询后，持仓与成交可以把组内其他交易员一并带上。
+
+```cpp
+struct LoginCheck {
+    char trader[32]{};
+    char registered_nic[32]{};
+    bool with_peers{false};
+};
+
+bool pass_login(const LoginCheck& c, const char* local_nic,
+                bool has_trader_acct, bool has_product, bool has_acct) {
+    if (!local_nic || !*local_nic) return false;
+    if (std::strcmp(local_nic, c.registered_nic) != 0) return false;
+    return has_trader_acct && has_product && has_acct;
+}
+
+struct LoadedScope {
+    std::vector<std::string> strategies;
+    std::vector<std::string> products;
+    std::vector<std::string> accounts;
+    std::vector<std::string> peer_traders;
+};
+```
+
+### 3. 行情订阅与重试上限
+
+系统配置装完后才启动行情客户端。订阅走配置里给出的消息节点，界面不写死地址。同一登录会话里订阅连续失败满五次就不再发送，避免错误配置把总线打满。客户端保存各标的最新价、已订列表、最近行情时刻和港股代码对照；解析失败或时间格式不对只提示，不动当前委托价。在盘口点选买一、卖一、最新、涨停或跌停时，把该价写回委托价。
+
+```cpp
+enum class BookPick { Bid, Ask, Last, UpLimit, DownLimit };
+
+struct QuoteState {
+    int tries{0};
+    static constexpr int k_max = 5;
+    std::unordered_map<std::string, double> last_px;
+    std::vector<std::string> sub_list;
+};
+
+bool send_subscribe(QuoteState& q, auto&& do_send) {
+    if (q.tries >= QuoteState::k_max) return false;
+    ++q.tries;
+    return do_send();
+}
+
+double price_from_book(BookPick p, double bid, double ask, double last,
+                       double up, double down) {
+    switch (p) {
+    case BookPick::Bid: return bid;
+    case BookPick::Ask: return ask;
+    case BookPick::Last: return last;
+    case BookPick::UpLimit: return up;
+    case BookPick::DownLimit: return down;
+    }
+    return last;
+}
+```
+
+### 4. 篮子公共参数与标的执行参数
+
+篮子参数分成两层。公共参数管创建、暂停、恢复、停止、更新，以及直通、顺序或分时控制；并给出起止时间、超时秒、单元量、执行间隔、账户顺序、买卖核对与差额、涨跌停是否可买卖、是否一次性打满涨跌停一侧、是否撤掉不足一手的在途单。标的参数按代码保存执行方式、价格类型、指定价、追价跳数、重挂间隔，以及集合竞价未完的量是否转入连续。勾选应用到全部标的时，各标的沿用同一套公共参数；否则只改公共参数，各标的执行参数各自保留。提交前把两层参数收成报文发出。
+
+```cpp
+enum class PackAct { Create, Pause, Resume, Stop, Update };
+enum class CtrlKind { Pass, Sequential, Twap };
+enum class RunKind { PassThru, Single, Twap, OpenAuc, CloseAuc };
+
+struct PackCtrl {
+    CtrlKind kind{CtrlKind::Twap};
+    int begin_hm{93000};
+    int end_hm{145700};
+    int timeout_sec{30};
+    int unit_lots{100};
+    int step_ms{1000};
+    bool buy_down_ok{false};
+    bool sell_up_ok{false};
+    bool cancel_odd_lot{true};
+};
+
+struct SymExec {
+    char symbol[32]{};
+    RunKind run{RunKind::Twap};
+    int px_type{0};
+    double px{0};
+    int chase_ticks{0};
+    int rehang_ms{500};
+    bool auc_to_cont{true};
+};
+
+struct PackDraft {
+    PackCtrl ctrl;
+    std::vector<SymExec> legs;
+    bool apply_ctrl_all{false};
+};
+```
+
+### 5. 篮子装入、持仓核对与补单
+
+篮子从表格、电子表格或结构化文件读入，再生成单个或合并后的包。单个文件名要带产品代码，避免落到错误产品账户。提交前按账户与标的核可用量；篮子参数未齐则不能生成可提交的包。运行中可停一只或全部，并刷新状态。补单要求原包已停止或已结束：对选中行汇总剩余量，可勾反向，再生成补量包提交。定时查看成交进度，未做完时补单入口一直可用。算法篮也可监视指定目录，等文件写稳后再读。
+
+```cpp
+enum class PackState {
+    Created, Inited, Submitted, Running, Hanging,
+    PendingCancel, Done, Stopped, Error, Paused, Empty
+};
+
+struct SubmitReady {
+    bool name_has_product{false};
+    bool params_ok{false};
+    bool pos_ok{false};
+    PackState st{PackState::Created};
+};
+
+bool can_submit(const SubmitReady& g) {
+    return g.name_has_product && g.params_ok && g.pos_ok
+        && (g.st == PackState::Created || g.st == PackState::Inited);
+}
+
+bool can_top_up(PackState st) {
+    return st == PackState::Stopped || st == PackState::Done
+        || st == PackState::Error;
+}
+
+struct TopUp {
+    bool reverse{false};
+    bool sum_selected{true};
+    std::vector<int64_t> remain_lots;
+};
+```
+
+### 6. 两篮轧差
+
+轧差页左右各装一篮，各自选定策略与交易员，按标的与买卖方向把数量轧成净值，得到第三包，并可存回表格或结构化文件。先在本机消掉对冲腿，再把净额发出，少发无效对冲单。轧差只改要发出的指令，不动持仓账面。
+
+```cpp
+struct IntentLine {
+    char symbol[32]{};
+    int side{1};          // +1 买, -1 卖
+    int64_t lots{0};
+};
+
+std::vector<IntentLine> net_intents(const std::vector<IntentLine>& a,
+                                    const std::vector<IntentLine>& b) {
+    std::unordered_map<std::string, int64_t> signed_lots;
+    auto acc = [&](const IntentLine& x) {
+        signed_lots[x.symbol] += x.side * x.lots;
+    };
+    for (auto& x : a) acc(x);
+    for (auto& x : b) acc(x);
+    std::vector<IntentLine> out;
+    for (auto& kv : signed_lots) {
+        if (kv.second == 0) continue;
+        IntentLine y{};
+        std::snprintf(y.symbol, sizeof(y.symbol), "%s", kv.first.c_str());
+        y.side = kv.second > 0 ? 1 : -1;
+        y.lots = std::llabs(kv.second);
+        out.push_back(y);
+    }
+    return out;
+}
+```
+
+### 7. 配对组合的主腿与标的数
+
+新建或修改配对组合时，客户端先检查：至少两个标的，且有且仅有一个主腿。组合成交可定为只成一个组合，或允许多个组合一起成；价格可用加减，也可用相除。挂单上限、撤打改偏移、追单与限价基准、强制配平秒数、撤单间隔在参数页填齐并通过检查后，才提交配对包。
+
+```cpp
+struct PairLeg {
+    char symbol[32]{};
+    bool is_main{false};
+    int64_t share_lots{0};
+};
+
+struct PairCombo {
+    char name[64]{};
+    int trade_mode{0};
+    int price_mode{0};
+    std::vector<PairLeg> legs;
+};
+
+bool pair_ok(const PairCombo& p) {
+    if (p.legs.size() < 2) return false;
+    int mains = 0;
+    for (auto& leg : p.legs) if (leg.is_main) ++mains;
+    return mains == 1 && p.name[0] != '\0';
+}
+```
+
+### 8. 对锁持仓与解锁回报
+
+对锁页按账户、柜台、标的列出多空、昨仓和当前对锁量。解锁要先选中账户与标的，数量为正整数。提交后生成解锁母单，可带策略与子单；当日已发的解锁单可再查。回报在界面上按开始、进行中、结束推进；单号不在本地列表则只告警，不改状态。未完成的解锁可停一笔或全停，操作前确认。
+
+```cpp
+struct LockRow {
+    char acct[32]{};
+    char symbol[32]{};
+    int64_t long_qty{0};
+    int64_t short_qty{0};
+    int64_t long_yd{0};
+    int64_t short_yd{0};
+    int64_t locked{0};
+};
+
+struct UnlockOrder {
+    char id[40]{};
+    char symbol[32]{};
+    int64_t qty{0};
+    int status{0};
+    std::vector<std::string> children;
+};
+
+bool unlock_qty_ok(int64_t q) { return q > 0; }
+
+bool apply_unlock_rsp(std::unordered_map<std::string, UnlockOrder>& book,
+                      const char* id, int new_st) {
+    auto it = book.find(id);
+    if (it == book.end()) return false;
+    it->second.status = new_st;
+    return true;
+}
+```
+
+### 9. 委托流控与不足一手撤单
+
+风控页给出运行状态，以及按笔计的委托上限、清空周期秒、单笔与全日委托上限、总买入额度、委撤比和委成比。数值在本机改完后经控制通道下发。篮子公共参数里的“撤不足一手”与全撤确认一起用：没有未成或已结束的单，提示无需撤；有未成则再确认一次再发撤。
+
+```cpp
+struct FlowLimit {
+    bool running{true};
+    int order_cap{0};
+    int clear_sec{60};
+    int per_order_lots{0};
+    int day_order_cap{0};
+    double buy_notional_cap{0};
+    double cancel_to_order{0};
+    double fill_to_order{0};
+};
+
+bool ask_cancel_all(int working) { return working > 0; }
+
+bool cancel_odd_lot(bool pack_on, bool form_on) {
+    return pack_on || form_on;
+}
+```
+
+### 10. 追单基准、重挂与双边等待
+
+配对与算法参数里，追单可以挂单价为基准，也可以盘口价为基准；买、卖可各设调价跳数，正数更激进、负数更保守。一边全部成交后，可先等一段时间再动另一边；两边都挂着时有等待时长，两边都空了可按间隔再挂。另有撤、打、改的价差跳数，限价幅度，以及集合竞价与连续竞价各自是否调价。重挂间隔、集合竞价未完是否继续，写在标的执行参数里，随包发出。
+
+```cpp
+enum class ChaseBase { RestPx, BookPx };
+
+struct ChaseParam {
+    ChaseBase base{ChaseBase::RestPx};
+    int buy_ticks{0};
+    int sell_ticks{0};
+    int rehang_ms{300};
+    int after_leg_wait_ms{0};
+    int both_rest_wait_ms{0};
+    int both_empty_rehang_ms{0};
+    int cancel_ticks{0};
+    int hit_ticks{0};
+    int amend_ticks{0};
+    bool auc_adjust{true};
+    bool cont_adjust{true};
+};
+
+double chase_px(double anchor, int ticks, double tick_size, bool buy) {
+    double signed_ticks = buy ? double(ticks) : -double(ticks);
+    return anchor + signed_ticks * tick_size;
+}
+```
+
+### 11. 中台持仓与柜台持仓
+
+终端同时看两套持仓。中台账户持仓来自登录时装入的账户仓位；柜台资金与持仓经消息查询，状态为初始、查询中、正常、超时、错误。仓位更新先写入后台缓冲，再与前台交换，避免回报密集时卡住界面。柜台页可勾选同组交易员，导出资金、持仓、成交与历史，并汇总费用。列上有昨仓、可卖和更新时间；回报里的账号若不在本机账户列表，这次回写丢弃。
+
+```cpp
+enum class QryState { Init, Querying, Ok, Timeout, Err };
+
+struct PosRow {
+    char acct[32]{};
+    char symbol[32]{};
+    int64_t qty{0};
+    int64_t yd{0};
+    int64_t sellable{0};
+    int64_t upd_ms{0};
+};
+
+struct PosView {
+    QryState st{QryState::Init};
+    std::vector<PosRow> shown;
+    std::vector<PosRow> staging;
+};
+
+void swap_to_ui(PosView& v) {
+    std::swap(v.shown, v.staging);
+    v.st = QryState::Ok;
+}
+
+bool acct_known(const std::unordered_set<std::string>& local, const char* acct) {
+    return local.count(acct) > 0;
+}
+```
+
+### 12. 券池、询价与资金划转
+
+融券相关操作走单独的控制报文，不与普通报单混发：查券池、查额度、询价、询价绩效、查询价结果、资金划转、期权组合。券池行有名称、类型、可借量与费率；询价行有询量、敲定量与费率、撤量与状态。正文格式不对只提示，本地额度不动。两融手工页提供买入、卖出、融券卖出、还款、还券，并提供券池查询与资金划转。
+
+```cpp
+enum class CtrlKindMsg {
+    StockPool, Quota, Enquire, EnquirePerf, EnquiryQry,
+    FundMove, OptComb, PosQry
+};
+
+struct PoolRow {
+    char name[64]{};
+    int kind{0};
+    int64_t lendable{0};
+    double rate{0};
+};
+
+struct EnquiryRow {
+    char symbol[32]{};
+    int64_t ask_qty{0};
+    int64_t knock_qty{0};
+    double ask_rate{0};
+    double knock_rate{0};
+    int64_t cancel_qty{0};
+    int status{0};
+};
+
+bool take_ctrl_body(CtrlKindMsg t, const char* body, auto&& on_ok) {
+    if (!body || !*body) return false;
+    return on_ok(t, body);
+}
+```
+
+### 13. 手工下单发出前检查
+
+股票、期货、港股、两融手工页共用同一套发出前检查：账户与策略已选，数量大于零，需要时可先弹出确认再发。盘口给十档；执行方式、价格类型、涨跌停是否可买卖、运行时长、单元量、超时与追价跳数，和篮子公共参数里同名字段含义一致。勾选按分钟执行时，起点取提交时刻，终点为起点加上分钟数。当日手工单按品种从库装回未成与已成，可单撤或全撤。
+
+```cpp
+struct ManualOrder {
+    char acct[32]{};
+    char strategy[32]{};
+    char symbol[32]{};
+    int64_t lots{0};
+    int exec_minutes{0};
+    bool need_confirm{true};
+    bool buy_down_ok{false};
+    bool sell_up_ok{false};
+};
+
+bool ready_to_send(const ManualOrder& t) {
+    return t.acct[0] && t.strategy[0] && t.symbol[0] && t.lots > 0;
+}
+
+void set_run_window(const ManualOrder& t, int now_hm, int& begin_hm, int& end_hm) {
+    begin_hm = now_hm;
+    int add = t.exec_minutes > 0 ? t.exec_minutes : 0;
+    end_hm = now_hm + add * 100;
+}
+```
+
+### 14. 监视目录装入篮子与备份
+
+文件下单设置给出监视目录、备份目录和启用开关。打开后，算法篮窗口监视该目录；文件长度与修改时间连续两次相同且非空，才读入，避免读到写到一半的文件。读成功后把原文件挪到备份目录并提示路径；目录不存在或无权访问则保持关闭并报错。界面上仍可手工选文件装入篮子。
+
+```cpp
+struct FileWatch {
+    bool on{false};
+    char watch_dir[260]{};
+    char bak_dir[260]{};
+};
+
+bool file_ready(int64_t size1, int64_t mtime1,
+                int64_t size2, int64_t mtime2) {
+    return size1 == size2 && mtime1 == mtime2 && size1 > 0;
+}
+
+bool can_load_file(const FileWatch& c, bool dirs_ok, bool stable) {
+    return c.on && dirs_ok && stable;
 }
 ```
 
