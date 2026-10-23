@@ -47,10 +47,10 @@ English version：[https://github.com/zzxscodes/trading-system-notes/blob/main/t
   - [38. 签名前置的桶查找](#38-签名前置的桶查找)
   - [39. 分阶段完成的有序环](#39-分阶段完成的有序环)
   - [40. 用户态静默期回收](#40-用户态静默期回收)
-  - [41. 用户态网卡收发与旁路有序交接](#41-用户态网卡收发与旁路有序交接)
+  - [41. 用户态网卡收发与旁路按序发布](#41-用户态网卡收发与旁路按序发布)
   - [42. 序号窗口重排](#42-序号窗口重排)
   - [43. 共享提交完成环上的内核异步收发](#43-共享提交完成环上的内核异步收发)
-  - [44. 用户态块设备收发与提交完成交接](#44-用户态块设备收发与提交完成交接)
+  - [44. 用户态块设备收发与提交完成环](#44-用户态块设备收发与提交完成环)
   - [45. 系统设计优质文章](#45-系统设计优质文章)
 - [常见性能瓶颈与优化方向](#常见性能瓶颈与优化方向)
   - [1. roofline model](#1-roofline-model)
@@ -88,37 +88,36 @@ English version：[https://github.com/zzxscodes/trading-system-notes/blob/main/t
   - [4. 消息中间件（zmq）](#4-消息中间件zmq)
   - [5. 交易系统的OMS、EMS、PMS、RMS](#5-交易系统的omsemspmsrms)
   - [6. 订单簿历史查询](#6-订单簿历史查询)
-  - [7. maker-only撮合器](#7-maker-only撮合器)
-  - [8. k线生成器](#8-k线生成器)
-  - [9. 求解器](#9-求解器)
-  - [10. 智能订单路由（SOR）](#10-智能订单路由sor)
-  - [11. 自成交保护机制](#11-自成交保护机制)
-  - [12. 限流器](#12-限流器)
-  - [13. Lezer/Tree-sitter](#13-lezertree-sitter)
-  - [14. 分布式交易系统共识模型](#14-分布式交易系统共识模型)
-  - [15. 交易所协议分层与序列一致性](#15-交易所协议分层与序列一致性)
-  - [16. 预序列化订单](#16-预序列化订单)
-  - [17. 自适应负载丢弃器（CoDEL）](#17-自适应负载丢弃器codel)
-  - [18. 多进程共享内存交易中间件（ShmDB）](#18-多进程共享内存交易中间件shmdb)
-  - [19. 交易桥双边订单号索引](#19-交易桥双边订单号索引)
-  - [20. 成交回报先于状态回报的本地缓存](#20-成交回报先于状态回报的本地缓存)
-  - [21. 关联订单元数据](#21-关联订单元数据)
-  - [22. 多档最小变动价位表](#22-多档最小变动价位表)
-  - [23. 因子存储与实时面](#23-因子存储与实时面)
-  - [24. 引擎消息路由过滤器](#24-引擎消息路由过滤器)
-  - [25. 篮子控制通道与超大执行缓冲](#25-篮子控制通道与超大执行缓冲)
-  - [26. 交易桥前置风控过滤与错误码分层](#26-交易桥前置风控过滤与错误码分层)
-  - [27. 订单检查计数信号量与两阶段账本预锁](#27-订单检查计数信号量与两阶段账本预锁)
-  - [28. 行情网关接入：全订过滤、字段补丁与夜盘交易日](#28-行情网关接入全订过滤字段补丁与夜盘交易日)
-  - [29. 交易桥短单号、异步配额与算法容器时钟扇出](#29-交易桥短单号异步配额与算法容器时钟扇出)
-  - [30. 报单入库前的开平与方向规整](#30-报单入库前的开平与方向规整)
-  - [31. 持仓查询移出报单线程并按游标续页](#31-持仓查询移出报单线程并按游标续页)
-  - [32. 信号窗口驱动自动母单](#32-信号窗口驱动自动母单)
-  - [33. 平今平昨与股票可卖冻结](#33-平今平昨与股票可卖冻结)
-  - [34. 品种大类费用与冻结价回填](#34-品种大类费用与冻结价回填)
-  - [35. 监控进程的只读追赶与发布水位](#35-监控进程的只读追赶与发布水位)
-  - [36. 交易进程的启停与主机采样](#36-交易进程的启停与主机采样)
-  - [37. 配对执行的挂单量、腿价格和手数门槛](#37-配对执行的挂单量腿价格和手数门槛)
+  - [7. k线生成器](#7-k线生成器)
+  - [8. 求解器](#8-求解器)
+  - [9. 智能订单路由（SOR）](#9-智能订单路由sor)
+  - [10. 自成交保护机制](#10-自成交保护机制)
+  - [11. 限流器](#11-限流器)
+  - [12. Lezer/Tree-sitter](#12-lezertree-sitter)
+  - [13. 分布式交易系统共识模型](#13-分布式交易系统共识模型)
+  - [14. 交易所协议分层与序列一致性](#14-交易所协议分层与序列一致性)
+  - [15. 预序列化订单](#15-预序列化订单)
+  - [16. 自适应负载丢弃器（CoDEL）](#16-自适应负载丢弃器codel)
+  - [17. 多进程共享内存交易中间件（ShmDB）](#17-多进程共享内存交易中间件shmdb)
+  - [18. 交易桥双边订单号索引](#18-交易桥双边订单号索引)
+  - [19. 成交回报先于状态回报的本地缓存](#19-成交回报先于状态回报的本地缓存)
+  - [20. 关联订单元数据](#20-关联订单元数据)
+  - [21. 多档最小变动价位表](#21-多档最小变动价位表)
+  - [22. 因子日历存储与实盘挂载](#22-因子日历存储与实盘挂载)
+  - [23. 引擎消息路由过滤器](#23-引擎消息路由过滤器)
+  - [24. 篮子控制通道与大容量执行缓冲](#24-篮子控制通道与大容量执行缓冲)
+  - [25. 交易桥发单前风控与错误码分层](#25-交易桥发单前风控与错误码分层)
+  - [26. 订单检查计数信号量与两阶段账本预锁](#26-订单检查计数信号量与两阶段账本预锁)
+  - [27. 行情网关接入：全订过滤、字段补全与夜盘交易日](#27-行情网关接入全订过滤字段补全与夜盘交易日)
+  - [28. 交易桥短单号、异步配额与算法容器时钟驱动](#28-交易桥短单号异步配额与算法容器时钟驱动)
+  - [29. 报单入库前的开平与方向归一](#29-报单入库前的开平与方向归一)
+  - [30. 持仓查询移出报单线程并按游标续页](#30-持仓查询移出报单线程并按游标续页)
+  - [31. 信号窗口驱动自动母单](#31-信号窗口驱动自动母单)
+  - [32. 平今平昨与股票可卖冻结](#32-平今平昨与股票可卖冻结)
+  - [33. 品种大类费用与冻结价回填](#33-品种大类费用与冻结价回填)
+  - [34. 监控进程的只读消费与发布限速](#34-监控进程的只读消费与发布限速)
+  - [35. 交易进程的启停与主机采样](#35-交易进程的启停与主机采样)
+  - [36. 配对执行的挂单量、腿价格和手数门槛](#36-配对执行的挂单量腿价格和手数门槛)
 - [业务逻辑设计-计算](#业务逻辑设计-计算)
   - [1. 对数收益率(百分比非对称性)](#1-对数收益率百分比非对称性)
   - [2. 市场趋势和波动率的状态变化](#2-市场趋势和波动率的状态变化)
@@ -129,14 +128,25 @@ English version：[https://github.com/zzxscodes/trading-system-notes/blob/main/t
   - [7. 廉价训练偏差估计](#7-廉价训练偏差估计)
   - [8. 参数关系分析](#8-参数关系分析)
   - [9. 参数敏感性曲线](#9-参数敏感性曲线)
-  - [10. 无偏交易模拟](#10-无偏交易模拟)
-  - [11. 交易收益统计分析](#11-交易收益统计分析)
-  - [12. 置换检验验证策略收益](#12-置换检验验证策略收益)
-  - [13. 资产成本基础(ACB)计算](#13-资产成本基础acb计算)
-  - [14. 数值计算工具](#14-数值计算工具)
-  - [15. EMA和EMASTDEV(时间平滑)](#15-ema和emastdev时间平滑)
-  - [16. Avellaneda-Stoikov做市策略](#16-avellaneda-stoikov做市策略)
-  - [17. 交易系统的定点数](#17-交易系统的定点数)
+  - [10. 交易收益统计分析](#10-交易收益统计分析)
+  - [11. 置换检验验证策略收益](#11-置换检验验证策略收益)
+  - [12. 资产成本基础(ACB)计算](#12-资产成本基础acb计算)
+  - [13. 数值计算工具](#13-数值计算工具)
+  - [14. EMA和EMASTDEV(时间平滑)](#14-ema和emastdev时间平滑)
+  - [15. Avellaneda-Stoikov做市策略](#15-avellaneda-stoikov做市策略)
+  - [16. 交易系统的定点数](#16-交易系统的定点数)
+- [业务逻辑设计-回测与模拟撮合](#业务逻辑设计-回测与模拟撮合)
+  - [1. 四进程模拟路径：回放、行情适配、交易、撮合](#1-四进程模拟路径回放行情适配交易撮合)
+  - [2. 历史回放节拍、休市加速与列式数据流](#2-历史回放节拍休市加速与列式数据流)
+  - [3. 模拟柜台的现金初值与期初持仓](#3-模拟柜台的现金初值与期初持仓)
+  - [4. 报入与撤单两套分时段时延表](#4-报入与撤单两套分时段时延表)
+  - [5. 报价重建路径与带刚性规则的成交路径](#5-报价重建路径与带刚性规则的成交路径)
+  - [6. 报入校验、拒绝码与订单状态类](#6-报入校验拒绝码与订单状态类)
+  - [7. 到期定时撮合与撤单](#7-到期定时撮合与撤单)
+  - [8. maker-only撮合器](#8-maker-only撮合器)
+  - [9. 无偏交易模拟](#9-无偏交易模拟)
+  - [10. 约束模拟交易日的日历与风控文档](#10-约束模拟交易日的日历与风控文档)
+  - [11. 模拟持仓与资金的柜台查询回报](#11-模拟持仓与资金的柜台查询回报)
 - [业务逻辑设计-清算](#业务逻辑设计-清算)
   - [1. 日终清算流水线](#1-日终清算流水线)
   - [2. 清算成交类型与方向](#2-清算成交类型与方向)
@@ -155,6 +165,9 @@ English version：[https://github.com/zzxscodes/trading-system-notes/blob/main/t
   - [15. 策略跟踪名义规模与跟踪误差](#15-策略跟踪名义规模与跟踪误差)
   - [16. 托管报表费用差分](#16-托管报表费用差分)
   - [17. 策略跟踪理论盈亏的两种算法](#17-策略跟踪理论盈亏的两种算法)
+  - [18. 清算日前的券商风控文档](#18-清算日前的券商风控文档)
+  - [19. 柜台查询回报中的持仓与资金字段](#19-柜台查询回报中的持仓与资金字段)
+  - [20. 与公司日终并列的策略日账](#20-与公司日终并列的策略日账)
 - [业务逻辑设计-交易终端](#业务逻辑设计-交易终端)
   - [1. 环境切换与多开限制](#1-环境切换与多开限制)
   - [2. 登录机器校验与账户装载](#2-登录机器校验与账户装载)
@@ -170,6 +183,9 @@ English version：[https://github.com/zzxscodes/trading-system-notes/blob/main/t
   - [12. 券池、询价与资金划转](#12-券池询价与资金划转)
   - [13. 手工下单发出前检查](#13-手工下单发出前检查)
   - [14. 监视目录装入篮子与备份](#14-监视目录装入篮子与备份)
+  - [15. 基础库中的账户与交易时段主数据](#15-基础库中的账户与交易时段主数据)
+  - [16. 柜台持仓与资金的查询回报通道](#16-柜台持仓与资金的查询回报通道)
+  - [17. 持仓与资金回报的消息格式](#17-持仓与资金回报的消息格式)
 - [数字货币](#数字货币)
   - [1. uniswap-v2](#1-uniswap-v2)
   - [2. uniswap-v3](#2-uniswap-v3)
@@ -4849,7 +4865,7 @@ double-mmap 的思路是在虚拟地址空间里把同一块 backing 连续映�
 + [https://yukunj.github.io/blogs/double_mmap_trick](https://yukunj.github.io/blogs/double_mmap_trick)
 + [https://abhinavag.medium.com/a-fast-circular-ring-buffer-4d102ef4d4a3](https://abhinavag.medium.com/a-fast-circular-ring-buffer-4d102ef4d4a3)
 
-**跨 NUMA 节点的批量交接**
+**跨 NUMA 节点的批量投递**
 
 生产者和消费者绑不到同一节点时，逐条入队就是每条一次远程写。把环放在消费者节点上，出队走本地读；生产者先填暂存，凑满一批再拷进环。
 
@@ -16149,7 +16165,7 @@ struct RetireQ {
 };
 ```
 
-### 41. 用户态网卡收发与旁路有序交接
+### 41. 用户态网卡收发与旁路按序发布
 
 极速行情和极速报单不把热路径放在内核套接字上。收包在用户态轮询网卡事件队列：过滤器按本地地址或完整四元组建好，无关报文进不了队列。每条报文带硬件时间戳和时钟同步标志，下游用这个时间，不在回调里再取一次时钟。
 
@@ -16157,7 +16173,7 @@ struct RetireQ {
 
 反应堆先按配置的次数空转，把已经到达的事件处理完；次数用尽仍然没有待办，再进入等待。空转外面加一把用户态自旋锁，避免两个线程同时碰同一条栈。登录、查询、日志这些控制连接明确不进加速栈。交易栈单独起名，和机器上其他进程的栈分开。加速库在运行时打开，打不开就退回内核 TCP，关掉 Nagle，并把套接字绑到加速网卡的地址上。
 
-网卡线程不直接调用策略。报文先放进编译期定长的共享块池，块数、块长、池长都是模板参数。载荷写成固定长度，再对齐到更大的槽，避免一条报文跨缓存行被撕开。发送线程只负责入池。另一条修复线程按序号补缺口，序号连续才交给上游。
+网卡线程不直接调用策略。报文先放进编译期定长的共享块池，块数、块长、池长都是模板参数。载荷写成固定长度，再对齐到更大的槽，避免一条报文跨缓存行被撕开。发送线程只负责入池。另一条修复线程按序号补缺口，序号连续后再发布给策略侧。
 
 ```cpp
 enum class TxKind : uint8_t { Pio, Cut, Plain };
@@ -17297,7 +17313,7 @@ struct WorkerRing {
 };
 ```
 
-### 44. 用户态块设备收发与提交完成交接
+### 44. 用户态块设备收发与提交完成环
 
 极速落盘和设备侧加速不把热路径放在内核块层上。队列映射进用户态：提交环写命令，完成环读结果，门铃寄存器通知设备。过滤器、文件表查找和通用块调度都不在这条路上。
 
@@ -23268,8 +23284,7 @@ symbol_rows=1
 
 
 ## 业务逻辑设计-系统
-### 1. 订单管理系统
-1.1 订单管理有限状态机
+### 1. 订单管理系统1.1 订单管理有限状态机
 
 Mealy 状态机和 Moore 状态机是两种经典的有限状态机（FSM）模型**。交易系统通常是Mealy状态机。相比Moore，Mealy将输入也包括其中。 **
 
@@ -24728,8 +24743,7 @@ bool replay_after_timeout(uint64_t cmd_id) {
 ```
 
 
-### 2. 订单簿设计
-**方案1：向量订单簿 (Vector-based LOB)**
+### 2. 订单簿设计**方案1：向量订单簿 (Vector-based LOB)**
 
 **核心**:
 
@@ -26915,8 +26929,7 @@ struct PriceWindow {
 };
 ```
 
-### 3. 消息传输协议引擎（FIX）
-FIX协议的基本构建块是 **标签-值对**。每个数据字段都由三部分组成：
+### 3. 消息传输协议引擎（FIX）FIX协议的基本构建块是 **标签-值对**。每个数据字段都由三部分组成：
 
 1. **Tag（标签）**：一个唯一的整数，代表字段的含义（例如，`35` 代表 `MsgType`，`44` 代表 `Price`）。
 2. **Value（值）**：字段的实际数据（例如，`D` 代表 `NewOrderSingle`，`150.25` 代表价格）。
@@ -29026,8 +29039,7 @@ struct L1Parser {
 ```
 
 
-### 4. 消息中间件（zmq）
-基于订单簿设计中的实现与ZeroMQ的简单消息中心
+### 4. 消息中间件（zmq）基于订单簿设计中的实现与ZeroMQ的简单消息中心
 
 ```cpp
 #include <zmq.hpp>
@@ -29289,8 +29301,7 @@ private:
 ![](https://cdn.nlark.com/yuque/0/2026/png/35485470/1768269462634-a35a10f7-8d7d-449e-91fa-8dc264f152eb.png)
 
 
-### 5. 交易系统的OMS、EMS、PMS、RMS
-**OMS - 订单管理系统 (Order Management System)**
+### 5. 交易系统的OMS、EMS、PMS、RMS**OMS - 订单管理系统 (Order Management System)**
 
 OMS负责管理订单的完整生命周期。
 
@@ -31362,725 +31373,7 @@ using LFPersistentOrderBook = PersistentHistoricalOrderBook<std::vector<PriceLev
 ```
 
 
-### 7. maker-only撮合器
-Maker-Only匹配引擎，用于回测交易策略。该引擎只允许限价单（maker订单），禁止市价单或激进的限价单（taker订单）。
-
-**功能特点**
-
-1. **Maker-only订单验证**：拒绝会穿过价差变成taker订单的订单
-2. **订单管理**：支持提交、撤销和跟踪订单
-3. **部分成交处理**：支持订单的部分成交，剩余数量保留在订单簿中
-4. **超时撤销**：自动撤销开放时间过长的订单
-5. **偏离撤销**：当市场价格偏离订单价格过多时撤销订单
-6. **双腿支持**：支持两个不同市场的腿（A和B）上的套利策略
-7. **成交记录**：记录所有成交详情，包括触发成交的交易
-
-**核心组件**
-
-**MakerSimulator 类(处理所有匹配逻辑的主类)**：
-
-+ `post_order()`：提交新订单，验证以防止taker订单
-+ `on_tick()`：处理传入的行情数据并匹配现有订单
-+ `cancel_order()`：按ID取消特定订单
-+ `cancel_timeout_orders()`：取消开放时间超过指定超时时间的订单
-+ `cancel_deviation_orders()`：取消价格偏离当前市场价格超过阈值的订单
-
-**订单跟踪信息：**
-
-+ 订单ID
-+ 市场腿（A或B）
-+ 方向（买入或卖出）
-+ 价格和数量
-+ 已成交数量
-+ 状态（新订单、部分成交、完全成交、已撤销、已拒绝）
-+ 时间戳
-
-**成交记录信息：**
-
-+ 关联订单ID
-+ 市场腿
-+ 方向
-+ 价格和数量
-+ 时间戳
-+ 匹配交易ID
-
-**测试场景**
-
-1. **完全成交**：订单被匹配交易完全成交
-2. **部分成交**：订单部分成交，剩余数量保持活跃
-3. **单腿成交**：在两腿策略中，只有一腿得到成交
-4. **吃单拒绝**：尝试提交taker订单被正确拒绝
-5. **重复处理**：处理重复订单ID
-
-**代码重要细节**
-
-**防止吃单**
-
-在接受任何订单之前，系统检查是否会成为吃单：
-
-+ 买入价高于等于当前最新价的订单会被拒绝
-+ 卖出价低于等于当前最新价的订单会被拒绝
-
-**匹配逻辑**
-
-订单与传入的交易行情匹配：
-
-+ 买入订单在交易价格≤订单价格时匹配
-+ 卖出订单在交易价格≥订单价格时匹配
-+ 匹配结果为部分成交（模拟为剩余数量的50%）
-
-**订单生命周期**
-
-订单经历以下状态：
-
-1. NEW - 刚提交
-2. PARTIALLY_FILLED - 部分数量已成交
-3. FILLED - 所有数量已成交
-4. CANCELLED - 被用户或系统取消
-5. REJECTED - 提交时被拒绝（例如taker订单）
-
-
-```cpp
-#ifndef MAKER_SIMULATOR_H
-#define MAKER_SIMULATOR_H
-
-#include <string>
-#include <map>
-#include <queue>
-#include <vector>
-#include <chrono>
-#include <memory>
-
-// 行情数据结构体
-struct TickData {
-    double bid_price;                     // 买一价
-    double ask_price;                     // 卖一价
-    double last_price;                    // 最新价
-    std::chrono::steady_clock::time_point timestamp;  // 时间戳
-    std::string trade_id;                 // 交易ID
-};
-
-// 前向声明
-struct Order;
-struct Trade;
-
-enum class OrderSide {
-    BUY,   // 买入
-    SELL   // 卖出
-};
-
-enum class OrderStatus {
-    NEW,             // 新订单
-    PARTIALLY_FILLED, // 部分成交
-    FILLED,          // 完全成交
-    CANCELLED,       // 已撤销
-    REJECTED         // 已拒绝
-};
-
-enum class Leg {
-    A,  // 腿A
-    B   // 腿B
-};
-
-// 订单结构体
-struct Order {
-    std::string order_id;                 // 订单ID
-    Leg leg;                              // 市场腿
-    OrderSide side;                       // 买卖方向
-    double price;                         // 价格
-    double size;                          // 数量
-    double filled_size;                   // 已成交数量
-    OrderStatus status;                   // 订单状态
-    std::chrono::steady_clock::time_point timestamp;     // 订单时间戳
-    std::chrono::steady_clock::time_point last_update;   // 最后更新时间
-};
-
-// 成交结构体
-struct Trade {
-    std::string order_id;                 // 订单ID
-    Leg leg;                              // 市场腿
-    OrderSide side;                       // 买卖方向
-    double price;                         // 成交价格
-    double size;                          // 成交数量
-    std::chrono::steady_clock::time_point timestamp;  // 成交时间戳
-    std::string matched_by;               // 触发成交的交易ID
-};
-
-// Maker交易模拟器类
-class MakerSimulator {
-public:
-    MakerSimulator();
-
-    // 提交新订单
-    bool post_order(const std::string& order_id, Leg leg, OrderSide side,
-                   double price, double size);
-
-    // 处理行情数据
-    void on_tick(Leg leg, const TickData& tick);
-
-    // 撤销订单
-    bool cancel_order(const std::string& order_id);
-
-    // 根据超时时间撤销订单
-    void cancel_timeout_orders(std::chrono::milliseconds timeout);
-
-    // 根据价格偏离撤销订单
-    void cancel_deviation_orders(double threshold_percent);
-
-    // 获取当前订单
-    const std::map<std::string, Order>& get_orders() const;
-
-    // 获取成交记录
-    const std::vector<Trade>& get_trades() const;
-
-    // 计算当前权益
-    double calculate_equity() const;
-
-    // 获取现金余额
-    double get_cash() const;
-
-private:
-    std::map<std::string, Order> orders_;     // 订单映射表
-    std::vector<Trade> trades_;               // 成交记录
-    std::map<Leg, double> last_prices_;       // 最新价格
-    double equity_;                           // 总权益
-    double cash_;                             // 现金
-
-    // 辅助方法
-    bool is_taker_order(Leg leg, OrderSide side, double price) const;
-    void match_order(Order& order, const TickData& tick);
-    void cancel_order_internal(Order& order);
-};
-
-#endif // MAKER_SIMULATOR_H
-```
-
-```cpp
-#include "maker_simulator.h"
-#include <iostream>
-#include <algorithm>
-#include <cmath>
-
-// 构造函数
-MakerSimulator::MakerSimulator() : equity_(0.0), cash_(100000.0) {
-    // 初始化现金为100000.0
-}
-
-// 提交订单
-bool MakerSimulator::post_order(const std::string& order_id, Leg leg, OrderSide side,
-double price, double size) {
-    // 检查是否会成为吃单
-    if (is_taker_order(leg, side, price)) {
-        std::cerr << "检测到尝试吃单，订单 " << order_id
-            << " 已被拒绝。" << std::endl;
-        return false;
-    }
-
-    // 检查是否有足够资金（对于买单）
-    if (side == OrderSide::BUY) {
-        double cost = price * size;
-        if (cost > cash_) {
-            std::cerr << "资金不足，订单 " << order_id
-                << " 已被拒绝。" << std::endl;
-            return false;
-        }
-    }
-
-    // 创建新订单
-    Order order;
-    order.order_id = order_id;
-    order.leg = leg;
-    order.side = side;
-    order.price = price;
-    order.size = size;
-    order.filled_size = 0.0;
-    order.status = OrderStatus::NEW;
-    order.timestamp = std::chrono::steady_clock::now();
-    order.last_update = order.timestamp;
-
-    // 添加到订单映射表
-    orders_[order_id] = order;
-    return true;
-}
-
-// 处理行情数据
-void MakerSimulator::on_tick(Leg leg, const TickData& tick) {
-    // 更新最新价格
-    last_prices_[leg] = tick.last_price;
-
-    // 检查每个订单是否有匹配
-    std::vector<std::string> orders_to_update;
-    for (const auto& pair : orders_) {
-        const Order& order = pair.second;
-        if (order.leg == leg && order.status != OrderStatus::CANCELLED &&
-            order.status != OrderStatus::FILLED) {
-            orders_to_update.push_back(order.order_id);
-        }
-    }
-
-    // 处理匹配
-    for (const std::string& order_id : orders_to_update) {
-        auto it = orders_.find(order_id);
-        if (it != orders_.end()) {
-            match_order(it->second, tick);
-        }
-    }
-}
-
-// 撤销订单
-bool MakerSimulator::cancel_order(const std::string& order_id) {
-    auto it = orders_.find(order_id);
-    if (it != orders_.end()) {
-        cancel_order_internal(it->second);
-        return true;
-    }
-    return false;
-}
-
-// 根据超时时间撤销订单
-void MakerSimulator::cancel_timeout_orders(std::chrono::milliseconds timeout) {
-    auto now = std::chrono::steady_clock::now();
-    for (auto& pair : orders_) {
-        Order& order = pair.second;
-        if (order.status != OrderStatus::CANCELLED &&
-            order.status != OrderStatus::FILLED) {
-            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-            now - order.timestamp);
-            if (elapsed >= timeout) {
-                cancel_order_internal(order);
-            }
-        }
-    }
-}
-
-// 根据价格偏离撤销订单
-void MakerSimulator::cancel_deviation_orders(double threshold_percent) {
-    for (auto& pair : orders_) {
-        Order& order = pair.second;
-        if (order.status != OrderStatus::CANCELLED &&
-            order.status != OrderStatus::FILLED) {
-            auto it = last_prices_.find(order.leg);
-            if (it != last_prices_.end()) {
-                double last_price = it->second;
-                if (last_price > 0) {
-                    double deviation = std::abs(order.price - last_price) / last_price;
-                    if (deviation >= threshold_percent / 100.0) {
-                        cancel_order_internal(order);
-                    }
-                }
-            }
-        }
-    }
-}
-
-// 获取当前订单
-const std::map<std::string, Order>& MakerSimulator::get_orders() const {
-    return orders_;
-}
-
-// 获取成交记录
-const std::vector<Trade>& MakerSimulator::get_trades() const {
-    return trades_;
-}
-
-// 计算当前权益
-double MakerSimulator::calculate_equity() const {
-    // 计算当前权益 = 现金 + 持仓价值
-    double total_equity = cash_;
-
-    // 计算持仓价值
-    std::map<std::pair<Leg, OrderSide>, double> positions; // 持仓数量
-    std::map<std::pair<Leg, OrderSide>, double> avg_prices; // 持仓均价
-
-    // 通过成交记录计算持仓
-    for (const auto& trade : trades_) {
-        std::pair<Leg, OrderSide> key = std::make_pair(trade.leg, trade.side);
-
-        if (trade.side == OrderSide::BUY) {
-            // 买入增加多头持仓
-            if (positions.find(key) == positions.end()) {
-                positions[key] = trade.size;
-                avg_prices[key] = trade.price;
-            } else {
-                // 加权平均计算均价
-                double total_quantity = positions[key] + trade.size;
-                avg_prices[key] = (avg_prices[key] * positions[key] + trade.price * trade.size) / total_quantity;
-                positions[key] = total_quantity;
-            }
-        } else {
-            // 卖出增加空头持仓（用负数表示）
-            if (positions.find(key) == positions.end()) {
-                positions[key] = -trade.size;
-                avg_prices[key] = trade.price;
-            } else {
-                // 加权平均计算均价
-                double total_quantity = positions[key] - trade.size;
-                avg_prices[key] = (avg_prices[key] * std::abs(positions[key]) + trade.price * trade.size) / std::abs(total_quantity);
-                positions[key] = total_quantity;
-            }
-        }
-    }
-
-    // 根据最新市场价格计算持仓价值
-    for (const auto& position : positions) {
-        Leg leg = position.first.first;
-        OrderSide side = position.first.second;
-        double quantity = position.second;
-        double avg_price = avg_prices.at(position.first);
-
-        auto it = last_prices_.find(leg);
-        if (it != last_prices_.end()) {
-            double current_price = it->second;
-
-            if (side == OrderSide::BUY) {
-                // 多头持仓盈亏 = 持仓数量 * (当前价格 - 持仓均价)
-                total_equity += quantity * (current_price - avg_price);
-            } else {
-                // 空头持仓盈亏 = 持仓数量 * (持仓均价 - 当前价格)
-                total_equity += std::abs(quantity) * (avg_price - current_price);
-            }
-        }
-    }
-
-    return total_equity;
-}
-
-// 获取现金余额
-double MakerSimulator::get_cash() const {
-    return cash_;
-}
-
-// 检查是否为吃单
-bool MakerSimulator::is_taker_order(Leg leg, OrderSide side, double price) const {
-    // 检查订单是否会穿过价差成为吃单
-    auto it = last_prices_.find(leg);
-    if (it != last_prices_.end()) {
-        double last_price = it->second;
-        if (side == OrderSide::BUY && price >= last_price) {
-            return true; // 买入价高于等于最新价，为吃单
-        } else if (side == OrderSide::SELL && price <= last_price) {
-            return true; // 卖出价低于等于最新价，为吃单
-        }
-    }
-    return false;
-}
-
-// 匹配订单
-void MakerSimulator::match_order(Order& order, const TickData& tick) {
-    bool matched = false;
-
-    // 买入订单，当交易价格小于等于我们的价格时匹配
-    if (order.side == OrderSide::BUY && tick.last_price <= order.price) {
-        matched = true;
-    }
-    // 卖出订单，当交易价格大于等于我们的价格时匹配
-    else if (order.side == OrderSide::SELL && tick.last_price >= order.price) {
-        matched = true;
-    }
-
-    if (matched) {
-        // 计算订单成交数量（这次我们尝试完全成交）
-        double remaining_size = order.size - order.filled_size;
-        double fill_size = remaining_size; // 完全成交剩余数量
-
-        // 创建成交记录
-        Trade trade;
-        trade.order_id = order.order_id;
-        trade.leg = order.leg;
-        trade.side = order.side;
-        trade.price = order.price; // 使用我们的价格，不是成交价格
-        trade.size = fill_size;
-        trade.timestamp = tick.timestamp;
-        trade.matched_by = tick.trade_id;
-
-        trades_.push_back(trade);
-
-        // 更新资金
-        if (order.side == OrderSide::BUY) {
-            cash_ -= trade.price * trade.size; // 买入扣减现金
-        } else {
-            cash_ += trade.price * trade.size; // 卖出增加现金
-        }
-
-        // 更新订单
-        order.filled_size += fill_size;
-        order.last_update = std::chrono::steady_clock::now();
-
-        if (order.filled_size >= order.size) {
-            order.status = OrderStatus::FILLED;
-        } else {
-            order.status = OrderStatus::PARTIALLY_FILLED;
-        }
-    }
-}
-
-// 内部撤销订单方法
-void MakerSimulator::cancel_order_internal(Order& order) {
-    if (order.status != OrderStatus::CANCELLED && order.status != OrderStatus::FILLED) {
-        order.status = OrderStatus::CANCELLED;
-        order.last_update = std::chrono::steady_clock::now();
-    }
-}
-```
-
-```cpp
-#include "maker_simulator.h"
-#include <iostream>
-#include <cassert>
-#include <thread>
-#include <chrono>
-
-// 测试场景A：完全成交
-void test_scenario_a() {
-    std::cout << "=== 测试场景 A: 完全成交 ===" << std::endl;
-
-    MakerSimulator simulator;
-
-    // 提交订单
-    bool result = simulator.post_order("order1", Leg::A, OrderSide::BUY, 100.0, 10.0);
-    assert(result);
-
-    // 创建能够匹配订单的行情数据
-    TickData tick;
-    tick.bid_price = 99.0;
-    tick.ask_price = 101.0;
-    tick.last_price = 100.0; // 与我们的买入价100.0匹配
-    tick.timestamp = std::chrono::steady_clock::now();
-    tick.trade_id = "trade1";
-
-    // 处理行情
-    simulator.on_tick(Leg::A, tick);
-
-    // 检查结果
-    const auto& orders = simulator.get_orders();
-    const auto& trades = simulator.get_trades();
-
-    assert(orders.at("order1").status == OrderStatus::FILLED);
-    assert(trades.size() >= 1);
-
-    std::cout << "场景 A 通过: 订单完全成交" << std::endl;
-}
-
-// 测试场景B：部分成交
-void test_scenario_b() {
-    std::cout << "=== 测试场景 B: 部分成交 ===" << std::endl;
-
-    MakerSimulator simulator;
-
-    // 提交订单
-    bool result = simulator.post_order("order2", Leg::B, OrderSide::SELL, 105.0, 20.0);
-    assert(result);
-
-    // 创建能够部分匹配订单的行情数据
-    TickData tick;
-    tick.bid_price = 104.0;
-    tick.ask_price = 106.0;
-    tick.last_price = 105.0; // 与我们的卖出价105.0匹配
-    tick.timestamp = std::chrono::steady_clock::now();
-    tick.trade_id = "trade2";
-
-    // 处理行情
-    simulator.on_tick(Leg::B, tick);
-
-    // 检查结果 - 应该是完全成交（现在我们的逻辑是完全成交）
-    const auto& orders = simulator.get_orders();
-    const auto& trades = simulator.get_trades();
-
-    assert(orders.at("order2").status == OrderStatus::FILLED);
-    assert(trades.size() >= 1);
-    assert(orders.at("order2").filled_size == 20.0);
-
-    std::cout << "场景 B 通过: 订单完全成交" << std::endl;
-}
-
-// 测试场景C：一条腿成交，另一条腿未成交
-void test_scenario_c() {
-    std::cout << "=== 测试场景 C: 一条腿成交，另一条腿未成交 ===" << std::endl;
-
-    MakerSimulator simulator;
-
-    // 在腿A提交买入订单
-    bool result1 = simulator.post_order("order3a", Leg::A, OrderSide::BUY, 100.0, 10.0);
-    assert(result1);
-
-    // 在腿B提交卖出订单
-    bool result2 = simulator.post_order("order3b", Leg::B, OrderSide::SELL, 105.0, 10.0);
-    assert(result2);
-
-    // 创建能够匹配腿A的行情数据
-    TickData tickA;
-    tickA.bid_price = 99.0;
-    tickA.ask_price = 101.0;
-    tickA.last_price = 100.0; // 与我们的买入价100.0匹配
-    tickA.timestamp = std::chrono::steady_clock::now();
-    tickA.trade_id = "trade3a";
-
-    // 处理腿A的行情
-    simulator.on_tick(Leg::A, tickA);
-
-    // 创建不能匹配腿B的行情数据
-    TickData tickB;
-    tickB.bid_price = 104.0;
-    tickB.ask_price = 106.0;
-    tickB.last_price = 104.5; // 不匹配我们的卖出价105.0
-    tickB.timestamp = std::chrono::steady_clock::now();
-    tickB.trade_id = "trade3b";
-
-    // 处理腿B的行情
-    simulator.on_tick(Leg::B, tickB);
-
-    // 检查结果
-    const auto& orders = simulator.get_orders();
-    const auto& trades = simulator.get_trades();
-
-    // 腿A应该已完全成交
-    assert(orders.at("order3a").status == OrderStatus::FILLED);
-
-    // 腿B应该未成交
-    assert(orders.at("order3b").status == OrderStatus::NEW);
-
-    std::cout << "场景 C 通过: 一条腿成交，另一条腿未成交" << std::endl;
-}
-
-// 测试场景D：吃单尝试被拒绝
-void test_scenario_d() {
-    std::cout << "=== 测试场景 D: 吃单尝试被拒绝 ===" << std::endl;
-
-    MakerSimulator simulator;
-
-    // 设置最新价格
-    TickData initial_tick;
-    initial_tick.bid_price = 99.0;
-    initial_tick.ask_price = 101.0;
-    initial_tick.last_price = 100.0;
-    initial_tick.timestamp = std::chrono::steady_clock::now();
-    initial_tick.trade_id = "initial";
-
-    simulator.on_tick(Leg::A, initial_tick);
-
-    // 尝试提交吃单（买入价高于最新价）
-    bool result = simulator.post_order("order4", Leg::A, OrderSide::BUY, 101.5, 10.0);
-
-    // 应该被拒绝
-    assert(!result);
-
-    // 检查订单未被添加
-    const auto& orders = simulator.get_orders();
-    assert(orders.find("order4") == orders.end());
-
-    std::cout << "场景 D 通过: 吃单尝试被正确拒绝" << std::endl;
-}
-
-// 测试场景E：重复订单处理
-void test_scenario_e() {
-    std::cout << "=== 测试场景 E: 重复订单处理 ===" << std::endl;
-
-    MakerSimulator simulator;
-
-    // 提交订单
-    bool result1 = simulator.post_order("order5", Leg::A, OrderSide::BUY, 100.0, 10.0);
-    assert(result1);
-
-    // 获取原始订单信息
-    const auto& orders_before = simulator.get_orders();
-    double original_size = orders_before.at("order5").size;
-
-    // 再次提交相同ID的订单（应该替换原来的订单）
-    bool result2 = simulator.post_order("order5", Leg::A, OrderSide::SELL, 95.0, 5.0);
-    // 这应该会替换现有订单
-
-    // 检查我们仍然只有一个订单，但是属性已经改变
-    const auto& orders = simulator.get_orders();
-    assert(orders.size() == 1);
-    assert(orders.begin()->first == "order5");
-    assert(orders.at("order5").side == OrderSide::SELL);
-    assert(orders.at("order5").price == 95.0);
-    assert(orders.at("order5").size == 5.0);
-
-    std::cout << "场景 E 通过: 重复订单被正确处理" << std::endl;
-}
-
-// 主函数
-int main() {
-    std::cout << "运行 Maker Simulator 测试场景" << std::endl;
-
-    test_scenario_a();
-    test_scenario_b();
-    test_scenario_c();
-    test_scenario_d();
-    test_scenario_e();
-
-    std::cout << "\n所有测试场景通过!" << std::endl;
-
-    return 0;
-}
-```
-
-**历史行情回放成交**
-
-回放撮合用历史盘口和逐笔成交给已接受的订单成交。报单时刻无效、单号为 0、数量不大于 0、方向超出买卖、单号已经存在，订单作废。接受后记为已报，已成数量和成交金额清零。生效时刻等于报单时刻加上模拟延迟。九点半之前延迟为 0。九点半到十点、十点到十点半、十点半到十一点、十一点到十一点半、十一点半到十三点半、十三点半到十四点、十四点到十四点半，各取一档配置的毫秒数，十四点半以后取最后一档。毫秒数乘 1000，加到以微秒计的报单时刻上。订单上还记着一个更晚的时刻时，这一轮不参与撮合。
-
-盘口侧，买单在行情价不高于限价时成交，卖单在行情价不低于限价时成交。两价之差小于 1e-6 视为同一价格。成交数量取剩余量和档位量的较小值，订单和档位一起减少，均价按成交数量加权。剩余量为 0 记全成，否则记部成。
-
-逐笔侧，早于订单时刻的成交丢掉。未收紧限价时，买单接受不高于限价的成交价，卖单接受不低于限价的成交价。收紧之后，买单限价先减去标的上的价格偏移，卖单限价先加上该偏移。成交数量同样取较小值。成交上买序号大于卖序号时买方后到，卖序号大于买序号时卖方后到。后到一侧与本单方向相同，成交价取逐笔价格，否则取本单限价。
-
-```cpp
-struct OpenTicket {
-    int64_t stamp_us{0};
-    uint64_t token{0};
-    bool bid{true};
-    double cap{0};
-    int64_t shares{0};
-    int64_t done{0};
-    double cash{0};
-    int8_t mark{1};
-    int64_t ready_us{0};
-};
-
-int64_t replay_lag_us(int minute, const double* slot_ms) {
-    if (minute < 9 * 60 + 30) return 0;
-    const int cut_min[] = {
-        10 * 60, 10 * 60 + 30, 11 * 60, 11 * 60 + 30,
-        13 * 60 + 30, 14 * 60, 14 * 60 + 30
-    };
-    int band = 7;
-    for (int i = 0; i < 7; ++i) {
-        if (minute < cut_min[i]) { band = i; break; }
-    }
-    return static_cast<int64_t>(slot_ms[band] * 1000.0);
-}
-
-bool px_eq(double a, double b) { return std::abs(a - b) < 1e-6; }
-
-bool level_ok(const OpenTicket& t, double level) {
-    if (px_eq(level, t.cap)) return true;
-    return t.bid ? level <= t.cap : t.cap <= level;
-}
-
-bool print_ok(const OpenTicket& t, double trade_px, double bend, bool tight) {
-    double gate = t.cap + (tight ? (t.bid ? -bend : bend) : 0);
-    if (px_eq(trade_px, gate)) return true;
-    return t.bid ? trade_px <= gate : gate <= trade_px;
-}
-
-double print_deal_px(const OpenTicket& t, double trade_px, int64_t bid_seq, int64_t ask_seq) {
-    bool buyer_later = bid_seq > ask_seq;
-    bool same = t.bid ? buyer_later : !buyer_later;
-    return same ? trade_px : t.cap;
-}
-
-int64_t book_fill(OpenTicket& t, int64_t now_us, double px, int64_t avail) {
-    int64_t left = t.shares - t.done;
-    if (left <= 0 || avail <= 0 || now_us < t.ready_us) return 0;
-    int64_t n = left < avail ? left : avail;
-    t.cash += px * static_cast<double>(n);
-    t.done += n;
-    t.mark = t.done >= t.shares ? 2 : 3;
-    return n;
-}
-```
-
-### 8. k线生成器
+### 7. k线生成器
 ```cpp
 #ifndef BAR_GENERATOR_H
 #define BAR_GENERATOR_H
@@ -32277,8 +31570,7 @@ private:
 ```
 
 
-### 9. 求解器
-求解器是一种高性能算法模块，专门用于在极低延迟环境下进行快速最优决策、资源分配或路径规划。这类组件通常集成在策略引擎、风险控制系统或资源分配系统中，能够在微秒级别内计算出最优解决方案。
+### 8. 求解器求解器是一种高性能算法模块，专门用于在极低延迟环境下进行快速最优决策、资源分配或路径规划。这类组件通常集成在策略引擎、风险控制系统或资源分配系统中，能够在微秒级别内计算出最优解决方案。
 
 **1. 订单分配求解器 (Order Allocation Solver)**
 
@@ -32802,8 +32094,7 @@ public:
 ```
 
 
-### 10. 智能订单路由（SOR）
-SOR（Smart Order Routing）指将一张母单（Parent Order）按规则拆分到多个执行场所（Venue）——如各交易所、暗池、流动性提供商（LP）——在约束条件下尽量优化：
+### 9. 智能订单路由（SOR）SOR（Smart Order Routing）指将一张母单（Parent Order）按规则拆分到多个执行场所（Venue）——如各交易所、暗池、流动性提供商（LP）——在约束条件下尽量优化：
 
 + 成交价格（相对基准的滑点 / 实施缺口）
 + 成交数量（吃单与挂单的完成度）
@@ -33041,8 +32332,7 @@ $ \mathrm{fill\,rate} = \begin{cases} Q_{\mathrm{filled}} / Q_{\mathrm{requested
 + 费率符号与交易所规则以实际合约为准。
 
 
-### 11. 自成交保护机制
-**自成交**指同一账户或实际控制关系账户组内的买卖订单相互匹配的行为
+### 10. 自成交保护机制**自成交**指同一账户或实际控制关系账户组内的买卖订单相互匹配的行为
 
 1. **自动化交易策略**：算法同时发送相同合约的多空双向订单，因系统延迟或逻辑漏洞导致匹配。
 2. **交易系统缺陷**：如部分券商系统未对特定场景（如MOM账户同步发单）做自成交拦截。
@@ -33228,8 +32518,7 @@ void remember_resting(PxTree& book, int dir, double px, uint64_t id) {
 ```
 
 
-### 12. 限流器
-在交易系统/风控/撮合/网关等高并发链路里，限流的目标是：把“不可控的突发流量”变成“系统可承受的稳定流量”，从而：
+### 11. 限流器在交易系统/风控/撮合/网关等高并发链路里，限流的目标是：把“不可控的突发流量”变成“系统可承受的稳定流量”，从而：
 
 + 保护核心依赖（撮合、账户、风控、行情、DB/Cache、下游三方）
 + 降低级联故障风险（雪崩、排队放大、超时重试风暴）
@@ -33881,7 +33170,8 @@ if (!fast.try_acquire_hashed(h, 1)) {
 ```
 
 
-### 13. Lezer/Tree-sitter
+### 12. Lezer/Tree-sitter
+
 **1. 通用定位**
 
 Lezer（由 CodeMirror 团队开发）和 Tree-sitter（由 GitHub 开发）均是**增量式语法分析器生成器**，核心目标是为文本/二进制流提供高效、容错的增量解析能力，生成结构化的语法树（AST），且能在输入数据局部变更时仅重新解析变更部分，而非全量重解析。
@@ -34089,8 +33379,7 @@ if (r.valid) {
 实测：~86 ns/parse，约 1160 万次/秒。
 
 
-### 14. 分布式交易系统共识模型
-**一、两种共识模型定义**
+### 13. 分布式交易系统共识模型**一、两种共识模型定义**
 
 **1. 命令共识 (Replicated State Machine)**
 
@@ -34218,8 +33507,7 @@ void applyStateUpdate(const StateUpdate& update) {
 
 
 
-### 15. 交易所协议分层与序列一致性
-1.**协议分层**
+### 14. 交易所协议分层与序列一致性1.**协议分层**
     会话层：登录、心跳、重连、序列号维护、重传协商。
     业务层：订单簿增量、成交、状态事件、快照事件。
     编解码层：字节序转换、字段校验、结构体映射。
@@ -34353,8 +33641,7 @@ struct TimeTriple {
 ```
 
 
-### 16. 预序列化订单
-预序列化订单指在**非热路径**（合约加载、会话就绪、配置变更时）预先构造好发往交易所/柜台的 **wire 字节模板**（FIX tag-value、FIXP/SBE 等二进制帧、或自有 UDP/TCP 载荷），在真正下单的热路径上**仅原地改写**每次必变的字段（如 `ClOrdID`、价格、数量、时间戳、校验和/签名占位等），从而避免在决策→发送路径上做全量字符串格式化、重复遍历标签或频繁分配。业界二进制协议侧，[FIX Simple Binary Encoding (SBE)](https://github.com/FIXTradingCommunity/fix-simple-binary-encoding) 强调定长/按偏移访问、适合低延迟编解码（参见其 [Introduction 文档](https://github.com/FIXTradingCommunity/fix-simple-binary-encoding/blob/master/v1-0-RC3/doc/01Introduction.md)）。开源侧如 [fixpp](https://github.com/sashamakarenko/fixpp) 等面向延迟敏感场景的 FIX 生成库，也常见「复用报文对象、只更新变化字段」的用法说明。
+### 15. 预序列化订单预序列化订单指在**非热路径**（合约加载、会话就绪、配置变更时）预先构造好发往交易所/柜台的 **wire 字节模板**（FIX tag-value、FIXP/SBE 等二进制帧、或自有 UDP/TCP 载荷），在真正下单的热路径上**仅原地改写**每次必变的字段（如 `ClOrdID`、价格、数量、时间戳、校验和/签名占位等），从而避免在决策→发送路径上做全量字符串格式化、重复遍历标签或频繁分配。业界二进制协议侧，[FIX Simple Binary Encoding (SBE)](https://github.com/FIXTradingCommunity/fix-simple-binary-encoding) 强调定长/按偏移访问、适合低延迟编解码（参见其 [Introduction 文档](https://github.com/FIXTradingCommunity/fix-simple-binary-encoding/blob/master/v1-0-RC3/doc/01Introduction.md)）。开源侧如 [fixpp](https://github.com/sashamakarenko/fixpp) 等面向延迟敏感场景的 FIX 生成库，也常见「复用报文对象、只更新变化字段」的用法说明。
 
 **系统设计要点**：
 
@@ -34575,8 +33862,7 @@ int main() {
 ```
 
 
-### 17. 自适应负载丢弃器（CoDEL）
-
+### 16. 自适应负载丢弃器（CoDEL）
 单线程低延迟链路中，策略一旦落后行情，继续处理队列里的过时包只会白白占 CPU、把延迟堆得更糟。借鉴网络 AQM 的 **CoDEL（Controlled Delay）**：用包的**驻留时间**（出队时刻 − 入队时刻）判断拥堵；当驻留持续超过目标阈值，并越过观测窗口后进入丢弃模式，主动丢掉过期数据以排空积压，保护核心交易路径的延迟稳定性。与限流器“限制发送速率”互补——这里是**按陈旧度做主动过载保护**。
 
 ```cpp
@@ -34635,8 +33921,7 @@ private:
 + **注意**：入队时间戳必须单调可信；丢弃是有损保护，需监控丢弃率与恢复时间
 
 
-### 18. 多进程共享内存交易中间件（ShmDB）
-
+### 17. 多进程共享内存交易中间件（ShmDB）
 机构交易系统很少把策略、行情接入、报单接入放进同一个进程。更常见的是主控进程创建一块共享内存，各业务进程映射进来，用类型化的环缓冲交换定长消息。热路径上不做序列化，也不走套接字或管道。下面各小节说明这类总线里常见、且容易写错的设计点。
 
 **1. 按业务划分的路由环缓冲池**
@@ -35019,8 +34304,7 @@ struct TurnLog {
 };
 ```
 
-### 19. 交易桥双边订单号索引
-
+### 18. 交易桥双边订单号索引
 柜台回报里的订单号类型并不统一：有的是字符串，有的是 64 位整数，有的只有 32 位。同一柜台号还会从不同接口会话回来，键上再带一段固定长度的接口名。交易桥把柜台号和本系统号收成两张定长槽。回报线程只把一条短记录写进自己的环并发布序号，桥线程按序号改槽。报单成功时写入两侧；撤单与成交回报用柜台号在开放寻址槽里找回本地单；超时巡检扫状态仍为未确认的槽。环满时这一笔直接失败返回。
 
 ```cpp
@@ -35216,8 +34500,7 @@ void sweep_timeouts(const std::vector<Live*>& unacked, const std::vector<Live*>&
 ```
 
 
-### 20. 成交回报先于状态回报的本地缓存
-
+### 19. 成交回报先于状态回报的本地缓存
 部分柜台会先推成交、后推状态变更。若本地单仍停在“已报”而累计成交已到，直接覆盖会把中间态弄丢。订单结构里预留三块缓存：先到的状态、先到的成交量、先到的成交额。状态回报迟到时，用缓存与正式字段合并，再推进到部分成交或全成。
 
 ```cpp
@@ -35409,8 +34692,7 @@ void on_cut_tape(DeskOrder& o, int kind, int64_t qty, int err) {
 ```
 
 
-### 21. 关联订单元数据
-
+### 20. 关联订单元数据
 配对交易、多腿同时下发时，每条腿仍是独立报单，但需要在同一生命周期里一起观察。订单头里放关联组号、组内总腿数、本腿序号：组号为 0 表示独立单；总腿数为 1 表示无关联。策略与风控按组号聚合进度，不必另建外挂表。
 
 ```cpp
@@ -35440,8 +34722,7 @@ bool group_done(const LinkedOrder* legs, size_t n, uint64_t gid) {
 ```
 
 
-### 22. 多档最小变动价位表
-
+### 21. 多档最小变动价位表
 A 股默认 0.01，港股与部分期货按价格区间切换步长。价位表解析成“起点价 → 步长”序列，最多十档，取整、逐 tick 上浮或下移、夹到涨跌停都走同一张表。上浮或下移 N 个 tick 时，每走一步都用当前档的步长；价格达到下一档起点后，后面的 tick 改用新档。定位时价格正好等于下一档起点，仍留在当前档；向下走且价格正好压在本档起点，第一步改用更低一档。取整把价格和步长乘 100000 再加 0.5，截成整数后做除法，已经落在格子上的价格保持原值。结果夹在跌停和涨停之间，向下移动时先把负价格抬到 0。错误取整是废单的常见来源，热路径上缓存每标的一张表和当前档下标，避免每次解析字符串。
 
 ```cpp
@@ -35520,8 +34801,7 @@ public:
 ```
 
 
-### 23. 因子存储与实时面
-
+### 22. 因子日历存储与实盘挂载
 分钟因子和采样值按名字落在日历环上。全局一张日历时间到下标的表，每个名字一条定长环，按下标写入。写入跳过中间 bar 时，用调用方提供的填充函数回填缺口，并打上已填充标记。哨兵下标 -2 表示从未写过，和已经写到 0 区分开，不必再放一个 bool。
 
 ```cpp
@@ -35561,9 +34841,9 @@ public:
 };
 ```
 
-实盘标的不走这张日历表。高频带嵌在标的对象里。因子面、采样面、非结构化信号面用指针挂在同一标的上，按名字分条目。
+实盘标的不走这张日历表。高频带嵌在标的对象里。因子环、采样环、非结构化信号环用指针挂在同一标的上，按名字分条目。
 
-因子面每个名字一条环，深 256。元素是一个填充标记加一个 double，标记占 1 字节，double 对齐到 8 字节，整格 16 字节。单标的名字预算 20。采样面用同一种元素，环深 512，名字预算 100。非结构化信号面环深 512，一条记录带上代码、频率、计算时间、产出时间、发出时间、信号名、复权系数和数值，名字预算 10。三类池各预留 1000 个，进程起来时按配置从共享段切出。短周期 RSI、动量、价差和基金净值走因子面的字符串键，不写入高频带的八个槽。
+因子环每个名字一条，深 256。元素是一个填充标记加一个 double，标记占 1 字节，double 对齐到 8 字节，整格 16 字节。单标的名字预算 20。采样环用同一种元素，环深 512，名字预算 100。非结构化信号环深 512，一条记录带上代码、频率、计算时间、产出时间、发出时间、信号名、复权系数和数值，名字预算 10。三类池各预留 1000 个，进程起来时按配置从共享段切出。短周期 RSI、动量、价差和基金净值走因子环的字符串键，不写入高频带的八个槽。
 
 ```cpp
 struct NamedCell {
@@ -35620,7 +34900,7 @@ InstrumentFaces bind_faces(FacePools& pools) {
 }
 ```
 
-发送进程用一个面标签分叉。标签为 0 时扫因子面，为 1 时扫采样面，把新条目收成一批再送出。非结构化面按信号名在该标的的收集器里取环，名字第一次出现时占用一个空条目。策略侧订阅分成三条：普通信号请求、高频带、非结构化信号。
+发送进程用一个类型标签分叉。标签为 0 时扫因子环，为 1 时扫采样环，把新条目收成一批再送出。非结构化信号按信号名在该标的的收集器里取环，名字第一次出现时占用一个空条目。策略侧订阅分成三条：普通信号请求、高频带、非结构化信号。
 
 ```cpp
 enum class FaceTag : int { Factor = 0, Sample = 1 };
@@ -35780,8 +35060,7 @@ void load_hist_row(double lane[8], const HistRow& row, bool publish) {
 }
 ```
 
-### 24. 引擎消息路由过滤器
-
+### 23. 引擎消息路由过滤器
 应答环里可能混着多个账户、多个算法引擎的消息。每个进程挂一条过滤规则：不过滤、按引擎 id 匹配、或按柜台+账户匹配。算法引擎还可再挂“只关心哪些 exec_type”的集合。过滤在置消费位之前完成，避免无关进程占掉确认位图。
 
 ```cpp
@@ -35812,9 +35091,8 @@ bool accept_order_msg(const RoutePolicy& p, uint32_t msg_engine,
 ```
 
 
-### 25. 篮子控制通道与超大执行缓冲
-
-机构篮子不是“循环下 2000 笔普通单控制”，而是单独的控制面：创建、暂停、恢复、停止、更新。执行内容放在超大定长缓冲里（可达数 MB），承载多标的参数或回报摘要。算法进程只订阅自己的 exec_type，普通策略环不会被篮子报文撑爆。
+### 24. 篮子控制通道与大容量执行缓冲
+机构篮子不是“循环下 2000 笔普通单控制”，而是单独的控制通道：创建、暂停、恢复、停止、更新。执行内容放在大容量定长缓冲里（可达数 MB），承载多标的参数或回报摘要。算法进程只订阅自己的 exec_type，普通策略环不会被篮子报文撑爆。
 
 ```cpp
 enum class BasketOp : uint8_t {
@@ -35836,9 +35114,8 @@ using BasketReq = BasketMsg<2048 * 2000>; // 控制面专用，勿放进行情�
 ```
 
 
-### 26. 交易桥前置风控过滤与错误码分层
-
-发往柜台 API 之前，交易桥应有一次同步过滤：黑名单、单笔金额、标的/全局笔数、委撤比、每分钟流控、自成交预判、多空失衡等。拒绝时写入与柜台错误同一套字段（错误码 + 文案），策略回调无需区分来源。校验类、资金持仓类、风控类错误码分段编号，便于监控归类。挂起与告警状态留给语义不清、需人工介入的回报。
+### 25. 交易桥发单前风控与错误码分层
+发往柜台 API 之前，交易桥先做一次同步过滤：黑名单、单笔金额、标的/全局笔数、委撤比、每分钟流控、自成交预判、多空失衡等。拒绝时写入与柜台错误同一套字段（错误码 + 文案），策略回调无需区分来源。校验类、资金持仓类、风控类错误码分段编号，便于监控归类。挂起与告警状态留给语义不清、需人工介入的回报。
 
 ```cpp
 enum class WireErr : int32_t {
@@ -35937,8 +35214,7 @@ bool listed(bool opening, const std::unordered_set<std::string>& opens,
 ```
 
 
-### 27. 订单检查计数信号量与两阶段账本预锁
-
+### 26. 订单检查计数信号量与两阶段账本预锁
 串行“先风控再发往交易桥”会把风控排队加进报单时延。更低延迟的做法是：策略只写一次订单请求，风控进程与交易桥同时看见；交易桥不立刻外发，而是轮询订单上的检查通过计数与拒绝计数。配置里约定需要几个风控柜台签字；全部通过且拒绝为 0 才发往券商。风控内部先做全部校验与预锁计算（不写共享账本），通过后再提交冻结并递增检查计数，避免失败路径留下半截资金占用。市价单冻结价可取中间价或对手价，首写者用原子量占住冻结价量。
 
 ```cpp
@@ -36018,8 +35294,7 @@ void drop_late(std::unordered_map<uint64_t, Inflight>& wait, int64_t now, int64_
 ```
 
 
-### 28. 行情网关接入：全订过滤、字段补丁与夜盘交易日
-
+### 27. 行情网关接入：全订过滤、字段补全与夜盘交易日
 现货 L2 常整市场订阅，开盘前把订阅收成按下标排列的字节，回调读这一字节决定放行，未开过滤则全部放行。沪市深度快照常缺涨跌停，静态查询时按下标写入平行数组，快照缺字段时用同一下标补上。沪深逐笔序号字段含义不同，重建订单簿前必须按交易所解释。期货行情里的业务日不可盲信接口字段，应按更新时刻反推：日盘与 TradingDay 相同；夜盘 18:00 后按星期减一天或三天；周一凌晨再特殊处理。算法母单创建后可读共享环最新一档立即喂一次，不必空等下一笔行情。
 
 ```cpp
@@ -36057,7 +35332,7 @@ template<class Ring, class Algo>
 void warm_latest_quote(Ring& quotes, Algo& algo) {
     const long end = quotes.end_index();
     if (end <= 0) return;
-    algo.on_quote(quotes.at(end - 1)); // 创建后立刻吃最新一档
+    algo.on_quote(quotes.at(end - 1)); // 创建后立刻取最新一档
 }
 ```
 
@@ -36164,11 +35439,10 @@ thread_local Tape tls_tape;
 ```
 
 
-### 29. 交易桥短单号、异步配额与算法容器时钟扇出
-
+### 28. 交易桥短单号、异步配额与算法容器时钟驱动
 期货开仓/平仓限额常在中台，交易桥不能在 API 回调线程里同步死等，又不能未获配额就外发。开仓与平仓插入走异步申请，状态为等待；回报或超时后再发或拒。平仓插入可预占一次撤单额度，首次撤单免再申请，第二次起再申请。外部手工成交合成回灌单时更新风险视图，但不释放撤单预占。
 
-算法容器侧，同一标的上多个母单共享一笔行情扇出；执行不只靠行情驱动，主循环按时钟调用每个算法的 OnClock，用于分时切片、追价切换与收尾强平。分钟计划量过稀时，把若干分钟收成更少的执行窗并强制严格模式，避免碎单抖动。
+算法容器侧，同一标的上多个母单共享同一笔行情分发；执行不只靠行情驱动，主循环按时钟调用每个算法的 OnClock，用于分时切片、追价切换与收尾强平。分钟计划量过稀时，把若干分钟收成更少的执行窗并强制严格模式，避免碎单抖动。
 
 ```cpp
 enum class QuotaState : uint8_t { Skip, Wait, Pass, Fail };
@@ -36448,8 +35722,7 @@ Tail tail_of(int64_t left, int64_t lot, bool late) {
 }
 ```
 
-### 30. 报单入库前的开平与方向规整
-
+### 29. 报单入库前的开平与方向归一
 现货没有平今、平昨。入库前若标的类型仍未知，用代码解析一次并写回，后面不再拆字符串。股票、债券、基金、指数、回购把开平强制写成开仓，避免柜台收到无意义的平今。期货和期权才保留平仓：上期所（SHF）和能源中心（INE）把普通平仓改成平昨，平今保持不变；其余交易所把平今、平昨收成普通平仓。方向由买卖方向映射：买入、融资买入、买券还券、申购记为多头，卖出、融券卖出、卖券还款、赎回记为空头。映射失败时在写环之前填错误码和短文案，单不到柜台。价格已经给出、价格类型仍未知、且价格大于 0 时，收成限价，避免算法单带着未知价型出去。限价类型已经写上、价格绝对值仍小于 1e-6 时直接拒单。
 
 ```cpp
@@ -36511,7 +35784,7 @@ bool normalize_ticket(Ticket& t) {
 
 **按代码前缀判定品种**
 
-合约写成代码加点号再加交易所。没有点号就是未知，开平规整不会把它收成现货。后缀是大商所、上期所、中金所、郑商所或能源中心时直接记期货。沪港通、深港通和港交所直接记股票。后缀对不上这些交易所，记未知。
+合约写成代码加点号再加交易所。没有点号就是未知，开平归一不会把它收成现货。后缀是大商所、上期所、中金所、郑商所或能源中心时直接记期货。沪港通、深港通和港交所直接记股票。后缀对不上这些交易所，记未知。
 
 沪市按更长的前缀先匹配。00 是指数，所以 000 开头的指数不会落到后面的 0。其余 0 开头和 1 开头是债券，1000 开头先收成股票期权。2 开头是回购，5 开头是基金，688 和 689 是科创板。剩下的是普通股票，600、601、603 走这里。
 
@@ -36597,8 +35870,7 @@ void close_td_then_yd(int want, Pos pos, Pend pend, int max_lot, int min_lot,
 ```
 
 
-### 31. 持仓查询移出报单线程并按游标续页
-
+### 30. 持仓查询移出报单线程并按游标续页
 现货柜台的持仓查询常常是同步的，一页几百行。放在报单线程里，后面的委托会排在整次查询之后。每个引擎只写自己的一条环，槽里放下标，同一账号后写的请求在查询线程折合时盖住前写。查询线程把这个账号上各引擎的槽合成一次柜台调用，每一行写回每一个等待中的请求。环满时这一笔直接失败返回。
 
 下一页从上一页最后一条的浏览序号加一开始；接口给定位串时，用这串代替序号。续页沿用第一次的请求号，返回才能对上原始请求。结束标记只打在最后一页的最后一行。两轮之间空几秒。同一资金账号在沪、深各有股东号，报单和查询都按代码后缀选取；双中心账户带当前中心的那个股东号。
@@ -36691,8 +35963,7 @@ public:
 ```
 
 
-### 32. 信号窗口驱动自动母单
-
+### 31. 信号窗口驱动自动母单
 自动策略每个时钟按开盘前收好的下标把新行情收进本地带，再跑决策。基类时钟会扫委托、算法回报、资金、持仓四条链。自动簿只走行情订阅的那段下标，拉行情和逐笔，再收母单回报。资金查询挂在保证金需要复核的时候，不进每一拍。行情回调按下标写入槽位。订阅名单在开盘前收成一段连续下标，时钟顺着它取行情。母单直接写进算法环的空槽：先核对单号基数，把买卖收成多空，限价缺失时用对手价补上，生成唯一母单号，字段写完再发布写序号。这条环只有策略时钟一个写者，环满时这一笔直接失败返回。子单由执行进程按母单上的算法类型继续拆。自动簿的买卖决策读的是开盘前信号书和盘中行情带。
 
 ```cpp
@@ -36969,8 +36240,7 @@ void cancel_other_side(int dir, Live& live) {
 ```
 
 
-### 33. 平今平昨与股票可卖冻结
-
+### 32. 平今平昨与股票可卖冻结
 期货平仓按开平标志扣不同的数量池。平仓看总仓减去已冻；平今看今仓（总仓减去昨仓剩余）再减去今仓已冻（总冻减去昨冻）；平昨只看昨仓剩余减去昨冻。三条不够的路径分开返回。通过以后，平仓和平今只增加总冻结，平昨同时增加总冻结和昨冻结，可卖改写成总仓减总冻结。买开和卖开不冻仓位，只把 min(目标量, 冻定量) 累进对应方向的委托量。冻定量为 0 的请求直接放过。
 
 股票侧，卖出以及还券、还款一类方向才扣可卖，可卖不够即拒绝。扣减时总冻结和昨冻结一起增加，可卖来自昨仓。买和融资买入只累委托量。成交量大于 0 且成交价绝对值小于 1e-6 的回报按成分股划转处理，不进现金和费用。日内回转放行四类名字：带港股后缀的代码、白名单合约、上述零价格成分划转、债券。其余股票按先买后卖的隔日约束处理。代码里交易所写在点号后面，先切出后缀再映射。
@@ -37035,8 +36305,7 @@ int how_on_fill(const ReqSnap* snap, int rsp_how) {
 }
 ```
 
-### 34. 品种大类费用与冻结价回填
-
+### 33. 品种大类费用与冻结价回填
 费用按品种大类走两条公式，热路径不查合约主数据。现货大类（股票、债券、基金、指数、回购）乘数取 1，保证金比例取 1；其余品种乘数取 100，保证金比例取 0.15。调用点用冻结价乘冻定量得到名义金额，第二参数传入常数 0.0003。期货公式把这个常数当作费率，费用等于名义金额乘费率。现货公式把它当作佣金金额直接相加，再加名义金额乘过户费率；卖出方向另加名义金额乘印花税率。
 
 冻结价已经有值就不再覆盖，判断用绝对值大于 1e-6。否则优先抄限价。限价也缺失时，用该合约行情环的写序号减一、按容量取模，落到最后一条已发布快照。买一和卖一都为正时取二者中点，只有一侧为正时用那一侧。冻定量为 0 时先把目标量抄进冻定量。价和量各自写完后跟一条顺序栅栏，让读这张单的另一侧看到成对的价和量。
@@ -37079,8 +36348,7 @@ bool backfill_lock(double& lock_px, int64_t& lock_qty, int64_t qty,
 }
 ```
 
-### 35. 监控进程的只读追赶与发布水位
-
+### 34. 监控进程的只读消费与发布限速
 监控和落盘放在独立进程里。池子容量不大于 0 时跳过。剩余槽位低于容量的 5% 时打一条告警，比较的是剩余量。
 
 对外发布和消费回调各用一条事件循环。漏桶在发布线程上：水位减去费率乘经过的毫秒，小于 0 就归零；水位仍低于容量就加 1 并放行一条，否则这条留在待发队列里等下一个定时器。心跳用非持久投递，启停命令的应答用持久投递。属性上报凑满 100 条，或距离上次发送超过 15 秒，再打成一包；日志上报到达即转发。落盘侧预分配固定条数的数组，下标前移，刷盘时按条数乘步长一次写出，然后清零整段并把下标归零。
@@ -37147,8 +36415,7 @@ void push_fresh(std::unordered_map<std::string, std::vector<std::string>>& fresh
 ```
 
 
-### 36. 交易进程的启停与主机采样
-
+### 35. 交易进程的启停与主机采样
 启停和主机采样放在两个进程里。命令进程管定时拉起、停止和改配置，上报进程管主机计数和共享内存日志。共享内存要等生产进程把段建好，读者才挂上去。开盘只改配置里的读者开关，上报进程继续跑，下一次起来时按这个开关挂上。收盘先停业务进程，把开关写回假，再重启上报进程，映射在生产端退出前卸掉。
 
 进程用完整命令行的结尾来认。`/proc/pid/status` 里的名字只留十几个字符，带分钟后缀的备份文件又和正本共前缀，短名和前缀都会对到别人身上。查询先丢掉查询命令自己那一行，只留命令行以目标文件名结尾的 pid。Python 进程认脚本名。这个 pid 已经在，就不再拉起。停止先发普通终止，等半秒再查，还在的发强制终止。整组拉起先整组停掉，空出几秒让共享内存和端口放开，再按序号逐个拉起。中间有一个失败，后面的继续。控制进程不进这条路径。拉起前把工作目录切到该进程的安装目录，目录插到库路径最前面，子进程带着这套环境起来；起来之后工作目录切回控制进程自己的目录。
@@ -37265,8 +36532,7 @@ def merge_roster(old, incoming):
 ```
 
 
-### 37. 配对执行的挂单量、腿价格和手数门槛
-
+### 36. 配对执行的挂单量、腿价格和手数门槛
 一笔配对带着若干腿和一份执行参数。每条腿有合约、账户、柜台、产品、币种、汇率、手数权重、行情系数、保证金率、标的、最小变动价位、每手数量和品种。执行参数给出目标价、目标手数、允许挂被动单的合约、组合方式、各腿方向、最大挂单量、挂单相对打单的偏移、撤单偏移、改单偏移、打单让出的档数、撤单间隔、强制配平的秒数、替代价格、价差、追价方式、定价方式、限价方式和限价档数。
 
 ```cpp
@@ -37413,8 +36679,7 @@ int main() {
 ```
 
 
-### 2. 市场趋势和波动率的状态变化
-1. **通过分析市场趋势和波动率的状态变化规律，判断市场是否具有平稳性。如果状态变化间隔呈现随机分布，说明市场较平稳；如果长期停留在某一状态（如长期高波动率），则可能存在非平稳性，会影响交易系统的 robustness。通过分析市场指标的状态变化规律，检验市场平稳性，为交易系统的开发提供依据（避免在非平稳市场中失效）。**
+### 2. 市场趋势和波动率的状态变化1. **通过分析市场趋势和波动率的状态变化规律，判断市场是否具有平稳性。如果状态变化间隔呈现随机分布，说明市场较平稳；如果长期停留在某一状态（如长期高波动率），则可能存在非平稳性，会影响交易系统的 robustness。通过分析市场指标的状态变化规律，检验市场平稳性，为交易系统的开发提供依据（避免在非平稳市场中失效）。**
 2. **关键指标计算**：
     - **趋势指标**：使用最小二乘拟合斜率（`find_slope`）衡量价格趋势
     - **波动率指标**：使用平均真实波动幅度（ATR，`find_volatility`）衡量市场波动
@@ -37905,8 +37170,7 @@ int main() {
 ```
 
 
-### 3. 基于移动窗口的指标平稳性优化
-**1. 均值非平稳性的解决（中心化）**
+### 3. 基于移动窗口的指标平稳性优化**1. 均值非平稳性的解决（中心化）**
 
 + 通过 “当前值 - 移动窗口均值 / 中位数” 消除指标长期趋势偏移，中位数更适合有极端值的场景。
     - `moving_mean`函数计算移动窗口均值，`moving_median`函数计算移动窗口中位数；
@@ -38163,8 +37427,7 @@ int main() {
 ```
 
 
-### 4. 交易指标评估的信息熵
-**1. 用“熵”量化指标信息价值**
+### 4. 交易指标评估的信息熵**1. 用“熵”量化指标信息价值**
 
 + 交易指标（如趋势、波动率）可视为市场传递的“信息”，其价值取决于消除市场未来状态不确定性的能力，这一能力用“熵”衡量。
 + 计算指标相对熵（实际熵值/最大可能熵值），将信息含量标准化到0-1范围：0表示无信息，1表示信息最大化，以此作为指标价值的核心评判标准，通常要求相对熵至少0.5。
@@ -38391,8 +37654,7 @@ cleanup:
 ```
 
 
-### 5. 正则化线性模型：首选模型
-**1. 核心目标**
+### 5. 正则化线性模型：首选模型**1. 核心目标**
 
 **指标的有效性远比使用指标生成交易信号的预测模型复杂度更重要**
 
@@ -39015,8 +38277,7 @@ int main() {
 ```
 
 
-### 6. 差分进化优化：非线性参数寻优
-**1. 核心目标**
+### 6. 差分进化优化：非线性参数寻优**1. 核心目标**
 
 针对交易系统中“规则化策略参数优化”的场景（如移动平均交叉系统的“长期/短期回溯期”“开仓阈值”），通过**种群进化+局部爬山**的混合算法，高效寻找全局最优参数组合，避免传统“网格搜索”效率低、易陷局部最优的问题。
 
@@ -39584,8 +38845,7 @@ int main() {
 ```
 
 
-### 7. 廉价训练偏差估计
-廉价训练偏差估计 (StocBias Class)
+### 7. 廉价训练偏差估计廉价训练偏差估计 (StocBias Class)
 
 **目标： **在不进行额外的样本外（OOS）回测的情况下，快速评估策略在样本内（IS）的平均性能与其在模拟样本外的平均性能之间的偏差。这是过度拟合的量化指标。
 
@@ -39850,8 +39110,7 @@ int main() {
 ```
 
 
-### 8. 参数关系分析
-参数关系分析 (ParamCorrelation Class)
+### 8. 参数关系分析参数关系分析 (ParamCorrelation Class)
 
 **目标：** 通过分析优化最终种群中参数和性能的关系，确定参数间的相关性以及策略性能对参数变化最敏感（或最不敏感）的方向。
 
@@ -40389,8 +39648,7 @@ int main() {
 ```
 
 
-### 9. 参数敏感性曲线
-参数敏感性曲线 (ParamSensitivity Class)
+### 9. 参数敏感性曲线参数敏感性曲线 (ParamSensitivity Class)
 
 **目标： **直观地验证单个参数在整个可行域内扰动时，策略性能的稳定性。
 
@@ -40713,745 +39971,7 @@ int main() {
 ```
 
 
-### 10. 无偏交易模拟
-无偏交易模拟的核心目标是消除 “未来数据泄露” 和 “过拟合” 对交易系统性能评估的干扰，通过模拟真实交易场景下的 “训练 - 测试” 流程，获取对系统未来表现的无偏估计。其核心原理与思想可概括为以下四点：
-
-1. **严格的时间序列数据划分逻辑**
-样本内（IS）与样本外（OOS）分离：必须按时间戳对市场数据（如对数价格 K 线）进行排序，确保样本内数据完全早于样本外数据，杜绝 “用未来数据训练模型” 的未来泄露。划分时需控制样本内占比（通常 0.5~0.8），且保证两者均有足够数据量（至少各 1 个有效数据点），避免因数据量不足导致的评估偏差。
-守卫缓冲区（Guard Buffer）机制：针对指标回溯期（如移动平均计算所需的 K 线数）和目标前瞻期（如预测未来 N 根 K 线收益），在样本内与样本外的边界处设置 “守卫缓冲区”（大小 = min (回溯期，前瞻期)-1）。例如，若指标需回溯 20 根 K 线、目标前瞻 10 根 K 线，则缓冲区为 9 根 K 线，避免样本内数据与样本外数据因 “指标计算重叠” 导致的隐性未来泄露。
-2. **前向检验（Walkforward Analysis）：模拟真实交易迭代流程**
-滑动窗口训练 - 测试：将历史数据按 “训练窗口 + 测试窗口” 划分为连续的 “折叠（Fold）”，每个折叠内先用训练窗口数据优化系统参数（如移动平均周期），再用测试窗口数据计算样本外收益，随后将整个窗口向前滑动（滑动步长 = 测试窗口大小），重复流程直至遍历所有数据。
-贴合真实交易场景：每轮训练仅使用 “截至当前时间点的历史数据”，测试仅针对 “未来有限时间窗口”，完全复现真实交易中 “定期更新模型、逐步执行交易” 的过程，避免一次性用全量数据训练导致的过拟合，同时能捕捉市场非平稳性对系统性能的影响。
-3. **交叉验证（Cross-Validation）：高效利用数据的补充评估**
-时间序列适配的折分逻辑：将数据按时间划分为 N 个连续的 “折（Fold）”，每个折轮流作为测试集，剩余折（排除测试集及守卫缓冲区）作为训练集。与传统交叉验证不同，需在测试集的 “前后两侧” 均设置守卫缓冲区，防止因指标回溯 / 前瞻导致的样本内 - 测试集数据重叠。
-平衡数据利用率与无偏性：解决前向检验 “早期训练数据量少” 的问题，通过多轮训练 - 测试充分利用历史数据，但需注意其局限性 —— 因包含 “测试集未来的数据” 用于训练，可能对非平稳市场的评估引入轻微乐观偏差，故通常作为前向检验的补充，而非替代。
-4. **嵌套前向检验：处理多层优化的选择偏差**
-两层优化分离：针对 “系统参数优化（内层）+ 多系统选择（外层）” 的场景，需通过嵌套结构消除 “选择偏差”。内层用前向检验评估每个竞争系统（如不同参数的移动平均策略）的样本外性能，外层基于内层的无偏结果选择最优系统，再用独立的外层测试窗口验证最终性能。
-避免 “幸存者偏差”：若直接从多个系统中选择 “样本内表现最好的系统”，易因 “偶然的运气成分” 高估性能；嵌套结构通过 “内层用 OOS 结果筛选系统、外层用新 OOS 结果验证”，确保选中的系统是 “真实具备泛化能力” 而非 “偶然拟合噪声” 的系统。
-
-```cpp
-#include <vector>
-#include <algorithm>
-#include <cmath>
-#include <numeric>
-#include <cstdint>
-#include <iostream>
-#include <cassert>
-
-// 错误码定义（无偏模拟的异常场景）
-enum class SimErrorCode : int32_t {
-    SUCCESS = 0,                // 成功
-    INVALID_RATIO = 1,          // 样本内占比非法（≤0或≥1）
-    INSUFFICIENT_DATA = 2,      // 数据量不足（无法满足窗口/折数要求）
-    EMPTY_TRAIN_DATA = 3,       // 训练集为空（排除守卫缓冲区后）
-    EMPTY_SYSTEM_LIST = 4,      // 竞争系统列表为空
-    INVALID_WINDOW_SIZE = 5,    // 窗口大小非法（外层训练窗口超限或内层周期非法）
-    INVALID_MA_PARAM = 6,       // 均线参数非法（短均线最大周期≥长均线最大周期）
-    TIMESTAMP_ORDER_ERR = 7     // 时间戳非递增（数据乱序，可能导致未来泄露）
-};
-
-// 市场数据结构体（使用对数价格确保收益尺度一致性）
-struct MarketData {
-    double log_price;  // 对数价格（用于收益计算，避免价格绝对值偏差）
-    int timestamp;     // 时间戳（确保数据按时间顺序处理，杜绝未来泄露）
-};
-
-// 交易系统抽象类（策略核心接口，支持参数优化与收益生成）
-class TradingSystem {
-public:
-    virtual ~TradingSystem() = default;
-
-    /**
-     * @brief 样本内参数优化（输入样本内对数价格数据）
-     * @param in_sample_data 样本内市场数据（按时间戳排序）
-     */
-    virtual void optimizeParams(const std::vector<MarketData>& in_sample_data) = 0;
-
-    /**
-     * @brief 生成交易收益（输出每根K线的对数收益，无持仓时收益为0）
-     * @param data 输入市场数据（按时间戳排序）
-     * @return std::vector<double> 单根K线对数收益序列
-     */
-    virtual std::vector<double> generateReturns(const std::vector<MarketData>& data) const = 0;
-
-    /**
-     * @brief 获取最优参数（返回优化后的策略参数，用于后续分析）
-     * @return std::vector<double> 最优参数序列（如均线周期、阈值等）
-     */
-    virtual std::vector<double> getOptimalParams() const = 0;
-};
-
-class UnbiasedSimulation {
-public:
-    /**
-     * @brief 1. 样本内/外数据划分（按时间戳排序，避免未来泄露）
-     * @param full_data 完整市场数据
-     * @param in_sample_ratio 样本内数据占比（0 < ratio < 1）
-     * @param out_in_sample 输出：样本内数据（按时间戳排序）
-     * @param out_out_sample 输出：样本外数据（按时间戳排序）
-     * @return SimErrorCode 错误码
-     */
-    static SimErrorCode splitInOutSample(
-        const std::vector<MarketData>& full_data,
-        double in_sample_ratio,
-        std::vector<MarketData>& out_in_sample,
-        std::vector<MarketData>& out_out_sample
-    ) {
-        // 校验样本内占比（必须在(0,1)范围内，确保样本内/外均有数据）
-        if (in_sample_ratio <= 0.0 || in_sample_ratio >= 1.0) {
-            return SimErrorCode::INVALID_RATIO;
-        }
-
-        // 按时间戳排序（避免数据乱序导致的未来泄露）
-        std::vector<MarketData> sorted_data = full_data;
-        std::sort(sorted_data.begin(), sorted_data.end(),
-            [](const MarketData& a, const MarketData& b) {
-                return a.timestamp < b.timestamp;
-            }
-        );
-
-        // 校验时间戳递增（二次检查，确保排序后无乱序）
-        for (size_t i = 1; i < sorted_data.size(); ++i) {
-            if (sorted_data[i].timestamp <= sorted_data[i-1].timestamp) {
-                return SimErrorCode::TIMESTAMP_ORDER_ERR;
-            }
-        }
-
-        const size_t total_size = sorted_data.size();
-        // 校验数据量（至少2根K线，确保样本内/外各有1根）
-        if (total_size < 2) {
-            return SimErrorCode::INSUFFICIENT_DATA;
-        }
-
-        // 计算划分边界（避免浮点误差，确保样本内至少1根、样本外至少1根）
-        size_t split_idx = static_cast<size_t>(std::round(total_size * in_sample_ratio));
-        split_idx = std::max<size_t>(split_idx, 1);          // 样本内至少1根
-        split_idx = std::min(split_idx, total_size - 1);     // 样本外至少1根
-
-        // 分割数据并赋值输出
-        out_in_sample.assign(sorted_data.begin(), sorted_data.begin() + split_idx);
-        out_out_sample.assign(sorted_data.begin() + split_idx, sorted_data.end());
-        return SimErrorCode::SUCCESS;
-    }
-
-    /**
-     * @brief 2. 前向检验（滑动窗口模拟真实交易，生成无偏样本外收益）
-     * @param full_data 完整市场数据
-     * @param train_window_size 训练窗口大小（样本内数据量）
-     * @param test_window_size 测试窗口大小（样本外数据量）
-     * @param system 交易系统（需实现TradingSystem接口）
-     * @param out_oos_returns 输出：样本外收益序列（对数收益）
-     * @return SimErrorCode 错误码
-     */
-    static SimErrorCode walkForwardAnalysis(
-        const std::vector<MarketData>& full_data,
-        size_t train_window_size,
-        size_t test_window_size,
-        TradingSystem& system,
-        std::vector<double>& out_oos_returns
-    ) {
-        // 按时间戳排序（文件基础要求，确保无未来泄露）
-        std::vector<MarketData> sorted_data = full_data;
-        std::sort(sorted_data.begin(), sorted_data.end(),
-            [](const MarketData& a, const MarketData& b) {
-                return a.timestamp < b.timestamp;
-            }
-        );
-
-        // 校验时间戳递增
-        for (size_t i = 1; i < sorted_data.size(); ++i) {
-            if (sorted_data[i].timestamp <= sorted_data[i-1].timestamp) {
-                return SimErrorCode::TIMESTAMP_ORDER_ERR;
-            }
-        }
-
-        const size_t total_size = sorted_data.size();
-        // 校验窗口大小（训练+测试窗口不超过总数据量，确保每次迭代有完整窗口）
-        if (train_window_size == 0 || test_window_size == 0 ||
-            train_window_size + test_window_size > total_size) {
-            return SimErrorCode::INSUFFICIENT_DATA;
-        }
-
-        out_oos_returns.clear();
-        size_t current_start = 0;
-
-        // 滑动窗口迭代（批量处理逻辑，无冗余数据拷贝）
-        while (current_start + train_window_size + test_window_size <= total_size) {
-            // 步骤1：提取当前训练窗口（样本内数据）
-            std::vector<MarketData> train_data(
-                sorted_data.begin() + current_start,
-                sorted_data.begin() + current_start + train_window_size
-            );
-            // 样本内参数优化（更新系统的最优参数）
-            system.optimizeParams(train_data);
-
-            // 步骤2：提取当前测试窗口（样本外数据）
-            std::vector<MarketData> test_data(
-                sorted_data.begin() + current_start + train_window_size,
-                sorted_data.begin() + current_start + train_window_size + test_window_size
-            );
-            // 生成样本外收益并追加到结果
-            std::vector<double> oos_returns = system.generateReturns(test_data);
-            out_oos_returns.insert(
-                out_oos_returns.end(),
-                oos_returns.begin(),
-                oos_returns.end()
-            );
-
-            // 步骤3：滑动窗口（前进测试窗口大小，避免数据重叠导致的偏差）
-            current_start += test_window_size;
-        }
-
-        return SimErrorCode::SUCCESS;
-    }
-
-    /**
-     * @brief 3. 交叉验证（高效利用数据，处理时间序列IS/OOS重叠）
-     * @param full_data 完整市场数据
-     * @param n_folds 折数（≥2，确保训练/测试集划分有效）
-     * @param lookback 指标回溯期（如均线周期，用于计算守卫缓冲区）
-     * @param lookahead 目标前瞻期（如持仓周期，用于计算守卫缓冲区）
-     * @param system 交易系统（需实现TradingSystem接口）
-     * @param out_oos_returns 输出：样本外收益序列（对数收益）
-     * @return SimErrorCode 错误码
-     */
-    static SimErrorCode crossValidation(
-        const std::vector<MarketData>& full_data,
-        size_t n_folds,
-        size_t lookback,
-        size_t lookahead,
-        TradingSystem& system,
-        std::vector<double>& out_oos_returns
-    ) {
-        // 按时间戳排序（避免未来泄露）
-        std::vector<MarketData> sorted_data = full_data;
-        std::sort(sorted_data.begin(), sorted_data.end(),
-            [](const MarketData& a, const MarketData& b) {
-                return a.timestamp < b.timestamp;
-            }
-        );
-
-        // 校验时间戳递增
-        for (size_t i = 1; i < sorted_data.size(); ++i) {
-            if (sorted_data[i].timestamp <= sorted_data[i-1].timestamp) {
-                return SimErrorCode::TIMESTAMP_ORDER_ERR;
-            }
-        }
-
-        const size_t total_size = sorted_data.size();
-        // 校验折数和数据量（折数≥2，数据量≥折数，确保每折有足够数据）
-        if (n_folds < 2 || total_size < n_folds) {
-            return SimErrorCode::INSUFFICIENT_DATA;
-        }
-
-        // 计算守卫缓冲区（核心逻辑：避免IS/OOS重叠，取min(lookback, lookahead)-1）
-        const size_t guard_size = (std::min(lookback, lookahead) > 0) ?
-                                  (std::min(lookback, lookahead) - 1) : 0;
-        const size_t fold_size = total_size / n_folds;  // 每折的基础大小
-        out_oos_returns.clear();
-
-        // 迭代每个折作为测试集
-        for (size_t fold_idx = 0; fold_idx < n_folds; ++fold_idx) {
-            // 计算当前折的测试集范围
-            const size_t test_start = fold_idx * fold_size;
-            const size_t test_end = (fold_idx == n_folds - 1) ?
-                                    total_size : (fold_idx + 1) * fold_size;
-
-            // 构建训练集（排除测试集及守卫缓冲区，避免IS/OOS重叠）
-            std::vector<MarketData> train_data;
-            // 测试集左侧的训练数据（排除左侧守卫缓冲区）
-            if (test_start > guard_size) {
-                train_data.insert(
-                    train_data.end(),
-                    sorted_data.begin(),
-                    sorted_data.begin() + test_start - guard_size
-                );
-            }
-            // 测试集右侧的训练数据（排除右侧守卫缓冲区）
-            if (test_end + guard_size < total_size) {
-                train_data.insert(
-                    train_data.end(),
-                    sorted_data.begin() + test_end + guard_size,
-                    sorted_data.end()
-                );
-            }
-
-            // 校验训练集非空（无训练数据无法优化参数）
-            if (train_data.empty()) {
-                return SimErrorCode::EMPTY_TRAIN_DATA;
-            }
-
-            // 步骤1：样本内参数优化
-            system.optimizeParams(train_data);
-            // 步骤2：提取当前折的测试集
-            std::vector<MarketData> test_data(
-                sorted_data.begin() + test_start,
-                sorted_data.begin() + test_end
-            );
-            // 步骤3：生成样本外收益并追加
-            std::vector<double> oos_returns = system.generateReturns(test_data);
-            out_oos_returns.insert(
-                out_oos_returns.end(),
-                oos_returns.begin(),
-                oos_returns.end()
-            );
-        }
-
-        return SimErrorCode::SUCCESS;
-    }
-
-    /**
-     * @brief 4. 嵌套前向检验（处理两层优化：系统选择+参数优化）
-     * @param full_data 完整市场数据
-     * @param inner_train_window 内层训练窗口大小（系统参数优化用）
-     * @param inner_test_window 内层测试窗口大小（系统性能评估用）
-     * @param outer_train_window 外层训练窗口大小（系统选择用）
-     * @param systems 竞争系统列表（需实现TradingSystem接口）
-     * @param out_final_returns 输出：最终样本外收益序列（对数收益）
-     * @return SimErrorCode 错误码
-     */
-    static SimErrorCode nestedWalkForward(
-        const std::vector<MarketData>& full_data,
-        size_t inner_train_window,
-        size_t inner_test_window,
-        size_t outer_train_window,
-        const std::vector<TradingSystem*>& systems,
-        std::vector<double>& out_final_returns
-    ) {
-        // 校验竞争系统列表非空（无系统无法进行选择）
-        if (systems.empty()) {
-            return SimErrorCode::EMPTY_SYSTEM_LIST;
-        }
-
-        // 按时间戳排序（文件要求，避免未来泄露）
-        std::vector<MarketData> sorted_data = full_data;
-        std::sort(sorted_data.begin(), sorted_data.end(),
-            [](const MarketData& a, const MarketData& b) {
-                return a.timestamp < b.timestamp;
-            }
-        );
-
-        // 校验时间戳递增
-        for (size_t i = 1; i < sorted_data.size(); ++i) {
-            if (sorted_data[i].timestamp <= sorted_data[i-1].timestamp) {
-                return SimErrorCode::TIMESTAMP_ORDER_ERR;
-            }
-        }
-
-        const size_t total_size = sorted_data.size();
-        const size_t inner_cycle = inner_train_window + inner_test_window;  // 内层前向检验周期
-        // 校验窗口大小（外层训练窗口≤总数据量，内层周期≤外层训练窗口）
-        if (outer_train_window == 0 || inner_train_window == 0 || inner_test_window == 0 ||
-            outer_train_window > total_size || inner_cycle > outer_train_window) {
-            return SimErrorCode::INVALID_WINDOW_SIZE;
-        }
-
-        out_final_returns.clear();
-        size_t outer_current_start = 0;
-
-        // 外层前向检验（迭代选择最优系统）
-        while (outer_current_start + outer_train_window + inner_test_window <= total_size) {
-            // 步骤1：提取外层训练数据（用于系统选择）
-            std::vector<MarketData> outer_train_data(
-                sorted_data.begin() + outer_current_start,
-                sorted_data.begin() + outer_current_start + outer_train_window
-            );
-
-            // 步骤2：内层前向检验：评估每个系统的性能得分
-            std::vector<double> system_scores(systems.size(), -std::numeric_limits<double>::max());
-            for (size_t sys_idx = 0; sys_idx < systems.size(); ++sys_idx) {
-                std::vector<double> inner_returns;
-                // 调用内层前向检验，生成系统的样本外收益
-                SimErrorCode err = walkForwardAnalysis(
-                    outer_train_data,
-                    inner_train_window,
-                    inner_test_window,
-                    *systems[sys_idx],
-                    inner_returns
-                );
-                if (err != SimErrorCode::SUCCESS) {
-                    continue;  // 跳过评估失败的系统
-                }
-                // 计算系统得分（总对数收益，常用的评估指标）
-                system_scores[sys_idx] = std::accumulate(inner_returns.begin(), inner_returns.end(), 0.0);
-            }
-
-            // 步骤3：选择最优系统（得分最高的系统）
-            auto best_sys_iter = std::max_element(system_scores.begin(), system_scores.end());
-            if (*best_sys_iter == -std::numeric_limits<double>::max()) {
-                return SimErrorCode::EMPTY_SYSTEM_LIST;  // 所有系统评估失败
-            }
-            size_t best_sys_idx = best_sys_iter - system_scores.begin();
-            TradingSystem* best_sys = systems[best_sys_idx];
-
-            // 步骤4：外层测试：生成最终样本外收益
-            std::vector<MarketData> outer_test_data(
-                sorted_data.begin() + outer_current_start + outer_train_window,
-                sorted_data.begin() + outer_current_start + outer_train_window + inner_test_window
-            );
-            std::vector<double> oos_returns = best_sys->generateReturns(outer_test_data);
-            out_final_returns.insert(
-                out_final_returns.end(),
-                oos_returns.begin(),
-                oos_returns.end()
-            );
-
-            // 步骤5：滑动外层窗口（前进内层测试窗口大小）
-            outer_current_start += inner_test_window;
-        }
-
-        return SimErrorCode::SUCCESS;
-    }
-};
-```
-
-```cpp
-#include "UnbiasedSimulation.h"
-
-// 移动平均交叉策略（示例策略，经典均线交叉逻辑）
-class MACrossSystem : public TradingSystem {
-public:
-    /**
-     * @brief 构造函数：初始化短/长期均线最大周期
-     * @param max_short_lookback 短均线最大周期（如1~20）
-     * @param max_long_lookback 长均线最大周期（如2~40）
-     */
-    MACrossSystem(size_t max_short_lookback, size_t max_long_lookback)
-        : max_short_lookback_(max_short_lookback),
-          max_long_lookback_(max_long_lookback),
-          opt_short_lookback_(1),
-          opt_long_lookback_(2) {}
-
-    /**
-     * @brief 校验均线参数合法性（短均线最大周期必须<长均线最大周期）
-     * @return SimErrorCode 错误码
-     */
-    SimErrorCode validateParams() const {
-        if (max_short_lookback_ >= max_long_lookback_) {
-            return SimErrorCode::INVALID_MA_PARAM;
-        }
-        return SimErrorCode::SUCCESS;
-    }
-
-    /**
-     * @brief 样本内参数优化：遍历均线组合，选择总对数收益最大的组合
-     * @param in_sample_data 样本内市场数据（按时间戳排序）
-     */
-    void optimizeParams(const std::vector<MarketData>& in_sample_data) override {
-        const size_t data_size = in_sample_data.size();
-        // 数据量不足时不优化（需至少长均线最大周期的K线）
-        if (data_size < max_long_lookback_) {
-            return;
-        }
-
-        double best_total_ret = -std::numeric_limits<double>::max();
-        // 遍历所有合法均线组合（短均线周期 < 长均线周期）
-        for (size_t short_lb = 1; short_lb <= max_short_lookback_; ++short_lb) {
-            for (size_t long_lb = short_lb + 1; long_lb <= max_long_lookback_; ++long_lb) {
-                // 计算当前均线组合的总对数收益
-                double current_ret = calculateTotalReturn(in_sample_data, short_lb, long_lb);
-                // 更新最优参数（总收益更大时）
-                if (current_ret > best_total_ret) {
-                    best_total_ret = current_ret;
-                    opt_short_lookback_ = short_lb;
-                    opt_long_lookback_ = long_lb;
-                }
-            }
-        }
-    }
-
-    /**
-     * @brief 生成收益：基于最优均线周期计算单根K线对数收益
-     * @param data 输入市场数据（按时间戳排序）
-     * @return std::vector<double> 单根K线对数收益序列
-     */
-    std::vector<double> generateReturns(const std::vector<MarketData>& data) const override {
-        return calculateReturnDetail(data, opt_short_lookback_, opt_long_lookback_);
-    }
-
-    /**
-     * @brief 获取最优参数：短/长期均线周期
-     * @return std::vector<double> 最优参数（短均线周期、长均线周期）
-     */
-    std::vector<double> getOptimalParams() const override {
-        return {static_cast<double>(opt_short_lookback_), static_cast<double>(opt_long_lookback_)};
-    }
-
-private:
-    size_t max_short_lookback_;  // 短均线最大周期
-    size_t max_long_lookback_;   // 长均线最大周期
-    size_t opt_short_lookback_;  // 优化后的短均线周期
-    size_t opt_long_lookback_;   // 优化后的长均线周期
-
-    /**
-     * @brief 计算总对数收益（用于参数优化）
-     * @param data 输入市场数据（按时间戳排序）
-     * @param short_lb 短均线周期
-     * @param long_lb 长均线周期
-     * @return double 总对数收益
-     */
-    double calculateTotalReturn(
-        const std::vector<MarketData>& data,
-        size_t short_lb,
-        size_t long_lb
-    ) const {
-        double total_ret = 0.0;
-        const size_t data_size = data.size();
-        // 从长均线周期后开始计算（确保能完整计算两条均线）
-        for (size_t i = long_lb; i < data_size - 1; ++i) {
-            // 计算短/长期均线（对数价格均值，避免价格尺度偏差）
-            double short_ma = 0.0, long_ma = 0.0;
-            for (size_t j = 0; j < short_lb; ++j) {
-                short_ma += data[i - j].log_price;
-            }
-            for (size_t j = 0; j < long_lb; ++j) {
-                long_ma += data[i - j].log_price;
-            }
-            short_ma /= short_lb;
-            long_ma /= long_lb;
-
-            // 生成交易信号与收益（短均线上穿做多，下穿做空，无交叉无持仓）
-            double ret = 0.0;
-            if (short_ma > long_ma) {
-                // 多头收益：下一根K线对数价格 - 当前K线对数价格
-                ret = data[i + 1].log_price - data[i].log_price;
-            } else if (short_ma < long_ma) {
-                // 空头收益：当前K线对数价格 - 下一根K线对数价格
-                ret = data[i].log_price - data[i + 1].log_price;
-            }
-            total_ret += ret;
-        }
-        return total_ret;
-    }
-
-    /**
-     * @brief 计算详细收益（用于样本外测试，返回单根K线收益）
-     * @param data 输入市场数据（按时间戳排序）
-     * @param short_lb 短均线周期
-     * @param long_lb 长均线周期
-     * @return std::vector<double> 单根K线对数收益序列
-     */
-    std::vector<double> calculateReturnDetail(
-        const std::vector<MarketData>& data,
-        size_t short_lb,
-        size_t long_lb
-    ) const {
-        std::vector<double> returns;
-        const size_t data_size = data.size();
-        // 预分配内存，提升性能（收益数量 = 数据量 - 长均线周期）
-        returns.reserve(data_size - long_lb);
-
-        for (size_t i = long_lb; i < data_size - 1; ++i) {
-            // 计算短/长期均线
-            double short_ma = 0.0, long_ma = 0.0;
-            for (size_t j = 0; j < short_lb; ++j) {
-                short_ma += data[i - j].log_price;
-            }
-            for (size_t j = 0; j < long_lb; ++j) {
-                long_ma += data[i - j].log_price;
-            }
-            short_ma /= short_lb;
-            long_ma /= long_lb;
-
-            // 计算单根K线收益
-            double ret = 0.0;
-            if (short_ma > long_ma) {
-                ret = data[i + 1].log_price - data[i].log_price;
-            } else if (short_ma < long_ma) {
-                ret = data[i].log_price - data[i + 1].log_price;
-            }
-            returns.push_back(ret);
-        }
-        return returns;
-    }
-};
-
-// 测试代码实现
-void testSplitInOutSample() {
-    std::cout << "Testing splitInOutSample..." << std::endl;
-
-    // 测试正常情况
-    std::vector<MarketData> data = {
-        {1.0, 1}, {2.0, 2}, {3.0, 3}, {4.0, 4}, {5.0, 5}
-    };
-
-    std::vector<MarketData> in_sample, out_sample;
-    auto result = UnbiasedSimulation::splitInOutSample(data, 0.6, in_sample, out_sample);
-
-    assert(result == SimErrorCode::SUCCESS);
-    assert(in_sample.size() == 3);
-    assert(out_sample.size() == 2);
-    assert(in_sample[0].timestamp < out_sample[0].timestamp);
-
-    // 测试无效比例
-    result = UnbiasedSimulation::splitInOutSample(data, 1.5, in_sample, out_sample);
-    assert(result == SimErrorCode::INVALID_RATIO);
-
-    result = UnbiasedSimulation::splitInOutSample(data, -0.1, in_sample, out_sample);
-    assert(result == SimErrorCode::INVALID_RATIO);
-
-    // 测试数据量不足
-    std::vector<MarketData> small_data = {{1.0, 1}};
-    result = UnbiasedSimulation::splitInOutSample(small_data, 0.5, in_sample, out_sample);
-    assert(result == SimErrorCode::INSUFFICIENT_DATA);
-
-    // 测试时间戳非递增
-    std::vector<MarketData> unordered_data = {{1.0, 2}, {2.0, 1}};
-    result = UnbiasedSimulation::splitInOutSample(unordered_data, 0.5, in_sample, out_sample);
-    assert(result == SimErrorCode::TIMESTAMP_ORDER_ERR);
-
-    std::cout << "splitInOutSample tests passed." << std::endl;
-}
-
-void testWalkForwardAnalysis() {
-    std::cout << "Testing walkForwardAnalysis..." << std::endl;
-
-    // 创建测试数据
-    std::vector<MarketData> data;
-    for (int i = 1; i <= 20; ++i) {
-        data.push_back({static_cast<double>(i), i});
-    }
-
-    // 创建交易系统
-    MACrossSystem system(3, 5);
-
-    std::vector<double> oos_returns;
-    auto result = UnbiasedSimulation::walkForwardAnalysis(data, 10, 5, system, oos_returns);
-
-    assert(result == SimErrorCode::SUCCESS);
-
-    // 测试窗口大小非法
-    result = UnbiasedSimulation::walkForwardAnalysis(data, 0, 5, system, oos_returns);
-    assert(result == SimErrorCode::INSUFFICIENT_DATA);
-
-    result = UnbiasedSimulation::walkForwardAnalysis(data, 15, 10, system, oos_returns);
-    assert(result == SimErrorCode::INSUFFICIENT_DATA);
-
-    // 测试时间戳非递增
-    std::vector<MarketData> unordered_data = {{1.0, 2}, {2.0, 1}};
-    result = UnbiasedSimulation::walkForwardAnalysis(unordered_data, 1, 1, system, oos_returns);
-    assert(result == SimErrorCode::TIMESTAMP_ORDER_ERR);
-
-    std::cout << "walkForwardAnalysis tests passed." << std::endl;
-}
-
-void testCrossValidation() {
-    std::cout << "Testing crossValidation..." << std::endl;
-
-    // 创建测试数据
-    std::vector<MarketData> data;
-    for (int i = 1; i <= 20; ++i) {
-        data.push_back({static_cast<double>(i), i});
-    }
-
-    MACrossSystem system(2, 4);
-
-    std::vector<double> oos_returns;
-    auto result = UnbiasedSimulation::crossValidation(data, 4, 2, 1, system, oos_returns);
-
-    assert(result == SimErrorCode::SUCCESS);
-
-    // 测试折数非法
-    result = UnbiasedSimulation::crossValidation(data, 1, 2, 1, system, oos_returns);
-    assert(result == SimErrorCode::INSUFFICIENT_DATA);
-
-    // 测试数据量不足
-    std::vector<MarketData> small_data = {{1.0, 1}, {2.0, 2}};
-    result = UnbiasedSimulation::crossValidation(small_data, 3, 1, 1, system, oos_returns);
-    assert(result == SimErrorCode::INSUFFICIENT_DATA);
-
-    // 测试时间戳非递增
-    std::vector<MarketData> unordered_data = {{1.0, 2}, {2.0, 1}};
-    result = UnbiasedSimulation::crossValidation(unordered_data, 2, 1, 1, system, oos_returns);
-    assert(result == SimErrorCode::TIMESTAMP_ORDER_ERR);
-
-    std::cout << "crossValidation tests passed." << std::endl;
-}
-
-void testNestedWalkForward() {
-    std::cout << "Testing nestedWalkForward..." << std::endl;
-
-    // 创建测试数据
-    std::vector<MarketData> data;
-    for (int i = 1; i <= 30; ++i) {
-        data.push_back({static_cast<double>(i), i});
-    }
-
-    // 创建多个交易系统
-    MACrossSystem system1(2, 4);
-    MACrossSystem system2(3, 6);
-    std::vector<TradingSystem*> systems = {&system1, &system2};
-
-    std::vector<double> final_returns;
-    auto result = UnbiasedSimulation::nestedWalkForward(data, 8, 4, 12, systems, final_returns);
-
-    assert(result == SimErrorCode::SUCCESS);
-
-    // 测试系统列表为空
-    std::vector<TradingSystem*> empty_systems;
-    result = UnbiasedSimulation::nestedWalkForward(data, 5, 3, 10, empty_systems, final_returns);
-    assert(result == SimErrorCode::EMPTY_SYSTEM_LIST);
-
-    // 测试窗口大小非法
-    result = UnbiasedSimulation::nestedWalkForward(data, 0, 3, 10, systems, final_returns);
-    assert(result == SimErrorCode::INVALID_WINDOW_SIZE);
-
-    result = UnbiasedSimulation::nestedWalkForward(data, 5, 3, 0, systems, final_returns);
-    assert(result == SimErrorCode::INVALID_WINDOW_SIZE);
-
-    // 测试时间戳非递增
-    std::vector<MarketData> unordered_data = {{1.0, 2}, {2.0, 1}};
-    result = UnbiasedSimulation::nestedWalkForward(unordered_data, 1, 1, 1, systems, final_returns);
-    assert(result == SimErrorCode::TIMESTAMP_ORDER_ERR);
-
-    std::cout << "nestedWalkForward tests passed." << std::endl;
-}
-
-void testMACrossSystem() {
-    std::cout << "Testing MACrossSystem..." << std::endl;
-
-    // 测试参数合法性
-    MACrossSystem valid_system(2, 5);
-    assert(valid_system.validateParams() == SimErrorCode::SUCCESS);
-
-    MACrossSystem invalid_system(5, 3);
-    assert(invalid_system.validateParams() == SimErrorCode::INVALID_MA_PARAM);
-
-    // 测试优化参数
-    std::vector<MarketData> data;
-    for (int i = 1; i <= 10; ++i) {
-        data.push_back({static_cast<double>(i), i});
-    }
-
-    valid_system.optimizeParams(data);
-    auto params = valid_system.getOptimalParams();
-    assert(params.size() == 2);
-
-    // 测试生成收益
-    auto returns = valid_system.generateReturns(data);
-    assert(returns.size() == data.size() - 5); // 长周期为5
-
-    std::cout << "MACrossSystem tests passed." << std::endl;
-}
-
-int main() {
-    std::cout << "Starting tests..." << std::endl;
-
-    testSplitInOutSample();
-    testWalkForwardAnalysis();
-    testCrossValidation();
-    testNestedWalkForward();
-    testMACrossSystem();
-
-    std::cout << "All tests passed!" << std::endl;
-
-    return 0;
-}
-```
-
-
-### 11. 交易收益统计分析
-交易收益分析的核心目标是基于无偏模拟获取的收益数据，客观评估交易系统的收益质量、风险水平及稳定性，避免因 “收益粒度选择不当” 或 “指标计算偏差” 导致的误判。其核心原理与思想可概括为以下四点：
+### 10. 交易收益统计分析交易收益分析的核心目标是基于无偏模拟获取的收益数据，客观评估交易系统的收益质量、风险水平及稳定性，避免因 “收益粒度选择不当” 或 “指标计算偏差” 导致的误判。其核心原理与思想可概括为以下四点：
 
 1. **收益粒度的标准化转换**
 不定前瞻期系统的单根 K 线收益转换：针对 “开仓 - 平仓时间不确定” 的交易系统（如突破策略），需将 “开仓到平仓的累计收益” 拆分为 “单根 K 线收益”—— 通过记录每根 K 线的持仓状态（多头 / 空头 / 无持仓），按对数价格差值计算单根 K 线收益（多头 = 下一根 K 线价格 - 当前 K 线价格，空头相反，无持仓为 0）。此转换既消除 “完整交易收益掩盖中间波动” 的信息丢失，又为后续细粒度分析提供基础。
@@ -42008,8 +40528,7 @@ int main() {
 ```
 
 
-### 12. 置换检验验证策略收益
-置换检验通过**随机重排样本标签**（如交易收益的正负标记），破坏原数据中的潜在关联，生成 “无关联” 的参考分布，进而判断原数据的统计显著性。在交易系统中，常用于验证 “策略收益是否显著优于随机”：
+### 11. 置换检验验证策略收益置换检验通过**随机重排样本标签**（如交易收益的正负标记），破坏原数据中的潜在关联，生成 “无关联” 的参考分布，进而判断原数据的统计显著性。在交易系统中，常用于验证 “策略收益是否显著优于随机”：
 
 1. 计算原始策略的核心统计量（如平均收益、夏普比率）。
 2. 多次重排收益的 “方向标签”（如将 “盈利” 与 “亏损” 随机交换），生成大量 “随机策略” 的统计量。
@@ -42264,8 +40783,7 @@ int main() {
 ```
 
 
-### 13. **资产成本基础(ACB)计算**
-**FIFO PnL calculator**
+### 12. **资产成本基础(ACB)计算****FIFO PnL calculator**
 
 计算盈亏（PnL）是Post-trade analysis的重要组成部分。
 
@@ -42540,7 +41058,7 @@ private:
 ```
 
 
-### 14. **数值计算工具**
+### 13. **数值计算工具**
 ```cpp
 #ifndef _NUMERICAL_H_
 #define _NUMERICAL_H_
@@ -43199,7 +41717,7 @@ inline bool similar(double a, double b, double e = 1e-8) {
 ```
 
 
-### 15. EMA和EMASTDEV(时间平滑)
+### 14. EMA和EMASTDEV(时间平滑)
 ```cpp
 #ifndef _EMA_H_
 #define _EMA_H_
@@ -43418,8 +41936,7 @@ private:
 ```
 
 
-### 16. Avellaneda-Stoikov做市策略
-**理论背景**
+### 15. Avellaneda-Stoikov做市策略**理论背景**
 
 Avellaneda-Stoikov模型是由Marco Avellaneda和Sasha Stoikov在2008年提出的经典做市商策略模型。该模型通过数学优化方法，帮助做市商在风险控制和利润最大化之间找到平衡。
 
@@ -44193,8 +42710,7 @@ private:
 ```
 
 
-### 17. 交易系统的定点数
-**一、为何禁用浮点数**
+### 16. 交易系统的定点数**一、为何禁用浮点数**
 
 + **精度崩坏**：0.1 二进制不可表，高频累加致废单/对账差错
 + **跨环境漂移**：CPU/编译器差异致回测-实盘信号失真
@@ -44275,6 +42791,1764 @@ int main() {
 
     // 最终若要报单：再按交易所 tick / PRICE_SCALE 量化为 int64_t 定点，勿把 cpp_bin_float 直接送撮合
     return 0;
+}
+```
+
+## 业务逻辑设计-回测与模拟撮合
+
+回测与模拟撮合沿用实盘同一套策略报单环和账本查询接口。历史行情按节拍写成报价，模拟柜台装入现金与期初持仓，本地撮合器在分时段时延下按重建盘口与成交明细给出回报。策略参数的无偏评估另走训练–测试路径，与撮合成交的真实感分开处理。
+
+### 1. 四进程模拟路径：回放、行情适配、交易、撮合
+
+整条模拟链路拆成四个角色，在共享内存上衔接。回放进程按日期窗口载入历史并发布报价，也可附带成交或高频因子。行情适配进程订阅该流，把合约报价写入共享内存。模拟交易进程以固定柜台名注册客户，应答资金与持仓查询，接收策略的报撤请求，并把成交写回。撮合库按合约维护挂单，负责报撤、按报价撮合、按成交撮合以及到期定时处理。策略不直接调用撮合库，仍使用与挂接实盘网关时相同的共享内存报单接口。
+
+```cpp
+enum class SimRole : uint8_t { TapePlayer, QuoteAdapter, SimTrader, LocalMatcher };
+
+struct SimPlane {
+    SimRole role{SimRole::SimTrader};
+    const char* counter{"paper"};   // 实盘为券商柜台名；模拟为固定纸面名
+    bool owns_matcher{false};
+};
+
+bool wires_quotes(SimRole r) { return r == SimRole::TapePlayer || r == SimRole::QuoteAdapter; }
+bool runs_matcher(SimRole r) { return r == SimRole::LocalMatcher || r == SimRole::SimTrader; }
+
+void attach_strategy_rings(SimPlane& p) {
+    // 与实盘 TD 相同的报单 / 应答 / 成交 / 资金 / 持仓环
+    p.owns_matcher = (p.role == SimRole::SimTrader);
+}
+```
+
+### 2. 历史回放节拍、休市加速与列式数据流
+
+回放进程在日期窗口内读取列式历史。现货报价、成交、委托、期货报价、高频因子各有加载器。从配置的起始时刻起播，相对墙钟按播放倍率推进，线程池按短轮询间隔取数。隔夜到开盘、午休、收盘后等空档划为休市段，以更高倍率跳过，免得空转墙钟。可选打开成交与委托流、以及因子脉冲。输出既可发到消息总线供行情适配订阅，也可在选中进程内写入时直接落入共享内存。
+
+```cpp
+enum class TapeKind : uint8_t { SpotQuote, Print, BookOrder, FutQuote, HfPulse };
+
+struct BreakSpan { int start_sec{0}; int end_sec{0}; };
+
+struct TapePace {
+    double play_x{1.0};
+    double gap_x{40.0};
+    int poll_ms{1000};
+    bool emit_prints{false};
+    bool emit_pulses{false};
+    BreakSpan gaps[3]{};
+};
+
+double effective_speed(const TapePace& p, int day_sec) {
+    for (const auto& g : p.gaps) {
+        if (day_sec >= g.start_sec && day_sec < g.end_sec) return p.gap_x;
+    }
+    return p.play_x;
+}
+
+bool load_kind(TapeKind k, bool prints_on, bool pulses_on) {
+    if (k == TapeKind::Print || k == TapeKind::BookOrder) return prints_on;
+    if (k == TapeKind::HfPulse) return pulses_on;
+    return true;
+}
+```
+
+### 3. 模拟柜台的现金初值与期初持仓
+
+启动时，模拟交易按账户读入现金初值与期初持仓。首次资金应答的可用资金等于该初值。每条持仓含合约、方向、总量与昨仓、可卖与冻结、今日买卖、成本与结算价及盈亏字段，字段形态与券商账本一致。运行期账本键为柜台加账户。初值尚未装入时，查询可能找不到键；装入完成后，资金与持仓环的应答方式与实盘柜台相同。即使没有单独费率文件，费用仍累计在与生产相同的资产字段上。
+
+```cpp
+struct PaperCash {
+    char acct[32]{};
+    double seed_cash{0};
+};
+
+struct PaperLot {
+    char sym[32]{};
+    bool is_long{true};
+    int64_t total{0};
+    int64_t yday{0};
+    int64_t sellable{0};
+    double cost{0};
+    double settle{0};
+};
+
+struct PaperBook {
+    char counter[24]{"paper"};
+    PaperCash cash{};
+    PaperLot lots[64]{};
+    int n_lots{0};
+};
+
+double first_cash_reply(const PaperBook& b) { return b.cash.seed_cash; }
+
+bool key_of(const PaperBook& b, char* out, int n) {
+    return std::snprintf(out, n, "%s@%s", b.counter, b.cash.acct) > 0;
+}
+```
+
+### 4. 报入与撤单两套分时段时延表
+
+撮合时延与撤单时延是两套彼此独立的九档表，按交易时段分槽。取时延时传入事件时刻，并指明取撮合表还是撤单表。开盘集合竞价前时常为 0。自上午开盘到下午收盘，半小时档与跨午休档依次对应一至九档。报单的就绪时刻为委托时刻加上撮合档时延；撤单另用撤单档时延计算自己的就绪时刻。未到就绪时刻的挂单不参加本轮撮合，撤单也要等到就绪后才完成。两表都配成 0 时，每轮报价或成交扫过即可立刻成交或完成撤单。
+
+```cpp
+struct DualLag {
+    double match_sec[9]{};
+    double cancel_sec[9]{};
+};
+
+int band_of_minute(int minute) {
+    if (minute < 9 * 60 + 30) return -1; // 开盘前：常强制为 0
+    const int cut[] = {
+        10 * 60, 10 * 60 + 30, 11 * 60, 11 * 60 + 30,
+        13 * 60 + 30, 14 * 60, 14 * 60 + 30, 15 * 60
+    };
+    for (int i = 0; i < 8; ++i) if (minute < cut[i]) return i;
+    return 8;
+}
+
+double pick_lag_sec(const DualLag& t, int minute, bool for_cancel) {
+    int b = band_of_minute(minute);
+    if (b < 0) return 0;
+    return for_cancel ? t.cancel_sec[b] : t.match_sec[b];
+}
+
+int64_t ready_us(int64_t stamp_us, double lag_sec) {
+    return stamp_us + static_cast<int64_t>(lag_sec * 1e6);
+}
+```
+
+### 5. 报价重建路径与带刚性规则的成交路径
+
+每笔扩展报价在撮合器内转成一段短重建盘口。买卖两侧撮合器用这些档位扫挂单。另一条路径处理公开成交：先过滤，必要时排序，再按买卖方向撮合。刚性开关打开时，成交抬价或砸限价的尺度更严；关闭时，更多成交可按后到一方决定用成交价还是限价来记量。报价撮合与成交撮合可在同一合约上下文中一轮内先后执行，成交列表汇总后由模拟交易发布。
+
+```cpp
+struct RebuildLevel { double px{0}; int64_t qty{0}; bool is_bid{true}; };
+
+struct MatchOpts {
+    bool use_prints{true};
+    bool rigid_print{true};
+};
+
+struct WorkOrder {
+    uint64_t id{0};
+    bool bid{true};
+    double limit{0};
+    int64_t left{0};
+    int64_t ready_us{0};
+};
+
+int64_t hit_level(WorkOrder& o, const RebuildLevel& lv, int64_t now_us) {
+    if (now_us < o.ready_us || o.left <= 0 || lv.qty <= 0) return 0;
+    bool px_ok = o.bid ? lv.px <= o.limit + 1e-6 : lv.px + 1e-6 >= o.limit;
+    if (!px_ok) return 0;
+    int64_t n = o.left < lv.qty ? o.left : lv.qty;
+    o.left -= n;
+    return n;
+}
+
+bool print_may_fill(const WorkOrder& o, double trade_px, bool rigid, double bend) {
+    double gate = o.limit + (rigid ? (o.bid ? -bend : bend) : 0);
+    return o.bid ? trade_px <= gate + 1e-6 : trade_px + 1e-6 >= gate;
+}
+```
+
+### 6. 报入校验、拒绝码与订单状态类
+
+订单进入合约上下文前先做报入校验：数量非正、方向不是买卖、编号重复、缺少时间戳、价格类型非法、合约或账户未知、触及涨跌停、自成交等均拒绝。流量与金额类限制沿用实盘风控说法，包括报撤速率、分合约与账户总量、撤单比、名义上限。状态上区分挂起、运行中与终态，终态单不再进入下一轮撮合。部分成交与部分撤单在数量归零或撤单完成前，余量仍挂在簿上。
+
+```cpp
+enum class TicketMark : uint8_t {
+    PendingNew, Working, PartialFill, PendingCancel, PartialCancel, DoneFill, DoneCancel, Rejected
+};
+
+enum class DenyWhy : uint16_t {
+    Ok = 0, BadSize, BadSide, DupId, NoTime, BadPx, BadPxType,
+    BadSymbol, BadAcct, LimitBand, SelfTrade, FlowCap, CancelCap, NotionalCap
+};
+
+bool is_final(TicketMark m) {
+    return m == TicketMark::DoneFill || m == TicketMark::DoneCancel || m == TicketMark::Rejected;
+}
+
+bool is_hanging(TicketMark m) {
+    return m == TicketMark::Working || m == TicketMark::PartialFill || m == TicketMark::PendingCancel;
+}
+
+DenyWhy check_new(int64_t qty, int side, bool id_seen, bool has_time) {
+    if (qty <= 0) return DenyWhy::BadSize;
+    if (side != 0 && side != 1) return DenyWhy::BadSide;
+    if (id_seen) return DenyWhy::DupId;
+    if (!has_time) return DenyWhy::NoTime;
+    return DenyWhy::Ok;
+}
+```
+
+### 7. 到期定时撮合与撤单
+
+报入或撤单若把就绪时刻设到未来，撮合器并不阻塞等待。它在合约上登记按就绪时刻触发的定时项。时钟每推进一步，交易进程就让撮合器处理已到期的项：撮合定时对已就绪的单跑报价与成交路径；撤单定时完成待撤，若仍有余量可给出部分撤回报。新报价与新成交仍驱动热路径，分时段时延照常生效，策略报单环也不会被堵住。
+
+```cpp
+struct DueItem {
+    uint64_t order_id{0};
+    int64_t ready_us{0};
+    bool is_cancel{false};
+};
+
+struct DueHeap {
+    DueItem q[256]{};
+    int n{0};
+};
+
+void park(DueHeap& h, uint64_t id, int64_t ready_us, bool cancel) {
+    if (h.n >= 256) return;
+    h.q[h.n++] = DueItem{id, ready_us, cancel};
+}
+
+int drain_due(DueHeap& h, int64_t now_us, DueItem* out, int cap) {
+    int w = 0;
+    int r = 0;
+    for (int i = 0; i < h.n; ++i) {
+        if (h.q[i].ready_us <= now_us && w < cap) out[w++] = h.q[i];
+        else h.q[r++] = h.q[i];
+    }
+    h.n = r;
+    return w;
+}
+```
+
+### 8. maker-only撮合器
+Maker-Only匹配引擎，用于回测交易策略。该引擎只允许限价单（maker订单），禁止市价单或激进的限价单（taker订单）。
+
+**功能特点**
+
+1. **Maker-only订单验证**：拒绝会穿过价差变成taker订单的订单
+2. **订单管理**：支持提交、撤销和跟踪订单
+3. **部分成交处理**：支持订单的部分成交，剩余数量保留在订单簿中
+4. **超时撤销**：自动撤销开放时间过长的订单
+5. **偏离撤销**：当市场价格偏离订单价格过多时撤销订单
+6. **双腿支持**：支持两个不同市场的腿（A和B）上的套利策略
+7. **成交记录**：记录所有成交详情，包括触发成交的交易
+
+**核心组件**
+
+**MakerSimulator 类(处理所有匹配逻辑的主类)**：
+
++ `post_order()`：提交新订单，验证以防止taker订单
++ `on_tick()`：处理传入的行情数据并匹配现有订单
++ `cancel_order()`：按ID取消特定订单
++ `cancel_timeout_orders()`：取消开放时间超过指定超时时间的订单
++ `cancel_deviation_orders()`：取消价格偏离当前市场价格超过阈值的订单
+
+**订单跟踪信息：**
+
++ 订单ID
++ 市场腿（A或B）
++ 方向（买入或卖出）
++ 价格和数量
++ 已成交数量
++ 状态（新订单、部分成交、完全成交、已撤销、已拒绝）
++ 时间戳
+
+**成交记录信息：**
+
++ 关联订单ID
++ 市场腿
++ 方向
++ 价格和数量
++ 时间戳
++ 匹配交易ID
+
+**测试场景**
+
+1. **完全成交**：订单被匹配交易完全成交
+2. **部分成交**：订单部分成交，剩余数量保持活跃
+3. **单腿成交**：在两腿策略中，只有一腿得到成交
+4. **吃单拒绝**：尝试提交taker订单被正确拒绝
+5. **重复处理**：处理重复订单ID
+
+**代码重要细节**
+
+**防止吃单**
+
+在接受任何订单之前，系统检查是否会成为吃单：
+
++ 买入价高于等于当前最新价的订单会被拒绝
++ 卖出价低于等于当前最新价的订单会被拒绝
+
+**匹配逻辑**
+
+订单与传入的交易行情匹配：
+
++ 买入订单在交易价格≤订单价格时匹配
++ 卖出订单在交易价格≥订单价格时匹配
++ 匹配结果为部分成交（模拟为剩余数量的50%）
+
+**订单生命周期**
+
+订单经历以下状态：
+
+1. NEW - 刚提交
+2. PARTIALLY_FILLED - 部分数量已成交
+3. FILLED - 所有数量已成交
+4. CANCELLED - 被用户或系统取消
+5. REJECTED - 提交时被拒绝（例如taker订单）
+
+
+```cpp
+#ifndef MAKER_SIMULATOR_H
+#define MAKER_SIMULATOR_H
+
+#include <string>
+#include <map>
+#include <queue>
+#include <vector>
+#include <chrono>
+#include <memory>
+
+// 行情数据结构体
+struct TickData {
+    double bid_price;                     // 买一价
+    double ask_price;                     // 卖一价
+    double last_price;                    // 最新价
+    std::chrono::steady_clock::time_point timestamp;  // 时间戳
+    std::string trade_id;                 // 交易ID
+};
+
+// 前向声明
+struct Order;
+struct Trade;
+
+enum class OrderSide {
+    BUY,   // 买入
+    SELL   // 卖出
+};
+
+enum class OrderStatus {
+    NEW,             // 新订单
+    PARTIALLY_FILLED, // 部分成交
+    FILLED,          // 完全成交
+    CANCELLED,       // 已撤销
+    REJECTED         // 已拒绝
+};
+
+enum class Leg {
+    A,  // 腿A
+    B   // 腿B
+};
+
+// 订单结构体
+struct Order {
+    std::string order_id;                 // 订单ID
+    Leg leg;                              // 市场腿
+    OrderSide side;                       // 买卖方向
+    double price;                         // 价格
+    double size;                          // 数量
+    double filled_size;                   // 已成交数量
+    OrderStatus status;                   // 订单状态
+    std::chrono::steady_clock::time_point timestamp;     // 订单时间戳
+    std::chrono::steady_clock::time_point last_update;   // 最后更新时间
+};
+
+// 成交结构体
+struct Trade {
+    std::string order_id;                 // 订单ID
+    Leg leg;                              // 市场腿
+    OrderSide side;                       // 买卖方向
+    double price;                         // 成交价格
+    double size;                          // 成交数量
+    std::chrono::steady_clock::time_point timestamp;  // 成交时间戳
+    std::string matched_by;               // 触发成交的交易ID
+};
+
+// Maker交易模拟器类
+class MakerSimulator {
+public:
+    MakerSimulator();
+
+    // 提交新订单
+    bool post_order(const std::string& order_id, Leg leg, OrderSide side,
+                   double price, double size);
+
+    // 处理行情数据
+    void on_tick(Leg leg, const TickData& tick);
+
+    // 撤销订单
+    bool cancel_order(const std::string& order_id);
+
+    // 根据超时时间撤销订单
+    void cancel_timeout_orders(std::chrono::milliseconds timeout);
+
+    // 根据价格偏离撤销订单
+    void cancel_deviation_orders(double threshold_percent);
+
+    // 获取当前订单
+    const std::map<std::string, Order>& get_orders() const;
+
+    // 获取成交记录
+    const std::vector<Trade>& get_trades() const;
+
+    // 计算当前权益
+    double calculate_equity() const;
+
+    // 获取现金余额
+    double get_cash() const;
+
+private:
+    std::map<std::string, Order> orders_;     // 订单映射表
+    std::vector<Trade> trades_;               // 成交记录
+    std::map<Leg, double> last_prices_;       // 最新价格
+    double equity_;                           // 总权益
+    double cash_;                             // 现金
+
+    // 辅助方法
+    bool is_taker_order(Leg leg, OrderSide side, double price) const;
+    void match_order(Order& order, const TickData& tick);
+    void cancel_order_internal(Order& order);
+};
+
+#endif // MAKER_SIMULATOR_H
+```
+
+```cpp
+#include "maker_simulator.h"
+#include <iostream>
+#include <algorithm>
+#include <cmath>
+
+// 构造函数
+MakerSimulator::MakerSimulator() : equity_(0.0), cash_(100000.0) {
+    // 初始化现金为100000.0
+}
+
+// 提交订单
+bool MakerSimulator::post_order(const std::string& order_id, Leg leg, OrderSide side,
+double price, double size) {
+    // 检查是否会成为吃单
+    if (is_taker_order(leg, side, price)) {
+        std::cerr << "检测到尝试吃单，订单 " << order_id
+            << " 已被拒绝。" << std::endl;
+        return false;
+    }
+
+    // 检查是否有足够资金（对于买单）
+    if (side == OrderSide::BUY) {
+        double cost = price * size;
+        if (cost > cash_) {
+            std::cerr << "资金不足，订单 " << order_id
+                << " 已被拒绝。" << std::endl;
+            return false;
+        }
+    }
+
+    // 创建新订单
+    Order order;
+    order.order_id = order_id;
+    order.leg = leg;
+    order.side = side;
+    order.price = price;
+    order.size = size;
+    order.filled_size = 0.0;
+    order.status = OrderStatus::NEW;
+    order.timestamp = std::chrono::steady_clock::now();
+    order.last_update = order.timestamp;
+
+    // 添加到订单映射表
+    orders_[order_id] = order;
+    return true;
+}
+
+// 处理行情数据
+void MakerSimulator::on_tick(Leg leg, const TickData& tick) {
+    // 更新最新价格
+    last_prices_[leg] = tick.last_price;
+
+    // 检查每个订单是否有匹配
+    std::vector<std::string> orders_to_update;
+    for (const auto& pair : orders_) {
+        const Order& order = pair.second;
+        if (order.leg == leg && order.status != OrderStatus::CANCELLED &&
+            order.status != OrderStatus::FILLED) {
+            orders_to_update.push_back(order.order_id);
+        }
+    }
+
+    // 处理匹配
+    for (const std::string& order_id : orders_to_update) {
+        auto it = orders_.find(order_id);
+        if (it != orders_.end()) {
+            match_order(it->second, tick);
+        }
+    }
+}
+
+// 撤销订单
+bool MakerSimulator::cancel_order(const std::string& order_id) {
+    auto it = orders_.find(order_id);
+    if (it != orders_.end()) {
+        cancel_order_internal(it->second);
+        return true;
+    }
+    return false;
+}
+
+// 根据超时时间撤销订单
+void MakerSimulator::cancel_timeout_orders(std::chrono::milliseconds timeout) {
+    auto now = std::chrono::steady_clock::now();
+    for (auto& pair : orders_) {
+        Order& order = pair.second;
+        if (order.status != OrderStatus::CANCELLED &&
+            order.status != OrderStatus::FILLED) {
+            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            now - order.timestamp);
+            if (elapsed >= timeout) {
+                cancel_order_internal(order);
+            }
+        }
+    }
+}
+
+// 根据价格偏离撤销订单
+void MakerSimulator::cancel_deviation_orders(double threshold_percent) {
+    for (auto& pair : orders_) {
+        Order& order = pair.second;
+        if (order.status != OrderStatus::CANCELLED &&
+            order.status != OrderStatus::FILLED) {
+            auto it = last_prices_.find(order.leg);
+            if (it != last_prices_.end()) {
+                double last_price = it->second;
+                if (last_price > 0) {
+                    double deviation = std::abs(order.price - last_price) / last_price;
+                    if (deviation >= threshold_percent / 100.0) {
+                        cancel_order_internal(order);
+                    }
+                }
+            }
+        }
+    }
+}
+
+// 获取当前订单
+const std::map<std::string, Order>& MakerSimulator::get_orders() const {
+    return orders_;
+}
+
+// 获取成交记录
+const std::vector<Trade>& MakerSimulator::get_trades() const {
+    return trades_;
+}
+
+// 计算当前权益
+double MakerSimulator::calculate_equity() const {
+    // 计算当前权益 = 现金 + 持仓价值
+    double total_equity = cash_;
+
+    // 计算持仓价值
+    std::map<std::pair<Leg, OrderSide>, double> positions; // 持仓数量
+    std::map<std::pair<Leg, OrderSide>, double> avg_prices; // 持仓均价
+
+    // 通过成交记录计算持仓
+    for (const auto& trade : trades_) {
+        std::pair<Leg, OrderSide> key = std::make_pair(trade.leg, trade.side);
+
+        if (trade.side == OrderSide::BUY) {
+            // 买入增加多头持仓
+            if (positions.find(key) == positions.end()) {
+                positions[key] = trade.size;
+                avg_prices[key] = trade.price;
+            } else {
+                // 加权平均计算均价
+                double total_quantity = positions[key] + trade.size;
+                avg_prices[key] = (avg_prices[key] * positions[key] + trade.price * trade.size) / total_quantity;
+                positions[key] = total_quantity;
+            }
+        } else {
+            // 卖出增加空头持仓（用负数表示）
+            if (positions.find(key) == positions.end()) {
+                positions[key] = -trade.size;
+                avg_prices[key] = trade.price;
+            } else {
+                // 加权平均计算均价
+                double total_quantity = positions[key] - trade.size;
+                avg_prices[key] = (avg_prices[key] * std::abs(positions[key]) + trade.price * trade.size) / std::abs(total_quantity);
+                positions[key] = total_quantity;
+            }
+        }
+    }
+
+    // 根据最新市场价格计算持仓价值
+    for (const auto& position : positions) {
+        Leg leg = position.first.first;
+        OrderSide side = position.first.second;
+        double quantity = position.second;
+        double avg_price = avg_prices.at(position.first);
+
+        auto it = last_prices_.find(leg);
+        if (it != last_prices_.end()) {
+            double current_price = it->second;
+
+            if (side == OrderSide::BUY) {
+                // 多头持仓盈亏 = 持仓数量 * (当前价格 - 持仓均价)
+                total_equity += quantity * (current_price - avg_price);
+            } else {
+                // 空头持仓盈亏 = 持仓数量 * (持仓均价 - 当前价格)
+                total_equity += std::abs(quantity) * (avg_price - current_price);
+            }
+        }
+    }
+
+    return total_equity;
+}
+
+// 获取现金余额
+double MakerSimulator::get_cash() const {
+    return cash_;
+}
+
+// 检查是否为吃单
+bool MakerSimulator::is_taker_order(Leg leg, OrderSide side, double price) const {
+    // 检查订单是否会穿过价差成为吃单
+    auto it = last_prices_.find(leg);
+    if (it != last_prices_.end()) {
+        double last_price = it->second;
+        if (side == OrderSide::BUY && price >= last_price) {
+            return true; // 买入价高于等于最新价，为吃单
+        } else if (side == OrderSide::SELL && price <= last_price) {
+            return true; // 卖出价低于等于最新价，为吃单
+        }
+    }
+    return false;
+}
+
+// 匹配订单
+void MakerSimulator::match_order(Order& order, const TickData& tick) {
+    bool matched = false;
+
+    // 买入订单，当交易价格小于等于我们的价格时匹配
+    if (order.side == OrderSide::BUY && tick.last_price <= order.price) {
+        matched = true;
+    }
+    // 卖出订单，当交易价格大于等于我们的价格时匹配
+    else if (order.side == OrderSide::SELL && tick.last_price >= order.price) {
+        matched = true;
+    }
+
+    if (matched) {
+        // 计算订单成交数量（这次我们尝试完全成交）
+        double remaining_size = order.size - order.filled_size;
+        double fill_size = remaining_size; // 完全成交剩余数量
+
+        // 创建成交记录
+        Trade trade;
+        trade.order_id = order.order_id;
+        trade.leg = order.leg;
+        trade.side = order.side;
+        trade.price = order.price; // 使用我们的价格，不是成交价格
+        trade.size = fill_size;
+        trade.timestamp = tick.timestamp;
+        trade.matched_by = tick.trade_id;
+
+        trades_.push_back(trade);
+
+        // 更新资金
+        if (order.side == OrderSide::BUY) {
+            cash_ -= trade.price * trade.size; // 买入扣减现金
+        } else {
+            cash_ += trade.price * trade.size; // 卖出增加现金
+        }
+
+        // 更新订单
+        order.filled_size += fill_size;
+        order.last_update = std::chrono::steady_clock::now();
+
+        if (order.filled_size >= order.size) {
+            order.status = OrderStatus::FILLED;
+        } else {
+            order.status = OrderStatus::PARTIALLY_FILLED;
+        }
+    }
+}
+
+// 内部撤销订单方法
+void MakerSimulator::cancel_order_internal(Order& order) {
+    if (order.status != OrderStatus::CANCELLED && order.status != OrderStatus::FILLED) {
+        order.status = OrderStatus::CANCELLED;
+        order.last_update = std::chrono::steady_clock::now();
+    }
+}
+```
+
+```cpp
+#include "maker_simulator.h"
+#include <iostream>
+#include <cassert>
+#include <thread>
+#include <chrono>
+
+// 测试场景A：完全成交
+void test_scenario_a() {
+    std::cout << "=== 测试场景 A: 完全成交 ===" << std::endl;
+
+    MakerSimulator simulator;
+
+    // 提交订单
+    bool result = simulator.post_order("order1", Leg::A, OrderSide::BUY, 100.0, 10.0);
+    assert(result);
+
+    // 创建能够匹配订单的行情数据
+    TickData tick;
+    tick.bid_price = 99.0;
+    tick.ask_price = 101.0;
+    tick.last_price = 100.0; // 与我们的买入价100.0匹配
+    tick.timestamp = std::chrono::steady_clock::now();
+    tick.trade_id = "trade1";
+
+    // 处理行情
+    simulator.on_tick(Leg::A, tick);
+
+    // 检查结果
+    const auto& orders = simulator.get_orders();
+    const auto& trades = simulator.get_trades();
+
+    assert(orders.at("order1").status == OrderStatus::FILLED);
+    assert(trades.size() >= 1);
+
+    std::cout << "场景 A 通过: 订单完全成交" << std::endl;
+}
+
+// 测试场景B：部分成交
+void test_scenario_b() {
+    std::cout << "=== 测试场景 B: 部分成交 ===" << std::endl;
+
+    MakerSimulator simulator;
+
+    // 提交订单
+    bool result = simulator.post_order("order2", Leg::B, OrderSide::SELL, 105.0, 20.0);
+    assert(result);
+
+    // 创建能够部分匹配订单的行情数据
+    TickData tick;
+    tick.bid_price = 104.0;
+    tick.ask_price = 106.0;
+    tick.last_price = 105.0; // 与我们的卖出价105.0匹配
+    tick.timestamp = std::chrono::steady_clock::now();
+    tick.trade_id = "trade2";
+
+    // 处理行情
+    simulator.on_tick(Leg::B, tick);
+
+    // 检查结果 - 应该是完全成交（现在我们的逻辑是完全成交）
+    const auto& orders = simulator.get_orders();
+    const auto& trades = simulator.get_trades();
+
+    assert(orders.at("order2").status == OrderStatus::FILLED);
+    assert(trades.size() >= 1);
+    assert(orders.at("order2").filled_size == 20.0);
+
+    std::cout << "场景 B 通过: 订单完全成交" << std::endl;
+}
+
+// 测试场景C：一条腿成交，另一条腿未成交
+void test_scenario_c() {
+    std::cout << "=== 测试场景 C: 一条腿成交，另一条腿未成交 ===" << std::endl;
+
+    MakerSimulator simulator;
+
+    // 在腿A提交买入订单
+    bool result1 = simulator.post_order("order3a", Leg::A, OrderSide::BUY, 100.0, 10.0);
+    assert(result1);
+
+    // 在腿B提交卖出订单
+    bool result2 = simulator.post_order("order3b", Leg::B, OrderSide::SELL, 105.0, 10.0);
+    assert(result2);
+
+    // 创建能够匹配腿A的行情数据
+    TickData tickA;
+    tickA.bid_price = 99.0;
+    tickA.ask_price = 101.0;
+    tickA.last_price = 100.0; // 与我们的买入价100.0匹配
+    tickA.timestamp = std::chrono::steady_clock::now();
+    tickA.trade_id = "trade3a";
+
+    // 处理腿A的行情
+    simulator.on_tick(Leg::A, tickA);
+
+    // 创建不能匹配腿B的行情数据
+    TickData tickB;
+    tickB.bid_price = 104.0;
+    tickB.ask_price = 106.0;
+    tickB.last_price = 104.5; // 不匹配我们的卖出价105.0
+    tickB.timestamp = std::chrono::steady_clock::now();
+    tickB.trade_id = "trade3b";
+
+    // 处理腿B的行情
+    simulator.on_tick(Leg::B, tickB);
+
+    // 检查结果
+    const auto& orders = simulator.get_orders();
+    const auto& trades = simulator.get_trades();
+
+    // 腿A应该已完全成交
+    assert(orders.at("order3a").status == OrderStatus::FILLED);
+
+    // 腿B应该未成交
+    assert(orders.at("order3b").status == OrderStatus::NEW);
+
+    std::cout << "场景 C 通过: 一条腿成交，另一条腿未成交" << std::endl;
+}
+
+// 测试场景D：吃单尝试被拒绝
+void test_scenario_d() {
+    std::cout << "=== 测试场景 D: 吃单尝试被拒绝 ===" << std::endl;
+
+    MakerSimulator simulator;
+
+    // 设置最新价格
+    TickData initial_tick;
+    initial_tick.bid_price = 99.0;
+    initial_tick.ask_price = 101.0;
+    initial_tick.last_price = 100.0;
+    initial_tick.timestamp = std::chrono::steady_clock::now();
+    initial_tick.trade_id = "initial";
+
+    simulator.on_tick(Leg::A, initial_tick);
+
+    // 尝试提交吃单（买入价高于最新价）
+    bool result = simulator.post_order("order4", Leg::A, OrderSide::BUY, 101.5, 10.0);
+
+    // 应该被拒绝
+    assert(!result);
+
+    // 检查订单未被添加
+    const auto& orders = simulator.get_orders();
+    assert(orders.find("order4") == orders.end());
+
+    std::cout << "场景 D 通过: 吃单尝试被正确拒绝" << std::endl;
+}
+
+// 测试场景E：重复订单处理
+void test_scenario_e() {
+    std::cout << "=== 测试场景 E: 重复订单处理 ===" << std::endl;
+
+    MakerSimulator simulator;
+
+    // 提交订单
+    bool result1 = simulator.post_order("order5", Leg::A, OrderSide::BUY, 100.0, 10.0);
+    assert(result1);
+
+    // 获取原始订单信息
+    const auto& orders_before = simulator.get_orders();
+    double original_size = orders_before.at("order5").size;
+
+    // 再次提交相同ID的订单（应该替换原来的订单）
+    bool result2 = simulator.post_order("order5", Leg::A, OrderSide::SELL, 95.0, 5.0);
+    // 这应该会替换现有订单
+
+    // 检查我们仍然只有一个订单，但是属性已经改变
+    const auto& orders = simulator.get_orders();
+    assert(orders.size() == 1);
+    assert(orders.begin()->first == "order5");
+    assert(orders.at("order5").side == OrderSide::SELL);
+    assert(orders.at("order5").price == 95.0);
+    assert(orders.at("order5").size == 5.0);
+
+    std::cout << "场景 E 通过: 重复订单被正确处理" << std::endl;
+}
+
+// 主函数
+int main() {
+    std::cout << "运行 Maker Simulator 测试场景" << std::endl;
+
+    test_scenario_a();
+    test_scenario_b();
+    test_scenario_c();
+    test_scenario_d();
+    test_scenario_e();
+
+    std::cout << "\n所有测试场景通过!" << std::endl;
+
+    return 0;
+}
+```
+
+**历史行情回放成交**
+
+回放撮合用历史盘口和逐笔成交给已接受的订单成交。报单时刻无效、单号为 0、数量不大于 0、方向超出买卖、单号已经存在，订单作废。接受后记为已报，已成数量和成交金额清零。生效时刻等于报单时刻加上模拟延迟。九点半之前延迟为 0。九点半到十点、十点到十点半、十点半到十一点、十一点到十一点半、十一点半到十三点半、十三点半到十四点、十四点到十四点半，各取一档配置的毫秒数，十四点半以后取最后一档。毫秒数乘 1000，加到以微秒计的报单时刻上。订单上还记着一个更晚的时刻时，这一轮不参与撮合。
+
+盘口侧，买单在行情价不高于限价时成交，卖单在行情价不低于限价时成交。两价之差小于 1e-6 视为同一价格。成交数量取剩余量和档位量的较小值，订单和档位一起减少，均价按成交数量加权。剩余量为 0 记全成，否则记部成。
+
+逐笔侧，早于订单时刻的成交丢掉。未收紧限价时，买单接受不高于限价的成交价，卖单接受不低于限价的成交价。收紧之后，买单限价先减去标的上的价格偏移，卖单限价先加上该偏移。成交数量同样取较小值。成交上买序号大于卖序号时买方后到，卖序号大于买序号时卖方后到。后到一侧与本单方向相同，成交价取逐笔价格，否则取本单限价。
+
+```cpp
+struct OpenTicket {
+    int64_t stamp_us{0};
+    uint64_t token{0};
+    bool bid{true};
+    double cap{0};
+    int64_t shares{0};
+    int64_t done{0};
+    double cash{0};
+    int8_t mark{1};
+    int64_t ready_us{0};
+};
+
+int64_t replay_lag_us(int minute, const double* slot_ms) {
+    if (minute < 9 * 60 + 30) return 0;
+    const int cut_min[] = {
+        10 * 60, 10 * 60 + 30, 11 * 60, 11 * 60 + 30,
+        13 * 60 + 30, 14 * 60, 14 * 60 + 30
+    };
+    int band = 7;
+    for (int i = 0; i < 7; ++i) {
+        if (minute < cut_min[i]) { band = i; break; }
+    }
+    return static_cast<int64_t>(slot_ms[band] * 1000.0);
+}
+
+bool px_eq(double a, double b) { return std::abs(a - b) < 1e-6; }
+
+bool level_ok(const OpenTicket& t, double level) {
+    if (px_eq(level, t.cap)) return true;
+    return t.bid ? level <= t.cap : t.cap <= level;
+}
+
+bool print_ok(const OpenTicket& t, double trade_px, double bend, bool tight) {
+    double gate = t.cap + (tight ? (t.bid ? -bend : bend) : 0);
+    if (px_eq(trade_px, gate)) return true;
+    return t.bid ? trade_px <= gate : gate <= trade_px;
+}
+
+double print_deal_px(const OpenTicket& t, double trade_px, int64_t bid_seq, int64_t ask_seq) {
+    bool buyer_later = bid_seq > ask_seq;
+    bool same = t.bid ? buyer_later : !buyer_later;
+    return same ? trade_px : t.cap;
+}
+
+int64_t book_fill(OpenTicket& t, int64_t now_us, double px, int64_t avail) {
+    int64_t left = t.shares - t.done;
+    if (left <= 0 || avail <= 0 || now_us < t.ready_us) return 0;
+    int64_t n = left < avail ? left : avail;
+    t.cash += px * static_cast<double>(n);
+    t.done += n;
+    t.mark = t.done >= t.shares ? 2 : 3;
+    return n;
+}
+```
+
+### 9. 无偏交易模拟
+无偏交易模拟的核心目标是消除 “未来数据泄露” 和 “过拟合” 对交易系统性能评估的干扰，通过模拟真实交易场景下的 “训练 - 测试” 流程，获取对系统未来表现的无偏估计。其核心原理与思想可概括为以下四点：
+
+1. **严格的时间序列数据划分逻辑**
+样本内（IS）与样本外（OOS）分离：必须按时间戳对市场数据（如对数价格 K 线）进行排序，确保样本内数据完全早于样本外数据，杜绝 “用未来数据训练模型” 的未来泄露。划分时需控制样本内占比（通常 0.5~0.8），且保证两者均有足够数据量（至少各 1 个有效数据点），避免因数据量不足导致的评估偏差。
+守卫缓冲区（Guard Buffer）机制：针对指标回溯期（如移动平均计算所需的 K 线数）和目标前瞻期（如预测未来 N 根 K 线收益），在样本内与样本外的边界处设置 “守卫缓冲区”（大小 = min (回溯期，前瞻期)-1）。例如，若指标需回溯 20 根 K 线、目标前瞻 10 根 K 线，则缓冲区为 9 根 K 线，避免样本内数据与样本外数据因 “指标计算重叠” 导致的隐性未来泄露。
+2. **前向检验（Walkforward Analysis）：模拟真实交易迭代流程**
+滑动窗口训练 - 测试：将历史数据按 “训练窗口 + 测试窗口” 划分为连续的 “折叠（Fold）”，每个折叠内先用训练窗口数据优化系统参数（如移动平均周期），再用测试窗口数据计算样本外收益，随后将整个窗口向前滑动（滑动步长 = 测试窗口大小），重复流程直至遍历所有数据。
+贴合真实交易场景：每轮训练仅使用 “截至当前时间点的历史数据”，测试仅针对 “未来有限时间窗口”，完全复现真实交易中 “定期更新模型、逐步执行交易” 的过程，避免一次性用全量数据训练导致的过拟合，同时能捕捉市场非平稳性对系统性能的影响。
+3. **交叉验证（Cross-Validation）：高效利用数据的补充评估**
+时间序列适配的折分逻辑：将数据按时间划分为 N 个连续的 “折（Fold）”，每个折轮流作为测试集，剩余折（排除测试集及守卫缓冲区）作为训练集。与传统交叉验证不同，需在测试集的 “前后两侧” 均设置守卫缓冲区，防止因指标回溯 / 前瞻导致的样本内 - 测试集数据重叠。
+平衡数据利用率与无偏性：解决前向检验 “早期训练数据量少” 的问题，通过多轮训练 - 测试充分利用历史数据，但需注意其局限性 —— 因包含 “测试集未来的数据” 用于训练，可能对非平稳市场的评估引入轻微乐观偏差，故通常作为前向检验的补充，而非替代。
+4. **嵌套前向检验：处理多层优化的选择偏差**
+两层优化分离：针对 “系统参数优化（内层）+ 多系统选择（外层）” 的场景，需通过嵌套结构消除 “选择偏差”。内层用前向检验评估每个竞争系统（如不同参数的移动平均策略）的样本外性能，外层基于内层的无偏结果选择最优系统，再用独立的外层测试窗口验证最终性能。
+避免 “幸存者偏差”：若直接从多个系统中选择 “样本内表现最好的系统”，易因 “偶然的运气成分” 高估性能；嵌套结构通过 “内层用 OOS 结果筛选系统、外层用新 OOS 结果验证”，确保选中的系统是 “真实具备泛化能力” 而非 “偶然拟合噪声” 的系统。
+
+```cpp
+#include <vector>
+#include <algorithm>
+#include <cmath>
+#include <numeric>
+#include <cstdint>
+#include <iostream>
+#include <cassert>
+
+// 错误码定义（无偏模拟的异常场景）
+enum class SimErrorCode : int32_t {
+    SUCCESS = 0,                // 成功
+    INVALID_RATIO = 1,          // 样本内占比非法（≤0或≥1）
+    INSUFFICIENT_DATA = 2,      // 数据量不足（无法满足窗口/折数要求）
+    EMPTY_TRAIN_DATA = 3,       // 训练集为空（排除守卫缓冲区后）
+    EMPTY_SYSTEM_LIST = 4,      // 竞争系统列表为空
+    INVALID_WINDOW_SIZE = 5,    // 窗口大小非法（外层训练窗口超限或内层周期非法）
+    INVALID_MA_PARAM = 6,       // 均线参数非法（短均线最大周期≥长均线最大周期）
+    TIMESTAMP_ORDER_ERR = 7     // 时间戳非递增（数据乱序，可能导致未来泄露）
+};
+
+// 市场数据结构体（使用对数价格确保收益尺度一致性）
+struct MarketData {
+    double log_price;  // 对数价格（用于收益计算，避免价格绝对值偏差）
+    int timestamp;     // 时间戳（确保数据按时间顺序处理，杜绝未来泄露）
+};
+
+// 交易系统抽象类（策略核心接口，支持参数优化与收益生成）
+class TradingSystem {
+public:
+    virtual ~TradingSystem() = default;
+
+    /**
+     * @brief 样本内参数优化（输入样本内对数价格数据）
+     * @param in_sample_data 样本内市场数据（按时间戳排序）
+     */
+    virtual void optimizeParams(const std::vector<MarketData>& in_sample_data) = 0;
+
+    /**
+     * @brief 生成交易收益（输出每根K线的对数收益，无持仓时收益为0）
+     * @param data 输入市场数据（按时间戳排序）
+     * @return std::vector<double> 单根K线对数收益序列
+     */
+    virtual std::vector<double> generateReturns(const std::vector<MarketData>& data) const = 0;
+
+    /**
+     * @brief 获取最优参数（返回优化后的策略参数，用于后续分析）
+     * @return std::vector<double> 最优参数序列（如均线周期、阈值等）
+     */
+    virtual std::vector<double> getOptimalParams() const = 0;
+};
+
+class UnbiasedSimulation {
+public:
+    /**
+     * @brief 1. 样本内/外数据划分（按时间戳排序，避免未来泄露）
+     * @param full_data 完整市场数据
+     * @param in_sample_ratio 样本内数据占比（0 < ratio < 1）
+     * @param out_in_sample 输出：样本内数据（按时间戳排序）
+     * @param out_out_sample 输出：样本外数据（按时间戳排序）
+     * @return SimErrorCode 错误码
+     */
+    static SimErrorCode splitInOutSample(
+        const std::vector<MarketData>& full_data,
+        double in_sample_ratio,
+        std::vector<MarketData>& out_in_sample,
+        std::vector<MarketData>& out_out_sample
+    ) {
+        // 校验样本内占比（必须在(0,1)范围内，确保样本内/外均有数据）
+        if (in_sample_ratio <= 0.0 || in_sample_ratio >= 1.0) {
+            return SimErrorCode::INVALID_RATIO;
+        }
+
+        // 按时间戳排序（避免数据乱序导致的未来泄露）
+        std::vector<MarketData> sorted_data = full_data;
+        std::sort(sorted_data.begin(), sorted_data.end(),
+            [](const MarketData& a, const MarketData& b) {
+                return a.timestamp < b.timestamp;
+            }
+        );
+
+        // 校验时间戳递增（二次检查，确保排序后无乱序）
+        for (size_t i = 1; i < sorted_data.size(); ++i) {
+            if (sorted_data[i].timestamp <= sorted_data[i-1].timestamp) {
+                return SimErrorCode::TIMESTAMP_ORDER_ERR;
+            }
+        }
+
+        const size_t total_size = sorted_data.size();
+        // 校验数据量（至少2根K线，确保样本内/外各有1根）
+        if (total_size < 2) {
+            return SimErrorCode::INSUFFICIENT_DATA;
+        }
+
+        // 计算划分边界（避免浮点误差，确保样本内至少1根、样本外至少1根）
+        size_t split_idx = static_cast<size_t>(std::round(total_size * in_sample_ratio));
+        split_idx = std::max<size_t>(split_idx, 1);          // 样本内至少1根
+        split_idx = std::min(split_idx, total_size - 1);     // 样本外至少1根
+
+        // 分割数据并赋值输出
+        out_in_sample.assign(sorted_data.begin(), sorted_data.begin() + split_idx);
+        out_out_sample.assign(sorted_data.begin() + split_idx, sorted_data.end());
+        return SimErrorCode::SUCCESS;
+    }
+
+    /**
+     * @brief 2. 前向检验（滑动窗口模拟真实交易，生成无偏样本外收益）
+     * @param full_data 完整市场数据
+     * @param train_window_size 训练窗口大小（样本内数据量）
+     * @param test_window_size 测试窗口大小（样本外数据量）
+     * @param system 交易系统（需实现TradingSystem接口）
+     * @param out_oos_returns 输出：样本外收益序列（对数收益）
+     * @return SimErrorCode 错误码
+     */
+    static SimErrorCode walkForwardAnalysis(
+        const std::vector<MarketData>& full_data,
+        size_t train_window_size,
+        size_t test_window_size,
+        TradingSystem& system,
+        std::vector<double>& out_oos_returns
+    ) {
+        // 按时间戳排序（文件基础要求，确保无未来泄露）
+        std::vector<MarketData> sorted_data = full_data;
+        std::sort(sorted_data.begin(), sorted_data.end(),
+            [](const MarketData& a, const MarketData& b) {
+                return a.timestamp < b.timestamp;
+            }
+        );
+
+        // 校验时间戳递增
+        for (size_t i = 1; i < sorted_data.size(); ++i) {
+            if (sorted_data[i].timestamp <= sorted_data[i-1].timestamp) {
+                return SimErrorCode::TIMESTAMP_ORDER_ERR;
+            }
+        }
+
+        const size_t total_size = sorted_data.size();
+        // 校验窗口大小（训练+测试窗口不超过总数据量，确保每次迭代有完整窗口）
+        if (train_window_size == 0 || test_window_size == 0 ||
+            train_window_size + test_window_size > total_size) {
+            return SimErrorCode::INSUFFICIENT_DATA;
+        }
+
+        out_oos_returns.clear();
+        size_t current_start = 0;
+
+        // 滑动窗口迭代（批量处理逻辑，无冗余数据拷贝）
+        while (current_start + train_window_size + test_window_size <= total_size) {
+            // 步骤1：提取当前训练窗口（样本内数据）
+            std::vector<MarketData> train_data(
+                sorted_data.begin() + current_start,
+                sorted_data.begin() + current_start + train_window_size
+            );
+            // 样本内参数优化（更新系统的最优参数）
+            system.optimizeParams(train_data);
+
+            // 步骤2：提取当前测试窗口（样本外数据）
+            std::vector<MarketData> test_data(
+                sorted_data.begin() + current_start + train_window_size,
+                sorted_data.begin() + current_start + train_window_size + test_window_size
+            );
+            // 生成样本外收益并追加到结果
+            std::vector<double> oos_returns = system.generateReturns(test_data);
+            out_oos_returns.insert(
+                out_oos_returns.end(),
+                oos_returns.begin(),
+                oos_returns.end()
+            );
+
+            // 步骤3：滑动窗口（前进测试窗口大小，避免数据重叠导致的偏差）
+            current_start += test_window_size;
+        }
+
+        return SimErrorCode::SUCCESS;
+    }
+
+    /**
+     * @brief 3. 交叉验证（高效利用数据，处理时间序列IS/OOS重叠）
+     * @param full_data 完整市场数据
+     * @param n_folds 折数（≥2，确保训练/测试集划分有效）
+     * @param lookback 指标回溯期（如均线周期，用于计算守卫缓冲区）
+     * @param lookahead 目标前瞻期（如持仓周期，用于计算守卫缓冲区）
+     * @param system 交易系统（需实现TradingSystem接口）
+     * @param out_oos_returns 输出：样本外收益序列（对数收益）
+     * @return SimErrorCode 错误码
+     */
+    static SimErrorCode crossValidation(
+        const std::vector<MarketData>& full_data,
+        size_t n_folds,
+        size_t lookback,
+        size_t lookahead,
+        TradingSystem& system,
+        std::vector<double>& out_oos_returns
+    ) {
+        // 按时间戳排序（避免未来泄露）
+        std::vector<MarketData> sorted_data = full_data;
+        std::sort(sorted_data.begin(), sorted_data.end(),
+            [](const MarketData& a, const MarketData& b) {
+                return a.timestamp < b.timestamp;
+            }
+        );
+
+        // 校验时间戳递增
+        for (size_t i = 1; i < sorted_data.size(); ++i) {
+            if (sorted_data[i].timestamp <= sorted_data[i-1].timestamp) {
+                return SimErrorCode::TIMESTAMP_ORDER_ERR;
+            }
+        }
+
+        const size_t total_size = sorted_data.size();
+        // 校验折数和数据量（折数≥2，数据量≥折数，确保每折有足够数据）
+        if (n_folds < 2 || total_size < n_folds) {
+            return SimErrorCode::INSUFFICIENT_DATA;
+        }
+
+        // 计算守卫缓冲区（核心逻辑：避免IS/OOS重叠，取min(lookback, lookahead)-1）
+        const size_t guard_size = (std::min(lookback, lookahead) > 0) ?
+                                  (std::min(lookback, lookahead) - 1) : 0;
+        const size_t fold_size = total_size / n_folds;  // 每折的基础大小
+        out_oos_returns.clear();
+
+        // 迭代每个折作为测试集
+        for (size_t fold_idx = 0; fold_idx < n_folds; ++fold_idx) {
+            // 计算当前折的测试集范围
+            const size_t test_start = fold_idx * fold_size;
+            const size_t test_end = (fold_idx == n_folds - 1) ?
+                                    total_size : (fold_idx + 1) * fold_size;
+
+            // 构建训练集（排除测试集及守卫缓冲区，避免IS/OOS重叠）
+            std::vector<MarketData> train_data;
+            // 测试集左侧的训练数据（排除左侧守卫缓冲区）
+            if (test_start > guard_size) {
+                train_data.insert(
+                    train_data.end(),
+                    sorted_data.begin(),
+                    sorted_data.begin() + test_start - guard_size
+                );
+            }
+            // 测试集右侧的训练数据（排除右侧守卫缓冲区）
+            if (test_end + guard_size < total_size) {
+                train_data.insert(
+                    train_data.end(),
+                    sorted_data.begin() + test_end + guard_size,
+                    sorted_data.end()
+                );
+            }
+
+            // 校验训练集非空（无训练数据无法优化参数）
+            if (train_data.empty()) {
+                return SimErrorCode::EMPTY_TRAIN_DATA;
+            }
+
+            // 步骤1：样本内参数优化
+            system.optimizeParams(train_data);
+            // 步骤2：提取当前折的测试集
+            std::vector<MarketData> test_data(
+                sorted_data.begin() + test_start,
+                sorted_data.begin() + test_end
+            );
+            // 步骤3：生成样本外收益并追加
+            std::vector<double> oos_returns = system.generateReturns(test_data);
+            out_oos_returns.insert(
+                out_oos_returns.end(),
+                oos_returns.begin(),
+                oos_returns.end()
+            );
+        }
+
+        return SimErrorCode::SUCCESS;
+    }
+
+    /**
+     * @brief 4. 嵌套前向检验（处理两层优化：系统选择+参数优化）
+     * @param full_data 完整市场数据
+     * @param inner_train_window 内层训练窗口大小（系统参数优化用）
+     * @param inner_test_window 内层测试窗口大小（系统性能评估用）
+     * @param outer_train_window 外层训练窗口大小（系统选择用）
+     * @param systems 竞争系统列表（需实现TradingSystem接口）
+     * @param out_final_returns 输出：最终样本外收益序列（对数收益）
+     * @return SimErrorCode 错误码
+     */
+    static SimErrorCode nestedWalkForward(
+        const std::vector<MarketData>& full_data,
+        size_t inner_train_window,
+        size_t inner_test_window,
+        size_t outer_train_window,
+        const std::vector<TradingSystem*>& systems,
+        std::vector<double>& out_final_returns
+    ) {
+        // 校验竞争系统列表非空（无系统无法进行选择）
+        if (systems.empty()) {
+            return SimErrorCode::EMPTY_SYSTEM_LIST;
+        }
+
+        // 按时间戳排序（文件要求，避免未来泄露）
+        std::vector<MarketData> sorted_data = full_data;
+        std::sort(sorted_data.begin(), sorted_data.end(),
+            [](const MarketData& a, const MarketData& b) {
+                return a.timestamp < b.timestamp;
+            }
+        );
+
+        // 校验时间戳递增
+        for (size_t i = 1; i < sorted_data.size(); ++i) {
+            if (sorted_data[i].timestamp <= sorted_data[i-1].timestamp) {
+                return SimErrorCode::TIMESTAMP_ORDER_ERR;
+            }
+        }
+
+        const size_t total_size = sorted_data.size();
+        const size_t inner_cycle = inner_train_window + inner_test_window;  // 内层前向检验周期
+        // 校验窗口大小（外层训练窗口≤总数据量，内层周期≤外层训练窗口）
+        if (outer_train_window == 0 || inner_train_window == 0 || inner_test_window == 0 ||
+            outer_train_window > total_size || inner_cycle > outer_train_window) {
+            return SimErrorCode::INVALID_WINDOW_SIZE;
+        }
+
+        out_final_returns.clear();
+        size_t outer_current_start = 0;
+
+        // 外层前向检验（迭代选择最优系统）
+        while (outer_current_start + outer_train_window + inner_test_window <= total_size) {
+            // 步骤1：提取外层训练数据（用于系统选择）
+            std::vector<MarketData> outer_train_data(
+                sorted_data.begin() + outer_current_start,
+                sorted_data.begin() + outer_current_start + outer_train_window
+            );
+
+            // 步骤2：内层前向检验：评估每个系统的性能得分
+            std::vector<double> system_scores(systems.size(), -std::numeric_limits<double>::max());
+            for (size_t sys_idx = 0; sys_idx < systems.size(); ++sys_idx) {
+                std::vector<double> inner_returns;
+                // 调用内层前向检验，生成系统的样本外收益
+                SimErrorCode err = walkForwardAnalysis(
+                    outer_train_data,
+                    inner_train_window,
+                    inner_test_window,
+                    *systems[sys_idx],
+                    inner_returns
+                );
+                if (err != SimErrorCode::SUCCESS) {
+                    continue;  // 跳过评估失败的系统
+                }
+                // 计算系统得分（总对数收益，常用的评估指标）
+                system_scores[sys_idx] = std::accumulate(inner_returns.begin(), inner_returns.end(), 0.0);
+            }
+
+            // 步骤3：选择最优系统（得分最高的系统）
+            auto best_sys_iter = std::max_element(system_scores.begin(), system_scores.end());
+            if (*best_sys_iter == -std::numeric_limits<double>::max()) {
+                return SimErrorCode::EMPTY_SYSTEM_LIST;  // 所有系统评估失败
+            }
+            size_t best_sys_idx = best_sys_iter - system_scores.begin();
+            TradingSystem* best_sys = systems[best_sys_idx];
+
+            // 步骤4：外层测试：生成最终样本外收益
+            std::vector<MarketData> outer_test_data(
+                sorted_data.begin() + outer_current_start + outer_train_window,
+                sorted_data.begin() + outer_current_start + outer_train_window + inner_test_window
+            );
+            std::vector<double> oos_returns = best_sys->generateReturns(outer_test_data);
+            out_final_returns.insert(
+                out_final_returns.end(),
+                oos_returns.begin(),
+                oos_returns.end()
+            );
+
+            // 步骤5：滑动外层窗口（前进内层测试窗口大小）
+            outer_current_start += inner_test_window;
+        }
+
+        return SimErrorCode::SUCCESS;
+    }
+};
+```
+
+```cpp
+#include "UnbiasedSimulation.h"
+
+// 移动平均交叉策略（示例策略，经典均线交叉逻辑）
+class MACrossSystem : public TradingSystem {
+public:
+    /**
+     * @brief 构造函数：初始化短/长期均线最大周期
+     * @param max_short_lookback 短均线最大周期（如1~20）
+     * @param max_long_lookback 长均线最大周期（如2~40）
+     */
+    MACrossSystem(size_t max_short_lookback, size_t max_long_lookback)
+        : max_short_lookback_(max_short_lookback),
+          max_long_lookback_(max_long_lookback),
+          opt_short_lookback_(1),
+          opt_long_lookback_(2) {}
+
+    /**
+     * @brief 校验均线参数合法性（短均线最大周期必须<长均线最大周期）
+     * @return SimErrorCode 错误码
+     */
+    SimErrorCode validateParams() const {
+        if (max_short_lookback_ >= max_long_lookback_) {
+            return SimErrorCode::INVALID_MA_PARAM;
+        }
+        return SimErrorCode::SUCCESS;
+    }
+
+    /**
+     * @brief 样本内参数优化：遍历均线组合，选择总对数收益最大的组合
+     * @param in_sample_data 样本内市场数据（按时间戳排序）
+     */
+    void optimizeParams(const std::vector<MarketData>& in_sample_data) override {
+        const size_t data_size = in_sample_data.size();
+        // 数据量不足时不优化（需至少长均线最大周期的K线）
+        if (data_size < max_long_lookback_) {
+            return;
+        }
+
+        double best_total_ret = -std::numeric_limits<double>::max();
+        // 遍历所有合法均线组合（短均线周期 < 长均线周期）
+        for (size_t short_lb = 1; short_lb <= max_short_lookback_; ++short_lb) {
+            for (size_t long_lb = short_lb + 1; long_lb <= max_long_lookback_; ++long_lb) {
+                // 计算当前均线组合的总对数收益
+                double current_ret = calculateTotalReturn(in_sample_data, short_lb, long_lb);
+                // 更新最优参数（总收益更大时）
+                if (current_ret > best_total_ret) {
+                    best_total_ret = current_ret;
+                    opt_short_lookback_ = short_lb;
+                    opt_long_lookback_ = long_lb;
+                }
+            }
+        }
+    }
+
+    /**
+     * @brief 生成收益：基于最优均线周期计算单根K线对数收益
+     * @param data 输入市场数据（按时间戳排序）
+     * @return std::vector<double> 单根K线对数收益序列
+     */
+    std::vector<double> generateReturns(const std::vector<MarketData>& data) const override {
+        return calculateReturnDetail(data, opt_short_lookback_, opt_long_lookback_);
+    }
+
+    /**
+     * @brief 获取最优参数：短/长期均线周期
+     * @return std::vector<double> 最优参数（短均线周期、长均线周期）
+     */
+    std::vector<double> getOptimalParams() const override {
+        return {static_cast<double>(opt_short_lookback_), static_cast<double>(opt_long_lookback_)};
+    }
+
+private:
+    size_t max_short_lookback_;  // 短均线最大周期
+    size_t max_long_lookback_;   // 长均线最大周期
+    size_t opt_short_lookback_;  // 优化后的短均线周期
+    size_t opt_long_lookback_;   // 优化后的长均线周期
+
+    /**
+     * @brief 计算总对数收益（用于参数优化）
+     * @param data 输入市场数据（按时间戳排序）
+     * @param short_lb 短均线周期
+     * @param long_lb 长均线周期
+     * @return double 总对数收益
+     */
+    double calculateTotalReturn(
+        const std::vector<MarketData>& data,
+        size_t short_lb,
+        size_t long_lb
+    ) const {
+        double total_ret = 0.0;
+        const size_t data_size = data.size();
+        // 从长均线周期后开始计算（确保能完整计算两条均线）
+        for (size_t i = long_lb; i < data_size - 1; ++i) {
+            // 计算短/长期均线（对数价格均值，避免价格尺度偏差）
+            double short_ma = 0.0, long_ma = 0.0;
+            for (size_t j = 0; j < short_lb; ++j) {
+                short_ma += data[i - j].log_price;
+            }
+            for (size_t j = 0; j < long_lb; ++j) {
+                long_ma += data[i - j].log_price;
+            }
+            short_ma /= short_lb;
+            long_ma /= long_lb;
+
+            // 生成交易信号与收益（短均线上穿做多，下穿做空，无交叉无持仓）
+            double ret = 0.0;
+            if (short_ma > long_ma) {
+                // 多头收益：下一根K线对数价格 - 当前K线对数价格
+                ret = data[i + 1].log_price - data[i].log_price;
+            } else if (short_ma < long_ma) {
+                // 空头收益：当前K线对数价格 - 下一根K线对数价格
+                ret = data[i].log_price - data[i + 1].log_price;
+            }
+            total_ret += ret;
+        }
+        return total_ret;
+    }
+
+    /**
+     * @brief 计算详细收益（用于样本外测试，返回单根K线收益）
+     * @param data 输入市场数据（按时间戳排序）
+     * @param short_lb 短均线周期
+     * @param long_lb 长均线周期
+     * @return std::vector<double> 单根K线对数收益序列
+     */
+    std::vector<double> calculateReturnDetail(
+        const std::vector<MarketData>& data,
+        size_t short_lb,
+        size_t long_lb
+    ) const {
+        std::vector<double> returns;
+        const size_t data_size = data.size();
+        // 预分配内存，提升性能（收益数量 = 数据量 - 长均线周期）
+        returns.reserve(data_size - long_lb);
+
+        for (size_t i = long_lb; i < data_size - 1; ++i) {
+            // 计算短/长期均线
+            double short_ma = 0.0, long_ma = 0.0;
+            for (size_t j = 0; j < short_lb; ++j) {
+                short_ma += data[i - j].log_price;
+            }
+            for (size_t j = 0; j < long_lb; ++j) {
+                long_ma += data[i - j].log_price;
+            }
+            short_ma /= short_lb;
+            long_ma /= long_lb;
+
+            // 计算单根K线收益
+            double ret = 0.0;
+            if (short_ma > long_ma) {
+                ret = data[i + 1].log_price - data[i].log_price;
+            } else if (short_ma < long_ma) {
+                ret = data[i].log_price - data[i + 1].log_price;
+            }
+            returns.push_back(ret);
+        }
+        return returns;
+    }
+};
+
+// 测试代码实现
+void testSplitInOutSample() {
+    std::cout << "Testing splitInOutSample..." << std::endl;
+
+    // 测试正常情况
+    std::vector<MarketData> data = {
+        {1.0, 1}, {2.0, 2}, {3.0, 3}, {4.0, 4}, {5.0, 5}
+    };
+
+    std::vector<MarketData> in_sample, out_sample;
+    auto result = UnbiasedSimulation::splitInOutSample(data, 0.6, in_sample, out_sample);
+
+    assert(result == SimErrorCode::SUCCESS);
+    assert(in_sample.size() == 3);
+    assert(out_sample.size() == 2);
+    assert(in_sample[0].timestamp < out_sample[0].timestamp);
+
+    // 测试无效比例
+    result = UnbiasedSimulation::splitInOutSample(data, 1.5, in_sample, out_sample);
+    assert(result == SimErrorCode::INVALID_RATIO);
+
+    result = UnbiasedSimulation::splitInOutSample(data, -0.1, in_sample, out_sample);
+    assert(result == SimErrorCode::INVALID_RATIO);
+
+    // 测试数据量不足
+    std::vector<MarketData> small_data = {{1.0, 1}};
+    result = UnbiasedSimulation::splitInOutSample(small_data, 0.5, in_sample, out_sample);
+    assert(result == SimErrorCode::INSUFFICIENT_DATA);
+
+    // 测试时间戳非递增
+    std::vector<MarketData> unordered_data = {{1.0, 2}, {2.0, 1}};
+    result = UnbiasedSimulation::splitInOutSample(unordered_data, 0.5, in_sample, out_sample);
+    assert(result == SimErrorCode::TIMESTAMP_ORDER_ERR);
+
+    std::cout << "splitInOutSample tests passed." << std::endl;
+}
+
+void testWalkForwardAnalysis() {
+    std::cout << "Testing walkForwardAnalysis..." << std::endl;
+
+    // 创建测试数据
+    std::vector<MarketData> data;
+    for (int i = 1; i <= 20; ++i) {
+        data.push_back({static_cast<double>(i), i});
+    }
+
+    // 创建交易系统
+    MACrossSystem system(3, 5);
+
+    std::vector<double> oos_returns;
+    auto result = UnbiasedSimulation::walkForwardAnalysis(data, 10, 5, system, oos_returns);
+
+    assert(result == SimErrorCode::SUCCESS);
+
+    // 测试窗口大小非法
+    result = UnbiasedSimulation::walkForwardAnalysis(data, 0, 5, system, oos_returns);
+    assert(result == SimErrorCode::INSUFFICIENT_DATA);
+
+    result = UnbiasedSimulation::walkForwardAnalysis(data, 15, 10, system, oos_returns);
+    assert(result == SimErrorCode::INSUFFICIENT_DATA);
+
+    // 测试时间戳非递增
+    std::vector<MarketData> unordered_data = {{1.0, 2}, {2.0, 1}};
+    result = UnbiasedSimulation::walkForwardAnalysis(unordered_data, 1, 1, system, oos_returns);
+    assert(result == SimErrorCode::TIMESTAMP_ORDER_ERR);
+
+    std::cout << "walkForwardAnalysis tests passed." << std::endl;
+}
+
+void testCrossValidation() {
+    std::cout << "Testing crossValidation..." << std::endl;
+
+    // 创建测试数据
+    std::vector<MarketData> data;
+    for (int i = 1; i <= 20; ++i) {
+        data.push_back({static_cast<double>(i), i});
+    }
+
+    MACrossSystem system(2, 4);
+
+    std::vector<double> oos_returns;
+    auto result = UnbiasedSimulation::crossValidation(data, 4, 2, 1, system, oos_returns);
+
+    assert(result == SimErrorCode::SUCCESS);
+
+    // 测试折数非法
+    result = UnbiasedSimulation::crossValidation(data, 1, 2, 1, system, oos_returns);
+    assert(result == SimErrorCode::INSUFFICIENT_DATA);
+
+    // 测试数据量不足
+    std::vector<MarketData> small_data = {{1.0, 1}, {2.0, 2}};
+    result = UnbiasedSimulation::crossValidation(small_data, 3, 1, 1, system, oos_returns);
+    assert(result == SimErrorCode::INSUFFICIENT_DATA);
+
+    // 测试时间戳非递增
+    std::vector<MarketData> unordered_data = {{1.0, 2}, {2.0, 1}};
+    result = UnbiasedSimulation::crossValidation(unordered_data, 2, 1, 1, system, oos_returns);
+    assert(result == SimErrorCode::TIMESTAMP_ORDER_ERR);
+
+    std::cout << "crossValidation tests passed." << std::endl;
+}
+
+void testNestedWalkForward() {
+    std::cout << "Testing nestedWalkForward..." << std::endl;
+
+    // 创建测试数据
+    std::vector<MarketData> data;
+    for (int i = 1; i <= 30; ++i) {
+        data.push_back({static_cast<double>(i), i});
+    }
+
+    // 创建多个交易系统
+    MACrossSystem system1(2, 4);
+    MACrossSystem system2(3, 6);
+    std::vector<TradingSystem*> systems = {&system1, &system2};
+
+    std::vector<double> final_returns;
+    auto result = UnbiasedSimulation::nestedWalkForward(data, 8, 4, 12, systems, final_returns);
+
+    assert(result == SimErrorCode::SUCCESS);
+
+    // 测试系统列表为空
+    std::vector<TradingSystem*> empty_systems;
+    result = UnbiasedSimulation::nestedWalkForward(data, 5, 3, 10, empty_systems, final_returns);
+    assert(result == SimErrorCode::EMPTY_SYSTEM_LIST);
+
+    // 测试窗口大小非法
+    result = UnbiasedSimulation::nestedWalkForward(data, 0, 3, 10, systems, final_returns);
+    assert(result == SimErrorCode::INVALID_WINDOW_SIZE);
+
+    result = UnbiasedSimulation::nestedWalkForward(data, 5, 3, 0, systems, final_returns);
+    assert(result == SimErrorCode::INVALID_WINDOW_SIZE);
+
+    // 测试时间戳非递增
+    std::vector<MarketData> unordered_data = {{1.0, 2}, {2.0, 1}};
+    result = UnbiasedSimulation::nestedWalkForward(unordered_data, 1, 1, 1, systems, final_returns);
+    assert(result == SimErrorCode::TIMESTAMP_ORDER_ERR);
+
+    std::cout << "nestedWalkForward tests passed." << std::endl;
+}
+
+void testMACrossSystem() {
+    std::cout << "Testing MACrossSystem..." << std::endl;
+
+    // 测试参数合法性
+    MACrossSystem valid_system(2, 5);
+    assert(valid_system.validateParams() == SimErrorCode::SUCCESS);
+
+    MACrossSystem invalid_system(5, 3);
+    assert(invalid_system.validateParams() == SimErrorCode::INVALID_MA_PARAM);
+
+    // 测试优化参数
+    std::vector<MarketData> data;
+    for (int i = 1; i <= 10; ++i) {
+        data.push_back({static_cast<double>(i), i});
+    }
+
+    valid_system.optimizeParams(data);
+    auto params = valid_system.getOptimalParams();
+    assert(params.size() == 2);
+
+    // 测试生成收益
+    auto returns = valid_system.generateReturns(data);
+    assert(returns.size() == data.size() - 5); // 长周期为5
+
+    std::cout << "MACrossSystem tests passed." << std::endl;
+}
+
+int main() {
+    std::cout << "Starting tests..." << std::endl;
+
+    testSplitInOutSample();
+    testWalkForwardAnalysis();
+    testCrossValidation();
+    testNestedWalkForward();
+    testMACrossSystem();
+
+    std::cout << "All tests passed!" << std::endl;
+
+    return 0;
+}
+```
+
+### 10. 约束模拟交易日的日历与风控文档
+
+交易时段与节假日放在与交易应用共用的基础库里。交易时间给出开盘、午休、收盘各档，与时延表对齐；节假日标记非交易日，回放窗口与日终任务据此跳过。券商风控文档以柜台加账户为键，找不到时回落默认键，内容包括报单名义上限、撤单比下限与起算笔数、分市场流量与笔数、开平黑名单，以及行情、自成交、流量等开关。模拟柜台与实盘柜台的键形式相同，模拟账户可以继承或覆盖同一套限制，不必另建一套风控。
+
+```cpp
+struct DayGate {
+    int ymd{0};
+    bool holiday{false};
+    int open_min{9 * 60 + 30};
+    int lunch0{11 * 60 + 30};
+    int lunch1{13 * 60};
+    int close_min{15 * 60};
+};
+
+struct RiskDoc {
+    char key[64]{};          // "paper@acct" 或 "default"
+    double order_money_cap{0};
+    double cancel_ratio_cap{0};
+    int min_orders_for_ratio{0};
+    int order_flow_cap{0};
+    int mkt_flow_cap{0};
+    int mkt_count_cap{0};
+    bool check_self_trade{true};
+    bool check_flow{false};
+};
+
+bool trading_minute(const DayGate& d, int minute) {
+    if (d.holiday) return false;
+    if (minute < d.open_min || minute >= d.close_min) return false;
+    if (minute >= d.lunch0 && minute < d.lunch1) return false;
+    return true;
+}
+
+const RiskDoc* pick_risk(const RiskDoc* rows, int n, const char* key) {
+    const RiskDoc* def = nullptr;
+    for (int i = 0; i < n; ++i) {
+        if (std::strcmp(rows[i].key, key) == 0) return &rows[i];
+        if (std::strcmp(rows[i].key, "default") == 0) def = &rows[i];
+    }
+    return def;
+}
+```
+
+### 11. 模拟持仓与资金的柜台查询回报
+
+撮合在共享内存内完成。对外只走与实盘柜台相同的持仓、资金查询回报通道：模拟交易把周期性查询答到回报交换机，路由键为柜台名加固定回报后缀。终端与运维按订阅券商柜台的方式订阅，纸面账本便可与实盘并列显示，不必另定协议。报文用业务类型区分持仓体或资金体，并带请求号、是否末包与编码信息。策略报单仍走共享内存环；这条通道只做查询与展示。
+
+```cpp
+struct BusHead {
+    int biz{0};              // 1 = 持仓列表, 2 = 资金列表
+    char route[80]{};        // "{counter}_back_respond_routing"
+    uint64_t req_id{0};
+    bool last{true};
+};
+
+struct PosBody {
+    char counter[24]{};
+    char account[32]{};
+    char symbol[32]{};
+    int64_t total{0};
+    int64_t sellable{0};
+    double cost{0};
+    double settle{0};
+    double realized{0};
+    double unrealized{0};
+};
+
+struct AstBody {
+    char counter[24]{};
+    char account[32]{};
+    double avail{0};
+    double frozen{0};
+    double mkt_value{0};
+    double realized{0};
+    double unrealized{0};
+};
+
+void fill_route(char* out, int n, const char* counter) {
+    std::snprintf(out, n, "%s_back_respond_routing", counter);
 }
 ```
 
@@ -44773,6 +45047,115 @@ double floating_rate(int64_t qty, double mult, double mark, double cost, double 
 }
 ```
 
+### 18. 清算日前的券商风控文档
+
+批次撮合前，账户风控行从账本库按柜台加账户读取，缺省行作回落。每行含报单名义上限、撤单比下限及起算笔数、分账户市场流量与笔数上限、开平黑名单，以及行情、自成交、流量、金额等开关。清算不再重判这些门，默认当日成交已通过，只在归费用、对柜台账时沿用同一账户键。
+
+```cpp
+struct AcctRiskRow {
+    char key[64]{};
+    double money_cap{0};
+    double cancel_ratio{0};
+    int min_orders{0};
+    int flow_cap{0};
+    int mkt_count_cap{0};
+    bool sw_self_trade{true};
+    bool sw_flow{false};
+    bool sw_money{false};
+};
+
+const AcctRiskRow* load_risk(const AcctRiskRow* rows, int n, const char* counter, const char* acct) {
+    char k[64];
+    std::snprintf(k, sizeof k, "%s@%s", counter, acct);
+    const AcctRiskRow* def = nullptr;
+    for (int i = 0; i < n; ++i) {
+        if (std::strcmp(rows[i].key, k) == 0) return &rows[i];
+        if (std::strcmp(rows[i].key, "default") == 0) def = &rows[i];
+    }
+    return def;
+}
+```
+
+### 19. 柜台查询回报中的持仓与资金字段
+
+日终与增量清算消费柜台在查询回报通道上发布的同一套持仓体与资金体。持仓行含总量、可卖、冻结、昨仓与今日买卖、成本、收盘、结算、保证金、已实现与未实现盈亏。资金行含可用与冻结现金、市值、权益档、费用累计，信用账户还有两融负债字段。路由键为柜台名加回报后缀；报文业务类型决定后面是哪类体数组。清算把这些字段映射进批次、仅现金成交与估值归并，而不另造一套线格式。
+
+```cpp
+struct WirePos {
+    char counter[24]{};
+    char account[32]{};
+    char symbol[32]{};
+    bool is_long{true};
+    int64_t total{0};
+    int64_t sellable{0};
+    int64_t yday_left{0};
+    int64_t today_buy{0};
+    int64_t today_sell{0};
+    double cost{0};
+    double close_px{0};
+    double settle_px{0};
+    double realized{0};
+    double unrealized{0};
+    double commission{0};
+};
+
+struct WireAst {
+    char counter[24]{};
+    char account[32]{};
+    double avail{0};
+    double frozen{0};
+    double mkt_value{0};
+    double static_eq{0};
+    double dynamic_eq{0};
+    double fee_day{0};
+    double fund_debt{0};
+    double stock_debt{0};
+};
+
+bool same_book_key(const WirePos& a, const WirePos& b) {
+    return std::strcmp(a.counter, b.counter) == 0
+        && std::strcmp(a.account, b.account) == 0
+        && std::strcmp(a.symbol, b.symbol) == 0
+        && a.is_long == b.is_long;
+}
+```
+
+### 20. 与公司日终并列的策略日账
+
+部分策略子系统在文档库自建日账：昨仓作开仓种子，当日成交作流水，当日终仓作收盘快照。公司清算仍独占多资产批次、结算/收盘双成本、汇率阶梯与产品净值。策略日账供给模型盈亏与跟踪核对，并可与同产品、同合约的清算估值行做差分，而不取代公司流水线。
+
+```cpp
+struct StratDayPos {
+    char product[32]{};
+    char symbol[32]{};
+    int64_t qty{0};
+    double cost{0};
+    double mark{0};
+};
+
+struct StratDayFill {
+    char symbol[32]{};
+    int64_t qty{0};
+    double px{0};
+    int64_t ts{0};
+};
+
+struct StratDayBooks {
+    StratDayPos yday[256]{};
+    int n_yday{0};
+    StratDayFill fills[4096]{};
+    int n_fills{0};
+    StratDayPos eod[256]{};
+    int n_eod{0};
+};
+
+int64_t seed_qty(const StratDayBooks& b, const char* sym) {
+    for (int i = 0; i < b.n_yday; ++i)
+        if (std::strcmp(b.yday[i].symbol, sym) == 0) return b.yday[i].qty;
+    return 0;
+}
+```
+
 ## 业务逻辑设计-交易终端
 
 买方交易终端在本机完成环境选择、登录校验、行情订阅、手工与篮子下单、配对、对锁解锁、持仓查询、券池与资金划转。报单真正发出仍经交易桥与算法进程；终端侧把参数编好、在发出前做完校验，并把回报落到界面。
@@ -45183,6 +45566,100 @@ bool file_ready(int64_t size1, int64_t mtime1,
 
 bool can_load_file(const FileWatch& c, bool dirs_ok, bool stable) {
     return c.on && dirs_ok && stable;
+}
+```
+
+### 15. 基础库中的账户与交易时段主数据
+
+登录与路由从基础库账户集合装入交易员可见的柜台与资金账号绑定。证券主数据、交易时间、节假日集合供给标的检索、TWAP 与竞价页的时段窗，以及非交易日防护。运维监控集合不进报单路径，只描述进程安装与健康。终端不另造日历：约束模拟时延档的同一套时段行，也约束篮子日程的桌面时钟。
+
+```cpp
+struct AcctBind {
+    char trader[32]{};
+    char counter[24]{};
+    char account[32]{};
+    bool enabled{true};
+};
+
+struct SessionRow {
+    char market[8]{};
+    int open_min{0};
+    int close_min{0};
+    int lunch0{0};
+    int lunch1{0};
+};
+
+bool acct_visible(const AcctBind* rows, int n, const char* trader, const char* counter, const char* acct) {
+    for (int i = 0; i < n; ++i) {
+        if (!rows[i].enabled) continue;
+        if (std::strcmp(rows[i].trader, trader) == 0
+            && std::strcmp(rows[i].counter, counter) == 0
+            && std::strcmp(rows[i].account, acct) == 0)
+            return true;
+    }
+    return false;
+}
+```
+
+### 16. 柜台持仓与资金的查询回报通道
+
+登录后终端挂到查询回报通道，按柜台绑定路由键：柜台名加固定回报后缀。周期性查询的持仓与资金回报落在该键上；范围内含纸面柜台时，模拟账本也走同一模式。外部单回报另走外层回报键。前置控制仍用自己的请求与回报通道做网关监控；桌面持仓与资金只需这条柜台查询回报通道。
+
+```cpp
+struct DeskBus {
+    char respond_ex[64]{"back_respond_exchange"};
+    char outer_key[64]{"outer_respond_routing"};
+    char route[80]{};
+};
+
+void bind_counter_route(DeskBus& b, const char* counter) {
+    std::snprintf(b.route, sizeof b.route, "%s_back_respond_routing", counter);
+}
+
+bool is_pos_biz(int biz) { return biz == 1; }
+bool is_ast_biz(int biz) { return biz == 2; }
+```
+
+### 17. 持仓与资金回报的消息格式
+
+每条持仓或资金回报含消息头、业务类型、JSON 体数组、路由号、编解码与压缩标记、发送时刻与是否末包。持仓体含柜台、账户、合约、方向、量（总量、可卖、冻结、昨仓拆分、今日买卖）、价（最新、成本、收盘、结算）、保证金、盈亏分段、佣金、币种、账本类别与查询元数据。资金体含可用与冻结现金、市值、权益档、费用合计、融资融券额度及信用负债字段。界面双缓冲这些数组，慢柜台不会撕开中台视图。
+
+```cpp
+struct RspHead {
+    int biz{0};
+    uint64_t req_id{0};
+    bool last{true};
+    int64_t send_ts{0};
+};
+
+struct DeskPos {
+    char counter[24]{};
+    char account[32]{};
+    char symbol[32]{};
+    int64_t total{0};
+    int64_t sellable{0};
+    int64_t frozen{0};
+    double cost{0};
+    double settle{0};
+    double realized{0};
+    double unrealized{0};
+};
+
+struct DeskAst {
+    char counter[24]{};
+    char account[32]{};
+    double avail{0};
+    double frozen{0};
+    double mkt_value{0};
+    double dynamic_eq{0};
+    double fee_day{0};
+    double fund_debt{0};
+};
+
+void swap_buf(DeskPos*& show, DeskPos*& build) {
+    DeskPos* t = show;
+    show = build;
+    build = t;
 }
 ```
 

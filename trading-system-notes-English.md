@@ -47,10 +47,10 @@
   - [38. Signature-first bucket lookup](#38-signature-first-bucket-lookup)
   - [39. Staged ordered completion ring](#39-staged-ordered-completion-ring)
   - [40. Quiescent-state reclamation](#40-quiescent-state-reclamation)
-  - [41. User-space NIC I/O and in-order bypass handoff](#41-user-space-nic-io-and-in-order-bypass-handoff)
+  - [41. User-space NIC I/O and in-order bypass publish](#41-user-space-nic-io-and-in-order-bypass-publish)
   - [42. Sequence-window reordering](#42-sequence-window-reordering)
   - [43. Kernel async I/O on shared submit and completion rings](#43-kernel-async-io-on-shared-submit-and-completion-rings)
-  - [44. User-space block-device I/O and submit-completion handoff](#44-user-space-block-device-io-and-submit-completion-handoff)
+  - [44. User-space block-device I/O with submit and completion rings](#44-user-space-block-device-io-with-submit-and-completion-rings)
   - [45. High-quality articles on system design](#45-high-quality-articles-on-system-design)
 - [Common performance bottlenecks and optimization directions](#common-performance-bottlenecks-and-optimization-directions)
   - [1. roofline model](#1-roofline-model)
@@ -88,37 +88,36 @@
   - [4. Message middleware (zmq)](#4-message-middleware-zmq)
   - [5. OMS, EMS, PMS, and RMS of trading systems](#5-oms-ems-pms-and-rms-of-trading-systems)
   - [6. Order book history inquiry](#6-order-book-history-inquiry)
-  - [7. maker-only matchmaker](#7-maker-only-matchmaker)
-  - [8. k line generator](#8-k-line-generator)
-  - [9. Solver](#9-solver)
-  - [10. Smart Order Routing (SOR)](#10-smart-order-routing-sor)
-  - [11. Self-transaction protection mechanism](#11-self-transaction-protection-mechanism)
-  - [12. Current limiter](#12-current-limiter)
-  - [13. Reader/Tree-sitter](#13-readertree-sitter)
-  - [14. Distributed trading system consensus model](#14-distributed-trading-system-consensus-model)
-  - [15. Exchange protocol layering and sequence consistency](#15-exchange-protocol-layering-and-sequence-consistency)
-  - [16. Pre-serialized orders](#16-pre-serialized-orders)
-  - [17. Adaptive load shedder (CoDEL)](#17-adaptive-load-shedder-codel)
-  - [18. Multi-process shared-memory trading middleware (ShmDB)](#18-multi-process-shared-memory-trading-middleware-shmdb)
-  - [19. Bilateral order-id index on the trade bridge](#19-bilateral-order-id-index-on-the-trade-bridge)
-  - [20. Local cache when fills arrive before status](#20-local-cache-when-fills-arrive-before-status)
-  - [21. Linked-order metadata](#21-linked-order-metadata)
-  - [22. Multi-band minimum tick table](#22-multi-band-minimum-tick-table)
-  - [23. Factor storage and live faces](#23-factor-storage-and-live-faces)
-  - [24. Engine message route filters](#24-engine-message-route-filters)
-  - [25. Basket control channel and oversized exec buffer](#25-basket-control-channel-and-oversized-exec-buffer)
-  - [26. Pre-trade risk gate and layered error codes](#26-pre-trade-risk-gate-and-layered-error-codes)
-  - [27. Order check-count semaphore and two-phase ledger prelock](#27-order-check-count-semaphore-and-two-phase-ledger-prelock)
-  - [28. Market-data gateway: full-sub filter, field patches, night-session day](#28-market-data-gateway-full-sub-filter-field-patches-night-session-day)
-  - [29. Short venue refs, async quota, and algo-container clock fanout](#29-short-venue-refs-async-quota-and-algo-container-clock-fanout)
-  - [30. Normalize offset and direction before the order hits the ring](#30-normalize-offset-and-direction-before-the-order-hits-the-ring)
-  - [31. Position queries leave the order thread and resume by cursor](#31-position-queries-leave-the-order-thread-and-resume-by-cursor)
-  - [32. Signal windows that emit parent orders](#32-signal-windows-that-emit-parent-orders)
-  - [33. Close-today, close-yesterday, and stock sellable locks](#33-close-today-close-yesterday-and-stock-sellable-locks)
-  - [34. Instrument-class fees and frozen-price backfill](#34-instrument-class-fees-and-frozen-price-backfill)
-  - [35. Read-only catch-up and publish watermark on the monitor](#35-read-only-catch-up-and-publish-watermark-on-the-monitor)
-  - [36. Process lifecycle control and host sampling](#36-process-lifecycle-control-and-host-sampling)
-  - [37. Pair resting size, leg price, and size gate](#37-pair-resting-size-leg-price-and-size-gate)
+  - [7. k line generator](#7-k-line-generator)
+  - [8. Solver](#8-solver)
+  - [9. Smart Order Routing (SOR)](#9-smart-order-routing-sor)
+  - [10. Self-transaction protection mechanism](#10-self-transaction-protection-mechanism)
+  - [11. Current limiter](#11-current-limiter)
+  - [12. Reader/Tree-sitter](#12-readertree-sitter)
+  - [13. Distributed trading system consensus model](#13-distributed-trading-system-consensus-model)
+  - [14. Exchange protocol layering and sequence consistency](#14-exchange-protocol-layering-and-sequence-consistency)
+  - [15. Pre-serialized orders](#15-pre-serialized-orders)
+  - [16. Adaptive load shedder (CoDEL)](#16-adaptive-load-shedder-codel)
+  - [17. Multi-process shared-memory trading middleware (ShmDB)](#17-multi-process-shared-memory-trading-middleware-shmdb)
+  - [18. Bilateral order-id index on the trade bridge](#18-bilateral-order-id-index-on-the-trade-bridge)
+  - [19. Local cache when fills arrive before status](#19-local-cache-when-fills-arrive-before-status)
+  - [20. Linked-order metadata](#20-linked-order-metadata)
+  - [21. Multi-band minimum tick table](#21-multi-band-minimum-tick-table)
+  - [22. Factor calendar store and live instrument mounts](#22-factor-calendar-store-and-live-instrument-mounts)
+  - [23. Engine message route filters](#23-engine-message-route-filters)
+  - [24. Basket control channel and large exec buffer](#24-basket-control-channel-and-large-exec-buffer)
+  - [25. Pre-send risk gate and layered error codes](#25-pre-send-risk-gate-and-layered-error-codes)
+  - [26. Order check-count semaphore and two-phase ledger prelock](#26-order-check-count-semaphore-and-two-phase-ledger-prelock)
+  - [27. Market-data gateway: full-sub filter, field fill-in, night-session day](#27-market-data-gateway-full-sub-filter-field-fill-in-night-session-day)
+  - [28. Short venue refs, async quota, and algo-container clock ticks](#28-short-venue-refs-async-quota-and-algo-container-clock-ticks)
+  - [29. Normalize open-close and side before the order hits the ring](#29-normalize-open-close-and-side-before-the-order-hits-the-ring)
+  - [30. Position queries leave the order thread and resume by cursor](#30-position-queries-leave-the-order-thread-and-resume-by-cursor)
+  - [31. Signal windows that emit parent orders](#31-signal-windows-that-emit-parent-orders)
+  - [32. Close-today, close-yesterday, and stock sellable locks](#32-close-today-close-yesterday-and-stock-sellable-locks)
+  - [33. Instrument-class fees and frozen-price backfill](#33-instrument-class-fees-and-frozen-price-backfill)
+  - [34. Read-only consume and publish rate limit on the monitor](#34-read-only-consume-and-publish-rate-limit-on-the-monitor)
+  - [35. Process lifecycle control and host sampling](#35-process-lifecycle-control-and-host-sampling)
+  - [36. Pair resting size, leg price, and size gate](#36-pair-resting-size-leg-price-and-size-gate)
 - [Business logic design-calculation](#business-logic-design-calculation)
   - [1. Log return (percent asymmetry)](#1-log-return-percent-asymmetry)
   - [2. Changes in state of market trends and volatility](#2-changes-in-state-of-market-trends-and-volatility)
@@ -129,14 +128,25 @@
   - [7. Cheap training bias estimation](#7-cheap-training-bias-estimation)
   - [8. Parameter relationship analysis](#8-parameter-relationship-analysis)
   - [9. Parameter sensitivity curve](#9-parameter-sensitivity-curve)
-  - [10. Unbiased trading simulation](#10-unbiased-trading-simulation)
-  - [11. Statistical analysis of transaction income](#11-statistical-analysis-of-transaction-income)
-  - [12. Permutation test verification strategyincome](#12-permutation-test-verification-strategyincome)
-  - [13. Asset Cost Base (ACB) Calculation](#13-asset-cost-base-acb-calculation)
-  - [14. Numerical calculation tools](#14-numerical-calculation-tools)
-  - [15. EMA and EMASTDEV (time smoothing)](#15-ema-and-emastdev-time-smoothing)
-  - [16. Avellaneda-Stoikov market making strategy](#16-avellaneda-stoikov-market-making-strategy)
-  - [17. Fixed point number of trading system](#17-fixed-point-number-of-trading-system)
+  - [10. Statistical analysis of transaction income](#10-statistical-analysis-of-transaction-income)
+  - [11. Permutation test verification strategyincome](#11-permutation-test-verification-strategyincome)
+  - [12. Asset Cost Base (ACB) Calculation](#12-asset-cost-base-acb-calculation)
+  - [13. Numerical calculation tools](#13-numerical-calculation-tools)
+  - [14. EMA and EMASTDEV (time smoothing)](#14-ema-and-emastdev-time-smoothing)
+  - [15. Avellaneda-Stoikov market making strategy](#15-avellaneda-stoikov-market-making-strategy)
+  - [16. Fixed point number of trading system](#16-fixed-point-number-of-trading-system)
+- [Business logic design-backtest and simulated matching](#business-logic-design-backtest-and-simulated-matching)
+  - [1. Four-process sim path: tape, quote adapter, trader, matcher](#1-four-process-sim-path-tape-quote-adapter-trader-matcher)
+  - [2. Historical tape pacing, break windows, and parquet streams](#2-historical-tape-pacing-break-windows-and-parquet-streams)
+  - [3. Opening cash and lots on the sim counter](#3-opening-cash-and-lots-on-the-sim-counter)
+  - [4. Dual latency tables for insert and cancel](#4-dual-latency-tables-for-insert-and-cancel)
+  - [5. Quote rebuild path and print path with rigid rule](#5-quote-rebuild-path-and-print-path-with-rigid-rule)
+  - [6. Accept checks, reject codes, and order status classes](#6-accept-checks-reject-codes-and-order-status-classes)
+  - [7. Deferred timer match and cancel](#7-deferred-timer-match-and-cancel)
+  - [8. maker-only matchmaker](#8-maker-only-matchmaker)
+  - [9. Unbiased trading simulation](#9-unbiased-trading-simulation)
+  - [10. Calendar and risk documents that gate the sim day](#10-calendar-and-risk-documents-that-gate-the-sim-day)
+  - [11. Counter-style query replies for sim position and asset](#11-counter-style-query-replies-for-sim-position-and-asset)
 - [Business logic design-clearing](#business-logic-design-clearing)
   - [1. Day-end clearing pipeline](#1-day-end-clearing-pipeline)
   - [2. Clearing fill kinds and sides](#2-clearing-fill-kinds-and-sides)
@@ -155,6 +165,9 @@
   - [15. Strategy-follow notional and tracking error](#15-strategy-follow-notional-and-tracking-error)
   - [16. Custody-report fee deltas](#16-custody-report-fee-deltas)
   - [17. Two algorithms for strategy-follow model PnL](#17-two-algorithms-for-strategy-follow-model-pnl)
+  - [18. Broker risk documents ahead of the clearing day](#18-broker-risk-documents-ahead-of-the-clearing-day)
+  - [19. Position and asset fields from counter query replies](#19-position-and-asset-fields-from-counter-query-replies)
+  - [20. Strategy day books beside firm end-of-day](#20-strategy-day-books-beside-firm-end-of-day)
 - [Business logic design-trading terminal](#business-logic-design-trading-terminal)
   - [1. Environment switch and multi-instance limit](#1-environment-switch-and-multi-instance-limit)
   - [2. Login machine check and account load](#2-login-machine-check-and-account-load)
@@ -170,6 +183,9 @@
   - [12. Stock pool, enquiry, and fund move](#12-stock-pool-enquiry-and-fund-move)
   - [13. Pre-send checks on manual tickets](#13-pre-send-checks-on-manual-tickets)
   - [14. Directory watch for basket files and backup](#14-directory-watch-for-basket-files-and-backup)
+  - [15. Account and session master from basic data](#15-account-and-session-master-from-basic-data)
+  - [16. Counter query-reply path for position and asset](#16-counter-query-reply-path-for-position-and-asset)
+  - [17. Position and asset reply message layout](#17-position-and-asset-reply-message-layout)
 - [digital currency](#digital-currency)
   - [1. uniswap-v2](#1-uniswap-v2)
   - [2. uniswap-v3](#2-uniswap-v3)
@@ -4841,7 +4857,7 @@ References:
 + [https://yukunj.github.io/blogs/double_mmap_trick](https://yukunj.github.io/blogs/double_mmap_trick)
 + [https://abhinavag.medium.com/a-fast-circular-ring-buffer-4d102ef4d4a3](https://abhinavag.medium.com/a-fast-circular-ring-buffer-4d102ef4d4a3)
 
-**Cross-NUMA batched handoff**
+**Cross-NUMA batched transfer**
 
 When producer and consumer cannot share a NUMA node, enqueue-per-item is a remote store every time. Put the ring on the consumer’s node so pops are local; the producer fills a hold array and copies a batch into the ring.
 
@@ -16178,7 +16194,7 @@ struct RetireQ {
 };
 ```
 
-### 41. User-space NIC I/O and in-order bypass handoff
+### 41. User-space NIC I/O and in-order bypass publish
 
 Fast market data and fast order entry do not put the hot path on a kernel socket. Receive polls the NIC event queue in user space. The filter is installed for a local address or a full 4-tuple, so unrelated packets never enter the queue. Each packet carries a hardware timestamp and a clock-sync flag. Downstream uses that time instead of taking another clock sample inside the callback.
 
@@ -16186,7 +16202,7 @@ Transmit is tiered by cost. The cheapest path copies an already filled packet in
 
 The reactor first spins a configured number of times and drains events that have already arrived. Only when that budget is spent and nothing is pending does it sleep. A user-space spin lock wraps the spin so two threads never touch the same stack. Login, query, and log sockets stay off the accelerated stack. The trading stack has its own name, separate from every other stack on the machine. The acceleration library is opened at runtime. If it does not open, the path falls back to kernel TCP, Nagle is turned off, and the socket is bound to the address of the accelerated NIC.
 
-The NIC thread does not call the strategy. Packets land in a shared block pool whose block count, block size, and pool size are template parameters. The payload is a fixed length, then aligned up to a larger slot, so one message is not torn across cache lines. The send thread only enqueues. A repair thread fills sequence holes, and a packet is handed upstream only when its sequence is contiguous.
+The NIC thread does not call the strategy. Packets land in a shared block pool whose block count, block size, and pool size are template parameters. The payload is a fixed length, then aligned up to a larger slot, so one message is not torn across cache lines. The send thread only enqueues. A repair thread fills sequence holes, and a packet is published to the strategy side only when its sequence is contiguous.
 
 ```cpp
 enum class TxKind : uint8_t { Pio, Cut, Plain };
@@ -17329,7 +17345,7 @@ struct WorkerRing {
 };
 ```
 
-### 44. User-space block-device I/O and submit-completion handoff
+### 44. User-space block-device I/O with submit and completion rings
 
 Fast durable writes and device-side offload keep the hot path out of the kernel block layer. The queues map into user space: the submit ring holds commands, the completion ring holds results, and a doorbell register wakes the device. Filter tables, file-table lookups, and the generic block scheduler stay off this path.
 
@@ -23288,8 +23304,7 @@ Based on the current end-to-end processing results, further optimization can imp
 
 
 ## Business logic design-system
-### 1. Order management system
-1.1 Order management finite state machine
+### 1. Order management system1.1 Order management finite state machine
 
 Mealy state machine and Moore state machine are two classic finite state machine (FSM) models. Trading systems are usually Mealy state machines. Compared to Moore, Mealy also includes input.
 
@@ -24740,8 +24755,7 @@ bool replay_after_timeout(uint64_t cmd_id) {
 ```
 
 
-### 2. Order book design
-**Option 1: Vector-based LOB**
+### 2. Order book design**Option 1: Vector-based LOB**
 
 **core**:
 
@@ -26920,8 +26934,7 @@ struct PriceWindow {
 };
 ```
 
-### 3. message transmission Protocol Engine (FIX)
-The basic building blocks of the FIX protocol are tag-value pairs. Each data field consists of three parts:
+### 3. message transmission Protocol Engine (FIX)The basic building blocks of the FIX protocol are tag-value pairs. Each data field consists of three parts:
 
 1. **Tag**: A unique integer that represents the meaning of the field (for example,`35` represent `MsgType`,`44` represent `Price`).
 2. **Value**: The actual data of the field (for example,`D` represent `NewOrderSingle`,`150.25` represents the price).
@@ -29029,8 +29042,7 @@ struct L1Parser {
 ```
 
 
-### 4. Message middleware (zmq)
-Implementation based on order book design and simple message center of ZeroMQ
+### 4. Message middleware (zmq)Implementation based on order book design and simple message center of ZeroMQ
 
 ```cpp
 #include <zmq.hpp>
@@ -29291,7 +29303,6 @@ Message middleware is responsible for system decoupling and interaction of large
 ![](https://cdn.nlark.com/yuque/0/2026/png/35485470/1768269462634-a35a10f7-8d7d-449e-91fa-8dc264f152eb.png)
 
 ### 5. OMS, EMS, PMS, and RMS of trading systems
-
 **OMS - Order Management System**
 
 OMS is responsible for managing the complete life cycle of the order.
@@ -31372,725 +31383,7 @@ using LFPersistentOrderBook = PersistentHistoricalOrderBook<std::vector<PriceLev
 ```
 
 
-### 7. maker-only matchmaker
-Maker-Only matching engine for backtesting trading strategies. The engine only allows limit orders (maker orders) and prohibits market orders or aggressive limit orders (taker orders).
-
-**Features**
-
-1. **Maker-only Order Validation**: Reject orders that would cross the spread and become taker orders
-2. **Order Management**: Supports submitting, canceling and tracking orders
-3. **Partial transaction processing**: Supports partial execution of orders, and the remaining quantity remains in the order book
-4. **Timeout Cancellation**: Automatically cancel orders that have been open for too long
-5. **Deviation Cancellation**: Cancel the order when the market price deviates too much from the order price
-6. **Leg Support**: Supports arbitrage strategies on legs (A and B) of two different markets
-7. **Transaction Record**: Record all transaction details, including the transaction that triggered the transaction
-
-**Core Components**
-
-**MakerSimulator class (main class that handles all matching logic)**:
-
-+ `post_order()`:Submit new orders, verify to prevent taker orders
-+ `on_tick()`: Process incoming market data and match existing orders
-+ `cancel_order()`: Cancel specific order by ID
-+ `cancel_timeout_orders()`:Cancel orders whose opening time exceeds the specified timeout period
-+ `cancel_deviation_orders()`:Cancel orders whose prices deviate from the current market price by more than a threshold
-
-**Order Tracking Information:**
-
-+ Order ID
-+ Market leg (A or B)
-+ direction (buy or sell)
-+ price and quantity
-+ Transaction quantity
-+ Status (new order, partially filled, fully filled, canceled, rejected)
-+ timestamp
-
-**Transaction record information:**
-
-+ Associated order ID
-+ market leg
-+ direction
-+ price and quantity
-+ timestamp
-+ Match transaction ID
-
-**Test Scenario**
-
-1. **Fully executed**: The order is completely executed by the matching transaction
-2. **Partially executed**: The order is partially executed and the remaining quantity remains active.
-3. **Single-Leg Deal**: In a two-leg strategy, only one leg gets a deal
-4. **Taker Rejected**: An attempt to submit a taker order was correctly rejected.
-5. **Duplicate processing**: Process duplicate order IDs
-
-**Important details of the code**
-
-**Prevent taking orders**
-
-Before accepting any order, the system checks whether it will become a taker:
-
-+ Orders with a purchase price higher than or equal to the current latest price will be rejected
-+ Orders with a sell price lower than or equal to the current latest price will be rejected
-
-**Matching logic**
-
-The order matches the incoming trading price:
-
-+ Buy orders are matched when transaction price ≤ order price
-+ Sell orders are matched when transaction price ≥ order price
-+ The matching result is a partial transaction (simulated as 50% of the remaining quantity)
-
-**Order Life Cycle**
-
-Orders go through the following states:
-
-1. NEW - Just submitted
-2. PARTIALLY_FILLED - Part of the quantity has been sold
-3. FILLED - All quantities have been sold
-4. CANCELLED - Canceled by user or system
-5. REJECTED - rejected on submission (e.g. taker order)
-
-
-```cpp
-#ifndef MAKER_SIMULATOR_H
-#define MAKER_SIMULATOR_H
-
-#include <string>
-#include <map>
-#include <queue>
-#include <vector>
-#include <chrono>
-#include <memory>
-
-//Quote data structure
-struct TickData {
-    double bid_price; // buy one price
-    double ask_price; // Ask one price
-    double last_price; // latest price
-    std::chrono::steady_clock::time_point timestamp; // timestamp
-    std::string trade_id; // Transaction ID
-};
-
-// forward declaration
-struct Order;
-struct Trade;
-
-enum class OrderSide {
-    BUY, // buy
-    SELL // sell
-};
-
-enum class OrderStatus {
-    NEW, // new order
-    PARTIALLY_FILLED, // Partial transaction
-    FILLED, // fully completed
-    CANCELLED, // Canceled
-    REJECTED // Rejected
-};
-
-enum class Leg {
-    A, // thigh A
-    B // Leg B
-};
-
-// order structure
-struct Order {
-    std::string order_id; // Order ID
-    Leg leg; // market leg
-    OrderSide side; // Buy and sell direction
-    double price; // price
-    double size; // quantity
-    double filled_size; // Transaction quantity
-    OrderStatus status; // order status
-    std::chrono::steady_clock::time_point timestamp; // Order timestamp
-    std::chrono::steady_clock::time_point last_update; // Last update time
-};
-
-//Deal structure
-struct Trade {
-    std::string order_id; // Order ID
-    Leg leg; // market leg
-    OrderSide side; // Buy and sell direction
-    double price; // transaction price
-    double size; // Transaction quantity
-    std::chrono::steady_clock::time_point timestamp; // Transaction timestamp
-    std::string matched_by; // Transaction ID that triggered the transaction
-};
-
-// Maker trading simulator class
-class MakerSimulator {
-public:
-    MakerSimulator();
-
-    //Submit new order
-    bool post_order(const std::string& order_id, Leg leg, OrderSide side,
-                   double price, double size);
-
-    // Process market data
-    void on_tick(Leg leg, const TickData& tick);
-
-    // Cancel order
-    bool cancel_order(const std::string& order_id);
-
-    //Cancel the order based on the timeout period
-    void cancel_timeout_orders(std::chrono::milliseconds timeout);
-
-    // Cancel order based on price deviation
-    void cancel_deviation_orders(double threshold_percent);
-
-    // Get the current order
-    const std::map<std::string, Order>& get_orders() const;
-
-    // Get transaction records
-    const std::vector<Trade>& get_trades() const;
-
-    // Calculate current equity
-    double calculate_equity() const;
-
-    // Get cash balance
-    double get_cash() const;
-
-private:
-    std::map<std::string, Order> orders_; // Order mapping table
-    std::vector<Trade> trades_; // Transaction records
-    std::map<Leg, double> last_prices_; // latest prices
-    double equity_; // total equity
-    double cash_; // cash
-
-    // Helper method
-    bool is_taker_order(Leg leg, OrderSide side, double price) const;
-    void match_order(Order& order, const TickData& tick);
-    void cancel_order_internal(Order& order);
-};
-
-#endif // MAKER_SIMULATOR_H
-```
-
-```cpp
-#include "maker_simulator.h"
-#include <iostream>
-#include <algorithm>
-#include <cmath>
-
-//Constructor
-MakerSimulator::MakerSimulator() : equity_(0.0), cash_(100000.0) {
-    //Initialize cash to 100000.0
-}
-
-//Submit order
-bool MakerSimulator::post_order(const std::string& order_id, Leg leg, OrderSide side,
-double price, double size) {
-    // Check if it will become a taker
-    if (is_taker_order(leg, side, price)) {
-        std::cerr << "Attempt to take order detected, order" << order_id
-            << "Rejected." << std::endl;
-        return false;
-    }
-
-    // Check if there are enough funds (for buy orders)
-    if (side == OrderSide::BUY) {
-        double cost = price * size;
-        if (cost > cash_) {
-            std::cerr << "Insufficient funds, order" << order_id
-                << "Rejected." << std::endl;
-            return false;
-        }
-    }
-
-    //Create new order
-    Order order;
-    order.order_id = order_id;
-    order.leg = leg;
-    order.side = side;
-    order.price = price;
-    order.size = size;
-    order.filled_size = 0.0;
-    order.status = OrderStatus::NEW;
-    order.timestamp = std::chrono::steady_clock::now();
-    order.last_update = order.timestamp;
-
-    //Add to order mapping table
-    orders_[order_id] = order;
-    return true;
-}
-
-// Process market data
-void MakerSimulator::on_tick(Leg leg, const TickData& tick) {
-    //Update the latest price
-    last_prices_[leg] = tick.last_price;
-
-    // Check if each order has a match
-    std::vector<std::string> orders_to_update;
-    for (const auto& pair : orders_) {
-        const Order& order = pair.second;
-        if (order.leg == leg && order.status != OrderStatus::CANCELLED &&
-            order.status != OrderStatus::FILLED) {
-            orders_to_update.push_back(order.order_id);
-        }
-    }
-
-    // Handle matching
-    for (const std::string& order_id : orders_to_update) {
-        auto it = orders_.find(order_id);
-        if (it != orders_.end()) {
-            match_order(it->second, tick);
-        }
-    }
-}
-
-// Cancel order
-bool MakerSimulator::cancel_order(const std::string& order_id) {
-    auto it = orders_.find(order_id);
-    if (it != orders_.end()) {
-        cancel_order_internal(it->second);
-        return true;
-    }
-    return false;
-}
-
-//Cancel the order based on the timeout period
-void MakerSimulator::cancel_timeout_orders(std::chrono::milliseconds timeout) {
-    auto now = std::chrono::steady_clock::now();
-    for (auto& pair : orders_) {
-        Order& order = pair.second;
-        if (order.status != OrderStatus::CANCELLED &&
-            order.status != OrderStatus::FILLED) {
-            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-            now - order.timestamp);
-            if (elapsed >= timeout) {
-                cancel_order_internal(order);
-            }
-        }
-    }
-}
-
-// Cancel order based on price deviation
-void MakerSimulator::cancel_deviation_orders(double threshold_percent) {
-    for (auto& pair : orders_) {
-        Order& order = pair.second;
-        if (order.status != OrderStatus::CANCELLED &&
-            order.status != OrderStatus::FILLED) {
-            auto it = last_prices_.find(order.leg);
-            if (it != last_prices_.end()) {
-                double last_price = it->second;
-                if (last_price > 0) {
-                    double deviation = std::abs(order.price - last_price) / last_price;
-                    if (deviation >= threshold_percent / 100.0) {
-                        cancel_order_internal(order);
-                    }
-                }
-            }
-        }
-    }
-}
-
-// Get the current order
-const std::map<std::string, Order>& MakerSimulator::get_orders() const {
-    return orders_;
-}
-
-// Get transaction records
-const std::vector<Trade>& MakerSimulator::get_trades() const {
-    return trades_;
-}
-
-// Calculate current equity
-double MakerSimulator::calculate_equity() const {
-    // Calculate current equity = cash + position value
-    double total_equity = cash_;
-
-    // Calculate position value
-    std::map<std::pair<Leg, OrderSide>, double> positions; // Number of positions
-    std::map<std::pair<Leg, OrderSide>, double> avg_prices; // average position price
-
-    // Calculate positions based on transaction records
-    for (const auto& trade : trades_) {
-        std::pair<Leg, OrderSide> key = std::make_pair(trade.leg, trade.side);
-
-        if (trade.side == OrderSide::BUY) {
-            // Buy to increase long position
-            if (positions.find(key) == positions.end()) {
-                positions[key] = trade.size;
-                avg_prices[key] = trade.price;
-            } else {
-                // Weighted average calculation average price
-                double total_quantity = positions[key] + trade.size;
-                avg_prices[key] = (avg_prices[key] * positions[key] + trade.price * trade.size) / total_quantity;
-                positions[key] = total_quantity;
-            }
-        } else {
-            // Selling increases the short position (represented by a negative number)
-            if (positions.find(key) == positions.end()) {
-                positions[key] = -trade.size;
-                avg_prices[key] = trade.price;
-            } else {
-                // Weighted average calculation average price
-                double total_quantity = positions[key] - trade.size;
-                avg_prices[key] = (avg_prices[key] * std::abs(positions[key]) + trade.price * trade.size) / std::abs(total_quantity);
-                positions[key] = total_quantity;
-            }
-        }
-    }
-
-    // Calculate the position value based on the latest market price
-    for (const auto& position : positions) {
-        Leg leg = position.first.first;
-        OrderSide side = position.first.second;
-        double quantity = position.second;
-        double avg_price = avg_prices.at(position.first);
-
-        auto it = last_prices_.find(leg);
-        if (it != last_prices_.end()) {
-            double current_price = it->second;
-
-            if (side == OrderSide::BUY) {
-                // Long position profit and loss = position quantity * (current price - average position price)
-                total_equity += quantity * (current_price - avg_price);
-            } else {
-                // Short position profit and loss = position quantity * (position average price - current price)
-                total_equity += std::abs(quantity) * (avg_price - current_price);
-            }
-        }
-    }
-
-    return total_equity;
-}
-
-// Get cash balance
-double MakerSimulator::get_cash() const {
-    return cash_;
-}
-
-// Check if it is a taker order
-bool MakerSimulator::is_taker_order(Leg leg, OrderSide side, double price) const {
-    // Check if the order will cross the spread and become a taker
-    auto it = last_prices_.find(leg);
-    if (it != last_prices_.end()) {
-        double last_price = it->second;
-        if (side == OrderSide::BUY && price >= last_price) {
-            return true; // If the buying price is higher than or equal to the latest price, it is a taker order
-        } else if (side == OrderSide::SELL && price <= last_price) {
-            return true; // If the selling price is lower than or equal to the latest price, it is a taker order
-        }
-    }
-    return false;
-}
-
-// Match orders
-void MakerSimulator::match_order(Order& order, const TickData& tick) {
-    bool matched = false;
-
-    // Buy order, matched when the transaction price is less than or equal to our price
-    if (order.side == OrderSide::BUY && tick.last_price <= order.price) {
-        matched = true;
-    }
-    // Sell order, matched when the transaction price is greater than or equal to our price
-    else if (order.side == OrderSide::SELL && tick.last_price >= order.price) {
-        matched = true;
-    }
-
-    if (matched) {
-        // Calculate the order transaction quantity (this time we try to complete the transaction)
-        double remaining_size = order.size - order.filled_size;
-        double fill_size = remaining_size; // Remaining quantity of fully completed transaction
-
-        //Create transaction record
-        Trade trade;
-        trade.order_id = order.order_id;
-        trade.leg = order.leg;
-        trade.side = order.side;
-        trade.price = order.price; // Use our price, not the transaction price
-        trade.size = fill_size;
-        trade.timestamp = tick.timestamp;
-        trade.matched_by = tick.trade_id;
-
-        trades_.push_back(trade);
-
-        // Update funds
-        if (order.side == OrderSide::BUY) {
-            cash_ -= trade.price * trade.size; // Purchase minus cash
-        } else {
-            cash_ += trade.price * trade.size; // Selling increases cash
-        }
-
-        //Update order
-        order.filled_size += fill_size;
-        order.last_update = std::chrono::steady_clock::now();
-
-        if (order.filled_size >= order.size) {
-            order.status = OrderStatus::FILLED;
-        } else {
-            order.status = OrderStatus::PARTIALLY_FILLED;
-        }
-    }
-}
-
-// Internal order cancellation method
-void MakerSimulator::cancel_order_internal(Order& order) {
-    if (order.status != OrderStatus::CANCELLED && order.status != OrderStatus::FILLED) {
-        order.status = OrderStatus::CANCELLED;
-        order.last_update = std::chrono::steady_clock::now();
-    }
-}
-```
-
-```cpp
-#include "maker_simulator.h"
-#include <iostream>
-#include <cassert>
-#include <thread>
-#include <chrono>
-
-//Test scenario A: Complete transaction
-void test_scenario_a() {
-    std::cout << "=== Test scenario A: Complete transaction ===" << std::endl;
-
-    MakerSimulator simulator;
-
-    //Submit order
-    bool result = simulator.post_order("order1", Leg::A, OrderSide::BUY, 100.0, 10.0);
-    assert(result);
-
-    //Create market data that can match orders
-    TickData tick;
-    tick.bid_price = 99.0;
-    tick.ask_price = 101.0;
-    tick.last_price = 100.0; // matches our bid price of 100.0
-    tick.timestamp = std::chrono::steady_clock::now();
-    tick.trade_id = "trade1";
-
-    // Process market conditions
-    simulator.on_tick(Leg::A, tick);
-
-    // Check results
-    const auto& orders = simulator.get_orders();
-    const auto& trades = simulator.get_trades();
-
-    assert(orders.at("order1").status == OrderStatus::FILLED);
-    assert(trades.size() >= 1);
-
-    std::cout << "Scenario A passes: the order is fully filled" << std::endl;
-}
-
-//Test scenario B: partial transaction
-void test_scenario_b() {
-    std::cout << "=== Test Scenario B: Partial Transaction ===" << std::endl;
-
-    MakerSimulator simulator;
-
-    //Submit order
-    bool result = simulator.post_order("order2", Leg::B, OrderSide::SELL, 105.0, 20.0);
-    assert(result);
-
-    //Create market data that can partially match orders
-    TickData tick;
-    tick.bid_price = 104.0;
-    tick.ask_price = 106.0;
-    tick.last_price = 105.0; // matches our ask price of 105.0
-    tick.timestamp = std::chrono::steady_clock::now();
-    tick.trade_id = "trade2";
-
-    // Process market conditions
-    simulator.on_tick(Leg::B, tick);
-
-    // Check the result - it should be fully executed (our logic now is fully executed)
-    const auto& orders = simulator.get_orders();
-    const auto& trades = simulator.get_trades();
-
-    assert(orders.at("order2").status == OrderStatus::FILLED);
-    assert(trades.size() >= 1);
-    assert(orders.at("order2").filled_size == 20.0);
-
-    std::cout << "Scenario B passes: the order is fully filled" << std::endl;
-}
-
-//Test scenario C: One leg is traded and the other leg is not.
-void test_scenario_c() {
-    std::cout << "=== Test scenario C: One leg is traded, the other leg is not traded ===" << std::endl;
-
-    MakerSimulator simulator;
-
-    // Submit a buy order on leg A
-    bool result1 = simulator.post_order("order3a", Leg::A, OrderSide::BUY, 100.0, 10.0);
-    assert(result1);
-
-    // Submit a sell order on leg B
-    bool result2 = simulator.post_order("order3b", Leg::B, OrderSide::SELL, 105.0, 10.0);
-    assert(result2);
-
-    //Create market data that can match leg A
-    TickData tickA;
-    tickA.bid_price = 99.0;
-    tickA.ask_price = 101.0;
-    tickA.last_price = 100.0; // matches our bid price of 100.0
-    tickA.timestamp = std::chrono::steady_clock::now();
-    tickA.trade_id = "trade3a";
-
-    // Process the market price of leg A
-    simulator.on_tick(Leg::A, tickA);
-
-    //Create market data that cannot match leg B
-    TickData tickB;
-    tickB.bid_price = 104.0;
-    tickB.ask_price = 106.0;
-    tickB.last_price = 104.5; // Does not match our ask price of 105.0
-    tickB.timestamp = std::chrono::steady_clock::now();
-    tickB.trade_id = "trade3b";
-
-    // Process the market price of leg B
-    simulator.on_tick(Leg::B, tickB);
-
-    // Check results
-    const auto& orders = simulator.get_orders();
-    const auto& trades = simulator.get_trades();
-
-    // Leg A should be fully traded
-    assert(orders.at("order3a").status == OrderStatus::FILLED);
-
-    // Leg B should be untraded
-    assert(orders.at("order3b").status == OrderStatus::NEW);
-
-    std::cout << "Scenario C passes: one leg is filled, the other leg is not filled" << std::endl;
-}
-
-// Test scenario D: The order-taking attempt is rejected
-void test_scenario_d() {
-    std::cout << "=== Test scenario D: Take attempt rejected ===" << std::endl;
-
-    MakerSimulator simulator;
-
-    //Set the latest price
-    TickData initial_tick;
-    initial_tick.bid_price = 99.0;
-    initial_tick.ask_price = 101.0;
-    initial_tick.last_price = 100.0;
-    initial_tick.timestamp = std::chrono::steady_clock::now();
-    initial_tick.trade_id = "initial";
-
-    simulator.on_tick(Leg::A, initial_tick);
-
-    // Try to submit a taker order (the buying price is higher than the latest price)
-    bool result = simulator.post_order("order4", Leg::A, OrderSide::BUY, 101.5, 10.0);
-
-    // should be rejected
-    assert(!result);
-
-    // Check that the order has not been added
-    const auto& orders = simulator.get_orders();
-    assert(orders.find("order4") == orders.end());
-
-    std::cout << "Scenario D passes: take attempt is correctly rejected" << std::endl;
-}
-
-//Test Scenario E: Repeat Order Processing
-void test_scenario_e() {
-    std::cout << "=== Test scenario E: Duplicate order processing ===" << std::endl;
-
-    MakerSimulator simulator;
-
-    //Submit order
-    bool result1 = simulator.post_order("order5", Leg::A, OrderSide::BUY, 100.0, 10.0);
-    assert(result1);
-
-    // Get original order information
-    const auto& orders_before = simulator.get_orders();
-    double original_size = orders_before.at("order5").size;
-
-    // Submit the order with the same ID again (the original order should be replaced)
-    bool result2 = simulator.post_order("order5", Leg::A, OrderSide::SELL, 95.0, 5.0);
-    // This should replace the existing order
-
-    // Check that we still only have one order, but the properties have changed
-    const auto& orders = simulator.get_orders();
-    assert(orders.size() == 1);
-    assert(orders.begin()->first == "order5");
-    assert(orders.at("order5").side == OrderSide::SELL);
-    assert(orders.at("order5").price == 95.0);
-    assert(orders.at("order5").size == 5.0);
-
-    std::cout << "Scenario E passed: duplicate orders are handled correctly" << std::endl;
-}
-
-// main function
-int main() {
-    std::cout << "Run Maker Simulator test scenario" << std::endl;
-
-    test_scenario_a();
-    test_scenario_b();
-    test_scenario_c();
-    test_scenario_d();
-    test_scenario_e();
-
-    std::cout << "\nAll test scenarios passed!" << std::endl;
-
-    return 0;
-}
-```
-
-**Fills from a historical replay**
-
-Replay matching fills an accepted order from a historical book and from prints. An order is dropped when its timestamp is invalid, its token is 0, its size is not positive, its side is outside buy and sell, or the token is already present. An accepted order is marked working, and its filled size and cash are cleared. The effective time is the order time plus a simulated lag. Before 09:30 the lag is 0. From 09:30 to 10:00, 10:00 to 10:30, 10:30 to 11:00, 11:00 to 11:30, 11:30 to 13:30, 13:30 to 14:00, and 14:00 to 14:30, each window reads one configured millisecond value. From 14:30 onward the last value is used. That value is multiplied by 1000 and added to the order time in microseconds. An order that still carries a later ready time does not join this pass.
-
-On the book, a buy fills when the level price is at or below the limit, and a sell fills when the level price is at or above the limit. A difference under 1e-6 is the same price. The fill size is the smaller of the remaining size and the level size. The order and the level both decrease, and the average is weighted by size. Zero remaining is a complete fill. A positive remainder is a partial fill.
-
-On prints, a trade older than the order is ignored. Without a tight limit, a buy accepts a trade at or below the limit and a sell accepts a trade at or above the limit. With the tight limit, a buy limit is reduced by the instrument price offset and a sell limit is increased by it. The fill size is again the smaller of the two sizes. When the buy sequence is greater than the sell sequence, the buyer arrived later. When the sell sequence is greater, the seller arrived later. If that later side is this order's side, the fill price is the print. Otherwise it is this order's limit.
-
-```cpp
-struct OpenTicket {
-    int64_t stamp_us{0};
-    uint64_t token{0};
-    bool bid{true};
-    double cap{0};
-    int64_t shares{0};
-    int64_t done{0};
-    double cash{0};
-    int8_t mark{1};
-    int64_t ready_us{0};
-};
-
-int64_t replay_lag_us(int minute, const double* slot_ms) {
-    if (minute < 9 * 60 + 30) return 0;
-    const int cut_min[] = {
-        10 * 60, 10 * 60 + 30, 11 * 60, 11 * 60 + 30,
-        13 * 60 + 30, 14 * 60, 14 * 60 + 30
-    };
-    int band = 7;
-    for (int i = 0; i < 7; ++i) {
-        if (minute < cut_min[i]) { band = i; break; }
-    }
-    return static_cast<int64_t>(slot_ms[band] * 1000.0);
-}
-
-bool px_eq(double a, double b) { return std::abs(a - b) < 1e-6; }
-
-bool level_ok(const OpenTicket& t, double level) {
-    if (px_eq(level, t.cap)) return true;
-    return t.bid ? level <= t.cap : t.cap <= level;
-}
-
-bool print_ok(const OpenTicket& t, double trade_px, double bend, bool tight) {
-    double gate = t.cap + (tight ? (t.bid ? -bend : bend) : 0);
-    if (px_eq(trade_px, gate)) return true;
-    return t.bid ? trade_px <= gate : gate <= trade_px;
-}
-
-double print_deal_px(const OpenTicket& t, double trade_px, int64_t bid_seq, int64_t ask_seq) {
-    bool buyer_later = bid_seq > ask_seq;
-    bool same = t.bid ? buyer_later : !buyer_later;
-    return same ? trade_px : t.cap;
-}
-
-int64_t book_fill(OpenTicket& t, int64_t now_us, double px, int64_t avail) {
-    int64_t left = t.shares - t.done;
-    if (left <= 0 || avail <= 0 || now_us < t.ready_us) return 0;
-    int64_t n = left < avail ? left : avail;
-    t.cash += px * static_cast<double>(n);
-    t.done += n;
-    t.mark = t.done >= t.shares ? 2 : 3;
-    return n;
-}
-```
-
-### 8. k line generator
+### 7. k line generator
 ```cpp
 #ifndef BAR_GENERATOR_H
 #define BAR_GENERATOR_H
@@ -32287,8 +31580,7 @@ private:
 ```
 
 
-### 9. Solver
-The solver is a high-performance algorithm module designed for fast optimal decision-making, resource allocation, or path planning in extremely low-latency environments. Such components are often integrated into policy engines, risk control systems or resource allocation systems and can calculate optimal solutions within microseconds.
+### 8. SolverThe solver is a high-performance algorithm module designed for fast optimal decision-making, resource allocation, or path planning in extremely low-latency environments. Such components are often integrated into policy engines, risk control systems or resource allocation systems and can calculate optimal solutions within microseconds.
 
 **1. Order Allocation Solver**
 
@@ -32816,8 +32108,7 @@ public:
 ```
 
 
-### 10. Smart Order Routing (SOR)
-SOR (Smart Order Routing) refers to splitting a parent order (Parent Order) into multiple execution venues (Venue) according to rules - such as exchanges, dark pools, and liquidity providers (LP) - and try to optimize it under constraints:
+### 9. Smart Order Routing (SOR)SOR (Smart Order Routing) refers to splitting a parent order (Parent Order) into multiple execution venues (Venue) according to rules - such as exchanges, dark pools, and liquidity providers (LP) - and try to optimize it under constraints:
 
 + Transaction price (slippage/implementation gap relative to benchmark)
 + Transaction quantity (completeness of take orders and pending orders)
@@ -33055,8 +32346,7 @@ $  \mathrm{fill\,rate} = \begin{cases} Q_{\mathrm{filled}} / Q_{\mathrm{requeste
 + The rate symbols and exchange rules are subject to the actual contract.
 
 
-### 11. Self-transaction protection mechanism
-**Self-dealing** refers to the behavior of matching buy and sell orders within the same account or account group with actual control relationship.
+### 10. Self-transaction protection mechanism**Self-dealing** refers to the behavior of matching buy and sell orders within the same account or account group with actual control relationship.
 
 1. **Automated trading strategy**: The algorithm sends long and short two-way orders for the same contract at the same time, resulting in matching due to system delays or logical loopholes.
 2. **Trading system defects**: For example, some brokerage systems do not intercept self-transactions for specific scenarios (such as simultaneous issuance of orders from MOM accounts).
@@ -33242,8 +32532,7 @@ void remember_resting(PxTree& book, int dir, double px, uint64_t id) {
 ```
 
 
-### 12. Current limiter
-In high-concurrency links such as trading systems/risk control/matching/gateways, the goal of current limiting is to turn "uncontrollable burst traffic" into "stable traffic that the system can bear", so as to:
+### 11. Current limiterIn high-concurrency links such as trading systems/risk control/matching/gateways, the goal of current limiting is to turn "uncontrollable burst traffic" into "stable traffic that the system can bear", so as to:
 
 + Protect core dependencies (matching, accounts, risk control, market prices, DB/Cache, downstream third parties)
 + Reduce the risk of cascading failures (avalanche, queue amplification, timeout retry storm)
@@ -33897,7 +33186,8 @@ if (!fast.try_acquire_hashed(h, 1)) {
 ```
 
 
-### 13. Reader/Tree-sitter
+### 12. Reader/Tree-sitter
+
 **1. Universal Positioning**
 
 Lezer (developed by the CodeMirror team) and Tree-sitter (developed by GitHub) are both **incremental parser generators**. The core goal is to provide efficient, fault-tolerant incremental parsing capabilities for text/binary streams, generate structured syntax trees (AST), and be able to re-parse only the changed part when the input data is partially changed, rather than re-parsing the entire amount.
@@ -34105,8 +33395,7 @@ if (r.valid) {
 Actual measurement: ~86 ns/parse, about 11.6 million times/second.
 
 
-### 14. Distributed trading system consensus model
-**1. Definition of two consensus models**
+### 13. Distributed trading system consensus model**1. Definition of two consensus models**
 
 **1. Command Consensus (Replicated State Machine)**
 
@@ -34231,8 +33520,7 @@ void applyStateUpdate(const StateUpdate& update) {
 `Client -> [Matching (Command Consensus)] -> TradeEvent -> [Counter (Result Consensus)] -> AccountState`
 
 
-### 15. Exchange protocol layering and sequence consistency
-1.**Protocol layering**
+### 14. Exchange protocol layering and sequence consistency1.**Protocol layering**
 Session layer: login, heartbeat, reconnection, sequence number maintenance, retransmission negotiation.
 Business layer: order book increments, transactions, status events, snapshot events.
 Encoding and decoding layer: byte order conversion, field verification, structure mapping.
@@ -34366,8 +33654,7 @@ struct TimeTriple {
 ```
 
 
-### 16. Pre-serialized orders
-Pre-serialized orders means building the **on-the-wire byte template** off the hot path (symbol load, session ready, config changes) and, at send time, **patching in place** only fields that change every order (e.g. `ClOrdID`, price, quantity, timestamps, checksum/signature slots). This avoids full string formatting, repeated tag walks, and allocations on the decision→send path. On the binary side, [FIX Simple Binary Encoding (SBE)](https://github.com/FIXTradingCommunity/fix-simple-binary-encoding) emphasizes fixed layouts and offset-based access for low-latency encode/decode (see its [Introduction](https://github.com/FIXTradingCommunity/fix-simple-binary-encoding/blob/master/v1-0-RC3/doc/01Introduction.md)). Open-source stacks such as [fixpp](https://github.com/sashamakarenko/fixpp) often reuse message buffers and update only fields that change.
+### 15. Pre-serialized ordersPre-serialized orders means building the **on-the-wire byte template** off the hot path (symbol load, session ready, config changes) and, at send time, **patching in place** only fields that change every order (e.g. `ClOrdID`, price, quantity, timestamps, checksum/signature slots). This avoids full string formatting, repeated tag walks, and allocations on the decision→send path. On the binary side, [FIX Simple Binary Encoding (SBE)](https://github.com/FIXTradingCommunity/fix-simple-binary-encoding) emphasizes fixed layouts and offset-based access for low-latency encode/decode (see its [Introduction](https://github.com/FIXTradingCommunity/fix-simple-binary-encoding/blob/master/v1-0-RC3/doc/01Introduction.md)). Open-source stacks such as [fixpp](https://github.com/sashamakarenko/fixpp) often reuse message buffers and update only fields that change.
 
 **System design notes**:
 
@@ -34588,8 +33875,7 @@ int main() {
 ```
 
 
-### 17. Adaptive load shedder (CoDEL)
-
+### 16. Adaptive load shedder (CoDEL)
 On a single-threaded low-latency path, once the strategy lags the market, continuing to process stale queued packets only burns CPU and deepens delay. Borrow **CoDEL (Controlled Delay)** from network AQM: use packet **sojourn time** (dequeue − enqueue) as the congestion signal. When sojourn stays above a target past an observation interval, enter drop mode and discard expired packets to drain backlog and keep the core trading path stable. Complements a rate limiter (which caps send rate)—this is **staleness-based active overload protection**.
 
 ```cpp
@@ -34648,8 +33934,7 @@ private:
 + **Caveat**: enqueue timestamps must be monotonic and trusted; dropping is lossy—monitor drop rate and recovery time
 
 
-### 18. Multi-process shared-memory trading middleware (ShmDB)
-
+### 17. Multi-process shared-memory trading middleware (ShmDB)
 Institutional trading systems rarely put strategy, market-data ingress, and order ingress in one process. A supervisor usually creates a shared-memory segment; each business process maps it in and exchanges fixed-size messages through typed ring buffers. The hot path avoids serialization and does not use sockets or pipes. The subsections below cover designs that show up often in this style of bus and are easy to get wrong.
 
 **1. Route ring pools by business type**
@@ -35032,8 +34317,7 @@ struct TurnLog {
 };
 ```
 
-### 19. Bilateral order-id index on the trade bridge
-
+### 18. Bilateral order-id index on the trade bridge
 Venue ack ids are not uniform: some are strings, some uint64, some only 32-bit. The same venue id can also come back on a different API session, so the key carries a fixed-length API name as well. The trade bridge keeps venue ids and local ids in two fixed slot tables. The callback thread writes one short note into its own ring and publishes the index; the bridge thread applies notes in order. On successful submit both sides are written; cancel and fill callbacks find the local order by open-addressing the venue id; timeout sweeps scan slots still marked unacked. A full ring fails that note immediately.
 
 ```cpp
@@ -35229,8 +34513,7 @@ void sweep_timeouts(const std::vector<Live*>& unacked, const std::vector<Live*>&
 ```
 
 
-### 20. Local cache when fills arrive before status
-
+### 19. Local cache when fills arrive before status
 Some venues push fills before status changes. If the local order is still “acked” while cumulative fills already exist, overwriting blindly loses the intermediate state. Reserve three cache fields on the order: early status, early filled qty, early filled amount. When the late status arrives, merge the cache into the official fields and advance to partial or filled.
 
 ```cpp
@@ -35422,8 +34705,7 @@ void on_cut_tape(DeskOrder& o, int kind, int64_t qty, int err) {
 ```
 
 
-### 21. Linked-order metadata
-
+### 20. Linked-order metadata
 Pair trades and multi-leg submits still send each leg as its own order, but they must be observed together. Put a group id, leg count, and leg index on the header: group id 0 means standalone; leg count 1 means no linkage. Strategy and risk aggregate progress by group id without a side table.
 
 ```cpp
@@ -35453,8 +34735,7 @@ bool group_done(const LinkedOrder* legs, size_t n, uint64_t gid) {
 ```
 
 
-### 22. Multi-band minimum tick table
-
+### 21. Multi-band minimum tick table
 A-shares default to 0.01; HK equities and some futures change step by price band. Parse the table into “from price → step” bands, at most ten of them. Flooring, moving one tick at a time, and clamping to limit-up/down all use the same table. A move of N ticks uses the current band’s step for each step; once the price reaches the next band’s start, later ticks use the new step. A lookup that lands exactly on the next start stays on the current band. A downward move that is already exactly on the current start takes the first step from the lower band. Rounding multiplies price and step by 100000, adds 0.5, truncates to integers, then divides; a price already on the grid keeps its original value. Clamp the result to the down and up limits, and lift a negative price to 0 before the downward clamp. Bad rounding is a common reject cause; cache one table per symbol and the current band index on the hot path instead of reparsing strings.
 
 ```cpp
@@ -35533,8 +34814,7 @@ public:
 ```
 
 
-### 23. Factor storage and live faces
-
+### 22. Factor calendar store and live instrument mounts
 Minute factors and samples land on a calendar ring, one ring per name. A global table maps calendar time to an index, and a write goes to that index. When a write skips intermediate bars, a caller-supplied function fills the gap and those cells are marked filled. The sentinel index -2 means never written. That is distinct from a write at index 0, so the series does not need another bool.
 
 ```cpp
@@ -35574,9 +34854,9 @@ public:
 };
 ```
 
-A live instrument does not use that calendar table. The high-frequency tape is embedded in the instrument object. The factor face, the sample face, and the unstructured signal face hang off the same instrument by pointer and are split by name.
+A live instrument does not use that calendar table. The high-frequency tape is embedded in the instrument object. The factor ring, the sample ring, and the unstructured signal ring hang off the same instrument by pointer and are split by name.
 
-On the factor face each name owns a ring of depth 256. The element is a filled flag plus one double: the flag is one byte, the double sits on an 8-byte boundary, and the cell is 16 bytes. One instrument has a budget of 20 factor names. The sample face uses the same cell, with depth 512 and a budget of 100 names. The unstructured signal face uses depth 512. One record carries the code, frequency, calc time, produce time, send time, signal name, corporate-action scale, and value, with a budget of 10 names. Each of the three pools reserves 1000 objects, carved from the shared segment at startup from config. Short-horizon RSI, momentum, spread, and fund net-asset values live on the factor face as string keys. They are not written into the eight tape slots.
+On the factor side each name owns a ring of depth 256. The element is a filled flag plus one double: the flag is one byte, the double sits on an 8-byte boundary, and the cell is 16 bytes. One instrument has a budget of 20 factor names. The sample ring uses the same cell, with depth 512 and a budget of 100 names. The unstructured signal ring uses depth 512. One record carries the code, frequency, calc time, produce time, send time, signal name, corporate-action scale, and value, with a budget of 10 names. Each of the three pools reserves 1000 objects, carved from the shared segment at startup from config. Short-horizon RSI, momentum, spread, and fund net-asset values live on the factor ring as string keys. They are not written into the eight tape slots.
 
 ```cpp
 struct NamedCell {
@@ -35633,7 +34913,7 @@ InstrumentFaces bind_faces(FacePools& pools) {
 }
 ```
 
-The sender forks on a face tag. Tag 0 scans the factor face, tag 1 scans the sample face, and the new cells leave as one batch. The unstructured face looks the ring up by signal name on that instrument. The first time a name appears it occupies an empty entry. A strategy subscription is one of three names: a plain signal request, the high-frequency tape, or an unstructured signal.
+The sender forks on a kind tag. Tag 0 scans the factor rings, tag 1 scans the sample rings, and the new cells leave as one batch. Unstructured signals look the ring up by signal name on that instrument. The first time a name appears it occupies an empty entry. A strategy subscription is one of three names: a plain signal request, the high-frequency tape, or an unstructured signal.
 
 ```cpp
 enum class FaceTag : int { Factor = 0, Sample = 1 };
@@ -35793,8 +35073,7 @@ void load_hist_row(double lane[8], const HistRow& row, bool publish) {
 }
 ```
 
-### 24. Engine message route filters
-
+### 23. Engine message route filters
 A reply ring may mix several accounts and algo engines. Each process attaches a filter: none, match by engine id, or match by counter+account. Algo engines may also keep a set of cared-about exec_types. Filtering happens before setting the consume bit so unrelated processes do not claim confirm bits.
 
 ```cpp
@@ -35825,9 +35104,8 @@ bool accept_order_msg(const RoutePolicy& p, uint32_t msg_engine,
 ```
 
 
-### 25. Basket control channel and oversized exec buffer
-
-Institutional baskets are not “loop 2000 normal-order controls”. They use a separate control plane: create, pause, resume, stop, update. Exec content sits in an oversized fixed buffer (up to a few MB) carrying multi-symbol parameters or reply digests. Algo processes subscribe only to their exec_type; ordinary strategy rings are not bloated by basket payloads.
+### 24. Basket control channel and large exec buffer
+Institutional baskets are not “loop 2000 normal-order controls”. They use a separate control channel: create, pause, resume, stop, update. Exec content sits in a large fixed buffer (up to a few MB) carrying multi-symbol parameters or reply digests. Algo processes subscribe only to their exec_type; ordinary strategy rings are not bloated by basket payloads.
 
 ```cpp
 enum class BasketOp : uint8_t {
@@ -35849,8 +35127,7 @@ using BasketReq = BasketMsg<2048 * 2000>; // control plane only; keep off MD hot
 ```
 
 
-### 26. Pre-trade risk gate and layered error codes
-
+### 25. Pre-send risk gate and layered error codes
 Before calling the venue API, the trade bridge should run a synchronous gate: blacklist, per-order notional, per-symbol and global counts, cancel/order ratio, per-minute flow, self-trade foresight, long/short imbalance. On reject, write the same error_id and error text fields used for venue errors so strategy callbacks need not branch on source. Validation, cash/position, and risk codes live in separate numeric bands for monitoring. Hanging and warning statuses are reserved for ambiguous acks that need human ops.
 
 ```cpp
@@ -35950,8 +35227,7 @@ bool listed(bool opening, const std::unordered_set<std::string>& opens,
 ```
 
 
-### 27. Order check-count semaphore and two-phase ledger prelock
-
+### 26. Order check-count semaphore and two-phase ledger prelock
 A serial “risk then trade-bridge” path adds risk queueing to submit latency. A lower-latency design has the strategy write the order request once; risk and the trade bridge both see it. The bridge does not send immediately: it polls a check-passed count and a reject count on the order. Config says how many risk signers are required; only when all have passed and rejects stay zero does the bridge hit the venue. Inside risk, run every check and a prelock computation without writing the shared ledger; only then commit freezes and bump the check count, so a failed path never leaves a half-applied cash lock. For market orders the freeze price can be mid or the opposite touch; the first writer wins the freeze price/qty with atomics.
 
 ```cpp
@@ -36031,9 +35307,8 @@ void drop_late(std::unordered_map<uint64_t, Inflight>& wait, int64_t now, int64_
 ```
 
 
-### 28. Market-data gateway: full-sub filter, field patches, night-session day
-
-Cash L2 often subscribes the whole venue. Before the open the subscribe set is flattened into a byte per name id, and the callback reads that byte, accepting everything when filtering is off. Shanghai depth snapshots often omit limit-up/down; the static instrument query writes a parallel array by the same id, and a snapshot missing the field is patched from that slot. Shanghai and Shenzhen disagree on which tick field is the book index; interpret by venue before rebuilding. Futures ActionDay in the wire message is unreliable—derive it from update time: day session matches TradingDay; after 18:00 on night session subtract one or three calendar days by weekday; Monday early morning needs its own rule. After an algo parent is created, read the latest quote already in the shared ring and feed it once so the algo need not wait for the next tick.
+### 27. Market-data gateway: full-sub filter, field fill-in, night-session day
+Cash L2 often subscribes the whole venue. Before the open the subscribe set is flattened into a byte per name id, and the callback reads that byte, accepting everything when filtering is off. Shanghai depth snapshots often omit limit-up/down; the static instrument query writes a parallel array by the same id, and a snapshot missing the field is filled from that slot. Shanghai and Shenzhen disagree on which tick field is the book index; interpret by venue before rebuilding. Futures ActionDay in the wire message is unreliable—derive it from update time: day session matches TradingDay; after 18:00 on night session subtract one or three calendar days by weekday; Monday early morning needs its own rule. After an algo parent is created, read the latest quote already in the shared ring and feed it once so the algo need not wait for the next tick.
 
 ```cpp
 struct LimitPx { double up, down; };
@@ -36177,11 +35452,10 @@ thread_local Tape tls_tape;
 ```
 
 
-### 29. Short venue refs, async quota, and algo-container clock fanout
-
+### 28. Short venue refs, async quota, and algo-container clock ticks
 Futures open/close budgets often live in the mid-desk. The trade bridge must not block forever on the API callback thread, and must not send before quota arrives. Open and close inserts request quota asynchronously and enter Wait; on grant or timeout the bridge sends or rejects. A close insert can pre-reserve one cancel credit so the first cancel skips a second round-trip; further cancels request again. External manual fills synthesize a feedback order to update risk views without releasing cancel credits.
 
-On the algo container, many parents on one symbol share each quote fanout. Execution is not quote-only: the main loop calls OnClock on every algo for tranche work, chase switches, and endgame flatten. When per-minute planned size is too sparse, collapse several minutes into fewer windows and force a strict mode to avoid jittery crumbs.
+On the algo container, many parents on one symbol share each quote delivery. Execution is not quote-only: the main loop calls OnClock on every algo for tranche work, chase switches, and endgame flatten. When per-minute planned size is too sparse, collapse several minutes into fewer windows and force a strict mode to avoid jittery crumbs.
 
 ```cpp
 enum class QuotaState : uint8_t { Skip, Wait, Pass, Fail };
@@ -36461,9 +35735,8 @@ Tail tail_of(int64_t left, int64_t lot, bool late) {
 }
 ```
 
-### 30. Normalize offset and direction before the order hits the ring
-
-Cash names have no close-today or close-yesterday. If the instrument kind is still unknown, parse it from the symbol once and store it; later inserts do not split the string again. Stocks, bonds, funds, indexes, and repos force offset to open, so the broker never sees a meaningless close-today. Futures and options keep close semantics: SHFE (SHF) and INE rewrite a plain close into close-yesterday and leave close-today unchanged; every other venue collapses close-today and close-yesterday into a plain close. Direction folds the side into long or short: buy, margin buy, repay-stock, and subscribe are long; sell, short-sell, repay-margin, and redeem are short. A failed map fills an error code and a short text before the ring write, and the ticket never reaches the broker. When a price is present, the price is greater than 0, and the price kind is still unknown, snap the kind to limit so an algo ticket does not leave with an unset price kind. A limit kind whose absolute price is still below 1e-6 is rejected.
+### 29. Normalize open-close and side before the order hits the ring
+Cash names have no close-today or close-yesterday. If the instrument kind is still unknown, parse it from the symbol once and store it; later inserts do not split the string again. Stocks, bonds, funds, indexes, and repos force open-close to open, so the broker never sees a meaningless close-today. Futures and options keep close semantics: SHFE (SHF) and INE rewrite a plain close into close-yesterday and leave close-today unchanged; every other venue collapses close-today and close-yesterday into a plain close. Direction folds the side into long or short: buy, margin buy, repay-stock, and subscribe are long; sell, short-sell, repay-margin, and redeem are short. A failed map fills an error code and a short text before the ring write, and the ticket never reaches the broker. When a price is present, the price is greater than 0, and the price kind is still unknown, snap the kind to limit so an algo ticket does not leave with an unset price kind. A limit kind whose absolute price is still below 1e-6 is rejected.
 
 ```cpp
 enum class Off : int8_t { Open, Close, CloseToday, CloseYday };
@@ -36610,8 +35883,7 @@ void close_td_then_yd(int want, Pos pos, Pend pend, int max_lot, int min_lot,
 ```
 
 
-### 31. Position queries leave the order thread and resume by cursor
-
+### 30. Position queries leave the order thread and resume by cursor
 On many cash brokers a position query is synchronous and returns a few hundred rows a page. Running it on the order thread places later orders behind the whole query. Each engine writes only its own ring, storing an account id in the slot. When the query thread folds a batch, a later request for the same account overwrites the earlier one. It then issues one broker call for every engine waiting on that account, and writes each row back to each waiting request. A full ring fails that request immediately.
 
 The next page starts at the previous page’s last browse index plus one. When the API returns a locator string, that string replaces the index. The continuation keeps the original request id so the reply still matches the local request. The end mark is set only on the last row of the last page. A few seconds separate rounds. One fund account has a shareholder id on each of Shanghai and Shenzhen; orders and queries pick it from the symbol suffix. A dual-center account uses the shareholder id of the center being queried.
@@ -36704,8 +35976,7 @@ public:
 ```
 
 
-### 32. Signal windows that emit parent orders
-
+### 31. Signal windows that emit parent orders
 On each clock the automatic book walks the id array built before the open, pulls fresh quotes into a local tape, then decides. The base clock scans four chains: orders, algo responses, cash, and positions. The automatic book walks only the quote-subscription ids, pulls quotes and prints, then collects parent responses. A cash query runs when margin must be rechecked, and stays off the every-tick path. The quote callback writes a slot by integer id. The subscription list is flattened into a dense id array before the open, and the clock walks that array. A parent is written straight into a free algo-ring slot: check the id base, map buy and sell onto long and short, fill a missing limit with the opposite touch, mint a unique parent id, then publish the write index. The strategy clock is the only writer of this ring. A full ring fails that parent immediately. Child slicing stays in the execution process, using the algo type stamped on the parent. The automatic book’s buy and sell decision reads the pre-open signal file and the intraday tape.
 
 ```cpp
@@ -36982,8 +36253,7 @@ void cancel_other_side(int dir, Live& live) {
 ```
 
 
-### 33. Close-today, close-yesterday, and stock sellable locks
-
+### 32. Close-today, close-yesterday, and stock sellable locks
 Futures closes draw from different quantity pools according to the offset. A plain close uses total lots minus lots already locked. Close-today uses today's lots (total minus yesterday still open) minus today's locked lots (total locked minus yesterday locked). Close-yesterday uses only yesterday remaining minus yesterday locked. The three shortages return as separate results. After a plain close or a close-today, only the total lock increases. A close-yesterday increases both the total lock and the yesterday lock, and free lots are rewritten as total minus total locked. Opens do not lock position. They add min(target quantity, locked quantity) into the working counter of that side. A request whose locked quantity is already zero passes through.
 
 On stocks, sell and the repay directions deduct sellable quantity, and a shortfall rejects the order. The deduction increases both total lock and yesterday lock, because sellable quantity comes from yesterday. Buys and margin buys only bump the working counter. A fill with quantity above zero and an absolute price below 1e-6 is a constituent transfer and stays out of cash and fees. Intraday round-trip is allowed for four kinds of names: a code with a Hong Kong suffix, a symbol on the whitelist, the zero-price constituent transfer above, and bonds. Other stocks keep the next-day sell constraint. The venue sits after a dot in the symbol; the suffix is cut off and then mapped.
@@ -37048,8 +36318,7 @@ int how_on_fill(const ReqSnap* snap, int rsp_how) {
 }
 ```
 
-### 34. Instrument-class fees and frozen-price backfill
-
+### 33. Instrument-class fees and frozen-price backfill
 Fees follow two formulas by instrument class. The hot path does not look up the contract master. Cash classes (stock, bond, fund, index, repo) use a multiplier of 1 and a margin ratio of 1. Every other class uses a multiplier of 100 and a margin ratio of 0.15. The caller forms notional as frozen price times frozen quantity and passes the constant 0.0003 as the second argument. The futures formula treats that constant as a rate, so the fee is notional times the rate. The cash formula treats it as a commission amount and adds it, then adds notional times the transfer rate. A sell also adds notional times the stamp rate.
 
 A frozen price that is already set is left alone. The test is an absolute value above 1e-6. Otherwise the limit price is copied first. When the limit is missing too, the quote ring is indexed by write sequence minus one, modulo capacity, which lands on the last published snapshot. If both best bid and best ask are positive, the frozen price is their midpoint. If only one side is positive, that side is used. A zero frozen quantity is filled from the target quantity first. After the price store and after the quantity store, a store fence runs so the other side of the order observes the pair together.
@@ -37092,8 +36361,7 @@ bool backfill_lock(double& lock_px, int64_t& lock_qty, int64_t qty,
 }
 ```
 
-### 35. Read-only catch-up and publish watermark on the monitor
-
+### 34. Read-only consume and publish rate limit on the monitor
 Monitoring and disk capture run in their own processes. Pools with capacity at or below zero are skipped. When free slots fall below 5% of capacity, an alert is raised. The comparison uses the free count.
 
 Publish and consume callbacks sit on separate event loops. The leaky bucket runs on the publish thread. Water level drops by rate times elapsed milliseconds, and a negative level is clamped to zero. If the level is still under capacity, it increases by one and one message is released. Otherwise the message stays on the outbound queue until the next timer. Heartbeats use non-persistent delivery. Replies to start and stop commands use persistent delivery. Property reports are packed once the batch exceeds 100 items or 15 seconds have passed since the last send. Log reports are forwarded as they arrive. The capture side preallocates a fixed array, advances an integer index, writes count times stride in one call, then zeroes the whole slab and resets the index.
@@ -37160,8 +36428,7 @@ void push_fresh(std::unordered_map<std::string, std::vector<std::string>>& fresh
 ```
 
 
-### 36. Process lifecycle control and host sampling
-
+### 35. Process lifecycle control and host sampling
 Start, stop, and host sampling run in two processes. The command process handles the clocks, process start and stop, and config changes. The report process handles host counters and the shared-memory log. Shared memory is created by the producers first, and the reader attaches after that. At the open, the command process writes the reader flag true and leaves the report process running, so the next start attaches with that flag. At the close, it stops the business processes, writes the flag false, and restarts the report process. The mapping comes off before the producers exit.
 
 A process is known by the tail of its command line. The name in `/proc/pid/status` keeps only a few characters, and a minute-stamped backup shares that prefix with the live binary, so a short name or a prefix match lands on the wrong file. The lookup throws away its own line and keeps a pid only when the line ends with the target file name. A Python process is known by the script name. An existing pid means the start stops there. Stop sends a normal terminate, waits half a second, looks again, and force-kills anything still there. A full start stops the whole set, waits a few seconds for shared memory and ports to come free, then starts each process in order. A failure in the middle leaves the rest to continue. The control process stays off this path. Before a start, the working directory moves to that install directory and the directory is placed at the front of the library path. The child inherits both. After the start, the working directory moves back to the control process.
@@ -37278,8 +36545,7 @@ def merge_roster(old, incoming):
 ```
 
 
-### 37. Pair resting size, leg price, and size gate
-
+### 36. Pair resting size, leg price, and size gate
 A pair order carries several legs and one execution sheet. Each leg has a symbol, account, counter, product, currency, exchange rate, size weight, feed coefficient, margin rate, underlying, tick size, board lot, and instrument kind. The sheet carries the target price, target size, the symbols allowed to rest, the combined-hit flag, each leg’s side, the resting cap, the resting offset against the taking price, the cancel offset, the amend offset, how many ticks the taker gives up, the cancel interval, the seconds before a forced balance, the alternate price, the spread, the chase mode, the pricing mode, the limit mode, and the limit-tick count.
 
 ```cpp
@@ -37426,8 +36692,7 @@ int main() {
 ```
 
 
-### 2. Changes in state of market trends and volatility
-1. By analyzing market trends and state changes in volatility, we can determine whether the market is stable. If the state change interval presents a random distribution, it means the market is relatively stable; if it stays in a certain state for a long time (such as long-term high volatility), there may be non-stationarity, which will affect the robustness of the trading system. By analyzing the state changes of market indicators, we can test the stability of the market and provide a basis for the development of trading systems (to avoid failure in non-stationary markets).
+### 2. Changes in state of market trends and volatility1. By analyzing market trends and state changes in volatility, we can determine whether the market is stable. If the state change interval presents a random distribution, it means the market is relatively stable; if it stays in a certain state for a long time (such as long-term high volatility), there may be non-stationarity, which will affect the robustness of the trading system. By analyzing the state changes of market indicators, we can test the stability of the market and provide a basis for the development of trading systems (to avoid failure in non-stationary markets).
 2. **Calculation of key indicators**:
     - **Trend Indicator**: Fit the slope using least squares (`find_slope`) to measure price trends
     - **Volatility Indicator**: uses average true range (ATR,`find_volatility`) to measure market volatility
@@ -37918,8 +37183,7 @@ int main() {
 ```
 
 
-### 3. Indicator stability optimization based on moving window
-**1. Solution to mean non-stationarity (centralization)**
+### 3. Indicator stability optimization based on moving window**1. Solution to mean non-stationarity (centralization)**
 
 + Eliminate the long-term trend deviation of the indicator through "Current Value - Moving Window Mean/Median", and the median is more suitable for scenarios with extreme values.
     - `moving_mean`The function calculates the moving window mean,`moving_median`The function calculates the moving window median;
@@ -38173,8 +37437,7 @@ int main() {
 ```
 
 
-### 4. Information entropy for trading indicator evaluation
-**1. Use "entropy" to quantify the value of indicator information**
+### 4. Information entropy for trading indicator evaluation**1. Use "entropy" to quantify the value of indicator information**
 
 + Trading indicators (such as trends, volatility) can be regarded as "information" transmitted by the market, and their value depends on the ability to eliminate uncertainty about the future state of the market, this ability is measured by "entropy".
 + Calculate the relative entropy of the indicator (actual entropy value/maximum possible entropy value), and standardize the information content to the range of 0-1: 0 means no information, 1 means maximized information. This is used as the core criterion for evaluating the value of the indicator. The relative entropy is usually required to be at least 0.5.
@@ -38401,8 +37664,7 @@ cleanup:
 ```
 
 
-### 5. Regularized linear models: the preferred model
-**1. Core Objectives**
+### 5. Regularized linear models: the preferred model**1. Core Objectives**
 
 **The effectiveness of the indicator is far more important than the complexity of the predictive model using the indicator to generate trading signals**
 
@@ -39025,8 +38287,7 @@ int main() {
 ```
 
 
-### 6. Differential evolution optimization: nonlinear parameter optimization
-**1. Core Objectives**
+### 6. Differential evolution optimization: nonlinear parameter optimization**1. Core Objectives**
 
 For the "regularized strategy parameter optimization" scenario in the trading system (such as the "long-term/short-term lookback period" and "position opening threshold" of the moving average crossover system), through the hybrid algorithm of **population evolution + local climbing**, we can efficiently find the global optimal parameter combination and avoid the problems of traditional "grid search" being inefficient and prone to falling into local optimality.
 
@@ -39594,8 +38855,7 @@ int main() {
 ```
 
 
-### 7. Cheap training bias estimation
-Cheap training bias estimation (StocBias Class)
+### 7. Cheap training bias estimationCheap training bias estimation (StocBias Class)
 
 **Goal: **Quickly assess the deviation between a strategy's average in-sample (IS) performance and its average out-of-sample simulated performance without conducting additional out-of-sample (OOS) backtesting. This is a quantitative measure of overfitting.
 
@@ -39860,8 +39120,7 @@ int main() {
 ```
 
 
-### 8. Parameter relationship analysis
-Parameter relationship analysis (ParamCorrelation Class)
+### 8. Parameter relationship analysisParameter relationship analysis (ParamCorrelation Class)
 
 **Goal:** By analyzing and optimizing the relationship between parameters and performance in the final population, determine the correlation between parameters and the direction in which policy performance is most (or least) sensitive to parameter changes.
 
@@ -40399,8 +39658,7 @@ int main() {
 ```
 
 
-### 9. Parameter sensitivity curve
-ParamSensitivity Class
+### 9. Parameter sensitivity curveParamSensitivity Class
 
 **Goal: **Visually verify the stability of the policy performance when a single parameter is perturbed throughout the feasible region.
 
@@ -40723,745 +39981,7 @@ int main() {
 ```
 
 
-### 10. Unbiased trading simulation
-The core goal of unbiased trading simulation is to eliminate the interference of "future data leakage" and "over-fitting" on the performance evaluation of the trading system, and obtain an unbiased estimate of the future performance of the system by simulating the "training-testing" process under real trading scenarios. Its core principles and ideas can be summarized as the following four points:
-
-1. **Strict time series data division logic**
-Separation of in-sample (IS) and out-of-sample (OOS): Market data (such as logarithmic price candlesticks) must be sorted by timestamp to ensure that the in-sample data is completely earlier than the out-of-sample data, and to prevent future leaks of "training models with future data". When dividing, it is necessary to control the proportion within the sample (usually 0.5~0.8), and ensure that both have sufficient data volume (at least 1 valid data point each) to avoid evaluation bias caused by insufficient data volume.
-Guard Buffer mechanism: For the indicator lookback period (such as the number of K lines required for moving average calculation) and the target forward period (such as predicting the future returns of N K lines), a "guard buffer" (size = min (lookback period, forward period)-1) is set at the boundary between the in-sample and out-of-sample periods. For example, if the indicator needs to look back 20 K lines and the target looks forward to 10 K lines, the buffer zone will be 9 K lines to avoid hidden future leakage of in-sample data and out-of-sample data due to "indicator calculation overlap".
-2. **Forward Analysis (Walkforward Analysis): simulate the real transaction iteration process**
-Sliding window training - testing: The historical data is divided into continuous "folds" according to "training window + test window". Within each fold, the training window data is first used to optimize the system parameters (such as the moving average period), and then the test window data is used to calculate out-of-sample returns. Then the entire window is slid forward (sliding step = test window size), and the process is repeated until all data is traversed.
-Fits real trading scenarios: Each round of training only uses "historical data as of the current point in time", and testing is only for "limited time windows in the future", fully replicating the process of "regularly updating the model and gradually executing transactions" in real trading, avoiding overfitting caused by training with the full amount of data at one time, and at the same time capturing the impact of market non-stationarity on system performance.
-3. **Cross-Validation: Supplementary evaluation for efficient use of data**
-The folding logic of time series adaptation: divide the data into N consecutive "folds" according to time, each fold is used as a test set in turn, and the remaining folds (excluding the test set and guard buffer) are used as the training set. Different from traditional cross-validation, guard buffers need to be set up on both sides of the test set to prevent in-sample-test set data overlap caused by indicator lookback/forward.
-Balance data utilization and unbiasedness: Solve the problem of "small amount of early training data" in forward testing and make full use of historical data through multiple rounds of training-testing, but you need to pay attention to its limitations - because it includes "future data of the test set" for training, it may introduce a slight optimistic bias to the evaluation of non-stationary markets, so it is usually used as a supplement to forward testing, not a replacement.
-4. **Nested Forward Testing: Handling Selection Bias in Multi-Level Optimization**
-Two-level optimization separation: For the scenario of "system parameter optimization (inner layer) + multi-system selection (outer layer)", the "selection bias" needs to be eliminated through a nested structure. The inner layer uses forward testing to evaluate the out-of-sample performance of each competing system (such as moving average strategies with different parameters). The outer layer selects the optimal system based on the unbiased results of the inner layer, and then uses an independent outer test window to verify the final performance.
-Avoid "survivor bias": If you directly select the "system with the best performance in the sample" from multiple systems, it is easy to overestimate the performance due to "accidental luck"; the nested structure ensures that the selected system is a system with "real generalization ability" rather than "accidental fitting noise" by "using OOS results to screen the system in the inner layer and verifying it in the outer layer with new OOS results".
-
-```cpp
-#include <vector>
-#include <algorithm>
-#include <cmath>
-#include <numeric>
-#include <cstdint>
-#include <iostream>
-#include <cassert>
-
-// Error code definition (unbiased simulation of abnormal scenarios)
-enum class SimErrorCode : int32_t {
-    SUCCESS = 0, // success
-    INVALID_RATIO = 1, // Illegal proportion within the sample (≤0 or ≥1)
-    INSUFFICIENT_DATA = 2, // Insufficient amount of data (cannot meet window/fold requirements)
-    EMPTY_TRAIN_DATA = 3, // The training set is empty (after excluding the guard buffer)
-    EMPTY_SYSTEM_LIST = 4, //The competing system list is empty
-    INVALID_WINDOW_SIZE = 5, // The window size is illegal (the outer training window exceeds the limit or the inner period is illegal)
-    INVALID_MA_PARAM = 6, //Illegal moving average parameters (maximum period of short moving average ≥ maximum period of long moving average)
-    TIMESTAMP_ORDER_ERR = 7 // Timestamp is non-increasing (data is out of order, which may lead to future leaks)
-};
-
-// Market data structure (use logarithmic prices to ensure consistent return scale)
-struct MarketData {
-    double log_price; // Logarithmic price (used for income calculation to avoid absolute price deviation)
-    int timestamp; // Timestamp (ensures that data is processed in chronological order to prevent future leakage)
-};
-
-// Trading system abstract class (strategy core interface, supports parameter optimization and income generation)
-class TradingSystem {
-public:
-    virtual ~TradingSystem() = default;
-
-    /**
-     * @brief In-sample parameter optimization (input in-sample logarithmic price data)
-     * @param in_sample_data In-sample market data (sorted by timestamp)
-     */
-    virtual void optimizeParams(const std::vector<MarketData>& in_sample_data) = 0;
-
-    /**
-     * @brief generates trading income (outputs the logarithmic income of each K line, and the income is 0 when there is no position)
-     * @param data input market data (sorted by timestamp)
-     * @return std::vector<double> Logarithmic return sequence of a single K-line
-     */
-    virtual std::vector<double> generateReturns(const std::vector<MarketData>& data) const = 0;
-
-    /**
-     * @brief Get the optimal parameters (return the optimized strategy parameters for subsequent analysis)
-     * @return std::vector<double> Optimal parameter sequence (such as moving average period, threshold, etc.)
-     */
-    virtual std::vector<double> getOptimalParams() const = 0;
-};
-
-class UnbiasedSimulation {
-public:
-    /**
-     * @brief 1. Division of data inside/outside the sample (sorted by timestamp to avoid future leakage)
-     * @param full_data complete market data
-     * @param in_sample_ratio The proportion of data in the sample (0 < ratio < 1)
-     * @param out_in_sample Output: In-sample data (sorted by timestamp)
-     * @param out_out_sample Output: out-of-sample data (sorted by timestamp)
-     * @return SimErrorCode error code
-     */
-    static SimErrorCode splitInOutSample(
-        const std::vector<MarketData>& full_data,
-        double in_sample_ratio,
-        std::vector<MarketData>& out_in_sample,
-        std::vector<MarketData>& out_out_sample
-    ) {
-        // Verify the proportion within the sample (must be within the range of (0,1) to ensure that there is data inside/outside the sample)
-        if (in_sample_ratio <= 0.0 || in_sample_ratio >= 1.0) {
-            return SimErrorCode::INVALID_RATIO;
-        }
-
-        // Sort by timestamp (to avoid future leaks caused by data disorder)
-        std::vector<MarketData> sorted_data = full_data;
-        std::sort(sorted_data.begin(), sorted_data.end(),
-            [](const MarketData& a, const MarketData& b) {
-                return a.timestamp < b.timestamp;
-            }
-        );
-
-        // Verify that the timestamp is incremented (secondary check to ensure there is no disorder after sorting)
-        for (size_t i = 1; i < sorted_data.size(); ++i) {
-            if (sorted_data[i].timestamp <= sorted_data[i-1].timestamp) {
-                return SimErrorCode::TIMESTAMP_ORDER_ERR;
-            }
-        }
-
-        const size_t total_size = sorted_data.size();
-        // Verify data amount (at least 2 K lines, make sure there is 1 inside/outside of the sample)
-        if (total_size < 2) {
-            return SimErrorCode::INSUFFICIENT_DATA;
-        }
-
-        // Calculate the dividing boundary (to avoid floating point errors and ensure at least 1 root within the sample and at least 1 root outside the sample)
-        size_t split_idx = static_cast<size_t>(std::round(total_size * in_sample_ratio));
-        split_idx = std::max<size_t>(split_idx, 1); // At least 1 root in the sample
-        split_idx = std::min(split_idx, total_size - 1); // At least 1 root outside the sample
-
-        // Split the data and assign output
-        out_in_sample.assign(sorted_data.begin(), sorted_data.begin() + split_idx);
-        out_out_sample.assign(sorted_data.begin() + split_idx, sorted_data.end());
-        return SimErrorCode::SUCCESS;
-    }
-
-    /**
-     * @brief 2. Forward testing (sliding window simulates real transactions and generates unbiased out-of-sample returns)
-     * @param full_data complete market data
-     * @param train_window_size training window size (amount of data within the sample)
-     * @param test_window_size test window size (amount of data outside the sample)
-     * @param system trading system (need to implement TradingSystem interface)
-     * @param out_oos_returns Output: Out-of-sample return series (log returns)
-     * @return SimErrorCode error code
-     */
-    static SimErrorCode walkForwardAnalysis(
-        const std::vector<MarketData>& full_data,
-        size_t train_window_size,
-        size_t test_window_size,
-        TradingSystem& system,
-        std::vector<double>& out_oos_returns
-    ) {
-        // Sort by timestamp (basic requirements for files to ensure no future leakage)
-        std::vector<MarketData> sorted_data = full_data;
-        std::sort(sorted_data.begin(), sorted_data.end(),
-            [](const MarketData& a, const MarketData& b) {
-                return a.timestamp < b.timestamp;
-            }
-        );
-
-        // Increment the verification timestamp
-        for (size_t i = 1; i < sorted_data.size(); ++i) {
-            if (sorted_data[i].timestamp <= sorted_data[i-1].timestamp) {
-                return SimErrorCode::TIMESTAMP_ORDER_ERR;
-            }
-        }
-
-        const size_t total_size = sorted_data.size();
-        // Verification window size (the training + test window does not exceed the total data volume to ensure that each iteration has a complete window)
-        if (train_window_size == 0 || test_window_size == 0 ||
-            train_window_size + test_window_size > total_size) {
-            return SimErrorCode::INSUFFICIENT_DATA;
-        }
-
-        out_oos_returns.clear();
-        size_t current_start = 0;
-
-        // Sliding window iteration (batch processing logic, no redundant data copy)
-        while (current_start + train_window_size + test_window_size <= total_size) {
-            // Step 1: Extract the current training window (in-sample data)
-            std::vector<MarketData> train_data(
-                sorted_data.begin() + current_start,
-                sorted_data.begin() + current_start + train_window_size
-            );
-            // In-sample parameter optimization (update the optimal parameters of the system)
-            system.optimizeParams(train_data);
-
-            // Step 2: Extract the current test window (out-of-sample data)
-            std::vector<MarketData> test_data(
-                sorted_data.begin() + current_start + train_window_size,
-                sorted_data.begin() + current_start + train_window_size + test_window_size
-            );
-            // Generate out-of-sample returns and append to results
-            std::vector<double> oos_returns = system.generateReturns(test_data);
-            out_oos_returns.insert(
-                out_oos_returns.end(),
-                oos_returns.begin(),
-                oos_returns.end()
-            );
-
-            // Step 3: Sliding window (advance the test window size to avoid deviations caused by data overlap)
-            current_start += test_window_size;
-        }
-
-        return SimErrorCode::SUCCESS;
-    }
-
-    /**
-     * @brief 3. Cross-validation (efficient use of data, processing time series IS/OOS overlap)
-     * @param full_data complete market data
-     * @param n_folds fold number (≥2, ensure that the training/test set division is effective)
-     * @param lookback indicator lookback period (such as the moving average period, used to calculate the guard buffer)
-     * @param lookahead Target lookahead period (such as position period, used to calculate guard buffer)
-     * @param system trading system (need to implement TradingSystem interface)
-     * @param out_oos_returns Output: Out-of-sample return series (log returns)
-     * @return SimErrorCode error code
-     */
-    static SimErrorCode crossValidation(
-        const std::vector<MarketData>& full_data,
-        size_t n_folds,
-        size_t lookback,
-        size_t lookahead,
-        TradingSystem& system,
-        std::vector<double>& out_oos_returns
-    ) {
-        // Sort by timestamp (to avoid future leaks)
-        std::vector<MarketData> sorted_data = full_data;
-        std::sort(sorted_data.begin(), sorted_data.end(),
-            [](const MarketData& a, const MarketData& b) {
-                return a.timestamp < b.timestamp;
-            }
-        );
-
-        // Increment the verification timestamp
-        for (size_t i = 1; i < sorted_data.size(); ++i) {
-            if (sorted_data[i].timestamp <= sorted_data[i-1].timestamp) {
-                return SimErrorCode::TIMESTAMP_ORDER_ERR;
-            }
-        }
-
-        const size_t total_size = sorted_data.size();
-        // Verify the fold number and data amount (fold number ≥ 2, data amount ≥ fold number, ensure there is enough data for each fold)
-        if (n_folds < 2 || total_size < n_folds) {
-            return SimErrorCode::INSUFFICIENT_DATA;
-        }
-
-        // Calculate the guard buffer (core logic: avoid IS/OOS overlap, take min(lookback, lookahead)-1)
-        const size_t guard_size = (std::min(lookback, lookahead) > 0) ?
-                                  (std::min(lookback, lookahead) - 1) : 0;
-        const size_t fold_size = total_size / n_folds; // Base size of each fold
-        out_oos_returns.clear();
-
-        // Iterate over each fold as a test set
-        for (size_t fold_idx = 0; fold_idx < n_folds; ++fold_idx) {
-            // Calculate the test set range of the current fold
-            const size_t test_start = fold_idx * fold_size;
-            const size_t test_end = (fold_idx == n_folds - 1) ?
-                                    total_size : (fold_idx + 1) * fold_size;
-
-            //Construct the training set (exclude the test set and guard buffer to avoid IS/OOS overlap)
-            std::vector<MarketData> train_data;
-            // Training data on the left side of the test set (excluding left guard buffer)
-            if (test_start > guard_size) {
-                train_data.insert(
-                    train_data.end(),
-                    sorted_data.begin(),
-                    sorted_data.begin() + test_start - guard_size
-                );
-            }
-            // Training data on the right side of the test set (excluding the right guard buffer)
-            if (test_end + guard_size < total_size) {
-                train_data.insert(
-                    train_data.end(),
-                    sorted_data.begin() + test_end + guard_size,
-                    sorted_data.end()
-                );
-            }
-
-            // Verify that the training set is not empty (parameters cannot be optimized without training data)
-            if (train_data.empty()) {
-                return SimErrorCode::EMPTY_TRAIN_DATA;
-            }
-
-            // Step 1: In-sample parameter optimization
-            system.optimizeParams(train_data);
-            // Step 2: Extract the test set of the current fold
-            std::vector<MarketData> test_data(
-                sorted_data.begin() + test_start,
-                sorted_data.begin() + test_end
-            );
-            // Step 3: Generate out-of-sample returns and append
-            std::vector<double> oos_returns = system.generateReturns(test_data);
-            out_oos_returns.insert(
-                out_oos_returns.end(),
-                oos_returns.begin(),
-                oos_returns.end()
-            );
-        }
-
-        return SimErrorCode::SUCCESS;
-    }
-
-    /**
-     * @brief 4. Nested forward testing (processing two levels of optimization: system selection + parameter optimization)
-     * @param full_data complete market data
-     * @param inner_train_window inner training window size (used for system parameter optimization)
-     * @param inner_test_window inner test window size (for system performance evaluation)
-     * @param outer_train_window outer training window size (for system selection)
-     * @param systems Competing system list (need to implement TradingSystem interface)
-     * @param out_final_returns Output: Final out-of-sample return series (log returns)
-     * @return SimErrorCode error code
-     */
-    static SimErrorCode nestedWalkForward(
-        const std::vector<MarketData>& full_data,
-        size_t inner_train_window,
-        size_t inner_test_window,
-        size_t outer_train_window,
-        const std::vector<TradingSystem*>& systems,
-        std::vector<double>& out_final_returns
-    ) {
-        // Verify that the list of competing systems is not empty (no system cannot be selected)
-        if (systems.empty()) {
-            return SimErrorCode::EMPTY_SYSTEM_LIST;
-        }
-
-        // Sort by timestamp (file requirement to avoid future leaks)
-        std::vector<MarketData> sorted_data = full_data;
-        std::sort(sorted_data.begin(), sorted_data.end(),
-            [](const MarketData& a, const MarketData& b) {
-                return a.timestamp < b.timestamp;
-            }
-        );
-
-        // Increment the verification timestamp
-        for (size_t i = 1; i < sorted_data.size(); ++i) {
-            if (sorted_data[i].timestamp <= sorted_data[i-1].timestamp) {
-                return SimErrorCode::TIMESTAMP_ORDER_ERR;
-            }
-        }
-
-        const size_t total_size = sorted_data.size();
-        const size_t inner_cycle = inner_train_window + inner_test_window; // Inner forward test cycle
-        // Verification window size (outer training window ≤ total data volume, inner period ≤ outer training window)
-        if (outer_train_window == 0 || inner_train_window == 0 || inner_test_window == 0 ||
-            outer_train_window > total_size || inner_cycle > outer_train_window) {
-            return SimErrorCode::INVALID_WINDOW_SIZE;
-        }
-
-        out_final_returns.clear();
-        size_t outer_current_start = 0;
-
-        // Outer forward test (iterative selection of the optimal system)
-        while (outer_current_start + outer_train_window + inner_test_window <= total_size) {
-            // Step 1: Extract outer training data (for system selection)
-            std::vector<MarketData> outer_train_data(
-                sorted_data.begin() + outer_current_start,
-                sorted_data.begin() + outer_current_start + outer_train_window
-            );
-
-            // Step 2: Inner forward test: evaluate the performance score of each system
-            std::vector<double> system_scores(systems.size(), -std::numeric_limits<double>::max());
-            for (size_t sys_idx = 0; sys_idx < systems.size(); ++sys_idx) {
-                std::vector<double> inner_returns;
-                //Call the inner forward test to generate the out-of-sample return of the system
-                SimErrorCode err = walkForwardAnalysis(
-                    outer_train_data,
-                    inner_train_window,
-                    inner_test_window,
-                    *systems[sys_idx],
-                    inner_returns
-                );
-                if (err != SimErrorCode::SUCCESS) {
-                    continue; // Skip systems that failed to evaluate
-                }
-                // Calculate system score (total logarithmic return, commonly used evaluation indicators)
-                system_scores[sys_idx] = std::accumulate(inner_returns.begin(), inner_returns.end(), 0.0);
-            }
-
-            // Step 3: Select the optimal system (the system with the highest score)
-            auto best_sys_iter = std::max_element(system_scores.begin(), system_scores.end());
-            if (*best_sys_iter == -std::numeric_limits<double>::max()) {
-                return SimErrorCode::EMPTY_SYSTEM_LIST; // All system evaluations failed
-            }
-            size_t best_sys_idx = best_sys_iter - system_scores.begin();
-            TradingSystem* best_sys = systems[best_sys_idx];
-
-            // Step 4: Outer layer testing: generate final out-of-sample returns
-            std::vector<MarketData> outer_test_data(
-                sorted_data.begin() + outer_current_start + outer_train_window,
-                sorted_data.begin() + outer_current_start + outer_train_window + inner_test_window
-            );
-            std::vector<double> oos_returns = best_sys->generateReturns(outer_test_data);
-            out_final_returns.insert(
-                out_final_returns.end(),
-                oos_returns.begin(),
-                oos_returns.end()
-            );
-
-            // Step 5: Slide the outer window (advance the inner test window size)
-            outer_current_start += inner_test_window;
-        }
-
-        return SimErrorCode::SUCCESS;
-    }
-};
-```
-
-```cpp
-#include "UnbiasedSimulation.h"
-
-// Moving average crossover strategy (example strategy, classic moving average crossover logic)
-class MACrossSystem : public TradingSystem {
-public:
-    /**
-     * @brief constructor: initialize short/long-term moving average maximum period
-     * @param max_short_lookback Maximum period of short moving average (such as 1~20)
-     * @param max_long_lookback Maximum period of long moving average (such as 2~40)
-     */
-    MACrossSystem(size_t max_short_lookback, size_t max_long_lookback)
-        : max_short_lookback_(max_short_lookback),
-          max_long_lookback_(max_long_lookback),
-          opt_short_lookback_(1),
-          opt_long_lookback_(2) {}
-
-    /**
-     * @brief Verifies the validity of moving average parameters (the maximum period of the short moving average must be < the maximum period of the long moving average)
-     * @return SimErrorCode error code
-     */
-    SimErrorCode validateParams() const {
-        if (max_short_lookback_ >= max_long_lookback_) {
-            return SimErrorCode::INVALID_MA_PARAM;
-        }
-        return SimErrorCode::SUCCESS;
-    }
-
-    /**
-     * @brief In-sample parameter optimization: traverse moving average combinations and select the combination with the largest total log return
-     * @param in_sample_data In-sample market data (sorted by timestamp)
-     */
-    void optimizeParams(const std::vector<MarketData>& in_sample_data) override {
-        const size_t data_size = in_sample_data.size();
-        // Not optimized when the amount of data is insufficient (needs to be at least the K-line with the maximum period of the long moving average)
-        if (data_size < max_long_lookback_) {
-            return;
-        }
-
-        double best_total_ret = -std::numeric_limits<double>::max();
-        // Traverse all legal moving average combinations (short moving average period < long moving average period)
-        for (size_t short_lb = 1; short_lb <= max_short_lookback_; ++short_lb) {
-            for (size_t long_lb = short_lb + 1; long_lb <= max_long_lookback_; ++long_lb) {
-                // Calculate the total log return of the current moving average combination
-                double current_ret = calculateTotalReturn(in_sample_data, short_lb, long_lb);
-                //Update the optimal parameters (when the total revenue is greater)
-                if (current_ret > best_total_ret) {
-                    best_total_ret = current_ret;
-                    opt_short_lookback_ = short_lb;
-                    opt_long_lookback_ = long_lb;
-                }
-            }
-        }
-    }
-
-    /**
-     * @brief Generate income: Calculate the logarithmic income of a single K-line based on the optimal moving average period
-     * @param data input market data (sorted by timestamp)
-     * @return std::vector<double> Logarithmic return sequence of a single K-line
-     */
-    std::vector<double> generateReturns(const std::vector<MarketData>& data) const override {
-        return calculateReturnDetail(data, opt_short_lookback_, opt_long_lookback_);
-    }
-
-    /**
-     * @brief Get the optimal parameters: short/long term moving average period
-     * @return std::vector<double> Optimal parameters (short moving average period, long moving average period)
-     */
-    std::vector<double> getOptimalParams() const override {
-        return {static_cast<double>(opt_short_lookback_), static_cast<double>(opt_long_lookback_)};
-    }
-
-private:
-    size_t max_short_lookback_; // Maximum period of short moving average
-    size_t max_long_lookback_; // Maximum period of long moving average
-    size_t opt_short_lookback_; // Optimized short moving average period
-    size_t opt_long_lookback_; // Optimized long moving average period
-
-    /**
-     * @brief Calculate the total log return (for parameter optimization)
-     * @param data input market data (sorted by timestamp)
-     * @param short_lb short moving average period
-     * @param long_lb long moving average period
-     * @return double total log return
-     */
-    double calculateTotalReturn(
-        const std::vector<MarketData>& data,
-        size_t short_lb,
-        size_t long_lb
-    ) const {
-        double total_ret = 0.0;
-        const size_t data_size = data.size();
-        //Start calculation after the long moving average period (make sure both moving averages can be fully calculated)
-        for (size_t i = long_lb; i < data_size - 1; ++i) {
-            // Calculate short/long term moving average (logarithmic price average to avoid price scale deviation)
-            double short_ma = 0.0, long_ma = 0.0;
-            for (size_t j = 0; j < short_lb; ++j) {
-                short_ma += data[i - j].log_price;
-            }
-            for (size_t j = 0; j < long_lb; ++j) {
-                long_ma += data[i - j].log_price;
-            }
-            short_ma /= short_lb;
-            long_ma /= long_lb;
-
-            // Generate trading signals and profits (short moving average goes long when it crosses above, short when it crosses below, no cross, no position)
-            double ret = 0.0;
-            if (short_ma > long_ma) {
-                // Long profit: logarithmic price of the next K line - logarithmic price of the current K line
-                ret = data[i + 1].log_price - data[i].log_price;
-            } else if (short_ma < long_ma) {
-                // Short profit: current K-line logarithmic price - next K-line logarithmic price
-                ret = data[i].log_price - data[i + 1].log_price;
-            }
-            total_right += right;
-        }
-        return total_ret;
-    }
-
-    /**
-     * @brief Calculate detailed returns (used for out-of-sample testing, return single K-line returns)
-     * @param data input market data (sorted by timestamp)
-     * @param short_lb short moving average period
-     * @param long_lb long moving average period
-     * @return std::vector<double> Logarithmic return sequence of a single K-line
-     */
-    std::vector<double> calculateReturnDetail(
-        const std::vector<MarketData>& data,
-        size_t short_lb,
-        size_t long_lb
-    ) const {
-        std::vector<double> returns;
-        const size_t data_size = data.size();
-        // Pre-allocate memory to improve performance (amount of income = amount of data - long moving average period)
-        returns.reserve(data_size - long_lb);
-
-        for (size_t i = long_lb; i < data_size - 1; ++i) {
-            // Calculate short/long term moving average
-            double short_ma = 0.0, long_ma = 0.0;
-            for (size_t j = 0; j < short_lb; ++j) {
-                short_ma += data[i - j].log_price;
-            }
-            for (size_t j = 0; j < long_lb; ++j) {
-                long_ma += data[i - j].log_price;
-            }
-            short_ma /= short_lb;
-            long_ma /= long_lb;
-
-            // Calculate the income of a single K line
-            double ret = 0.0;
-            if (short_ma > long_ma) {
-                ret = data[i + 1].log_price - data[i].log_price;
-            } else if (short_ma < long_ma) {
-                ret = data[i].log_price - data[i + 1].log_price;
-            }
-            returns.push_back(ret);
-        }
-        return returns;
-    }
-};
-
-//Test code implementation
-void testSplitInOutSample() {
-    std::cout << "Testing splitInOutSample..." << std::endl;
-
-    // Test normal conditions
-    std::vector<MarketData> data = {
-        {1.0, 1}, {2.0, 2}, {3.0, 3}, {4.0, 4}, {5.0, 5}
-    };
-
-    std::vector<MarketData> in_sample, out_sample;
-    auto result = UnbiasedSimulation::splitInOutSample(data, 0.6, in_sample, out_sample);
-
-    assert(result == SimErrorCode::SUCCESS);
-    assert(in_sample.size() == 3);
-    assert(out_sample.size() == 2);
-    assert(in_sample[0].timestamp < out_sample[0].timestamp);
-
-    //Test invalid ratio
-    result = UnbiasedSimulation::splitInOutSample(data, 1.5, in_sample, out_sample);
-    assert(result == SimErrorCode::INVALID_RATIO);
-
-    result = UnbiasedSimulation::splitInOutSample(data, -0.1, in_sample, out_sample);
-    assert(result == SimErrorCode::INVALID_RATIO);
-
-    //Insufficient amount of test data
-    std::vector<MarketData> small_data = {{1.0, 1}};
-    result = UnbiasedSimulation::splitInOutSample(small_data, 0.5, in_sample, out_sample);
-    assert(result == SimErrorCode::INSUFFICIENT_DATA);
-
-    // Test timestamp is non-increasing
-    std::vector<MarketData> unordered_data = {{1.0, 2}, {2.0, 1}};
-    result = UnbiasedSimulation::splitInOutSample(unordered_data, 0.5, in_sample, out_sample);
-    assert(result == SimErrorCode::TIMESTAMP_ORDER_ERR);
-
-    std::cout << "splitInOutSample tests passed." << std::endl;
-}
-
-void testWalkForwardAnalysis() {
-    std::cout << "Testing walkForwardAnalysis..." << std::endl;
-
-    //Create test data
-    std::vector<MarketData> data;
-    for (int i = 1; i <= 20; ++i) {
-        data.push_back({static_cast<double>(i), i});
-    }
-
-    //Create trading system
-    MACrossSystem system(3, 5);
-
-    std::vector<double> oos_returns;
-    auto result = UnbiasedSimulation::walkForwardAnalysis(data, 10, 5, system, oos_returns);
-
-    assert(result == SimErrorCode::SUCCESS);
-
-    //The test window size is illegal
-    result = UnbiasedSimulation::walkForwardAnalysis(data, 0, 5, system, oos_returns);
-    assert(result == SimErrorCode::INSUFFICIENT_DATA);
-
-    result = UnbiasedSimulation::walkForwardAnalysis(data, 15, 10, system, oos_returns);
-    assert(result == SimErrorCode::INSUFFICIENT_DATA);
-
-    // Test timestamp is non-increasing
-    std::vector<MarketData> unordered_data = {{1.0, 2}, {2.0, 1}};
-    result = UnbiasedSimulation::walkForwardAnalysis(unordered_data, 1, 1, system, oos_returns);
-    assert(result == SimErrorCode::TIMESTAMP_ORDER_ERR);
-
-    std::cout << "walkForwardAnalysis tests passed." << std::endl;
-}
-
-void testCrossValidation() {
-    std::cout << "Testing crossValidation..." << std::endl;
-
-    //Create test data
-    std::vector<MarketData> data;
-    for (int i = 1; i <= 20; ++i) {
-        data.push_back({static_cast<double>(i), i});
-    }
-
-    MACrossSystem system(2, 4);
-
-    std::vector<double> oos_returns;
-    auto result = UnbiasedSimulation::crossValidation(data, 4, 2, 1, system, oos_returns);
-
-    assert(result == SimErrorCode::SUCCESS);
-
-    //The test fold is illegal
-    result = UnbiasedSimulation::crossValidation(data, 1, 2, 1, system, oos_returns);
-    assert(result == SimErrorCode::INSUFFICIENT_DATA);
-
-    //Insufficient amount of test data
-    std::vector<MarketData> small_data = {{1.0, 1}, {2.0, 2}};
-    result = UnbiasedSimulation::crossValidation(small_data, 3, 1, 1, system, oos_returns);
-    assert(result == SimErrorCode::INSUFFICIENT_DATA);
-
-    // Test timestamp is non-increasing
-    std::vector<MarketData> unordered_data = {{1.0, 2}, {2.0, 1}};
-    result = UnbiasedSimulation::crossValidation(unordered_data, 2, 1, 1, system, oos_returns);
-    assert(result == SimErrorCode::TIMESTAMP_ORDER_ERR);
-
-    std::cout << "crossValidation tests passed." << std::endl;
-}
-
-void testNestedWalkForward() {
-    std::cout << "Testing nestedWalkForward..." << std::endl;
-
-    //Create test data
-    std::vector<MarketData> data;
-    for (int i = 1; i <= 30; ++i) {
-        data.push_back({static_cast<double>(i), i});
-    }
-
-    //Create multiple trading systems
-    MACrossSystem system1(2, 4);
-    MACrossSystem system2(3, 6);
-    std::vector<TradingSystem*> systems = {&system1, &system2};
-
-    std::vector<double> final_returns;
-    auto result = UnbiasedSimulation::nestedWalkForward(data, 8, 4, 12, systems, final_returns);
-
-    assert(result == SimErrorCode::SUCCESS);
-
-    //The test system list is empty
-    std::vector<TradingSystem*> empty_systems;
-    result = UnbiasedSimulation::nestedWalkForward(data, 5, 3, 10, empty_systems, final_returns);
-    assert(result == SimErrorCode::EMPTY_SYSTEM_LIST);
-
-    //The test window size is illegal
-    result = UnbiasedSimulation::nestedWalkForward(data, 0, 3, 10, systems, final_returns);
-    assert(result == SimErrorCode::INVALID_WINDOW_SIZE);
-
-    result = UnbiasedSimulation::nestedWalkForward(data, 5, 3, 0, systems, final_returns);
-    assert(result == SimErrorCode::INVALID_WINDOW_SIZE);
-
-    // Test timestamp is non-increasing
-    std::vector<MarketData> unordered_data = {{1.0, 2}, {2.0, 1}};
-    result = UnbiasedSimulation::nestedWalkForward(unordered_data, 1, 1, 1, systems, final_returns);
-    assert(result == SimErrorCode::TIMESTAMP_ORDER_ERR);
-
-    std::cout << "nestedWalkForward tests passed." << std::endl;
-}
-
-void testMACrossSystem() {
-    std::cout << "Testing MACrossSystem..." << std::endl;
-
-    // Test parameter validity
-    MACrossSystem valid_system(2, 5);
-    assert(valid_system.validateParams() == SimErrorCode::SUCCESS);
-
-    MACrossSystem invalid_system(5, 3);
-    assert(invalid_system.validateParams() == SimErrorCode::INVALID_MA_PARAM);
-
-    //Test optimization parameters
-    std::vector<MarketData> data;
-    for (int i = 1; i <= 10; ++i) {
-        data.push_back({static_cast<double>(i), i});
-    }
-
-    valid_system.optimizeParams(data);
-    auto params = valid_system.getOptimalParams();
-    assert(params.size() == 2);
-
-    // Test to generate revenue
-    auto returns = valid_system.generateReturns(data);
-    assert(returns.size() == data.size() - 5); // The long period is 5
-
-    std::cout << "MACrossSystem tests passed." << std::endl;
-}
-
-int main() {
-    std::cout << "Starting tests..." << std::endl;
-
-    testSplitInOutSample();
-    testWalkForwardAnalysis();
-    testCrossValidation();
-    testNestedWalkForward();
-    testMACrossSystem();
-
-    std::cout << "All tests passed!" << std::endl;
-
-    return 0;
-}
-```
-
-
-### 11. Statistical analysis of transaction income
-The core goal of transaction income analysis is to objectively evaluate the income quality, risk level and stability of the trading system based on income data obtained through unbiased simulation, and to avoid misjudgments caused by "improper selection of income granularity" or "indicator calculation deviation". Its core principles and ideas can be summarized as the following four points:
+### 10. Statistical analysis of transaction incomeThe core goal of transaction income analysis is to objectively evaluate the income quality, risk level and stability of the trading system based on income data obtained through unbiased simulation, and to avoid misjudgments caused by "improper selection of income granularity" or "indicator calculation deviation". Its core principles and ideas can be summarized as the following four points:
 
 1. **Standardized conversion of revenue granularity**
 Conversion of single K-line income for an indefinite look-ahead period system: For a trading system with "uncertain opening-closing time" (such as a breakthrough strategy), it is necessary to split the "cumulative income from opening to closing" into "single K-line income" - by recording the position status of each K-line (long/short/no position), and calculating the single K-line income based on the logarithmic price difference (long = next K-line price - current K Line price, short position is the opposite, no position is 0). This transformation not only eliminates the information loss of "complete transaction returns masking intermediate fluctuations", but also provides a basis for subsequent fine-grained analysis.
@@ -42017,8 +40537,7 @@ int main() {
 
 ```
 
-### 12. Permutation test verification strategy (income)
-
+### 11. Permutation test verification strategy (income)
 A **permutation test** randomly permutes sample labels (such as the positive/negative marks of transaction income), destroying correlations present in the original data and yielding an “uncorrelated” reference distribution; you then assess whether the original statistic is extreme relative to that null. In trading systems this often answers whether strategy returns are materially better than random:
 
 1. Calculate the core statistics of the original strategy (such as average return, Sharpe ratio).
@@ -42274,8 +40793,7 @@ int main() {
 ```
 
 
-### 13. Asset Cost Base (ACB) Calculation
-**FIFO PnL calculator**
+### 12. Asset Cost Base (ACB) Calculation**FIFO PnL calculator**
 
 Calculating profit and loss (PnL) is an important part of post-trade analysis.
 
@@ -42550,7 +41068,7 @@ private:
 ```
 
 
-### 14. Numerical calculation tools
+### 13. Numerical calculation tools
 ```cpp
 #ifndef _NUMERICAL_H_
 #define _NUMERICAL_H_
@@ -43209,7 +41727,7 @@ inline bool similar(double a, double b, double e = 1e-8) {
 ```
 
 
-### 15. EMA and EMASTDEV (time smoothing)
+### 14. EMA and EMASTDEV (time smoothing)
 ```cpp
 #ifndef _EMA_H_
 #define _EMA_H_
@@ -43428,8 +41946,7 @@ private:
 ```
 
 
-### 16. Avellaneda-Stoikov market making strategy
-**Theoretical Background**
+### 15. Avellaneda-Stoikov market making strategy**Theoretical Background**
 
 The Avellaneda-Stoikov model is a classic market maker strategy model proposed by Marco Avellaneda and Sasha Stoikov in 2008. This model helps market makers find a balance between risk control and profit maximization through mathematical optimization methods.
 
@@ -44205,8 +42722,7 @@ private:
 ```
 
 
-### 17. Fixed point number of trading system
-**1. Why floating point numbers are disabled**
+### 16. Fixed point number of trading system**1. Why floating point numbers are disabled**
 
 + **Accuracy collapse**: 0.1 binary cannot be tabled, high-frequency accumulation causes invalid orders/reconciliation errors
 + **Cross-environment drift**: CPU/compiler differences cause backtest-real signal distortion
@@ -44288,6 +42804,1764 @@ int main() {
     // Before sending an order: quantize to int64_t fixed-point by exchange tick / PRICE_SCALE;
     // never feed cpp_bin_float straight into the matcher
     return 0;
+}
+```
+
+## Business logic design-backtest and simulated matching
+
+Backtest and simulated matching keep the same strategy order rings and ledger query API as live trading. Historical tape is paced into quotes, a sim counter loads cash and opening lots, and a local matcher produces fills from rebuilt books and prints under session latency. Unbiased evaluation of strategy parameters stays on a separate train–test path, apart from how realistic the fills are.
+
+### 1. Four-process sim path: tape, quote adapter, trader, matcher
+
+The sim path splits into four roles that join on shared memory. A tape player loads a date window of history and publishes quotes, and may also emit prints or high-frequency factors. A quote adapter subscribes that feed and writes instrument quotes into shared memory. A sim trader registers clients under a fixed counter name, answers cash and position queries, takes order and cancel requests from strategies, and writes fills back. The matcher library keeps a working book per symbol and handles place, cancel, quote-driven match, print-driven match, and due timers. Strategies never call the matcher directly; they use the same shared-memory order API as when a live gateway is attached.
+
+```cpp
+enum class SimRole : uint8_t { TapePlayer, QuoteAdapter, SimTrader, LocalMatcher };
+
+struct SimPlane {
+    SimRole role{SimRole::SimTrader};
+    const char* counter{"paper"};   // live uses broker counter; sim uses a fixed paper name
+    bool owns_matcher{false};
+};
+
+bool wires_quotes(SimRole r) { return r == SimRole::TapePlayer || r == SimRole::QuoteAdapter; }
+bool runs_matcher(SimRole r) { return r == SimRole::LocalMatcher || r == SimRole::SimTrader; }
+
+void attach_strategy_rings(SimPlane& p) {
+    // same order / ack / fill / cash / position rings as live TD
+    p.owns_matcher = (p.role == SimRole::SimTrader);
+}
+```
+
+### 2. Historical tape pacing, break windows, and parquet streams
+
+The tape player reads columnar history for a date window. Spot quote, print, order, futures quote, and high-frequency factor each have their own loader. Playback starts at a configured clock and advances at a play speed relative to wall time, while the worker pool polls on a short interval. Gaps such as overnight into open, lunch, and after close are break windows and run at a higher break speed so empty time does not waste wall clock. Optional flags turn on print and order streams, and factor pulses. Output can publish on a message bus for the quote adapter, or write straight into shared memory when an in-process writer is selected.
+
+```cpp
+enum class TapeKind : uint8_t { SpotQuote, Print, BookOrder, FutQuote, HfPulse };
+
+struct BreakSpan { int start_sec{0}; int end_sec{0}; };
+
+struct TapePace {
+    double play_x{1.0};
+    double gap_x{40.0};
+    int poll_ms{1000};
+    bool emit_prints{false};
+    bool emit_pulses{false};
+    BreakSpan gaps[3]{};
+};
+
+double effective_speed(const TapePace& p, int day_sec) {
+    for (const auto& g : p.gaps) {
+        if (day_sec >= g.start_sec && day_sec < g.end_sec) return p.gap_x;
+    }
+    return p.play_x;
+}
+
+bool load_kind(TapeKind k, bool prints_on, bool pulses_on) {
+    if (k == TapeKind::Print || k == TapeKind::BookOrder) return prints_on;
+    if (k == TapeKind::HfPulse) return pulses_on;
+    return true;
+}
+```
+
+### 3. Opening cash and lots on the sim counter
+
+On start, the sim trader loads an opening cash amount per account and a list of opening lots. The first cash reply returns available cash equal to that amount. Each lot carries symbol, side, total and yesterday volume, sellable and frozen, today buy and sell, cost and settlement marks, and PnL fields, in the same shape as a broker book. Runtime ledger keys are counter plus account. Until the opening values are loaded, a query may miss the key; once loaded, cash and position rings answer like a live counter. Fees still accumulate on the same asset fields as production even when no separate fee schedule file is present.
+
+```cpp
+struct PaperCash {
+    char acct[32]{};
+    double seed_cash{0};
+};
+
+struct PaperLot {
+    char sym[32]{};
+    bool is_long{true};
+    int64_t total{0};
+    int64_t yday{0};
+    int64_t sellable{0};
+    double cost{0};
+    double settle{0};
+};
+
+struct PaperBook {
+    char counter[24]{"paper"};
+    PaperCash cash{};
+    PaperLot lots[64]{};
+    int n_lots{0};
+};
+
+double first_cash_reply(const PaperBook& b) { return b.cash.seed_cash; }
+
+bool key_of(const PaperBook& b, char* out, int n) {
+    return std::snprintf(out, n, "%s@%s", b.counter, b.cash.acct) > 0;
+}
+```
+
+### 4. Dual latency tables for insert and cancel
+
+Match latency and cancel latency are two independent nine-slot tables keyed by session band. Looking up a delay takes the event clock and whether the match table or the cancel table is needed. Before the open auction band the delay is often zero. From the morning open through the afternoon close, successive half-hour and lunch-spanning windows map to slots one through nine. Place sets ready time to order time plus the match-band delay; cancel sets its own ready time from the cancel-band delay. A working order does not join match until the clock reaches its ready time, and a cancel does not finish until its cancel ready time. When both tables are zero, each quote or print pass can fill or cancel immediately.
+
+```cpp
+struct DualLag {
+    double match_sec[9]{};
+    double cancel_sec[9]{};
+};
+
+int band_of_minute(int minute) {
+    if (minute < 9 * 60 + 30) return -1; // pre-open: often forced to 0
+    const int cut[] = {
+        10 * 60, 10 * 60 + 30, 11 * 60, 11 * 60 + 30,
+        13 * 60 + 30, 14 * 60, 14 * 60 + 30, 15 * 60
+    };
+    for (int i = 0; i < 8; ++i) if (minute < cut[i]) return i;
+    return 8;
+}
+
+double pick_lag_sec(const DualLag& t, int minute, bool for_cancel) {
+    int b = band_of_minute(minute);
+    if (b < 0) return 0;
+    return for_cancel ? t.cancel_sec[b] : t.match_sec[b];
+}
+
+int64_t ready_us(int64_t stamp_us, double lag_sec) {
+    return stamp_us + static_cast<int64_t>(lag_sec * 1e6);
+}
+```
+
+### 5. Quote rebuild path and print path with rigid rule
+
+Each extended quote is turned into a short rebuild book inside the matcher. Bid and ask matchers walk working buys and sells against those levels. A second path handles public prints: filter them, sort if needed, then match by side. With the rigid flag on, a print is stricter about lifting or hitting a resting limit; with it off, more prints can add size at the print price or the limit price, depending on which side arrived later. Quote match and print match can run on the same instrument in one pass, and both append fills into one list for the sim trader to publish.
+
+```cpp
+struct RebuildLevel { double px{0}; int64_t qty{0}; bool is_bid{true}; };
+
+struct MatchOpts {
+    bool use_prints{true};
+    bool rigid_print{true};
+};
+
+struct WorkOrder {
+    uint64_t id{0};
+    bool bid{true};
+    double limit{0};
+    int64_t left{0};
+    int64_t ready_us{0};
+};
+
+int64_t hit_level(WorkOrder& o, const RebuildLevel& lv, int64_t now_us) {
+    if (now_us < o.ready_us || o.left <= 0 || lv.qty <= 0) return 0;
+    bool px_ok = o.bid ? lv.px <= o.limit + 1e-6 : lv.px + 1e-6 >= o.limit;
+    if (!px_ok) return 0;
+    int64_t n = o.left < lv.qty ? o.left : lv.qty;
+    o.left -= n;
+    return n;
+}
+
+bool print_may_fill(const WorkOrder& o, double trade_px, bool rigid, double bend) {
+    double gate = o.limit + (rigid ? (o.bid ? -bend : bend) : 0);
+    return o.bid ? trade_px <= gate + 1e-6 : trade_px + 1e-6 >= gate;
+}
+```
+
+### 6. Accept checks, reject codes, and order status classes
+
+Before an order enters the instrument context, place validation rejects non-positive size, sides other than buy or sell, duplicate ids, missing timestamps, bad price types, unknown symbol or account, limit-up or limit-down hits, and self-trade. Flow and notional limits use the same language as live risk: order and cancel rates, per-ticker and account totals, cancel-to-order ratio, and notional caps. Tickets are hanging, running, or final; final tickets stay out of the next match pass. Partial fill and partial cancel leave the remainder working until size reaches zero or the cancel finishes after its delay.
+
+```cpp
+enum class TicketMark : uint8_t {
+    PendingNew, Working, PartialFill, PendingCancel, PartialCancel, DoneFill, DoneCancel, Rejected
+};
+
+enum class DenyWhy : uint16_t {
+    Ok = 0, BadSize, BadSide, DupId, NoTime, BadPx, BadPxType,
+    BadSymbol, BadAcct, LimitBand, SelfTrade, FlowCap, CancelCap, NotionalCap
+};
+
+bool is_final(TicketMark m) {
+    return m == TicketMark::DoneFill || m == TicketMark::DoneCancel || m == TicketMark::Rejected;
+}
+
+bool is_hanging(TicketMark m) {
+    return m == TicketMark::Working || m == TicketMark::PartialFill || m == TicketMark::PendingCancel;
+}
+
+DenyWhy check_new(int64_t qty, int side, bool id_seen, bool has_time) {
+    if (qty <= 0) return DenyWhy::BadSize;
+    if (side != 0 && side != 1) return DenyWhy::BadSide;
+    if (id_seen) return DenyWhy::DupId;
+    if (!has_time) return DenyWhy::NoTime;
+    return DenyWhy::Ok;
+}
+```
+
+### 7. Deferred timer match and cancel
+
+If place or cancel sets a ready time in the future, the matcher does not block waiting. It registers a timer on the instrument keyed by that ready time. On each clock step the trader asks the matcher to run due timers: match timers run the quote and print paths for tickets that are ready; cancel timers finish pending cancels and may emit a partial cancel when size remains. New quotes and prints still drive the hot path, session-band latency still applies, and the strategy order rings are not blocked.
+
+```cpp
+struct DueItem {
+    uint64_t order_id{0};
+    int64_t ready_us{0};
+    bool is_cancel{false};
+};
+
+struct DueHeap {
+    DueItem q[256]{};
+    int n{0};
+};
+
+void park(DueHeap& h, uint64_t id, int64_t ready_us, bool cancel) {
+    if (h.n >= 256) return;
+    h.q[h.n++] = DueItem{id, ready_us, cancel};
+}
+
+int drain_due(DueHeap& h, int64_t now_us, DueItem* out, int cap) {
+    int w = 0;
+    int r = 0;
+    for (int i = 0; i < h.n; ++i) {
+        if (h.q[i].ready_us <= now_us && w < cap) out[w++] = h.q[i];
+        else h.q[r++] = h.q[i];
+    }
+    h.n = r;
+    return w;
+}
+```
+
+### 8. maker-only matchmaker
+Maker-Only matching engine for backtesting trading strategies. The engine only allows limit orders (maker orders) and prohibits market orders or aggressive limit orders (taker orders).
+
+**Features**
+
+1. **Maker-only Order Validation**: Reject orders that would cross the spread and become taker orders
+2. **Order Management**: Supports submitting, canceling and tracking orders
+3. **Partial transaction processing**: Supports partial execution of orders, and the remaining quantity remains in the order book
+4. **Timeout Cancellation**: Automatically cancel orders that have been open for too long
+5. **Deviation Cancellation**: Cancel the order when the market price deviates too much from the order price
+6. **Leg Support**: Supports arbitrage strategies on legs (A and B) of two different markets
+7. **Transaction Record**: Record all transaction details, including the transaction that triggered the transaction
+
+**Core Components**
+
+**MakerSimulator class (main class that handles all matching logic)**:
+
++ `post_order()`:Submit new orders, verify to prevent taker orders
++ `on_tick()`: Process incoming market data and match existing orders
++ `cancel_order()`: Cancel specific order by ID
++ `cancel_timeout_orders()`:Cancel orders whose opening time exceeds the specified timeout period
++ `cancel_deviation_orders()`:Cancel orders whose prices deviate from the current market price by more than a threshold
+
+**Order Tracking Information:**
+
++ Order ID
++ Market leg (A or B)
++ direction (buy or sell)
++ price and quantity
++ Transaction quantity
++ Status (new order, partially filled, fully filled, canceled, rejected)
++ timestamp
+
+**Transaction record information:**
+
++ Associated order ID
++ market leg
++ direction
++ price and quantity
++ timestamp
++ Match transaction ID
+
+**Test Scenario**
+
+1. **Fully executed**: The order is completely executed by the matching transaction
+2. **Partially executed**: The order is partially executed and the remaining quantity remains active.
+3. **Single-Leg Deal**: In a two-leg strategy, only one leg gets a deal
+4. **Taker Rejected**: An attempt to submit a taker order was correctly rejected.
+5. **Duplicate processing**: Process duplicate order IDs
+
+**Important details of the code**
+
+**Prevent taking orders**
+
+Before accepting any order, the system checks whether it will become a taker:
+
++ Orders with a purchase price higher than or equal to the current latest price will be rejected
++ Orders with a sell price lower than or equal to the current latest price will be rejected
+
+**Matching logic**
+
+The order matches the incoming trading price:
+
++ Buy orders are matched when transaction price ≤ order price
++ Sell orders are matched when transaction price ≥ order price
++ The matching result is a partial transaction (simulated as 50% of the remaining quantity)
+
+**Order Life Cycle**
+
+Orders go through the following states:
+
+1. NEW - Just submitted
+2. PARTIALLY_FILLED - Part of the quantity has been sold
+3. FILLED - All quantities have been sold
+4. CANCELLED - Canceled by user or system
+5. REJECTED - rejected on submission (e.g. taker order)
+
+
+```cpp
+#ifndef MAKER_SIMULATOR_H
+#define MAKER_SIMULATOR_H
+
+#include <string>
+#include <map>
+#include <queue>
+#include <vector>
+#include <chrono>
+#include <memory>
+
+//Quote data structure
+struct TickData {
+    double bid_price; // buy one price
+    double ask_price; // Ask one price
+    double last_price; // latest price
+    std::chrono::steady_clock::time_point timestamp; // timestamp
+    std::string trade_id; // Transaction ID
+};
+
+// forward declaration
+struct Order;
+struct Trade;
+
+enum class OrderSide {
+    BUY, // buy
+    SELL // sell
+};
+
+enum class OrderStatus {
+    NEW, // new order
+    PARTIALLY_FILLED, // Partial transaction
+    FILLED, // fully completed
+    CANCELLED, // Canceled
+    REJECTED // Rejected
+};
+
+enum class Leg {
+    A, // thigh A
+    B // Leg B
+};
+
+// order structure
+struct Order {
+    std::string order_id; // Order ID
+    Leg leg; // market leg
+    OrderSide side; // Buy and sell direction
+    double price; // price
+    double size; // quantity
+    double filled_size; // Transaction quantity
+    OrderStatus status; // order status
+    std::chrono::steady_clock::time_point timestamp; // Order timestamp
+    std::chrono::steady_clock::time_point last_update; // Last update time
+};
+
+//Deal structure
+struct Trade {
+    std::string order_id; // Order ID
+    Leg leg; // market leg
+    OrderSide side; // Buy and sell direction
+    double price; // transaction price
+    double size; // Transaction quantity
+    std::chrono::steady_clock::time_point timestamp; // Transaction timestamp
+    std::string matched_by; // Transaction ID that triggered the transaction
+};
+
+// Maker trading simulator class
+class MakerSimulator {
+public:
+    MakerSimulator();
+
+    //Submit new order
+    bool post_order(const std::string& order_id, Leg leg, OrderSide side,
+                   double price, double size);
+
+    // Process market data
+    void on_tick(Leg leg, const TickData& tick);
+
+    // Cancel order
+    bool cancel_order(const std::string& order_id);
+
+    //Cancel the order based on the timeout period
+    void cancel_timeout_orders(std::chrono::milliseconds timeout);
+
+    // Cancel order based on price deviation
+    void cancel_deviation_orders(double threshold_percent);
+
+    // Get the current order
+    const std::map<std::string, Order>& get_orders() const;
+
+    // Get transaction records
+    const std::vector<Trade>& get_trades() const;
+
+    // Calculate current equity
+    double calculate_equity() const;
+
+    // Get cash balance
+    double get_cash() const;
+
+private:
+    std::map<std::string, Order> orders_; // Order mapping table
+    std::vector<Trade> trades_; // Transaction records
+    std::map<Leg, double> last_prices_; // latest prices
+    double equity_; // total equity
+    double cash_; // cash
+
+    // Helper method
+    bool is_taker_order(Leg leg, OrderSide side, double price) const;
+    void match_order(Order& order, const TickData& tick);
+    void cancel_order_internal(Order& order);
+};
+
+#endif // MAKER_SIMULATOR_H
+```
+
+```cpp
+#include "maker_simulator.h"
+#include <iostream>
+#include <algorithm>
+#include <cmath>
+
+//Constructor
+MakerSimulator::MakerSimulator() : equity_(0.0), cash_(100000.0) {
+    //Initialize cash to 100000.0
+}
+
+//Submit order
+bool MakerSimulator::post_order(const std::string& order_id, Leg leg, OrderSide side,
+double price, double size) {
+    // Check if it will become a taker
+    if (is_taker_order(leg, side, price)) {
+        std::cerr << "Attempt to take order detected, order" << order_id
+            << "Rejected." << std::endl;
+        return false;
+    }
+
+    // Check if there are enough funds (for buy orders)
+    if (side == OrderSide::BUY) {
+        double cost = price * size;
+        if (cost > cash_) {
+            std::cerr << "Insufficient funds, order" << order_id
+                << "Rejected." << std::endl;
+            return false;
+        }
+    }
+
+    //Create new order
+    Order order;
+    order.order_id = order_id;
+    order.leg = leg;
+    order.side = side;
+    order.price = price;
+    order.size = size;
+    order.filled_size = 0.0;
+    order.status = OrderStatus::NEW;
+    order.timestamp = std::chrono::steady_clock::now();
+    order.last_update = order.timestamp;
+
+    //Add to order mapping table
+    orders_[order_id] = order;
+    return true;
+}
+
+// Process market data
+void MakerSimulator::on_tick(Leg leg, const TickData& tick) {
+    //Update the latest price
+    last_prices_[leg] = tick.last_price;
+
+    // Check if each order has a match
+    std::vector<std::string> orders_to_update;
+    for (const auto& pair : orders_) {
+        const Order& order = pair.second;
+        if (order.leg == leg && order.status != OrderStatus::CANCELLED &&
+            order.status != OrderStatus::FILLED) {
+            orders_to_update.push_back(order.order_id);
+        }
+    }
+
+    // Handle matching
+    for (const std::string& order_id : orders_to_update) {
+        auto it = orders_.find(order_id);
+        if (it != orders_.end()) {
+            match_order(it->second, tick);
+        }
+    }
+}
+
+// Cancel order
+bool MakerSimulator::cancel_order(const std::string& order_id) {
+    auto it = orders_.find(order_id);
+    if (it != orders_.end()) {
+        cancel_order_internal(it->second);
+        return true;
+    }
+    return false;
+}
+
+//Cancel the order based on the timeout period
+void MakerSimulator::cancel_timeout_orders(std::chrono::milliseconds timeout) {
+    auto now = std::chrono::steady_clock::now();
+    for (auto& pair : orders_) {
+        Order& order = pair.second;
+        if (order.status != OrderStatus::CANCELLED &&
+            order.status != OrderStatus::FILLED) {
+            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            now - order.timestamp);
+            if (elapsed >= timeout) {
+                cancel_order_internal(order);
+            }
+        }
+    }
+}
+
+// Cancel order based on price deviation
+void MakerSimulator::cancel_deviation_orders(double threshold_percent) {
+    for (auto& pair : orders_) {
+        Order& order = pair.second;
+        if (order.status != OrderStatus::CANCELLED &&
+            order.status != OrderStatus::FILLED) {
+            auto it = last_prices_.find(order.leg);
+            if (it != last_prices_.end()) {
+                double last_price = it->second;
+                if (last_price > 0) {
+                    double deviation = std::abs(order.price - last_price) / last_price;
+                    if (deviation >= threshold_percent / 100.0) {
+                        cancel_order_internal(order);
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Get the current order
+const std::map<std::string, Order>& MakerSimulator::get_orders() const {
+    return orders_;
+}
+
+// Get transaction records
+const std::vector<Trade>& MakerSimulator::get_trades() const {
+    return trades_;
+}
+
+// Calculate current equity
+double MakerSimulator::calculate_equity() const {
+    // Calculate current equity = cash + position value
+    double total_equity = cash_;
+
+    // Calculate position value
+    std::map<std::pair<Leg, OrderSide>, double> positions; // Number of positions
+    std::map<std::pair<Leg, OrderSide>, double> avg_prices; // average position price
+
+    // Calculate positions based on transaction records
+    for (const auto& trade : trades_) {
+        std::pair<Leg, OrderSide> key = std::make_pair(trade.leg, trade.side);
+
+        if (trade.side == OrderSide::BUY) {
+            // Buy to increase long position
+            if (positions.find(key) == positions.end()) {
+                positions[key] = trade.size;
+                avg_prices[key] = trade.price;
+            } else {
+                // Weighted average calculation average price
+                double total_quantity = positions[key] + trade.size;
+                avg_prices[key] = (avg_prices[key] * positions[key] + trade.price * trade.size) / total_quantity;
+                positions[key] = total_quantity;
+            }
+        } else {
+            // Selling increases the short position (represented by a negative number)
+            if (positions.find(key) == positions.end()) {
+                positions[key] = -trade.size;
+                avg_prices[key] = trade.price;
+            } else {
+                // Weighted average calculation average price
+                double total_quantity = positions[key] - trade.size;
+                avg_prices[key] = (avg_prices[key] * std::abs(positions[key]) + trade.price * trade.size) / std::abs(total_quantity);
+                positions[key] = total_quantity;
+            }
+        }
+    }
+
+    // Calculate the position value based on the latest market price
+    for (const auto& position : positions) {
+        Leg leg = position.first.first;
+        OrderSide side = position.first.second;
+        double quantity = position.second;
+        double avg_price = avg_prices.at(position.first);
+
+        auto it = last_prices_.find(leg);
+        if (it != last_prices_.end()) {
+            double current_price = it->second;
+
+            if (side == OrderSide::BUY) {
+                // Long position profit and loss = position quantity * (current price - average position price)
+                total_equity += quantity * (current_price - avg_price);
+            } else {
+                // Short position profit and loss = position quantity * (position average price - current price)
+                total_equity += std::abs(quantity) * (avg_price - current_price);
+            }
+        }
+    }
+
+    return total_equity;
+}
+
+// Get cash balance
+double MakerSimulator::get_cash() const {
+    return cash_;
+}
+
+// Check if it is a taker order
+bool MakerSimulator::is_taker_order(Leg leg, OrderSide side, double price) const {
+    // Check if the order will cross the spread and become a taker
+    auto it = last_prices_.find(leg);
+    if (it != last_prices_.end()) {
+        double last_price = it->second;
+        if (side == OrderSide::BUY && price >= last_price) {
+            return true; // If the buying price is higher than or equal to the latest price, it is a taker order
+        } else if (side == OrderSide::SELL && price <= last_price) {
+            return true; // If the selling price is lower than or equal to the latest price, it is a taker order
+        }
+    }
+    return false;
+}
+
+// Match orders
+void MakerSimulator::match_order(Order& order, const TickData& tick) {
+    bool matched = false;
+
+    // Buy order, matched when the transaction price is less than or equal to our price
+    if (order.side == OrderSide::BUY && tick.last_price <= order.price) {
+        matched = true;
+    }
+    // Sell order, matched when the transaction price is greater than or equal to our price
+    else if (order.side == OrderSide::SELL && tick.last_price >= order.price) {
+        matched = true;
+    }
+
+    if (matched) {
+        // Calculate the order transaction quantity (this time we try to complete the transaction)
+        double remaining_size = order.size - order.filled_size;
+        double fill_size = remaining_size; // Remaining quantity of fully completed transaction
+
+        //Create transaction record
+        Trade trade;
+        trade.order_id = order.order_id;
+        trade.leg = order.leg;
+        trade.side = order.side;
+        trade.price = order.price; // Use our price, not the transaction price
+        trade.size = fill_size;
+        trade.timestamp = tick.timestamp;
+        trade.matched_by = tick.trade_id;
+
+        trades_.push_back(trade);
+
+        // Update funds
+        if (order.side == OrderSide::BUY) {
+            cash_ -= trade.price * trade.size; // Purchase minus cash
+        } else {
+            cash_ += trade.price * trade.size; // Selling increases cash
+        }
+
+        //Update order
+        order.filled_size += fill_size;
+        order.last_update = std::chrono::steady_clock::now();
+
+        if (order.filled_size >= order.size) {
+            order.status = OrderStatus::FILLED;
+        } else {
+            order.status = OrderStatus::PARTIALLY_FILLED;
+        }
+    }
+}
+
+// Internal order cancellation method
+void MakerSimulator::cancel_order_internal(Order& order) {
+    if (order.status != OrderStatus::CANCELLED && order.status != OrderStatus::FILLED) {
+        order.status = OrderStatus::CANCELLED;
+        order.last_update = std::chrono::steady_clock::now();
+    }
+}
+```
+
+```cpp
+#include "maker_simulator.h"
+#include <iostream>
+#include <cassert>
+#include <thread>
+#include <chrono>
+
+//Test scenario A: Complete transaction
+void test_scenario_a() {
+    std::cout << "=== Test scenario A: Complete transaction ===" << std::endl;
+
+    MakerSimulator simulator;
+
+    //Submit order
+    bool result = simulator.post_order("order1", Leg::A, OrderSide::BUY, 100.0, 10.0);
+    assert(result);
+
+    //Create market data that can match orders
+    TickData tick;
+    tick.bid_price = 99.0;
+    tick.ask_price = 101.0;
+    tick.last_price = 100.0; // matches our bid price of 100.0
+    tick.timestamp = std::chrono::steady_clock::now();
+    tick.trade_id = "trade1";
+
+    // Process market conditions
+    simulator.on_tick(Leg::A, tick);
+
+    // Check results
+    const auto& orders = simulator.get_orders();
+    const auto& trades = simulator.get_trades();
+
+    assert(orders.at("order1").status == OrderStatus::FILLED);
+    assert(trades.size() >= 1);
+
+    std::cout << "Scenario A passes: the order is fully filled" << std::endl;
+}
+
+//Test scenario B: partial transaction
+void test_scenario_b() {
+    std::cout << "=== Test Scenario B: Partial Transaction ===" << std::endl;
+
+    MakerSimulator simulator;
+
+    //Submit order
+    bool result = simulator.post_order("order2", Leg::B, OrderSide::SELL, 105.0, 20.0);
+    assert(result);
+
+    //Create market data that can partially match orders
+    TickData tick;
+    tick.bid_price = 104.0;
+    tick.ask_price = 106.0;
+    tick.last_price = 105.0; // matches our ask price of 105.0
+    tick.timestamp = std::chrono::steady_clock::now();
+    tick.trade_id = "trade2";
+
+    // Process market conditions
+    simulator.on_tick(Leg::B, tick);
+
+    // Check the result - it should be fully executed (our logic now is fully executed)
+    const auto& orders = simulator.get_orders();
+    const auto& trades = simulator.get_trades();
+
+    assert(orders.at("order2").status == OrderStatus::FILLED);
+    assert(trades.size() >= 1);
+    assert(orders.at("order2").filled_size == 20.0);
+
+    std::cout << "Scenario B passes: the order is fully filled" << std::endl;
+}
+
+//Test scenario C: One leg is traded and the other leg is not.
+void test_scenario_c() {
+    std::cout << "=== Test scenario C: One leg is traded, the other leg is not traded ===" << std::endl;
+
+    MakerSimulator simulator;
+
+    // Submit a buy order on leg A
+    bool result1 = simulator.post_order("order3a", Leg::A, OrderSide::BUY, 100.0, 10.0);
+    assert(result1);
+
+    // Submit a sell order on leg B
+    bool result2 = simulator.post_order("order3b", Leg::B, OrderSide::SELL, 105.0, 10.0);
+    assert(result2);
+
+    //Create market data that can match leg A
+    TickData tickA;
+    tickA.bid_price = 99.0;
+    tickA.ask_price = 101.0;
+    tickA.last_price = 100.0; // matches our bid price of 100.0
+    tickA.timestamp = std::chrono::steady_clock::now();
+    tickA.trade_id = "trade3a";
+
+    // Process the market price of leg A
+    simulator.on_tick(Leg::A, tickA);
+
+    //Create market data that cannot match leg B
+    TickData tickB;
+    tickB.bid_price = 104.0;
+    tickB.ask_price = 106.0;
+    tickB.last_price = 104.5; // Does not match our ask price of 105.0
+    tickB.timestamp = std::chrono::steady_clock::now();
+    tickB.trade_id = "trade3b";
+
+    // Process the market price of leg B
+    simulator.on_tick(Leg::B, tickB);
+
+    // Check results
+    const auto& orders = simulator.get_orders();
+    const auto& trades = simulator.get_trades();
+
+    // Leg A should be fully traded
+    assert(orders.at("order3a").status == OrderStatus::FILLED);
+
+    // Leg B should be untraded
+    assert(orders.at("order3b").status == OrderStatus::NEW);
+
+    std::cout << "Scenario C passes: one leg is filled, the other leg is not filled" << std::endl;
+}
+
+// Test scenario D: The order-taking attempt is rejected
+void test_scenario_d() {
+    std::cout << "=== Test scenario D: Take attempt rejected ===" << std::endl;
+
+    MakerSimulator simulator;
+
+    //Set the latest price
+    TickData initial_tick;
+    initial_tick.bid_price = 99.0;
+    initial_tick.ask_price = 101.0;
+    initial_tick.last_price = 100.0;
+    initial_tick.timestamp = std::chrono::steady_clock::now();
+    initial_tick.trade_id = "initial";
+
+    simulator.on_tick(Leg::A, initial_tick);
+
+    // Try to submit a taker order (the buying price is higher than the latest price)
+    bool result = simulator.post_order("order4", Leg::A, OrderSide::BUY, 101.5, 10.0);
+
+    // should be rejected
+    assert(!result);
+
+    // Check that the order has not been added
+    const auto& orders = simulator.get_orders();
+    assert(orders.find("order4") == orders.end());
+
+    std::cout << "Scenario D passes: take attempt is correctly rejected" << std::endl;
+}
+
+//Test Scenario E: Repeat Order Processing
+void test_scenario_e() {
+    std::cout << "=== Test scenario E: Duplicate order processing ===" << std::endl;
+
+    MakerSimulator simulator;
+
+    //Submit order
+    bool result1 = simulator.post_order("order5", Leg::A, OrderSide::BUY, 100.0, 10.0);
+    assert(result1);
+
+    // Get original order information
+    const auto& orders_before = simulator.get_orders();
+    double original_size = orders_before.at("order5").size;
+
+    // Submit the order with the same ID again (the original order should be replaced)
+    bool result2 = simulator.post_order("order5", Leg::A, OrderSide::SELL, 95.0, 5.0);
+    // This should replace the existing order
+
+    // Check that we still only have one order, but the properties have changed
+    const auto& orders = simulator.get_orders();
+    assert(orders.size() == 1);
+    assert(orders.begin()->first == "order5");
+    assert(orders.at("order5").side == OrderSide::SELL);
+    assert(orders.at("order5").price == 95.0);
+    assert(orders.at("order5").size == 5.0);
+
+    std::cout << "Scenario E passed: duplicate orders are handled correctly" << std::endl;
+}
+
+// main function
+int main() {
+    std::cout << "Run Maker Simulator test scenario" << std::endl;
+
+    test_scenario_a();
+    test_scenario_b();
+    test_scenario_c();
+    test_scenario_d();
+    test_scenario_e();
+
+    std::cout << "\nAll test scenarios passed!" << std::endl;
+
+    return 0;
+}
+```
+
+**Fills from a historical replay**
+
+Replay matching fills an accepted order from a historical book and from prints. An order is dropped when its timestamp is invalid, its token is 0, its size is not positive, its side is outside buy and sell, or the token is already present. An accepted order is marked working, and its filled size and cash are cleared. The effective time is the order time plus a simulated lag. Before 09:30 the lag is 0. From 09:30 to 10:00, 10:00 to 10:30, 10:30 to 11:00, 11:00 to 11:30, 11:30 to 13:30, 13:30 to 14:00, and 14:00 to 14:30, each window reads one configured millisecond value. From 14:30 onward the last value is used. That value is multiplied by 1000 and added to the order time in microseconds. An order that still carries a later ready time does not join this pass.
+
+On the book, a buy fills when the level price is at or below the limit, and a sell fills when the level price is at or above the limit. A difference under 1e-6 is the same price. The fill size is the smaller of the remaining size and the level size. The order and the level both decrease, and the average is weighted by size. Zero remaining is a complete fill. A positive remainder is a partial fill.
+
+On prints, a trade older than the order is ignored. Without a tight limit, a buy accepts a trade at or below the limit and a sell accepts a trade at or above the limit. With the tight limit, a buy limit is reduced by the instrument price offset and a sell limit is increased by it. The fill size is again the smaller of the two sizes. When the buy sequence is greater than the sell sequence, the buyer arrived later. When the sell sequence is greater, the seller arrived later. If that later side is this order's side, the fill price is the print. Otherwise it is this order's limit.
+
+```cpp
+struct OpenTicket {
+    int64_t stamp_us{0};
+    uint64_t token{0};
+    bool bid{true};
+    double cap{0};
+    int64_t shares{0};
+    int64_t done{0};
+    double cash{0};
+    int8_t mark{1};
+    int64_t ready_us{0};
+};
+
+int64_t replay_lag_us(int minute, const double* slot_ms) {
+    if (minute < 9 * 60 + 30) return 0;
+    const int cut_min[] = {
+        10 * 60, 10 * 60 + 30, 11 * 60, 11 * 60 + 30,
+        13 * 60 + 30, 14 * 60, 14 * 60 + 30
+    };
+    int band = 7;
+    for (int i = 0; i < 7; ++i) {
+        if (minute < cut_min[i]) { band = i; break; }
+    }
+    return static_cast<int64_t>(slot_ms[band] * 1000.0);
+}
+
+bool px_eq(double a, double b) { return std::abs(a - b) < 1e-6; }
+
+bool level_ok(const OpenTicket& t, double level) {
+    if (px_eq(level, t.cap)) return true;
+    return t.bid ? level <= t.cap : t.cap <= level;
+}
+
+bool print_ok(const OpenTicket& t, double trade_px, double bend, bool tight) {
+    double gate = t.cap + (tight ? (t.bid ? -bend : bend) : 0);
+    if (px_eq(trade_px, gate)) return true;
+    return t.bid ? trade_px <= gate : gate <= trade_px;
+}
+
+double print_deal_px(const OpenTicket& t, double trade_px, int64_t bid_seq, int64_t ask_seq) {
+    bool buyer_later = bid_seq > ask_seq;
+    bool same = t.bid ? buyer_later : !buyer_later;
+    return same ? trade_px : t.cap;
+}
+
+int64_t book_fill(OpenTicket& t, int64_t now_us, double px, int64_t avail) {
+    int64_t left = t.shares - t.done;
+    if (left <= 0 || avail <= 0 || now_us < t.ready_us) return 0;
+    int64_t n = left < avail ? left : avail;
+    t.cash += px * static_cast<double>(n);
+    t.done += n;
+    t.mark = t.done >= t.shares ? 2 : 3;
+    return n;
+}
+```
+
+### 9. Unbiased trading simulation
+The core goal of unbiased trading simulation is to eliminate the interference of "future data leakage" and "over-fitting" on the performance evaluation of the trading system, and obtain an unbiased estimate of the future performance of the system by simulating the "training-testing" process under real trading scenarios. Its core principles and ideas can be summarized as the following four points:
+
+1. **Strict time series data division logic**
+Separation of in-sample (IS) and out-of-sample (OOS): Market data (such as logarithmic price candlesticks) must be sorted by timestamp to ensure that the in-sample data is completely earlier than the out-of-sample data, and to prevent future leaks of "training models with future data". When dividing, it is necessary to control the proportion within the sample (usually 0.5~0.8), and ensure that both have sufficient data volume (at least 1 valid data point each) to avoid evaluation bias caused by insufficient data volume.
+Guard Buffer mechanism: For the indicator lookback period (such as the number of K lines required for moving average calculation) and the target forward period (such as predicting the future returns of N K lines), a "guard buffer" (size = min (lookback period, forward period)-1) is set at the boundary between the in-sample and out-of-sample periods. For example, if the indicator needs to look back 20 K lines and the target looks forward to 10 K lines, the buffer zone will be 9 K lines to avoid hidden future leakage of in-sample data and out-of-sample data due to "indicator calculation overlap".
+2. **Forward Analysis (Walkforward Analysis): simulate the real transaction iteration process**
+Sliding window training - testing: The historical data is divided into continuous "folds" according to "training window + test window". Within each fold, the training window data is first used to optimize the system parameters (such as the moving average period), and then the test window data is used to calculate out-of-sample returns. Then the entire window is slid forward (sliding step = test window size), and the process is repeated until all data is traversed.
+Fits real trading scenarios: Each round of training only uses "historical data as of the current point in time", and testing is only for "limited time windows in the future", fully replicating the process of "regularly updating the model and gradually executing transactions" in real trading, avoiding overfitting caused by training with the full amount of data at one time, and at the same time capturing the impact of market non-stationarity on system performance.
+3. **Cross-Validation: Supplementary evaluation for efficient use of data**
+The folding logic of time series adaptation: divide the data into N consecutive "folds" according to time, each fold is used as a test set in turn, and the remaining folds (excluding the test set and guard buffer) are used as the training set. Different from traditional cross-validation, guard buffers need to be set up on both sides of the test set to prevent in-sample-test set data overlap caused by indicator lookback/forward.
+Balance data utilization and unbiasedness: Solve the problem of "small amount of early training data" in forward testing and make full use of historical data through multiple rounds of training-testing, but you need to pay attention to its limitations - because it includes "future data of the test set" for training, it may introduce a slight optimistic bias to the evaluation of non-stationary markets, so it is usually used as a supplement to forward testing, not a replacement.
+4. **Nested Forward Testing: Handling Selection Bias in Multi-Level Optimization**
+Two-level optimization separation: For the scenario of "system parameter optimization (inner layer) + multi-system selection (outer layer)", the "selection bias" needs to be eliminated through a nested structure. The inner layer uses forward testing to evaluate the out-of-sample performance of each competing system (such as moving average strategies with different parameters). The outer layer selects the optimal system based on the unbiased results of the inner layer, and then uses an independent outer test window to verify the final performance.
+Avoid "survivor bias": If you directly select the "system with the best performance in the sample" from multiple systems, it is easy to overestimate the performance due to "accidental luck"; the nested structure ensures that the selected system is a system with "real generalization ability" rather than "accidental fitting noise" by "using OOS results to screen the system in the inner layer and verifying it in the outer layer with new OOS results".
+
+```cpp
+#include <vector>
+#include <algorithm>
+#include <cmath>
+#include <numeric>
+#include <cstdint>
+#include <iostream>
+#include <cassert>
+
+// Error code definition (unbiased simulation of abnormal scenarios)
+enum class SimErrorCode : int32_t {
+    SUCCESS = 0, // success
+    INVALID_RATIO = 1, // Illegal proportion within the sample (≤0 or ≥1)
+    INSUFFICIENT_DATA = 2, // Insufficient amount of data (cannot meet window/fold requirements)
+    EMPTY_TRAIN_DATA = 3, // The training set is empty (after excluding the guard buffer)
+    EMPTY_SYSTEM_LIST = 4, //The competing system list is empty
+    INVALID_WINDOW_SIZE = 5, // The window size is illegal (the outer training window exceeds the limit or the inner period is illegal)
+    INVALID_MA_PARAM = 6, //Illegal moving average parameters (maximum period of short moving average ≥ maximum period of long moving average)
+    TIMESTAMP_ORDER_ERR = 7 // Timestamp is non-increasing (data is out of order, which may lead to future leaks)
+};
+
+// Market data structure (use logarithmic prices to ensure consistent return scale)
+struct MarketData {
+    double log_price; // Logarithmic price (used for income calculation to avoid absolute price deviation)
+    int timestamp; // Timestamp (ensures that data is processed in chronological order to prevent future leakage)
+};
+
+// Trading system abstract class (strategy core interface, supports parameter optimization and income generation)
+class TradingSystem {
+public:
+    virtual ~TradingSystem() = default;
+
+    /**
+     * @brief In-sample parameter optimization (input in-sample logarithmic price data)
+     * @param in_sample_data In-sample market data (sorted by timestamp)
+     */
+    virtual void optimizeParams(const std::vector<MarketData>& in_sample_data) = 0;
+
+    /**
+     * @brief generates trading income (outputs the logarithmic income of each K line, and the income is 0 when there is no position)
+     * @param data input market data (sorted by timestamp)
+     * @return std::vector<double> Logarithmic return sequence of a single K-line
+     */
+    virtual std::vector<double> generateReturns(const std::vector<MarketData>& data) const = 0;
+
+    /**
+     * @brief Get the optimal parameters (return the optimized strategy parameters for subsequent analysis)
+     * @return std::vector<double> Optimal parameter sequence (such as moving average period, threshold, etc.)
+     */
+    virtual std::vector<double> getOptimalParams() const = 0;
+};
+
+class UnbiasedSimulation {
+public:
+    /**
+     * @brief 1. Division of data inside/outside the sample (sorted by timestamp to avoid future leakage)
+     * @param full_data complete market data
+     * @param in_sample_ratio The proportion of data in the sample (0 < ratio < 1)
+     * @param out_in_sample Output: In-sample data (sorted by timestamp)
+     * @param out_out_sample Output: out-of-sample data (sorted by timestamp)
+     * @return SimErrorCode error code
+     */
+    static SimErrorCode splitInOutSample(
+        const std::vector<MarketData>& full_data,
+        double in_sample_ratio,
+        std::vector<MarketData>& out_in_sample,
+        std::vector<MarketData>& out_out_sample
+    ) {
+        // Verify the proportion within the sample (must be within the range of (0,1) to ensure that there is data inside/outside the sample)
+        if (in_sample_ratio <= 0.0 || in_sample_ratio >= 1.0) {
+            return SimErrorCode::INVALID_RATIO;
+        }
+
+        // Sort by timestamp (to avoid future leaks caused by data disorder)
+        std::vector<MarketData> sorted_data = full_data;
+        std::sort(sorted_data.begin(), sorted_data.end(),
+            [](const MarketData& a, const MarketData& b) {
+                return a.timestamp < b.timestamp;
+            }
+        );
+
+        // Verify that the timestamp is incremented (secondary check to ensure there is no disorder after sorting)
+        for (size_t i = 1; i < sorted_data.size(); ++i) {
+            if (sorted_data[i].timestamp <= sorted_data[i-1].timestamp) {
+                return SimErrorCode::TIMESTAMP_ORDER_ERR;
+            }
+        }
+
+        const size_t total_size = sorted_data.size();
+        // Verify data amount (at least 2 K lines, make sure there is 1 inside/outside of the sample)
+        if (total_size < 2) {
+            return SimErrorCode::INSUFFICIENT_DATA;
+        }
+
+        // Calculate the dividing boundary (to avoid floating point errors and ensure at least 1 root within the sample and at least 1 root outside the sample)
+        size_t split_idx = static_cast<size_t>(std::round(total_size * in_sample_ratio));
+        split_idx = std::max<size_t>(split_idx, 1); // At least 1 root in the sample
+        split_idx = std::min(split_idx, total_size - 1); // At least 1 root outside the sample
+
+        // Split the data and assign output
+        out_in_sample.assign(sorted_data.begin(), sorted_data.begin() + split_idx);
+        out_out_sample.assign(sorted_data.begin() + split_idx, sorted_data.end());
+        return SimErrorCode::SUCCESS;
+    }
+
+    /**
+     * @brief 2. Forward testing (sliding window simulates real transactions and generates unbiased out-of-sample returns)
+     * @param full_data complete market data
+     * @param train_window_size training window size (amount of data within the sample)
+     * @param test_window_size test window size (amount of data outside the sample)
+     * @param system trading system (need to implement TradingSystem interface)
+     * @param out_oos_returns Output: Out-of-sample return series (log returns)
+     * @return SimErrorCode error code
+     */
+    static SimErrorCode walkForwardAnalysis(
+        const std::vector<MarketData>& full_data,
+        size_t train_window_size,
+        size_t test_window_size,
+        TradingSystem& system,
+        std::vector<double>& out_oos_returns
+    ) {
+        // Sort by timestamp (basic requirements for files to ensure no future leakage)
+        std::vector<MarketData> sorted_data = full_data;
+        std::sort(sorted_data.begin(), sorted_data.end(),
+            [](const MarketData& a, const MarketData& b) {
+                return a.timestamp < b.timestamp;
+            }
+        );
+
+        // Increment the verification timestamp
+        for (size_t i = 1; i < sorted_data.size(); ++i) {
+            if (sorted_data[i].timestamp <= sorted_data[i-1].timestamp) {
+                return SimErrorCode::TIMESTAMP_ORDER_ERR;
+            }
+        }
+
+        const size_t total_size = sorted_data.size();
+        // Verification window size (the training + test window does not exceed the total data volume to ensure that each iteration has a complete window)
+        if (train_window_size == 0 || test_window_size == 0 ||
+            train_window_size + test_window_size > total_size) {
+            return SimErrorCode::INSUFFICIENT_DATA;
+        }
+
+        out_oos_returns.clear();
+        size_t current_start = 0;
+
+        // Sliding window iteration (batch processing logic, no redundant data copy)
+        while (current_start + train_window_size + test_window_size <= total_size) {
+            // Step 1: Extract the current training window (in-sample data)
+            std::vector<MarketData> train_data(
+                sorted_data.begin() + current_start,
+                sorted_data.begin() + current_start + train_window_size
+            );
+            // In-sample parameter optimization (update the optimal parameters of the system)
+            system.optimizeParams(train_data);
+
+            // Step 2: Extract the current test window (out-of-sample data)
+            std::vector<MarketData> test_data(
+                sorted_data.begin() + current_start + train_window_size,
+                sorted_data.begin() + current_start + train_window_size + test_window_size
+            );
+            // Generate out-of-sample returns and append to results
+            std::vector<double> oos_returns = system.generateReturns(test_data);
+            out_oos_returns.insert(
+                out_oos_returns.end(),
+                oos_returns.begin(),
+                oos_returns.end()
+            );
+
+            // Step 3: Sliding window (advance the test window size to avoid deviations caused by data overlap)
+            current_start += test_window_size;
+        }
+
+        return SimErrorCode::SUCCESS;
+    }
+
+    /**
+     * @brief 3. Cross-validation (efficient use of data, processing time series IS/OOS overlap)
+     * @param full_data complete market data
+     * @param n_folds fold number (≥2, ensure that the training/test set division is effective)
+     * @param lookback indicator lookback period (such as the moving average period, used to calculate the guard buffer)
+     * @param lookahead Target lookahead period (such as position period, used to calculate guard buffer)
+     * @param system trading system (need to implement TradingSystem interface)
+     * @param out_oos_returns Output: Out-of-sample return series (log returns)
+     * @return SimErrorCode error code
+     */
+    static SimErrorCode crossValidation(
+        const std::vector<MarketData>& full_data,
+        size_t n_folds,
+        size_t lookback,
+        size_t lookahead,
+        TradingSystem& system,
+        std::vector<double>& out_oos_returns
+    ) {
+        // Sort by timestamp (to avoid future leaks)
+        std::vector<MarketData> sorted_data = full_data;
+        std::sort(sorted_data.begin(), sorted_data.end(),
+            [](const MarketData& a, const MarketData& b) {
+                return a.timestamp < b.timestamp;
+            }
+        );
+
+        // Increment the verification timestamp
+        for (size_t i = 1; i < sorted_data.size(); ++i) {
+            if (sorted_data[i].timestamp <= sorted_data[i-1].timestamp) {
+                return SimErrorCode::TIMESTAMP_ORDER_ERR;
+            }
+        }
+
+        const size_t total_size = sorted_data.size();
+        // Verify the fold number and data amount (fold number ≥ 2, data amount ≥ fold number, ensure there is enough data for each fold)
+        if (n_folds < 2 || total_size < n_folds) {
+            return SimErrorCode::INSUFFICIENT_DATA;
+        }
+
+        // Calculate the guard buffer (core logic: avoid IS/OOS overlap, take min(lookback, lookahead)-1)
+        const size_t guard_size = (std::min(lookback, lookahead) > 0) ?
+                                  (std::min(lookback, lookahead) - 1) : 0;
+        const size_t fold_size = total_size / n_folds; // Base size of each fold
+        out_oos_returns.clear();
+
+        // Iterate over each fold as a test set
+        for (size_t fold_idx = 0; fold_idx < n_folds; ++fold_idx) {
+            // Calculate the test set range of the current fold
+            const size_t test_start = fold_idx * fold_size;
+            const size_t test_end = (fold_idx == n_folds - 1) ?
+                                    total_size : (fold_idx + 1) * fold_size;
+
+            //Construct the training set (exclude the test set and guard buffer to avoid IS/OOS overlap)
+            std::vector<MarketData> train_data;
+            // Training data on the left side of the test set (excluding left guard buffer)
+            if (test_start > guard_size) {
+                train_data.insert(
+                    train_data.end(),
+                    sorted_data.begin(),
+                    sorted_data.begin() + test_start - guard_size
+                );
+            }
+            // Training data on the right side of the test set (excluding the right guard buffer)
+            if (test_end + guard_size < total_size) {
+                train_data.insert(
+                    train_data.end(),
+                    sorted_data.begin() + test_end + guard_size,
+                    sorted_data.end()
+                );
+            }
+
+            // Verify that the training set is not empty (parameters cannot be optimized without training data)
+            if (train_data.empty()) {
+                return SimErrorCode::EMPTY_TRAIN_DATA;
+            }
+
+            // Step 1: In-sample parameter optimization
+            system.optimizeParams(train_data);
+            // Step 2: Extract the test set of the current fold
+            std::vector<MarketData> test_data(
+                sorted_data.begin() + test_start,
+                sorted_data.begin() + test_end
+            );
+            // Step 3: Generate out-of-sample returns and append
+            std::vector<double> oos_returns = system.generateReturns(test_data);
+            out_oos_returns.insert(
+                out_oos_returns.end(),
+                oos_returns.begin(),
+                oos_returns.end()
+            );
+        }
+
+        return SimErrorCode::SUCCESS;
+    }
+
+    /**
+     * @brief 4. Nested forward testing (processing two levels of optimization: system selection + parameter optimization)
+     * @param full_data complete market data
+     * @param inner_train_window inner training window size (used for system parameter optimization)
+     * @param inner_test_window inner test window size (for system performance evaluation)
+     * @param outer_train_window outer training window size (for system selection)
+     * @param systems Competing system list (need to implement TradingSystem interface)
+     * @param out_final_returns Output: Final out-of-sample return series (log returns)
+     * @return SimErrorCode error code
+     */
+    static SimErrorCode nestedWalkForward(
+        const std::vector<MarketData>& full_data,
+        size_t inner_train_window,
+        size_t inner_test_window,
+        size_t outer_train_window,
+        const std::vector<TradingSystem*>& systems,
+        std::vector<double>& out_final_returns
+    ) {
+        // Verify that the list of competing systems is not empty (no system cannot be selected)
+        if (systems.empty()) {
+            return SimErrorCode::EMPTY_SYSTEM_LIST;
+        }
+
+        // Sort by timestamp (file requirement to avoid future leaks)
+        std::vector<MarketData> sorted_data = full_data;
+        std::sort(sorted_data.begin(), sorted_data.end(),
+            [](const MarketData& a, const MarketData& b) {
+                return a.timestamp < b.timestamp;
+            }
+        );
+
+        // Increment the verification timestamp
+        for (size_t i = 1; i < sorted_data.size(); ++i) {
+            if (sorted_data[i].timestamp <= sorted_data[i-1].timestamp) {
+                return SimErrorCode::TIMESTAMP_ORDER_ERR;
+            }
+        }
+
+        const size_t total_size = sorted_data.size();
+        const size_t inner_cycle = inner_train_window + inner_test_window; // Inner forward test cycle
+        // Verification window size (outer training window ≤ total data volume, inner period ≤ outer training window)
+        if (outer_train_window == 0 || inner_train_window == 0 || inner_test_window == 0 ||
+            outer_train_window > total_size || inner_cycle > outer_train_window) {
+            return SimErrorCode::INVALID_WINDOW_SIZE;
+        }
+
+        out_final_returns.clear();
+        size_t outer_current_start = 0;
+
+        // Outer forward test (iterative selection of the optimal system)
+        while (outer_current_start + outer_train_window + inner_test_window <= total_size) {
+            // Step 1: Extract outer training data (for system selection)
+            std::vector<MarketData> outer_train_data(
+                sorted_data.begin() + outer_current_start,
+                sorted_data.begin() + outer_current_start + outer_train_window
+            );
+
+            // Step 2: Inner forward test: evaluate the performance score of each system
+            std::vector<double> system_scores(systems.size(), -std::numeric_limits<double>::max());
+            for (size_t sys_idx = 0; sys_idx < systems.size(); ++sys_idx) {
+                std::vector<double> inner_returns;
+                //Call the inner forward test to generate the out-of-sample return of the system
+                SimErrorCode err = walkForwardAnalysis(
+                    outer_train_data,
+                    inner_train_window,
+                    inner_test_window,
+                    *systems[sys_idx],
+                    inner_returns
+                );
+                if (err != SimErrorCode::SUCCESS) {
+                    continue; // Skip systems that failed to evaluate
+                }
+                // Calculate system score (total logarithmic return, commonly used evaluation indicators)
+                system_scores[sys_idx] = std::accumulate(inner_returns.begin(), inner_returns.end(), 0.0);
+            }
+
+            // Step 3: Select the optimal system (the system with the highest score)
+            auto best_sys_iter = std::max_element(system_scores.begin(), system_scores.end());
+            if (*best_sys_iter == -std::numeric_limits<double>::max()) {
+                return SimErrorCode::EMPTY_SYSTEM_LIST; // All system evaluations failed
+            }
+            size_t best_sys_idx = best_sys_iter - system_scores.begin();
+            TradingSystem* best_sys = systems[best_sys_idx];
+
+            // Step 4: Outer layer testing: generate final out-of-sample returns
+            std::vector<MarketData> outer_test_data(
+                sorted_data.begin() + outer_current_start + outer_train_window,
+                sorted_data.begin() + outer_current_start + outer_train_window + inner_test_window
+            );
+            std::vector<double> oos_returns = best_sys->generateReturns(outer_test_data);
+            out_final_returns.insert(
+                out_final_returns.end(),
+                oos_returns.begin(),
+                oos_returns.end()
+            );
+
+            // Step 5: Slide the outer window (advance the inner test window size)
+            outer_current_start += inner_test_window;
+        }
+
+        return SimErrorCode::SUCCESS;
+    }
+};
+```
+
+```cpp
+#include "UnbiasedSimulation.h"
+
+// Moving average crossover strategy (example strategy, classic moving average crossover logic)
+class MACrossSystem : public TradingSystem {
+public:
+    /**
+     * @brief constructor: initialize short/long-term moving average maximum period
+     * @param max_short_lookback Maximum period of short moving average (such as 1~20)
+     * @param max_long_lookback Maximum period of long moving average (such as 2~40)
+     */
+    MACrossSystem(size_t max_short_lookback, size_t max_long_lookback)
+        : max_short_lookback_(max_short_lookback),
+          max_long_lookback_(max_long_lookback),
+          opt_short_lookback_(1),
+          opt_long_lookback_(2) {}
+
+    /**
+     * @brief Verifies the validity of moving average parameters (the maximum period of the short moving average must be < the maximum period of the long moving average)
+     * @return SimErrorCode error code
+     */
+    SimErrorCode validateParams() const {
+        if (max_short_lookback_ >= max_long_lookback_) {
+            return SimErrorCode::INVALID_MA_PARAM;
+        }
+        return SimErrorCode::SUCCESS;
+    }
+
+    /**
+     * @brief In-sample parameter optimization: traverse moving average combinations and select the combination with the largest total log return
+     * @param in_sample_data In-sample market data (sorted by timestamp)
+     */
+    void optimizeParams(const std::vector<MarketData>& in_sample_data) override {
+        const size_t data_size = in_sample_data.size();
+        // Not optimized when the amount of data is insufficient (needs to be at least the K-line with the maximum period of the long moving average)
+        if (data_size < max_long_lookback_) {
+            return;
+        }
+
+        double best_total_ret = -std::numeric_limits<double>::max();
+        // Traverse all legal moving average combinations (short moving average period < long moving average period)
+        for (size_t short_lb = 1; short_lb <= max_short_lookback_; ++short_lb) {
+            for (size_t long_lb = short_lb + 1; long_lb <= max_long_lookback_; ++long_lb) {
+                // Calculate the total log return of the current moving average combination
+                double current_ret = calculateTotalReturn(in_sample_data, short_lb, long_lb);
+                //Update the optimal parameters (when the total revenue is greater)
+                if (current_ret > best_total_ret) {
+                    best_total_ret = current_ret;
+                    opt_short_lookback_ = short_lb;
+                    opt_long_lookback_ = long_lb;
+                }
+            }
+        }
+    }
+
+    /**
+     * @brief Generate income: Calculate the logarithmic income of a single K-line based on the optimal moving average period
+     * @param data input market data (sorted by timestamp)
+     * @return std::vector<double> Logarithmic return sequence of a single K-line
+     */
+    std::vector<double> generateReturns(const std::vector<MarketData>& data) const override {
+        return calculateReturnDetail(data, opt_short_lookback_, opt_long_lookback_);
+    }
+
+    /**
+     * @brief Get the optimal parameters: short/long term moving average period
+     * @return std::vector<double> Optimal parameters (short moving average period, long moving average period)
+     */
+    std::vector<double> getOptimalParams() const override {
+        return {static_cast<double>(opt_short_lookback_), static_cast<double>(opt_long_lookback_)};
+    }
+
+private:
+    size_t max_short_lookback_; // Maximum period of short moving average
+    size_t max_long_lookback_; // Maximum period of long moving average
+    size_t opt_short_lookback_; // Optimized short moving average period
+    size_t opt_long_lookback_; // Optimized long moving average period
+
+    /**
+     * @brief Calculate the total log return (for parameter optimization)
+     * @param data input market data (sorted by timestamp)
+     * @param short_lb short moving average period
+     * @param long_lb long moving average period
+     * @return double total log return
+     */
+    double calculateTotalReturn(
+        const std::vector<MarketData>& data,
+        size_t short_lb,
+        size_t long_lb
+    ) const {
+        double total_ret = 0.0;
+        const size_t data_size = data.size();
+        //Start calculation after the long moving average period (make sure both moving averages can be fully calculated)
+        for (size_t i = long_lb; i < data_size - 1; ++i) {
+            // Calculate short/long term moving average (logarithmic price average to avoid price scale deviation)
+            double short_ma = 0.0, long_ma = 0.0;
+            for (size_t j = 0; j < short_lb; ++j) {
+                short_ma += data[i - j].log_price;
+            }
+            for (size_t j = 0; j < long_lb; ++j) {
+                long_ma += data[i - j].log_price;
+            }
+            short_ma /= short_lb;
+            long_ma /= long_lb;
+
+            // Generate trading signals and profits (short moving average goes long when it crosses above, short when it crosses below, no cross, no position)
+            double ret = 0.0;
+            if (short_ma > long_ma) {
+                // Long profit: logarithmic price of the next K line - logarithmic price of the current K line
+                ret = data[i + 1].log_price - data[i].log_price;
+            } else if (short_ma < long_ma) {
+                // Short profit: current K-line logarithmic price - next K-line logarithmic price
+                ret = data[i].log_price - data[i + 1].log_price;
+            }
+            total_right += right;
+        }
+        return total_ret;
+    }
+
+    /**
+     * @brief Calculate detailed returns (used for out-of-sample testing, return single K-line returns)
+     * @param data input market data (sorted by timestamp)
+     * @param short_lb short moving average period
+     * @param long_lb long moving average period
+     * @return std::vector<double> Logarithmic return sequence of a single K-line
+     */
+    std::vector<double> calculateReturnDetail(
+        const std::vector<MarketData>& data,
+        size_t short_lb,
+        size_t long_lb
+    ) const {
+        std::vector<double> returns;
+        const size_t data_size = data.size();
+        // Pre-allocate memory to improve performance (amount of income = amount of data - long moving average period)
+        returns.reserve(data_size - long_lb);
+
+        for (size_t i = long_lb; i < data_size - 1; ++i) {
+            // Calculate short/long term moving average
+            double short_ma = 0.0, long_ma = 0.0;
+            for (size_t j = 0; j < short_lb; ++j) {
+                short_ma += data[i - j].log_price;
+            }
+            for (size_t j = 0; j < long_lb; ++j) {
+                long_ma += data[i - j].log_price;
+            }
+            short_ma /= short_lb;
+            long_ma /= long_lb;
+
+            // Calculate the income of a single K line
+            double ret = 0.0;
+            if (short_ma > long_ma) {
+                ret = data[i + 1].log_price - data[i].log_price;
+            } else if (short_ma < long_ma) {
+                ret = data[i].log_price - data[i + 1].log_price;
+            }
+            returns.push_back(ret);
+        }
+        return returns;
+    }
+};
+
+//Test code implementation
+void testSplitInOutSample() {
+    std::cout << "Testing splitInOutSample..." << std::endl;
+
+    // Test normal conditions
+    std::vector<MarketData> data = {
+        {1.0, 1}, {2.0, 2}, {3.0, 3}, {4.0, 4}, {5.0, 5}
+    };
+
+    std::vector<MarketData> in_sample, out_sample;
+    auto result = UnbiasedSimulation::splitInOutSample(data, 0.6, in_sample, out_sample);
+
+    assert(result == SimErrorCode::SUCCESS);
+    assert(in_sample.size() == 3);
+    assert(out_sample.size() == 2);
+    assert(in_sample[0].timestamp < out_sample[0].timestamp);
+
+    //Test invalid ratio
+    result = UnbiasedSimulation::splitInOutSample(data, 1.5, in_sample, out_sample);
+    assert(result == SimErrorCode::INVALID_RATIO);
+
+    result = UnbiasedSimulation::splitInOutSample(data, -0.1, in_sample, out_sample);
+    assert(result == SimErrorCode::INVALID_RATIO);
+
+    //Insufficient amount of test data
+    std::vector<MarketData> small_data = {{1.0, 1}};
+    result = UnbiasedSimulation::splitInOutSample(small_data, 0.5, in_sample, out_sample);
+    assert(result == SimErrorCode::INSUFFICIENT_DATA);
+
+    // Test timestamp is non-increasing
+    std::vector<MarketData> unordered_data = {{1.0, 2}, {2.0, 1}};
+    result = UnbiasedSimulation::splitInOutSample(unordered_data, 0.5, in_sample, out_sample);
+    assert(result == SimErrorCode::TIMESTAMP_ORDER_ERR);
+
+    std::cout << "splitInOutSample tests passed." << std::endl;
+}
+
+void testWalkForwardAnalysis() {
+    std::cout << "Testing walkForwardAnalysis..." << std::endl;
+
+    //Create test data
+    std::vector<MarketData> data;
+    for (int i = 1; i <= 20; ++i) {
+        data.push_back({static_cast<double>(i), i});
+    }
+
+    //Create trading system
+    MACrossSystem system(3, 5);
+
+    std::vector<double> oos_returns;
+    auto result = UnbiasedSimulation::walkForwardAnalysis(data, 10, 5, system, oos_returns);
+
+    assert(result == SimErrorCode::SUCCESS);
+
+    //The test window size is illegal
+    result = UnbiasedSimulation::walkForwardAnalysis(data, 0, 5, system, oos_returns);
+    assert(result == SimErrorCode::INSUFFICIENT_DATA);
+
+    result = UnbiasedSimulation::walkForwardAnalysis(data, 15, 10, system, oos_returns);
+    assert(result == SimErrorCode::INSUFFICIENT_DATA);
+
+    // Test timestamp is non-increasing
+    std::vector<MarketData> unordered_data = {{1.0, 2}, {2.0, 1}};
+    result = UnbiasedSimulation::walkForwardAnalysis(unordered_data, 1, 1, system, oos_returns);
+    assert(result == SimErrorCode::TIMESTAMP_ORDER_ERR);
+
+    std::cout << "walkForwardAnalysis tests passed." << std::endl;
+}
+
+void testCrossValidation() {
+    std::cout << "Testing crossValidation..." << std::endl;
+
+    //Create test data
+    std::vector<MarketData> data;
+    for (int i = 1; i <= 20; ++i) {
+        data.push_back({static_cast<double>(i), i});
+    }
+
+    MACrossSystem system(2, 4);
+
+    std::vector<double> oos_returns;
+    auto result = UnbiasedSimulation::crossValidation(data, 4, 2, 1, system, oos_returns);
+
+    assert(result == SimErrorCode::SUCCESS);
+
+    //The test fold is illegal
+    result = UnbiasedSimulation::crossValidation(data, 1, 2, 1, system, oos_returns);
+    assert(result == SimErrorCode::INSUFFICIENT_DATA);
+
+    //Insufficient amount of test data
+    std::vector<MarketData> small_data = {{1.0, 1}, {2.0, 2}};
+    result = UnbiasedSimulation::crossValidation(small_data, 3, 1, 1, system, oos_returns);
+    assert(result == SimErrorCode::INSUFFICIENT_DATA);
+
+    // Test timestamp is non-increasing
+    std::vector<MarketData> unordered_data = {{1.0, 2}, {2.0, 1}};
+    result = UnbiasedSimulation::crossValidation(unordered_data, 2, 1, 1, system, oos_returns);
+    assert(result == SimErrorCode::TIMESTAMP_ORDER_ERR);
+
+    std::cout << "crossValidation tests passed." << std::endl;
+}
+
+void testNestedWalkForward() {
+    std::cout << "Testing nestedWalkForward..." << std::endl;
+
+    //Create test data
+    std::vector<MarketData> data;
+    for (int i = 1; i <= 30; ++i) {
+        data.push_back({static_cast<double>(i), i});
+    }
+
+    //Create multiple trading systems
+    MACrossSystem system1(2, 4);
+    MACrossSystem system2(3, 6);
+    std::vector<TradingSystem*> systems = {&system1, &system2};
+
+    std::vector<double> final_returns;
+    auto result = UnbiasedSimulation::nestedWalkForward(data, 8, 4, 12, systems, final_returns);
+
+    assert(result == SimErrorCode::SUCCESS);
+
+    //The test system list is empty
+    std::vector<TradingSystem*> empty_systems;
+    result = UnbiasedSimulation::nestedWalkForward(data, 5, 3, 10, empty_systems, final_returns);
+    assert(result == SimErrorCode::EMPTY_SYSTEM_LIST);
+
+    //The test window size is illegal
+    result = UnbiasedSimulation::nestedWalkForward(data, 0, 3, 10, systems, final_returns);
+    assert(result == SimErrorCode::INVALID_WINDOW_SIZE);
+
+    result = UnbiasedSimulation::nestedWalkForward(data, 5, 3, 0, systems, final_returns);
+    assert(result == SimErrorCode::INVALID_WINDOW_SIZE);
+
+    // Test timestamp is non-increasing
+    std::vector<MarketData> unordered_data = {{1.0, 2}, {2.0, 1}};
+    result = UnbiasedSimulation::nestedWalkForward(unordered_data, 1, 1, 1, systems, final_returns);
+    assert(result == SimErrorCode::TIMESTAMP_ORDER_ERR);
+
+    std::cout << "nestedWalkForward tests passed." << std::endl;
+}
+
+void testMACrossSystem() {
+    std::cout << "Testing MACrossSystem..." << std::endl;
+
+    // Test parameter validity
+    MACrossSystem valid_system(2, 5);
+    assert(valid_system.validateParams() == SimErrorCode::SUCCESS);
+
+    MACrossSystem invalid_system(5, 3);
+    assert(invalid_system.validateParams() == SimErrorCode::INVALID_MA_PARAM);
+
+    //Test optimization parameters
+    std::vector<MarketData> data;
+    for (int i = 1; i <= 10; ++i) {
+        data.push_back({static_cast<double>(i), i});
+    }
+
+    valid_system.optimizeParams(data);
+    auto params = valid_system.getOptimalParams();
+    assert(params.size() == 2);
+
+    // Test to generate revenue
+    auto returns = valid_system.generateReturns(data);
+    assert(returns.size() == data.size() - 5); // The long period is 5
+
+    std::cout << "MACrossSystem tests passed." << std::endl;
+}
+
+int main() {
+    std::cout << "Starting tests..." << std::endl;
+
+    testSplitInOutSample();
+    testWalkForwardAnalysis();
+    testCrossValidation();
+    testNestedWalkForward();
+    testMACrossSystem();
+
+    std::cout << "All tests passed!" << std::endl;
+
+    return 0;
+}
+```
+
+### 10. Calendar and risk documents that gate the sim day
+
+Session calendars and holidays live in a basic-data store shared with the trading app. Trade-time rows give open, lunch, and close bands that the latency tables align to; holiday rows mark non-trading days so tape windows and day jobs skip them. Broker risk documents are keyed by counter plus account, falling back to a default key, and hold order notional caps, cancel-ratio floors and the minimum order count before the ratio applies, per-market flow and count limits, open and close blacklists, and switches for tick, self-trade, and flow checks. The paper counter uses the same key shape as a live counter, so a sim account can inherit or override the same limits without a second risk product.
+
+```cpp
+struct DayGate {
+    int ymd{0};
+    bool holiday{false};
+    int open_min{9 * 60 + 30};
+    int lunch0{11 * 60 + 30};
+    int lunch1{13 * 60};
+    int close_min{15 * 60};
+};
+
+struct RiskDoc {
+    char key[64]{};          // "paper@acct" or "default"
+    double order_money_cap{0};
+    double cancel_ratio_cap{0};
+    int min_orders_for_ratio{0};
+    int order_flow_cap{0};
+    int mkt_flow_cap{0};
+    int mkt_count_cap{0};
+    bool check_self_trade{true};
+    bool check_flow{false};
+};
+
+bool trading_minute(const DayGate& d, int minute) {
+    if (d.holiday) return false;
+    if (minute < d.open_min || minute >= d.close_min) return false;
+    if (minute >= d.lunch0 && minute < d.lunch1) return false;
+    return true;
+}
+
+const RiskDoc* pick_risk(const RiskDoc* rows, int n, const char* key) {
+    const RiskDoc* def = nullptr;
+    for (int i = 0; i < n; ++i) {
+        if (std::strcmp(rows[i].key, key) == 0) return &rows[i];
+        if (std::strcmp(rows[i].key, "default") == 0) def = &rows[i];
+    }
+    return def;
+}
+```
+
+### 11. Counter-style query replies for sim position and asset
+
+Matching stays inside shared memory. Outward, sim uses the same position and asset query-reply path as a live counter: the sim trader posts periodic replies onto a reply exchange, with a routing key of counter name plus a fixed reply suffix. Terminals and ops tools subscribe the same way they do for broker counters, so a paper book can sit beside live books without another protocol. Each message uses a business type to choose position or asset bodies, and carries request id, last flag, and encode information. Strategy orders still use the shared-memory rings; this path is only for query and display.
+
+```cpp
+struct BusHead {
+    int biz{0};              // 1 = position list, 2 = asset list
+    char route[80]{};        // "{counter}_back_respond_routing"
+    uint64_t req_id{0};
+    bool last{true};
+};
+
+struct PosBody {
+    char counter[24]{};
+    char account[32]{};
+    char symbol[32]{};
+    int64_t total{0};
+    int64_t sellable{0};
+    double cost{0};
+    double settle{0};
+    double realized{0};
+    double unrealized{0};
+};
+
+struct AstBody {
+    char counter[24]{};
+    char account[32]{};
+    double avail{0};
+    double frozen{0};
+    double mkt_value{0};
+    double realized{0};
+    double unrealized{0};
+};
+
+void fill_route(char* out, int n, const char* counter) {
+    std::snprintf(out, n, "%s_back_respond_routing", counter);
 }
 ```
 
@@ -44786,6 +45060,115 @@ double floating_rate(int64_t qty, double mult, double mark, double cost, double 
 }
 ```
 
+### 18. Broker risk documents ahead of the clearing day
+
+Before lots are matched, account risk rows are read from a ledger store keyed by counter at account, with a default row as fallback. Each row holds order notional caps, cancel-ratio floors and the minimum order count before the ratio applies, per-account market flow and order-count caps, open and close blacklists, and switch bits for tick checks, self-trade, flow, and money gates. Clearing does not re-decide those gates; it assumes the day’s fills already passed them, and uses the same account key when attributing fees and verifying against the counter book.
+
+```cpp
+struct AcctRiskRow {
+    char key[64]{};
+    double money_cap{0};
+    double cancel_ratio{0};
+    int min_orders{0};
+    int flow_cap{0};
+    int mkt_count_cap{0};
+    bool sw_self_trade{true};
+    bool sw_flow{false};
+    bool sw_money{false};
+};
+
+const AcctRiskRow* load_risk(const AcctRiskRow* rows, int n, const char* counter, const char* acct) {
+    char k[64];
+    std::snprintf(k, sizeof k, "%s@%s", counter, acct);
+    const AcctRiskRow* def = nullptr;
+    for (int i = 0; i < n; ++i) {
+        if (std::strcmp(rows[i].key, k) == 0) return &rows[i];
+        if (std::strcmp(rows[i].key, "default") == 0) def = &rows[i];
+    }
+    return def;
+}
+```
+
+### 19. Position and asset fields from counter query replies
+
+Day-end and incremental clearing consume the same position and asset bodies that counters publish on the query-reply path. Position rows carry total, sellable, frozen, yesterday and today buy/sell, cost, close, settlement, margin, and realized or unrealized PnL. Asset rows carry available and frozen cash, market value, equity bands, fee accumulators, and margin-debt fields when the account is credit. The routing key is counter name plus a reply suffix; the business type in the message selects which body array follows. Clearing maps those fields into lots, cash-only fills, and valuation merges rather than inventing a second wire format.
+
+```cpp
+struct WirePos {
+    char counter[24]{};
+    char account[32]{};
+    char symbol[32]{};
+    bool is_long{true};
+    int64_t total{0};
+    int64_t sellable{0};
+    int64_t yday_left{0};
+    int64_t today_buy{0};
+    int64_t today_sell{0};
+    double cost{0};
+    double close_px{0};
+    double settle_px{0};
+    double realized{0};
+    double unrealized{0};
+    double commission{0};
+};
+
+struct WireAst {
+    char counter[24]{};
+    char account[32]{};
+    double avail{0};
+    double frozen{0};
+    double mkt_value{0};
+    double static_eq{0};
+    double dynamic_eq{0};
+    double fee_day{0};
+    double fund_debt{0};
+    double stock_debt{0};
+};
+
+bool same_book_key(const WirePos& a, const WirePos& b) {
+    return std::strcmp(a.counter, b.counter) == 0
+        && std::strcmp(a.account, b.account) == 0
+        && std::strcmp(a.symbol, b.symbol) == 0
+        && a.is_long == b.is_long;
+}
+```
+
+### 20. Strategy day books beside firm end-of-day
+
+Some strategy subsystems keep their own day books in a document store: yesterday positions as the open seed, today’s trade records as the fill stream, and today’s final positions as the close snapshot. Firm clearing still owns multi-asset lots, dual settle/close cost, FX ladders, and product NAV. The strategy day books feed model PnL and tracking checks, and can be diffed against clearing valuation rows for the same product and symbol without replacing the firm pipeline.
+
+```cpp
+struct StratDayPos {
+    char product[32]{};
+    char symbol[32]{};
+    int64_t qty{0};
+    double cost{0};
+    double mark{0};
+};
+
+struct StratDayFill {
+    char symbol[32]{};
+    int64_t qty{0};
+    double px{0};
+    int64_t ts{0};
+};
+
+struct StratDayBooks {
+    StratDayPos yday[256]{};
+    int n_yday{0};
+    StratDayFill fills[4096]{};
+    int n_fills{0};
+    StratDayPos eod[256]{};
+    int n_eod{0};
+};
+
+int64_t seed_qty(const StratDayBooks& b, const char* sym) {
+    for (int i = 0; i < b.n_yday; ++i)
+        if (std::strcmp(b.yday[i].symbol, sym) == 0) return b.yday[i].qty;
+    return 0;
+}
+```
+
 ## Business logic design-trading terminal
 
 A buy-side trading terminal handles environment choice, login checks, quote subscribe, manual and basket orders, pairs, lock unlock, position queries, and stock-pool and fund moves on the trader’s machine. Orders still leave through the trade bridge and algo processes; the terminal builds parameters, checks them before send, and lands returns on the screen.
@@ -45196,6 +45579,100 @@ bool file_ready(int64_t size1, int64_t mtime1,
 
 bool can_load_file(const FileWatch& c, bool dirs_ok, bool stable) {
     return c.on && dirs_ok && stable;
+}
+```
+
+### 15. Account and session master from basic data
+
+Login and routing load accounts from a basic-data account collection that binds trader scope to counter and account identifiers. Security master, trade-time, and holiday collections feed symbol search, session windows for TWAP and auction pages, and non-trading-day guards. Ops monitor collections stay out of the order path; they only describe process install and health. The terminal does not invent a second calendar: the same session rows that gate sim latency bands gate the desk clock for basket schedules.
+
+```cpp
+struct AcctBind {
+    char trader[32]{};
+    char counter[24]{};
+    char account[32]{};
+    bool enabled{true};
+};
+
+struct SessionRow {
+    char market[8]{};
+    int open_min{0};
+    int close_min{0};
+    int lunch0{0};
+    int lunch1{0};
+};
+
+bool acct_visible(const AcctBind* rows, int n, const char* trader, const char* counter, const char* acct) {
+    for (int i = 0; i < n; ++i) {
+        if (!rows[i].enabled) continue;
+        if (std::strcmp(rows[i].trader, trader) == 0
+            && std::strcmp(rows[i].counter, counter) == 0
+            && std::strcmp(rows[i].account, acct) == 0)
+            return true;
+    }
+    return false;
+}
+```
+
+### 16. Counter query-reply path for position and asset
+
+After login the terminal attaches to the query-reply path and binds a routing key per counter: the counter name plus a fixed reply suffix. Periodic queries land as position and asset replies on that key, including the paper counter when a sim book is in scope. External order replies use a separate outer reply key. Front control still uses its own request and reply path for gateway monitor traffic; the desk blotter only needs this counter query-reply path for cash and lots.
+
+```cpp
+struct DeskBus {
+    char respond_ex[64]{"back_respond_exchange"};
+    char outer_key[64]{"outer_respond_routing"};
+    char route[80]{};
+};
+
+void bind_counter_route(DeskBus& b, const char* counter) {
+    std::snprintf(b.route, sizeof b.route, "%s_back_respond_routing", counter);
+}
+
+bool is_pos_biz(int biz) { return biz == 1; }
+bool is_ast_biz(int biz) { return biz == 2; }
+```
+
+### 17. Position and asset reply message layout
+
+Each position or asset reply carries a message head, business type, JSON body array, routing id, encode and compress flags, send time, and last flag. Position bodies list counter, account, symbol, side, volumes (total, sellable, frozen, yesterday splits, today buy/sell), marks (last, cost, close, settlement), margin, PnL legs, commission, currency, ledger category, and query metadata. Asset bodies list available and frozen cash, market value, equity bands, fee totals, finance and short-sell quotas, and debt fields for credit accounts. The UI double-buffers these arrays so a slow counter does not tear the mid-desk view.
+
+```cpp
+struct RspHead {
+    int biz{0};
+    uint64_t req_id{0};
+    bool last{true};
+    int64_t send_ts{0};
+};
+
+struct DeskPos {
+    char counter[24]{};
+    char account[32]{};
+    char symbol[32]{};
+    int64_t total{0};
+    int64_t sellable{0};
+    int64_t frozen{0};
+    double cost{0};
+    double settle{0};
+    double realized{0};
+    double unrealized{0};
+};
+
+struct DeskAst {
+    char counter[24]{};
+    char account[32]{};
+    double avail{0};
+    double frozen{0};
+    double mkt_value{0};
+    double dynamic_eq{0};
+    double fee_day{0};
+    double fund_debt{0};
+};
+
+void swap_buf(DeskPos*& show, DeskPos*& build) {
+    DeskPos* t = show;
+    show = build;
+    build = t;
 }
 ```
 
