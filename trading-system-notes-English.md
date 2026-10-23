@@ -50,7 +50,8 @@
   - [41. Fixed-stride per-core variables](#41-fixed-stride-per-core-variables)
   - [42. Signature-first bucket lookup](#42-signature-first-bucket-lookup)
   - [43. Staged ordered completion ring](#43-staged-ordered-completion-ring)
-  - [44. High-quality articles on system design](#44-high-quality-articles-on-system-design)
+  - [44. User-space block-device I/O and submit-completion handoff](#44-user-space-block-device-io-and-submit-completion-handoff)
+  - [45. High-quality articles on system design](#45-high-quality-articles-on-system-design)
 - [Common performance bottlenecks and optimization directions](#common-performance-bottlenecks-and-optimization-directions)
   - [1. roofline model](#1-roofline-model)
     - [Memory Bound optimization](#memory-bound-optimization)
@@ -1612,6 +1613,30 @@ _ReadWriteBarrier(); // Compiler barrier
 2. **Determine whether a "synchronization relationship" is required**: If you need "the write operation of thread A to be seen by thread B" (such as pointer release, lock), use`acquire/release`;
 3. **Only use strong memory ordering when necessary**: Use it if you need "global consistency" (such as state synchronization of a distributed system)`seq_cst`, and the performance cost needs to be evaluated;
 4. **Avoid "use seq_cst by default"**: C++ atomic operations default`seq_cst`, but 90% of scenarios do not require this strong constraint. Manually specifying weak memory order can greatly improve performance.
+
+**Use two barrier families: device-facing and core-to-core**
+
+A store that must be visible to a device is not the same as a store that must be visible to another CPU core. On x86, after writing descriptors and before ringing a doorbell, `sfence` drains the write-combining buffers so the device sees the stores in order. When a device mapping must be ordered against later loads, use `lfence` or `mfence`.
+
+Between cores, x86 TSO already stops most store/store and load/load reorderings. A read or write barrier is often only a compiler barrier. When a true core-to-core full barrier is required, do not reach for `mfence` by default. A locked add of zero to a stack address, such as `lock addl $0, -128(%rsp)`, pushes prior stores so other cores can see them, usually at lower cost than `mfence`. The `-128(%rsp)` address sits in the red zone and does not touch the real frame.
+
+A plain `volatile` store to a device doorbell is already a bus transaction. Wrap it with a compiler barrier so nearby ordinary stores are not moved across it. Do not add an extra `mfence` around the doorbell without a reason.
+
+```cpp
+inline void device_wmb() {
+    __asm__ __volatile__("sfence" ::: "memory");
+}
+
+inline void smp_mb() {
+    __asm__ __volatile__("lock addl $0, -128(%%rsp)" ::: "memory");
+}
+
+inline void kick(volatile uint32_t* door, uint32_t idx) {
+    device_wmb();
+    __asm__ __volatile__("" ::: "memory");
+    *door = idx;
+}
+```
 
 
 Cache consistency protocol explanation reference:
@@ -12525,6 +12550,60 @@ struct HoleMap {
 };
 ```
 
+**Leave a sentinel word past the bitmap, and keep the lowest free bit in the id pool**
+
+Past the real word array, store one more word with the value `0b10`. A scan for the first 0 or the first 1 does not test the end on every step: past the last real word it always hits the 0 and the 1 in that sentinel. If the index found is already at or past the real bit count, treat it as not found.
+
+An id pool keeps two extra numbers beside the bitmap: the current lowest free bit, and how many free bits remain. Allocate takes the lowest free bit, then scans forward for the next 0. Free clears the bit; if that index is below the recorded lowest free bit, replace it. The hot path rarely walks the whole map from the start.
+
+```cpp
+#include <cstdint>
+
+struct BitWords {
+    uint32_t bits{0};
+    uint64_t* w{};
+
+    void bind(uint64_t* words, uint32_t nbits) {
+        bits = nbits;
+        w = words;
+        uint32_t nw = (nbits + 63u) / 64u;
+        w[nw] = 0x2ull;
+    }
+
+    uint32_t find_zero(uint32_t from) const {
+        if (from >= bits) return bits;
+        uint32_t wi = from >> 6;
+        uint64_t mask = ~((1ull << (from & 63u)) - 1ull);
+        uint64_t x = (~w[wi]) & mask;
+        while (x == 0) x = ~w[++wi];
+        uint32_t i = (wi << 6) + (uint32_t)__builtin_ctzll(x);
+        return i < bits ? i : bits;
+    }
+};
+
+struct IdPool {
+    BitWords map{};
+    uint32_t lowest{0};
+    uint32_t free_n{0};
+
+    uint32_t take() {
+        uint32_t i = lowest;
+        if (i >= map.bits) return ~0u;
+        map.w[i >> 6] |= 1ull << (i & 63u);
+        --free_n;
+        lowest = map.find_zero(i + 1);
+        return i;
+    }
+
+    void give(uint32_t i) {
+        map.w[i >> 6] &= ~(1ull << (i & 63u));
+        ++free_n;
+        if (i < lowest) lowest = i;
+    }
+};
+```
+
+
 ### 27. C++20 coroutine scheduling framework
 [https://zplutor.github.io/2022/03/25/cpp-coroutine-beginner/](https://zplutor.github.io/2022/03/25/cpp-coroutine-beginner/)
 
@@ -13524,6 +13603,35 @@ struct WaitFreeCounter {
 ```
 
 Tip: Use high bit stealing to carry the state, and the read operation also participates in assistance; there is no loop, and the spin jitter is eliminated.
+
+**The urgent path owns a single function-pointer slot**
+
+Ordinary cross-thread messages go through a queue. Stop and trip commands that must run at once, and must not sit behind ordinary traffic, get one pointer slot. The sender swaps a null pointer for the callback with compare-and-swap. If the slot is already taken, the send fails; there is no queue. Each poll on the receiver runs this slot first: if it is non-null, call it, then clear it. Ordinary messages and timers come after.
+
+The slot holds only a function pointer. Context travels inside the callback. At most one urgent command is in flight.
+
+```cpp
+#include <atomic>
+#include <cstdint>
+
+struct UrgentSlot {
+    using Fn = void (*)(void*);
+    std::atomic<Fn> slot{nullptr};
+    void* arg{nullptr};
+
+    bool post(Fn fn, void* a) {
+        Fn expect = nullptr;
+        arg = a;
+        return slot.compare_exchange_strong(
+            expect, fn, std::memory_order_seq_cst, std::memory_order_seq_cst);
+    }
+
+    void run_first() {
+        Fn fn = slot.exchange(nullptr, std::memory_order_seq_cst);
+        if (fn) fn(arg);
+    }
+};
+```
 
 
 ### 32. Linux kernel tuning and BIOS configuration
@@ -15297,6 +15405,67 @@ struct SpikeRing {
     }
 };
 ```
+
+**One lock-free shared-memory trail per core**
+
+Hot-path marks must not share one global queue. Each core owns a fixed ring in shared memory, and only that core advances its write index. When a mark is enabled, first test a bit in a mask for that event kind; if the bit is clear, return. That is one bit test on the hot path. When enabled, write the timestamp, the event id, and a few arguments. If the arguments do not fit the current slot, occupy the following slots. Those continuation slots use an event id that never collides with a real event, and they copy the same timestamp. After the whole record is written, advance this core's write index. A write barrier between cores keeps an offline reader from seeing half-written fields.
+
+Offline tools map the same shared memory per core and play it back. The hot path takes no lock and does not contend on a shared cache line across cores.
+
+```cpp
+#include <cstdint>
+
+struct TraceSlot {
+    uint64_t tsc;
+    uint16_t kind;
+    uint16_t owner;
+    uint32_t size;
+    uint64_t obj;
+    uint8_t data[32];
+};
+
+struct CoreTrace {
+    static constexpr uint32_t kMask = 4095;
+    static constexpr uint16_t kCont = 0xffff;
+    TraceSlot* slot{};
+    uint32_t next{0};
+    uint64_t enable_mask{0};
+
+    bool on(uint16_t kind) const {
+        return (enable_mask & (1ull << (kind & 63))) != 0;
+    }
+
+    void record(uint64_t tsc, uint16_t kind, uint64_t obj,
+                const void* bytes, uint32_t nbytes) {
+        if (!on(kind)) return;
+        uint32_t i = next & kMask;
+        TraceSlot& e = slot[i];
+        e.tsc = tsc;
+        e.kind = kind;
+        e.obj = obj;
+        e.size = nbytes;
+        uint32_t n = 1;
+        uint32_t off = 0;
+        while (off < nbytes) {
+            if (off > 0) {
+                TraceSlot& c = slot[(i + n) & kMask];
+                c.tsc = tsc;
+                c.kind = kCont;
+                ++n;
+            }
+            TraceSlot& cur = slot[(i + (off ? n - 1 : 0)) & kMask];
+            uint32_t chunk = nbytes - off;
+            if (chunk > sizeof(cur.data)) chunk = sizeof(cur.data);
+            for (uint32_t k = 0; k < chunk; ++k)
+                cur.data[k] = static_cast<const uint8_t*>(bytes)[off + k];
+            off += chunk;
+        }
+        __asm__ __volatile__("" ::: "memory");
+        next += n;
+    }
+};
+```
+
 
 ### 35. In-place ring writes to avoid large-object copies
 
@@ -17128,7 +17297,224 @@ struct GateSet {
 };
 ```
 
-### 44. High-quality articles on system design
+### 44. User-space block-device I/O and submit-completion handoff
+
+Fast durable writes and device-side offload keep the hot path out of the kernel block layer. The queues map into user space: the submit ring holds commands, the completion ring holds results, and a doorbell register wakes the device. Filter tables, file-table lookups, and the generic block scheduler stay off this path.
+
+Submit is ordered by cost. A command is written into the host submit ring first; the doorbell can wait until completions are harvested. If the device exposes a shadow doorbell and an event index, most updates stay in host memory and never touch PCIe. Completions use a phase bit to tell new from old, and prefetch the local handle for the next command. Tracker blocks are page-aligned, and the command id is the array index. When a user buffer splits across physical pages, adjacent segments fold into one scatter-gather entry.
+
+The rules below share one hot path, so they stay in one section.
+
+**Write the submit ring first; ring the doorbell when polling**
+
+After a command is copied into the submit ring, the tail index advances in software. The doorbell can be written at once, or deferred until the next completion poll sees that the tail has moved since the last kick, and then written once. Many submits share one doorbell, which cuts PCIe round trips. For a pair of commands that must go out together, do not ring after the first; ring after the second is in the ring.
+
+```cpp
+#include <cstdint>
+
+struct SubmitQ {
+    uint64_t* cmd{};
+    volatile uint32_t* door{};
+    uint32_t mask{0};
+    uint32_t tail{0};
+    uint32_t last_kick{0};
+    bool defer{true};
+
+    void post(uint64_t word) {
+        cmd[tail & mask] = word;
+        ++tail;
+        if (!defer) {
+            __asm__ __volatile__("sfence" ::: "memory");
+            *door = tail & mask;
+            last_kick = tail;
+        }
+    }
+
+    void flush_if_moved() {
+        if (tail == last_kick) return;
+        __asm__ __volatile__("sfence" ::: "memory");
+        *door = tail & mask;
+        last_kick = tail;
+    }
+};
+```
+
+**A shadow doorbell and an event index decide whether MMIO is needed**
+
+If the device exposes a shadow doorbell in host memory and an event index, write the new tail or head into the shadow doorbell first, then read the event index. When the unsigned test `(new - event) <= (new - old)` fails, the device does not need a wake this round, and the MMIO is skipped. When it holds, write the real doorbell once. A full barrier sits between the shadow store and the event-index load, so the CPU does not read a stale event index.
+
+```cpp
+#include <cstdint>
+
+inline bool need_kick(uint16_t event, uint16_t neu, uint16_t old) {
+    return (uint16_t)(neu - event) <= (uint16_t)(neu - old);
+}
+
+inline bool shadow_then_maybe_mmio(volatile uint32_t* shadow,
+                                   volatile uint32_t* eventidx,
+                                   volatile uint32_t* mmio,
+                                   uint16_t value) {
+    __asm__ __volatile__("sfence" ::: "memory");
+    uint16_t old = (uint16_t)*shadow;
+    *shadow = value;
+    __asm__ __volatile__("mfence" ::: "memory");
+    if (!need_kick((uint16_t)*eventidx, value, old)) return false;
+    __asm__ __volatile__("sfence" ::: "memory");
+    *mmio = value;
+    return true;
+}
+```
+
+**Completions use a phase bit; prefetch the next handle**
+
+Each completion slot carries a phase bit. It matches the phase remembered on this side only when the slot is a new completion. At the wrap of the ring, this side flips the expected phase. There is no need to read a head index from the device.
+
+After the current slot is accepted, compute the next index and the phase for the next lap, and test whether the next slot is already valid. If it is, prefetch the local handle keyed by that command id. By the time the current completion is finished, the next handle is often already in cache. Cap the number of completions taken in one poll, commonly a quarter of the queue depth and never more than 128. Outstanding commands must stay below the queue depth minus that cap, or the completion ring can wrap a full lap before the doorbell is written back, and old and new phases collide.
+
+When a command is stored into the submit ring, write the full 64-byte command with nontemporal 16-byte stores. The device will DMA those slots; this core almost never reads them again, so they should not fill the writer's cache.
+
+```cpp
+#include <cstdint>
+#include <immintrin.h>
+
+struct Cpl {
+    uint16_t cid;
+    uint16_t phase_bit;
+};
+
+struct Track {
+    void* req;
+    uint8_t pad[56];
+};
+
+struct CplQ {
+    Cpl* cpl{};
+    Track* tr{};
+    volatile uint32_t* door{};
+    uint32_t mask{0};
+    uint32_t head{0};
+    uint32_t phase{1};
+    uint32_t cap{64};
+
+    static void store_cmd(void* dst, const void* src) {
+        auto* d = reinterpret_cast<__m128i*>(dst);
+        auto* s = reinterpret_cast<const __m128i*>(src);
+        _mm_stream_si128(&d[0], _mm_load_si128(&s[0]));
+        _mm_stream_si128(&d[1], _mm_load_si128(&s[1]));
+        _mm_stream_si128(&d[2], _mm_load_si128(&s[2]));
+        _mm_stream_si128(&d[3], _mm_load_si128(&s[3]));
+    }
+
+    uint32_t drain(void (*done)(void*)) {
+        uint32_t n = 0;
+        bool next_ok = false;
+        while (n < cap) {
+            Cpl cur = cpl[head & mask];
+            if (!next_ok && cur.phase_bit != phase) break;
+            uint32_t nh = (head + 1) & mask;
+            uint32_t np = (head + 1) <= mask ? phase : phase ^ 1u;
+            Cpl nxt = cpl[nh];
+            next_ok = (nxt.phase_bit == np);
+            if (next_ok) __builtin_prefetch(&tr[nxt.cid], 0, 3);
+            if (++head > mask) {
+                head = 0;
+                phase ^= 1u;
+            }
+            if (tr[cur.cid].req) {
+                __builtin_prefetch(&tr[cur.cid].req, 0, 3);
+                done(tr[cur.cid].req);
+                tr[cur.cid].req = nullptr;
+            }
+            ++n;
+        }
+        if (n) *door = head & mask;
+        return n;
+    }
+};
+```
+
+**Command trackers are page-aligned; completion looks up by command id**
+
+Each outstanding command owns one tracker block. The block is a full page long, and the scatter-gather table or page list lives inside it, so those tables never cross a 4KiB boundary. Allocate the bank once at start-up for the queue depth. The array index is the command id. The completion ring returns that id, and this side indexes the bank directly; there is no hash table. Free trackers hang on a local chain: take one on submit, return it on completion.
+
+```cpp
+#include <cstdint>
+#include <new>
+
+struct CmdTrack {
+    void* req;
+    uint64_t bus_addr;
+    uint64_t sge[508];
+    uint8_t pad[16];
+};
+static_assert(sizeof(CmdTrack) == 4096);
+
+struct TrackBank {
+    CmdTrack* tr{};
+    uint16_t* free_id{};
+    uint32_t free_n{0};
+    uint32_t depth{0};
+
+    bool setup(uint32_t n) {
+        void* p = ::operator new(n * sizeof(CmdTrack), std::align_val_t{4096});
+        tr = static_cast<CmdTrack*>(p);
+        free_id = new uint16_t[n];
+        depth = n;
+        free_n = n;
+        for (uint32_t i = 0; i < n; ++i) {
+            free_id[i] = static_cast<uint16_t>(i);
+            tr[i].req = nullptr;
+        }
+        return true;
+    }
+
+    CmdTrack* take(uint16_t* id) {
+        if (free_n == 0) return nullptr;
+        *id = free_id[--free_n];
+        return &tr[*id];
+    }
+
+    void give(uint16_t id) {
+        tr[id].req = nullptr;
+        free_id[free_n++] = id;
+    }
+
+    CmdTrack* at(uint16_t id) { return &tr[id]; }
+};
+```
+
+**Adjacent physical segments fold into one scatter-gather entry**
+
+A user buffer may span several physical pages. When building the scatter-gather list the device understands, if the next segment's physical start equals the end of the previous segment, add the length to the previous entry instead of opening a new one. Fewer entries means a shorter walk on the device. With a single segment, the command carries that entry inline and does not hang an external list. When merge is turned off, every segment is its own entry, which is useful when matching hardware behaviour.
+
+```cpp
+#include <cstdint>
+
+struct Sge {
+    uint64_t addr;
+    uint32_t len;
+};
+
+struct SgeList {
+    Sge* out{};
+    uint32_t n{0};
+    bool merge{true};
+
+    void push(uint64_t addr, uint32_t len) {
+        if (merge && n > 0) {
+            Sge& prev = out[n - 1];
+            if (prev.addr + prev.len == addr) {
+                prev.len += len;
+                return;
+            }
+        }
+        out[n++] = {addr, len};
+    }
+};
+```
+
+
+### 45. High-quality articles on system design
 [https://mp.weixin.qq.com/s/9OH1RA8POFidgQnvape6fQ](https://mp.weixin.qq.com/s/9OH1RA8POFidgQnvape6fQ)
 
 [https://mp.weixin.qq.com/s/PuG4ZFVZ-7hijS4Db8Z5jQ](https://mp.weixin.qq.com/s/PuG4ZFVZ-7hijS4Db8Z5jQ)
