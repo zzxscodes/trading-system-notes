@@ -115,9 +115,7 @@
   - [31. Signal windows that emit parent orders](#31-signal-windows-that-emit-parent-orders)
   - [32. Close-today, close-yesterday, and stock sellable locks](#32-close-today-close-yesterday-and-stock-sellable-locks)
   - [33. Instrument-class fees and frozen-price backfill](#33-instrument-class-fees-and-frozen-price-backfill)
-  - [34. Read-only consume and publish rate limit on the monitor](#34-read-only-consume-and-publish-rate-limit-on-the-monitor)
-  - [35. Process lifecycle control and host sampling](#35-process-lifecycle-control-and-host-sampling)
-  - [36. Pair resting size, leg price, and size gate](#36-pair-resting-size-leg-price-and-size-gate)
+  - [34. Pair resting size, leg price, and size gate](#34-pair-resting-size-leg-price-and-size-gate)
 - [Business logic design-calculation](#business-logic-design-calculation)
   - [1. Log return (percent asymmetry)](#1-log-return-percent-asymmetry)
   - [2. Changes in state of market trends and volatility](#2-changes-in-state-of-market-trends-and-volatility)
@@ -147,6 +145,9 @@
   - [9. Unbiased trading simulation](#9-unbiased-trading-simulation)
   - [10. Calendar and risk documents that gate the sim day](#10-calendar-and-risk-documents-that-gate-the-sim-day)
   - [11. Counter-style query replies for sim position and asset](#11-counter-style-query-replies-for-sim-position-and-asset)
+- [Business logic design-monitoring](#business-logic-design-monitoring)
+  - [1. Read-only consume and publish rate limit on the monitor](#1-read-only-consume-and-publish-rate-limit-on-the-monitor)
+  - [2. Process lifecycle control and host sampling](#2-process-lifecycle-control-and-host-sampling)
 - [Business logic design-clearing](#business-logic-design-clearing)
   - [1. Day-end clearing pipeline](#1-day-end-clearing-pipeline)
   - [2. Clearing fill kinds and sides](#2-clearing-fill-kinds-and-sides)
@@ -36361,191 +36362,7 @@ bool backfill_lock(double& lock_px, int64_t& lock_qty, int64_t qty,
 }
 ```
 
-### 34. Read-only consume and publish rate limit on the monitor
-Monitoring and disk capture run in their own processes. Pools with capacity at or below zero are skipped. When free slots fall below 5% of capacity, an alert is raised. The comparison uses the free count.
-
-Publish and consume callbacks sit on separate event loops. The leaky bucket runs on the publish thread. Water level drops by rate times elapsed milliseconds, and a negative level is clamped to zero. If the level is still under capacity, it increases by one and one message is released. Otherwise the message stays on the outbound queue until the next timer. Heartbeats use non-persistent delivery. Replies to start and stop commands use persistent delivery. Property reports are packed once the batch exceeds 100 items or 15 seconds have passed since the last send. Log reports are forwarded as they arrive. The capture side preallocates a fixed array, advances an integer index, writes count times stride in one call, then zeroes the whole slab and resets the index.
-
-```cpp
-void watch_pool(const char* name, int64_t used, int64_t cap) {
-    if (cap <= 0) return;
-    if (static_cast<double>(cap - used) < static_cast<double>(cap) * 0.05)
-        raise_pool(name, used, cap);
-}
-```
-
-```cpp
-bool leak_one(int64_t& level, int64_t& last_ms, int64_t now_ms, int rate, int cap) {
-    int64_t dt = now_ms - last_ms;
-    last_ms = now_ms;
-    level -= static_cast<int64_t>(rate) * dt;
-    if (level < 0) level = 0;
-    if (level >= cap) return false;
-    ++level;
-    return true;
-}
-
-struct PropBatch {
-    int n{0};
-    int64_t last_ms{0};
-    bool due(int64_t now_ms) const {
-        return n > 100 || now_ms - last_ms > 15000;
-    }
-};
-
-struct Slab {
-    static constexpr int CAP = 1000000;
-    char* rec{nullptr};
-    int n{0};
-    size_t stride{0};
-    void flush(std::ostream& out) {
-        out.write(rec, static_cast<std::streamsize>(n * stride));
-        std::memset(rec, 0, stride * CAP);
-        n = 0;
-    }
-};
-```
-
-A quote subscription that arrives late is parked in a pending map keyed by symbol. Each incoming quote looks at that map first and returns when the map is empty. When the symbol is present, the current quote is wrapped into one message, with kind, codec, compression, body, and body length, and sent to every route waiting under that symbol. The symbol is then removed from the map. Later quotes follow the ordinary forward path.
-
-```cpp
-void push_fresh(std::unordered_map<std::string, std::vector<std::string>>& fresh,
-                const std::string& sym, const Quote& q) {
-    if (fresh.empty()) return;
-    auto it = fresh.find(sym);
-    if (it == fresh.end() || it->second.empty()) return;
-    for (const auto& route : it->second) {
-        Envelope env;
-        env.kind = "mkt.quote";
-        env.codec = "json";
-        env.pack = "none";
-        env.body = dump_one(q);
-        env.body_n = static_cast<int>(env.body.size());
-        send_one(route, env);
-    }
-    fresh.erase(it);
-}
-```
-
-
-### 35. Process lifecycle control and host sampling
-Start, stop, and host sampling run in two processes. The command process handles the clocks, process start and stop, and config changes. The report process handles host counters and the shared-memory log. Shared memory is created by the producers first, and the reader attaches after that. At the open, the command process writes the reader flag true and leaves the report process running, so the next start attaches with that flag. At the close, it stops the business processes, writes the flag false, and restarts the report process. The mapping comes off before the producers exit.
-
-A process is known by the tail of its command line. The name in `/proc/pid/status` keeps only a few characters, and a minute-stamped backup shares that prefix with the live binary, so a short name or a prefix match lands on the wrong file. The lookup throws away its own line and keeps a pid only when the line ends with the target file name. A Python process is known by the script name. An existing pid means the start stops there. Stop sends a normal terminate, waits half a second, looks again, and force-kills anything still there. A full start stops the whole set, waits a few seconds for shared memory and ports to come free, then starts each process in order. A failure in the middle leaves the rest to continue. The control process stays off this path. Before a start, the working directory moves to that install directory and the directory is placed at the front of the library path. The child inherits both. After the start, the working directory moves back to the control process.
-
-A day holds several open and close times. When the command process comes up, times already past move to the next day and sit behind the times still ahead, so a control process started at noon leaves the morning start where it is. Start and stop each have a weekday range. A time outside its range moves to the next day. A time that has run moves to the same clock on the next day. Start and restart go to a pool of one worker. Stop and config changes stay on the request thread, and the sleep between starts stays in the pool. Each command is matched to the site id first. A mismatch comes back as a failure.
-
-CPU use is the change since the previous call, and the call itself does not sleep. A temperature read takes about fifteen seconds, and per-core use stays outside the periodic sample. Network speed is taken on the report thread: two counter reads a second apart, then the difference. Disk throughput is cumulative bytes divided by cumulative busy time, the average since boot. A threshold of zero is skipped. Shared-memory size is stored on its own in the memory sample. A thread that barely sleeps pulls shared-memory logs into the send queue. Host status goes out every hundred milliseconds. Status messages are non-persistent. Shared-memory logs are persistent. The publish connection keeps a 60-second heartbeat. With the heartbeat set to zero, a failed send raises nothing and the reconnect path stays idle. The publish side confirms delivery. The consume side caps prefetch. Queue names and routing keys both carry the site id.
-
-```python
-def session_open(cfg_path):
-    patch_flag(cfg_path, reader=True)
-
-def session_close(cfg_path, reporter):
-    stop_fleet()
-    patch_flag(cfg_path, reader=False)
-    restart(reporter)
-```
-
-```python
-def live_pids(binary):
-    pids = []
-    text = run(f"pgrep -af {binary}")
-    for line in text.splitlines():
-        if "pgrep -af" in line:
-            continue
-        if line.endswith(binary):
-            pids.append(line.split()[0])
-    return pids
-
-def stop_one(binary):
-    for pid in live_pids(binary):
-        run(f"kill {pid}")
-    time.sleep(0.5)
-    for pid in live_pids(binary):
-        run(f"kill -9 {pid}")
-
-def bring_up(apps, self_name, self_home):
-    stop_fleet(apps)
-    time.sleep(5)
-    for app in sorted(apps, key=lambda a: a["order"]):
-        if not app["on"] or app["name"] == self_name:
-            continue
-        os.chdir(app["home"])
-        prepend("LD_LIBRARY_PATH", app["home"])
-        if not live_pids(app["name"]):
-            run(f"nohup ./{app['name']} >/dev/null 2>&1 &")
-        os.chdir(self_home)
-        time.sleep(app.get("gap", 5))
-```
-
-```python
-def load_clocks(clocks, now):
-    pending, late = [], []
-    for item in clocks:
-        (pending if item["when"] > now else late).append(item)
-    pending.sort(key=lambda x: x["when"])
-    late.sort(key=lambda x: x["when"])
-    for item in late:
-        item["when"] = item["when"] + timedelta(days=1)
-        pending.append(item)
-    return pending
-
-def fire(item, start_days, stop_days):
-    wd = item["when"].isoweekday()
-    window = start_days if item["opening"] else stop_days
-    if wd < window[0] or wd > window[1]:
-        item["when"] = item["when"] + timedelta(days=1)
-        return False
-    run_open() if item["opening"] else run_close()
-    item["when"] = item["when"] + timedelta(days=1)
-    return True
-```
-
-```python
-def sample_host(prev_net, unit):
-    cpu = psutil.cpu_percent(interval=None)
-    wait = psutil.cpu_times_percent().iowait
-    shared = psutil.virtual_memory().shared / unit
-    time.sleep(1)
-    now = psutil.net_io_counters(nowrap=True)
-    up = (now.bytes_sent - prev_net.bytes_sent) / unit
-    return cpu, wait, shared, up
-
-def breached(value, limit):
-    if math.isclose(limit, 0.0):
-        return False
-    return value >= limit
-```
-
-A package is unpacked into a side directory. When the directory name inside the archive differs from the configured process name, the extracted executable is renamed to the configured name before the tree is copied onto the install path. The executable already in the install directory is copied aside with a minute timestamp before that overwrite. A config file gets the same timestamped copy before the new body is written. The whole install tree is copied into a backup directory under a version name, and a rollback copies that version back onto the install path. The application roster merges by process name: a process present in the new message replaces the entry of the same name. Open and close clocks, weekday ranges, and the shared library path stay as they were when the new message leaves them empty.
-
-```python
-def install_tree(home, name, unpacked, stamp):
-    live = os.path.join(home, name)
-    if os.path.exists(live):
-        shutil.copy(live, f"{live}_{stamp}")
-    inner = os.path.join(unpacked, os.listdir(unpacked)[0])
-    packed = os.path.join(inner, os.path.basename(inner))
-    if os.path.basename(inner) != name and os.path.exists(packed):
-        os.rename(packed, os.path.join(inner, name))
-    for entry in os.listdir(inner):
-        copy_over(os.path.join(inner, entry), home)
-
-def merge_roster(old, incoming):
-    by_name = {a["name"]: a for a in old.get("apps", [])}
-    for app in incoming.get("apps", []):
-        by_name[app["name"]] = app
-    out = dict(old)
-    for key in ("open_days", "close_days", "clocks", "shared_libs"):
-        if incoming.get(key):
-            out[key] = incoming[key]
-    out["apps"] = list(by_name.values())
-    return out
-```
-
-
-### 36. Pair resting size, leg price, and size gate
+### 34. Pair resting size, leg price, and size gate
 A pair order carries several legs and one execution sheet. Each leg has a symbol, account, counter, product, currency, exchange rate, size weight, feed coefficient, margin rate, underlying, tick size, board lot, and instrument kind. The sheet carries the target price, target size, the symbols allowed to rest, the combined-hit flag, each leg’s side, the resting cap, the resting offset against the taking price, the cancel offset, the amend offset, how many ticks the taker gives up, the cancel interval, the seconds before a forced balance, the alternate price, the spread, the chase mode, the pricing mode, the limit mode, and the limit-tick count.
 
 ```cpp
@@ -44563,6 +44380,190 @@ struct AstBody {
 void fill_route(char* out, int n, const char* counter) {
     std::snprintf(out, n, "%s_back_respond_routing", counter);
 }
+```
+
+## Business logic design-monitoring
+
+### 1. Read-only consume and publish rate limit on the monitor
+Monitoring and disk capture run in their own processes. Pools with capacity at or below zero are skipped. When free slots fall below 5% of capacity, an alert is raised. The comparison uses the free count.
+
+Publish and consume callbacks sit on separate event loops. The leaky bucket runs on the publish thread. Water level drops by rate times elapsed milliseconds, and a negative level is clamped to zero. If the level is still under capacity, it increases by one and one message is released. Otherwise the message stays on the outbound queue until the next timer. Heartbeats use non-persistent delivery. Replies to start and stop commands use persistent delivery. Property reports are packed once the batch exceeds 100 items or 15 seconds have passed since the last send. Log reports are forwarded as they arrive. The capture side preallocates a fixed array, advances an integer index, writes count times stride in one call, then zeroes the whole slab and resets the index.
+
+```cpp
+void watch_pool(const char* name, int64_t used, int64_t cap) {
+    if (cap <= 0) return;
+    if (static_cast<double>(cap - used) < static_cast<double>(cap) * 0.05)
+        raise_pool(name, used, cap);
+}
+```
+
+```cpp
+bool leak_one(int64_t& level, int64_t& last_ms, int64_t now_ms, int rate, int cap) {
+    int64_t dt = now_ms - last_ms;
+    last_ms = now_ms;
+    level -= static_cast<int64_t>(rate) * dt;
+    if (level < 0) level = 0;
+    if (level >= cap) return false;
+    ++level;
+    return true;
+}
+
+struct PropBatch {
+    int n{0};
+    int64_t last_ms{0};
+    bool due(int64_t now_ms) const {
+        return n > 100 || now_ms - last_ms > 15000;
+    }
+};
+
+struct Slab {
+    static constexpr int CAP = 1000000;
+    char* rec{nullptr};
+    int n{0};
+    size_t stride{0};
+    void flush(std::ostream& out) {
+        out.write(rec, static_cast<std::streamsize>(n * stride));
+        std::memset(rec, 0, stride * CAP);
+        n = 0;
+    }
+};
+```
+
+A quote subscription that arrives late is parked in a pending map keyed by symbol. Each incoming quote looks at that map first and returns when the map is empty. When the symbol is present, the current quote is wrapped into one message, with kind, codec, compression, body, and body length, and sent to every route waiting under that symbol. The symbol is then removed from the map. Later quotes follow the ordinary forward path.
+
+```cpp
+void push_fresh(std::unordered_map<std::string, std::vector<std::string>>& fresh,
+                const std::string& sym, const Quote& q) {
+    if (fresh.empty()) return;
+    auto it = fresh.find(sym);
+    if (it == fresh.end() || it->second.empty()) return;
+    for (const auto& route : it->second) {
+        Envelope env;
+        env.kind = "mkt.quote";
+        env.codec = "json";
+        env.pack = "none";
+        env.body = dump_one(q);
+        env.body_n = static_cast<int>(env.body.size());
+        send_one(route, env);
+    }
+    fresh.erase(it);
+}
+```
+
+### 2. Process lifecycle control and host sampling
+Start, stop, and host sampling run in two processes. The command process handles the clocks, process start and stop, and config changes. The report process handles host counters and the shared-memory log. Shared memory is created by the producers first, and the reader attaches after that. At the open, the command process writes the reader flag true and leaves the report process running, so the next start attaches with that flag. At the close, it stops the business processes, writes the flag false, and restarts the report process. The mapping comes off before the producers exit.
+
+A process is known by the tail of its command line. The name in `/proc/pid/status` keeps only a few characters, and a minute-stamped backup shares that prefix with the live binary, so a short name or a prefix match lands on the wrong file. The lookup throws away its own line and keeps a pid only when the line ends with the target file name. A Python process is known by the script name. An existing pid means the start stops there. Stop sends a normal terminate, waits half a second, looks again, and force-kills anything still there. A full start stops the whole set, waits a few seconds for shared memory and ports to come free, then starts each process in order. A failure in the middle leaves the rest to continue. The control process stays off this path. Before a start, the working directory moves to that install directory and the directory is placed at the front of the library path. The child inherits both. After the start, the working directory moves back to the control process.
+
+A day holds several open and close times. When the command process comes up, times already past move to the next day and sit behind the times still ahead, so a control process started at noon leaves the morning start where it is. Start and stop each have a weekday range. A time outside its range moves to the next day. A time that has run moves to the same clock on the next day. Start and restart go to a pool of one worker. Stop and config changes stay on the request thread, and the sleep between starts stays in the pool. Each command is matched to the site id first. A mismatch comes back as a failure.
+
+CPU use is the change since the previous call, and the call itself does not sleep. A temperature read takes about fifteen seconds, and per-core use stays outside the periodic sample. Network speed is taken on the report thread: two counter reads a second apart, then the difference. Disk throughput is cumulative bytes divided by cumulative busy time, the average since boot. A threshold of zero is skipped. Shared-memory size is stored on its own in the memory sample. A thread that barely sleeps pulls shared-memory logs into the send queue. Host status goes out every hundred milliseconds. Status messages are non-persistent. Shared-memory logs are persistent. The publish connection keeps a 60-second heartbeat. With the heartbeat set to zero, a failed send raises nothing and the reconnect path stays idle. The publish side confirms delivery. The consume side caps prefetch. Queue names and routing keys both carry the site id.
+
+```python
+def session_open(cfg_path):
+    patch_flag(cfg_path, reader=True)
+
+def session_close(cfg_path, reporter):
+    stop_fleet()
+    patch_flag(cfg_path, reader=False)
+    restart(reporter)
+```
+
+```python
+def live_pids(binary):
+    pids = []
+    text = run(f"pgrep -af {binary}")
+    for line in text.splitlines():
+        if "pgrep -af" in line:
+            continue
+        if line.endswith(binary):
+            pids.append(line.split()[0])
+    return pids
+
+def stop_one(binary):
+    for pid in live_pids(binary):
+        run(f"kill {pid}")
+    time.sleep(0.5)
+    for pid in live_pids(binary):
+        run(f"kill -9 {pid}")
+
+def bring_up(apps, self_name, self_home):
+    stop_fleet(apps)
+    time.sleep(5)
+    for app in sorted(apps, key=lambda a: a["order"]):
+        if not app["on"] or app["name"] == self_name:
+            continue
+        os.chdir(app["home"])
+        prepend("LD_LIBRARY_PATH", app["home"])
+        if not live_pids(app["name"]):
+            run(f"nohup ./{app['name']} >/dev/null 2>&1 &")
+        os.chdir(self_home)
+        time.sleep(app.get("gap", 5))
+```
+
+```python
+def load_clocks(clocks, now):
+    pending, late = [], []
+    for item in clocks:
+        (pending if item["when"] > now else late).append(item)
+    pending.sort(key=lambda x: x["when"])
+    late.sort(key=lambda x: x["when"])
+    for item in late:
+        item["when"] = item["when"] + timedelta(days=1)
+        pending.append(item)
+    return pending
+
+def fire(item, start_days, stop_days):
+    wd = item["when"].isoweekday()
+    window = start_days if item["opening"] else stop_days
+    if wd < window[0] or wd > window[1]:
+        item["when"] = item["when"] + timedelta(days=1)
+        return False
+    run_open() if item["opening"] else run_close()
+    item["when"] = item["when"] + timedelta(days=1)
+    return True
+```
+
+```python
+def sample_host(prev_net, unit):
+    cpu = psutil.cpu_percent(interval=None)
+    wait = psutil.cpu_times_percent().iowait
+    shared = psutil.virtual_memory().shared / unit
+    time.sleep(1)
+    now = psutil.net_io_counters(nowrap=True)
+    up = (now.bytes_sent - prev_net.bytes_sent) / unit
+    return cpu, wait, shared, up
+
+def breached(value, limit):
+    if math.isclose(limit, 0.0):
+        return False
+    return value >= limit
+```
+
+A package is unpacked into a side directory. When the directory name inside the archive differs from the configured process name, the extracted executable is renamed to the configured name before the tree is copied onto the install path. The executable already in the install directory is copied aside with a minute timestamp before that overwrite. A config file gets the same timestamped copy before the new body is written. The whole install tree is copied into a backup directory under a version name, and a rollback copies that version back onto the install path. The application roster merges by process name: a process present in the new message replaces the entry of the same name. Open and close clocks, weekday ranges, and the shared library path stay as they were when the new message leaves them empty.
+
+```python
+def install_tree(home, name, unpacked, stamp):
+    live = os.path.join(home, name)
+    if os.path.exists(live):
+        shutil.copy(live, f"{live}_{stamp}")
+    inner = os.path.join(unpacked, os.listdir(unpacked)[0])
+    packed = os.path.join(inner, os.path.basename(inner))
+    if os.path.basename(inner) != name and os.path.exists(packed):
+        os.rename(packed, os.path.join(inner, name))
+    for entry in os.listdir(inner):
+        copy_over(os.path.join(inner, entry), home)
+
+def merge_roster(old, incoming):
+    by_name = {a["name"]: a for a in old.get("apps", [])}
+    for app in incoming.get("apps", []):
+        by_name[app["name"]] = app
+    out = dict(old)
+    for key in ("open_days", "close_days", "clocks", "shared_libs"):
+        if incoming.get(key):
+            out[key] = incoming[key]
+    out["apps"] = list(by_name.values())
+    return out
 ```
 
 ## Business logic design-clearing
