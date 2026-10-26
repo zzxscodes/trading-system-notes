@@ -51,7 +51,8 @@
   - [42. Sequence-window reordering](#42-sequence-window-reordering)
   - [43. Kernel async I/O on shared submit and completion rings](#43-kernel-async-io-on-shared-submit-and-completion-rings)
   - [44. User-space block-device I/O with submit and completion rings](#44-user-space-block-device-io-with-submit-and-completion-rings)
-  - [45. High-quality articles on system design](#45-high-quality-articles-on-system-design)
+  - [45. Event-driven factor plans that unfold at compile time](#45-event-driven-factor-plans-that-unfold-at-compile-time)
+  - [46. High-quality articles on system design](#46-high-quality-articles-on-system-design)
 - [Common performance bottlenecks and optimization directions](#common-performance-bottlenecks-and-optimization-directions)
   - [1. roofline model](#1-roofline-model)
     - [Memory Bound optimization](#memory-bound-optimization)
@@ -116,6 +117,7 @@
   - [32. Close-today, close-yesterday, and stock sellable locks](#32-close-today-close-yesterday-and-stock-sellable-locks)
   - [33. Instrument-class fees and frozen-price backfill](#33-instrument-class-fees-and-frozen-price-backfill)
   - [34. Pair resting size, leg price, and size gate](#34-pair-resting-size-leg-price-and-size-gate)
+  - [35. Live factor wiring that separates state from events](#35-live-factor-wiring-that-separates-state-from-events)
 - [Business logic design-calculation](#business-logic-design-calculation)
   - [1. Log return (percent asymmetry)](#1-log-return-percent-asymmetry)
   - [2. Changes in state of market trends and volatility](#2-changes-in-state-of-market-trends-and-volatility)
@@ -133,6 +135,7 @@
   - [14. EMA and EMASTDEV (time smoothing)](#14-ema-and-emastdev-time-smoothing)
   - [15. Avellaneda-Stoikov market making strategy](#15-avellaneda-stoikov-market-making-strategy)
   - [16. Fixed point number of trading system](#16-fixed-point-number-of-trading-system)
+  - [17. Rolling gap of trade price versus mid at trade time](#17-rolling-gap-of-trade-price-versus-mid-at-trade-time)
 - [Business logic design-backtest and simulated matching](#business-logic-design-backtest-and-simulated-matching)
   - [1. Four-process sim path: tape, quote adapter, trader, matcher](#1-four-process-sim-path-tape-quote-adapter-trader-matcher)
   - [2. Historical tape pacing, break windows, and parquet streams](#2-historical-tape-pacing-break-windows-and-parquet-streams)
@@ -17565,7 +17568,111 @@ struct SgeList {
 };
 ```
 
-### 45. High-quality articles on system design
+### 45. Event-driven factor plans that unfold at compile time
+
+Market factors often touch both book state and trade events. State may stay equal while events must not be dropped: two trades at the same price are two history samples, and skipping because the number matches is wrong. Coalescing and cutoff in spreadsheet-style incremental engines break factors that keep history.
+
+Split each factor into two steps. A pulse handler updates internal state on every matching event, for example pushing trade price minus mid-at-that-trade into a ring. A refresh runs only when someone reads the value, for example dividing the ring sum by the count. A book update that nobody reads mid for does not compute mid.
+
+Dependencies live in types or an adjacency list. A planner walks them with gray/black depth-first search per event kind and emits an ordered step list. Cycles fail during planning. A shared dependency evaluates once per event. If a read node also handles the event, its pulse runs before its refresh so readers see the updated state. The hot path follows the step list with no runtime cutoff: a few predictable arithmetic steps are often cheaper than extra branches, and tail latency is easier to reason about. When the graph is fixed at compile time, the same algorithm moves into a constant expression and the step list becomes a sequence of direct calls.
+
+```cpp
+struct QuotePulse { double bid, ask; };
+struct FillPulse { double px; };
+
+struct Sheet {
+  double bid = 0, ask = 0;
+  void on_pulse(QuotePulse q) { bid = q.bid; ask = q.ask; }
+};
+
+struct FairMid {
+  double value = 0;
+  void refresh(const Sheet& s) { value = (s.bid + s.ask) * 0.5; }
+};
+
+struct FillGapWin {
+  static constexpr std::size_t K = 10;
+  std::array<double, K> ring{};
+  std::size_t pos = 0, n = 0;
+  double sum = 0, value = 0;
+  void on_pulse(FillPulse f, double mid_now) {
+    double x = f.px - mid_now;
+    sum += x - ring[pos];
+    ring[pos] = x;
+    pos = (pos + 1) % K;
+    if (n < K) ++n;
+  }
+  void refresh() { value = n ? sum / static_cast<double>(n) : 0; }
+};
+```
+
+One step list per event kind. A quote only pushes the sheet; a fill pulls mid then pushes the gap window; a query only pulls the window mean.
+
+```cpp
+enum class Act : uint8_t { PushSheet, PullMid, PushGap, PullGap };
+
+struct PulseHub {
+  Sheet sheet{};
+  FairMid mid{};
+  FillGapWin gap{};
+
+  void ingest(QuotePulse q) {
+    constexpr Act plan[] = {Act::PushSheet};
+    for (Act a : plan) run(a, &q, nullptr);
+  }
+  void ingest(FillPulse f) {
+    constexpr Act plan[] = {Act::PullMid, Act::PushGap};
+    for (Act a : plan) run(a, nullptr, &f);
+  }
+  double sample_gap() {
+    constexpr Act plan[] = {Act::PullGap};
+    for (Act a : plan) run(a, nullptr, nullptr);
+    return gap.value;
+  }
+  void run(Act a, const QuotePulse* q, const FillPulse* f) {
+    switch (a) {
+      case Act::PushSheet: sheet.on_pulse(*q); break;
+      case Act::PullMid: mid.refresh(sheet); break;
+      case Act::PushGap: gap.on_pulse(*f, mid.value); break;
+      case Act::PullGap: gap.refresh(); break;
+    }
+  }
+};
+```
+
+Gray/black marks separate “in progress” from “done”. Hitting a done node skips work; hitting an in-progress node is a cycle.
+
+```cpp
+struct TinyDag {
+  static constexpr int M = 4;
+  std::array<std::array<int, M>, M> need{};
+  std::array<uint8_t, M> mark{};
+  std::array<int, M> order{};
+  int n_nodes{0}, n_order{0};
+  bool cycle{false};
+
+  void add_edge(int reader, int dep) {
+    if (!need[reader][dep]) need[reader][dep] = 1;
+  }
+  void dfs(int u) {
+    if (mark[u] == 1) { cycle = true; return; }
+    if (mark[u] == 2) return;
+    mark[u] = 1;
+    for (int v = 0; v < n_nodes; ++v)
+      if (need[u][v]) dfs(v);
+    mark[u] = 2;
+    order[n_order++] = u;
+  }
+  void build(int start) {
+    mark.fill(0);
+    n_order = 0;
+    cycle = false;
+    dfs(start);
+  }
+};
+```
+
+### 46. High-quality articles on system design
 [https://mp.weixin.qq.com/s/9OH1RA8POFidgQnvape6fQ](https://mp.weixin.qq.com/s/9OH1RA8POFidgQnvape6fQ)
 
 [https://mp.weixin.qq.com/s/PuG4ZFVZ-7hijS4Db8Z5jQ](https://mp.weixin.qq.com/s/PuG4ZFVZ-7hijS4Db8Z5jQ)
@@ -36600,6 +36707,46 @@ bool admit_pair_qty(std::string_view venue, std::string_view code, long qty) {
 }
 ```
 
+### 35. Live factor wiring that separates state from events
+
+Researchers keep adding and rewiring factors, and each market needs a different subset. If “what to compute” and “when and in what order” live in the same event callback, the main file grows into tens of thousands of lines, a simple ratio factor may touch many files, and a factor unused on one market still slows every market.
+
+The wiring layer only takes dependency declarations: which values a pulse reads, and which values a refresh reads. Each market event builds a minimal closure: pulses for that event plus the refreshes they transitively need. A factor added elsewhere stays off this hot path when it is outside the closure. A quote pulse usually updates only the sheet; a fill pulse pulls mid-at-trade and writes the history window; a strategy sample runs only the refresh chain.
+
+Replay and live trading share the same factor structs: the input becomes a historical event stream, the step lists stay the same, and research diverges less from production. When dependencies only drive ordering, a body may still compile while reading an undeclared node, but it sees a stale value from an earlier event; tests should pin missing declarations.
+
+```cpp
+enum class Act : uint8_t { PushSheet, PullMid, PushGap, PullGap };
+
+struct PulseHub {
+  Sheet sheet{};
+  FairMid mid{};
+  FillGapWin gap{};
+
+  void ingest(QuotePulse q) {
+    constexpr Act plan[] = {Act::PushSheet};
+    for (Act a : plan) run(a, &q, nullptr);
+  }
+  void ingest(FillPulse f) {
+    constexpr Act plan[] = {Act::PullMid, Act::PushGap};
+    for (Act a : plan) run(a, nullptr, &f);
+  }
+  double sample_gap() {
+    constexpr Act plan[] = {Act::PullGap};
+    for (Act a : plan) run(a, nullptr, nullptr);
+    return gap.value;
+  }
+  void run(Act a, const QuotePulse* q, const FillPulse* f) {
+    switch (a) {
+      case Act::PushSheet: sheet.on_pulse(*q); break;
+      case Act::PullMid: mid.refresh(sheet); break;
+      case Act::PushGap: gap.on_pulse(*f, mid.value); break;
+      case Act::PullGap: gap.refresh(); break;
+    }
+  }
+};
+```
+
 
 ## Business logic design-calculation
 ### 1. Log return (percent asymmetry)
@@ -42779,6 +42926,33 @@ int main() {
     return 0;
 }
 ```
+
+### 17. Rolling gap of trade price versus mid at trade time
+
+Mid is the mean of bid and ask and moves with the book. Many microstructure factors need mid at each trade, not “the mid right now”. Average the last N trades of trade price minus mid at that trade:
+
+F = (1/N) * sum_i (TradePrice_i - Mid_i)
+
+Two trades at the same price still both enter the window. Mid used for the sample must be pulled on the fill path; a cache left by an earlier quote pulse can be wrong if books moved without a refresh. A ring stores gaps and a running sum; when a new gap replaces the oldest cell, subtract the old gap from the sum first, then divide by the filled count for the mean.
+
+```cpp
+struct TradeMidGap {
+  static constexpr int W = 10;
+  double gap[W]{};
+  int i{0}, filled{0};
+  double run{0};
+
+  void push_at_trade(double trade_px, double mid_then) {
+    double x = trade_px - mid_then;
+    run += x - gap[i];
+    gap[i] = x;
+    i = (i + 1) % W;
+    if (filled < W) ++filled;
+  }
+  double mean() const { return filled ? run / filled : 0; }
+};
+```
+
 
 ## Business logic design-backtest and simulated matching
 

@@ -51,7 +51,8 @@ English version：[https://github.com/zzxscodes/trading-system-notes/blob/main/t
   - [42. 序号窗口重排](#42-序号窗口重排)
   - [43. 共享提交完成环上的内核异步收发](#43-共享提交完成环上的内核异步收发)
   - [44. 用户态块设备收发与提交完成环](#44-用户态块设备收发与提交完成环)
-  - [45. 系统设计优质文章](#45-系统设计优质文章)
+  - [45. 编译期可展开的事件因子执行计划](#45-编译期可展开的事件因子执行计划)
+  - [46. 系统设计优质文章](#46-系统设计优质文章)
 - [常见性能瓶颈与优化方向](#常见性能瓶颈与优化方向)
   - [1. roofline model](#1-roofline-model)
     - [Memory Bound优化](#memory-bound优化)
@@ -116,6 +117,7 @@ English version：[https://github.com/zzxscodes/trading-system-notes/blob/main/t
   - [32. 平今平昨与股票可卖冻结](#32-平今平昨与股票可卖冻结)
   - [33. 品种大类费用与冻结价回填](#33-品种大类费用与冻结价回填)
   - [34. 配对执行的挂单量、腿价格和手数门槛](#34-配对执行的挂单量腿价格和手数门槛)
+  - [35. 状态与事件分离的实盘因子编排](#35-状态与事件分离的实盘因子编排)
 - [业务逻辑设计-计算](#业务逻辑设计-计算)
   - [1. 对数收益率(百分比非对称性)](#1-对数收益率百分比非对称性)
   - [2. 市场趋势和波动率的状态变化](#2-市场趋势和波动率的状态变化)
@@ -133,6 +135,7 @@ English version：[https://github.com/zzxscodes/trading-system-notes/blob/main/t
   - [14. EMA和EMASTDEV(时间平滑)](#14-ema和emastdev时间平滑)
   - [15. Avellaneda-Stoikov做市策略](#15-avellaneda-stoikov做市策略)
   - [16. 交易系统的定点数](#16-交易系统的定点数)
+  - [17. 成交时刻相对中间价的滚动偏差](#17-成交时刻相对中间价的滚动偏差)
 - [业务逻辑设计-回测与模拟撮合](#业务逻辑设计-回测与模拟撮合)
   - [1. 四进程模拟路径：回放、行情适配、交易、撮合](#1-四进程模拟路径回放行情适配交易撮合)
   - [2. 历史回放节拍、休市加速与列式数据流](#2-历史回放节拍休市加速与列式数据流)
@@ -17533,7 +17536,111 @@ struct SgeList {
 };
 ```
 
-### 45. 系统设计优质文章
+### 45. 编译期可展开的事件因子执行计划
+
+行情因子常要同时处理盘口状态和成交事件。状态可以不变，事件却不能丢：两笔同价成交是两次历史，不能因数值相同就跳过。表格式增量计算里的合并更新与截断，会把这类依赖历史的因子算错。
+
+把每个因子拆成两步。脉冲处理在每条它订阅的事件上更新内部状态，例如把成交价与当时中间价的差推进环形窗。求值只在有人要读这个数时才做，例如用窗内和除以条数。盘口更新若没有读者需要中间价，就不算中间价。
+
+依赖写进类型或邻接表，规划器按事件种类做灰黑标记的深度优先遍历，得到一份有序步骤表。环依赖在规划阶段失败。共享依赖在同一事件里只求值一次；被读节点若自己也处理该事件，先做它的脉冲处理，再求值，读者看到的是更新后的状态。热路径按步骤表直线执行，不做运行时截断：少几次判断往往比多几次可预测的算术更稳，尾延迟也好分析。图在编译期固定时，同算法可搬进常量表达式，步骤表变成直接调用序列。
+
+```cpp
+struct QuotePulse { double bid, ask; };
+struct FillPulse { double px; };
+
+struct Sheet {
+  double bid = 0, ask = 0;
+  void on_pulse(QuotePulse q) { bid = q.bid; ask = q.ask; }
+};
+
+struct FairMid {
+  double value = 0;
+  void refresh(const Sheet& s) { value = (s.bid + s.ask) * 0.5; }
+};
+
+struct FillGapWin {
+  static constexpr std::size_t K = 10;
+  std::array<double, K> ring{};
+  std::size_t pos = 0, n = 0;
+  double sum = 0, value = 0;
+  void on_pulse(FillPulse f, double mid_now) {
+    double x = f.px - mid_now;
+    sum += x - ring[pos];
+    ring[pos] = x;
+    pos = (pos + 1) % K;
+    if (n < K) ++n;
+  }
+  void refresh() { value = n ? sum / static_cast<double>(n) : 0; }
+};
+```
+
+每种事件一份步骤表。盘口只推簿；成交先拉中间价再推偏差窗；查询只拉窗上的均值。
+
+```cpp
+enum class Act : uint8_t { PushSheet, PullMid, PushGap, PullGap };
+
+struct PulseHub {
+  Sheet sheet{};
+  FairMid mid{};
+  FillGapWin gap{};
+
+  void ingest(QuotePulse q) {
+    constexpr Act plan[] = {Act::PushSheet};
+    for (Act a : plan) run(a, &q, nullptr);
+  }
+  void ingest(FillPulse f) {
+    constexpr Act plan[] = {Act::PullMid, Act::PushGap};
+    for (Act a : plan) run(a, nullptr, &f);
+  }
+  double sample_gap() {
+    constexpr Act plan[] = {Act::PullGap};
+    for (Act a : plan) run(a, nullptr, nullptr);
+    return gap.value;
+  }
+  void run(Act a, const QuotePulse* q, const FillPulse* f) {
+    switch (a) {
+      case Act::PushSheet: sheet.on_pulse(*q); break;
+      case Act::PullMid: mid.refresh(sheet); break;
+      case Act::PushGap: gap.on_pulse(*f, mid.value); break;
+      case Act::PullGap: gap.refresh(); break;
+    }
+  }
+};
+```
+
+灰黑标记把“正在展开”和“已完成”分开，重复遇到已完成的节点直接跳过，再次进入正在展开的节点就是环。
+
+```cpp
+struct TinyDag {
+  static constexpr int M = 4;
+  std::array<std::array<int, M>, M> need{};
+  std::array<uint8_t, M> mark{};
+  std::array<int, M> order{};
+  int n_nodes{0}, n_order{0};
+  bool cycle{false};
+
+  void add_edge(int reader, int dep) {
+    if (!need[reader][dep]) need[reader][dep] = 1;
+  }
+  void dfs(int u) {
+    if (mark[u] == 1) { cycle = true; return; }
+    if (mark[u] == 2) return;
+    mark[u] = 1;
+    for (int v = 0; v < n_nodes; ++v)
+      if (need[u][v]) dfs(v);
+    mark[u] = 2;
+    order[n_order++] = u;
+  }
+  void build(int start) {
+    mark.fill(0);
+    n_order = 0;
+    cycle = false;
+    dfs(start);
+  }
+};
+```
+
+### 46. 系统设计优质文章
 [https://mp.weixin.qq.com/s/9OH1RA8POFidgQnvape6fQ](https://mp.weixin.qq.com/s/9OH1RA8POFidgQnvape6fQ)
 
 [https://mp.weixin.qq.com/s/PuG4ZFVZ-7hijS4Db8Z5jQ](https://mp.weixin.qq.com/s/PuG4ZFVZ-7hijS4Db8Z5jQ)
@@ -36587,6 +36694,46 @@ bool admit_pair_qty(std::string_view venue, std::string_view code, long qty) {
 }
 ```
 
+### 35. 状态与事件分离的实盘因子编排
+
+研究人员不断增删组合因子，不同市场需要的子集也不同。若把“算什么”和“何时按何序算”都写进同一条事件回调，主文件会膨胀到上万行，加一个比率因子可能要改十几个文件，而且某个市场不需要的因子仍会拖慢所有市场。
+
+编排层只接受依赖声明：这个脉冲要读哪些值，这次求值要读哪些值。每种市场事件生成一份最小闭包：本事件的脉冲，加上它们传递需要的求值。别处新加的因子若不在闭包里，不会进入这条热路径。盘口脉冲通常只更新簿；成交脉冲才拉成交时刻的中间价并写入历史窗；策略索取因子时只跑求值链。
+
+回放与实盘共用同一套因子结构：输入改成历史事件流，步骤表不变，研究和生产少一层实现分叉。依赖只用于排序时，函数体若读了未声明的节点，仍可能编过，但读到的是旧事件留下的值，声明遗漏要靠测试钉住。
+
+```cpp
+enum class Act : uint8_t { PushSheet, PullMid, PushGap, PullGap };
+
+struct PulseHub {
+  Sheet sheet{};
+  FairMid mid{};
+  FillGapWin gap{};
+
+  void ingest(QuotePulse q) {
+    constexpr Act plan[] = {Act::PushSheet};
+    for (Act a : plan) run(a, &q, nullptr);
+  }
+  void ingest(FillPulse f) {
+    constexpr Act plan[] = {Act::PullMid, Act::PushGap};
+    for (Act a : plan) run(a, nullptr, &f);
+  }
+  double sample_gap() {
+    constexpr Act plan[] = {Act::PullGap};
+    for (Act a : plan) run(a, nullptr, nullptr);
+    return gap.value;
+  }
+  void run(Act a, const QuotePulse* q, const FillPulse* f) {
+    switch (a) {
+      case Act::PushSheet: sheet.on_pulse(*q); break;
+      case Act::PullMid: mid.refresh(sheet); break;
+      case Act::PushGap: gap.on_pulse(*f, mid.value); break;
+      case Act::PullGap: gap.refresh(); break;
+    }
+  }
+};
+```
+
 
 ## 业务逻辑设计-计算
 ### 1. 对数收益率(百分比非对称性)
@@ -42766,6 +42913,33 @@ int main() {
     return 0;
 }
 ```
+
+### 17. 成交时刻相对中间价的滚动偏差
+
+中间价是买卖价的均值，随盘口变。许多微观结构因子要的不是“当前中间价”，而是每一笔成交发生那一刻的中间价。最近 N 笔成交价减去当时中间价，再取平均：
+
+F = (1/N) * sum_i (TradePrice_i - Mid_i)
+
+两笔成交价相同，只要是两笔成交，都要进窗。采样用的中间价必须在成交路径上当场拉出；若只用上一次盘口脉冲留下的缓存，且中间隔了未触发求值的盘口，差会算错。环形窗保存差值与运行和，新差替换最旧一格时先从和里减掉旧差，求均值时再除以已填条数。
+
+```cpp
+struct TradeMidGap {
+  static constexpr int W = 10;
+  double gap[W]{};
+  int i{0}, filled{0};
+  double run{0};
+
+  void push_at_trade(double trade_px, double mid_then) {
+    double x = trade_px - mid_then;
+    run += x - gap[i];
+    gap[i] = x;
+    i = (i + 1) % W;
+    if (filled < W) ++filled;
+  }
+  double mean() const { return filled ? run / filled : 0; }
+};
+```
+
 
 ## 业务逻辑设计-回测与模拟撮合
 
