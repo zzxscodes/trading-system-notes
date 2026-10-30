@@ -52,7 +52,9 @@
   - [43. Kernel async I/O on shared submit and completion rings](#43-kernel-async-io-on-shared-submit-and-completion-rings)
   - [44. User-space block-device I/O with submit and completion rings](#44-user-space-block-device-io-with-submit-and-completion-rings)
   - [45. Event-driven factor plans that unfold at compile time](#45-event-driven-factor-plans-that-unfold-at-compile-time)
-  - [46. High-quality articles on system design](#46-high-quality-articles-on-system-design)
+  - [46. Single-thread vs multi-stage pipeline: service time versus packet spacing](#46-single-thread-vs-multi-stage-pipeline-service-time-versus-packet-spacing)
+  - [47. Compile-time typestate: illegal ticket moves are unreachable by type](#47-compile-time-typestate-illegal-ticket-moves-are-unreachable-by-type)
+  - [48. High-quality articles on system design](#48-high-quality-articles-on-system-design)
 - [Common performance bottlenecks and optimization directions](#common-performance-bottlenecks-and-optimization-directions)
   - [1. roofline model](#1-roofline-model)
     - [Memory Bound optimization](#memory-bound-optimization)
@@ -118,6 +120,8 @@
   - [33. Instrument-class fees and frozen-price backfill](#33-instrument-class-fees-and-frozen-price-backfill)
   - [34. Pair resting size, leg price, and size gate](#34-pair-resting-size-leg-price-and-size-gate)
   - [35. Live factor wiring that separates state from events](#35-live-factor-wiring-that-separates-state-from-events)
+  - [36. Config-picked frame digests with enum dispatch](#36-config-picked-frame-digests-with-enum-dispatch)
+  - [37. Ticket capability matrix, command objects, and version-guarded snapshots](#37-ticket-capability-matrix-command-objects-and-version-guarded-snapshots)
 - [Business logic design-calculation](#business-logic-design-calculation)
   - [1. Log return (percent asymmetry)](#1-log-return-percent-asymmetry)
   - [2. Changes in state of market trends and volatility](#2-changes-in-state-of-market-trends-and-volatility)
@@ -148,6 +152,7 @@
   - [9. Unbiased trading simulation](#9-unbiased-trading-simulation)
   - [10. Calendar and risk documents that gate the sim day](#10-calendar-and-risk-documents-that-gate-the-sim-day)
   - [11. Counter-style query replies for sim position and asset](#11-counter-style-query-replies-for-sim-position-and-asset)
+  - [12. Matching hub, book invariants, and synchronous fill fan-out](#12-matching-hub-book-invariants-and-synchronous-fill-fan-out)
 - [Business logic design-monitoring](#business-logic-design-monitoring)
   - [1. Read-only consume and publish rate limit on the monitor](#1-read-only-consume-and-publish-rate-limit-on-the-monitor)
   - [2. Process lifecycle control and host sampling](#2-process-lifecycle-control-and-host-sampling)
@@ -17672,10 +17677,100 @@ struct TinyDag {
 };
 ```
 
-### 46. High-quality articles on system design
+### 46. Single-thread vs multi-stage pipeline: service time versus packet spacing
+
+The path from packet read to order send can stay on one core end to end, or split into stages such as decode, book, and strategy with a queue between stages.
+
+Let `T` be the full-path service time, `N` the stage count (`N = 1` is single-thread), and `h` the handoff cost. With no queueing, single-thread costs `T` and an `N`-stage line costs `T + (N - 1)h`. When the thread is idle and arrivals are sparse, extra stages only pay handoff.
+
+Live market packets arrive in clusters with long gaps between clusters. The low percentile of inter-packet gaps (about 7.5 µs on some futures feeds) is the queueing threshold; the mean gap is often two or three orders larger and must not set capacity. When the high percentile of single-thread service time sits below that spacing, p99 shows almost no queueing and a split only adds `(N - 1)h`. Once that high percentile crosses the spacing, packets at the end of a burst can wait several times `T`. An even split into `N` stages keeps queue wait near at most `1/N` of the single-thread wait, plus `(N - 1)h`. Gain is set by the slowest stage `s_max`; even splits win, and a cut that does not shorten `s_max` only pays `h`. Stateful stages (the book) split on module boundaries with the slowest stage near the front. Stateless stages (fixed binary decode) with enough cores can fan packets out and reorder by sequence; median delay is about `T + 2h`, independent of `N`. Adding handoff without shortening decode does not clear backlog from multi-message packets.
+
+```cpp
+// arrivals: ascending arrival times in ns; t full-path service; n stages; h handoff
+std::vector<uint64_t> tandem_lat(const std::vector<uint64_t>& arrivals,
+                                 uint64_t t, uint64_t n, uint64_t h) {
+    std::vector<uint64_t> dep = arrivals;
+    const uint64_t slice = t / n;
+    for (uint64_t stage = 0; stage < n; ++stage) {
+        uint64_t free_at = 0;
+        for (std::size_t i = 0; i < dep.size(); ++i) {
+            const uint64_t arrive = stage == 0 ? arrivals[i] : dep[i] + h;
+            free_at = (arrive > free_at ? arrive : free_at) + slice;
+            dep[i] = free_at;
+        }
+    }
+    std::vector<uint64_t> out(dep.size());
+    for (std::size_t i = 0; i < dep.size(); ++i) out[i] = dep[i] - arrivals[i];
+    return out;
+}
+
+enum class CutChoice : uint8_t { KeepSolo, SplitStateful, FanoutStateless };
+
+CutChoice pick_cut(uint64_t stage_p99_ns, uint64_t gap_p01_ns,
+                   bool stateful, int cores) {
+    if (stage_p99_ns <= gap_p01_ns) return CutChoice::KeepSolo;
+    if (!stateful && cores >= 4) return CutChoice::FanoutStateless;
+    return CutChoice::SplitStateful;
+}
+```
+
+### 47. Compile-time typestate: illegal ticket moves are unreachable by type
+
+With a runtime enum, illegal calls only fail behind a guard, and a terminal state can still expose `fill`. Encoding state as a type tag makes `TicketDraft` and `TicketLive` distinct types: `commit` lives only on draft, `apply_fill` only on live, and illegal calls fail at compile time. A transition consumes the old object and returns a new type, so the old binding cannot mutate state again. Read-only queries stay open for every tag. Tags are empty structs with no runtime storage. When there are many states or frequent rollbacks, keep typestate only for critical invariants such as “unvalidated tickets cannot submit”.
+
+```cpp
+struct TagDraft {};
+struct TagReady {};
+struct TagLive {};
+struct TagDone {};
+
+template <class Tag>
+struct Ticket {
+    uint64_t id{0};
+    int64_t leaves{0};
+};
+
+template <class Tag>
+uint64_t ticket_id(const Ticket<Tag>& t) { return t.id; }
+
+Ticket<TagReady> mark_ready(Ticket<TagDraft> t) {
+    Ticket<TagReady> r;
+    r.id = t.id;
+    r.leaves = t.leaves;
+    return r;
+}
+
+Ticket<TagLive> go_live(Ticket<TagReady> t) {
+    Ticket<TagLive> r;
+    r.id = t.id;
+    r.leaves = t.leaves;
+    return r;
+}
+
+Ticket<TagLive> apply_fill(Ticket<TagLive> t, int64_t qty) {
+    t.leaves -= qty;
+    return t;
+}
+
+Ticket<TagDone> seal(Ticket<TagLive> t) {
+    Ticket<TagDone> r;
+    r.id = t.id;
+    r.leaves = 0;
+    return r;
+}
+
+// Ticket<TagDraft> d{1, 10};
+// apply_fill(d, 1);           // compile error: no apply_fill on draft
+// auto live = go_live(mark_ready(Ticket<TagDraft>{1, 10}));
+// apply_fill(std::move(live), 3);
+```
+
+### 48. High-quality articles on system design
 [https://mp.weixin.qq.com/s/9OH1RA8POFidgQnvape6fQ](https://mp.weixin.qq.com/s/9OH1RA8POFidgQnvape6fQ)
 
 [https://mp.weixin.qq.com/s/PuG4ZFVZ-7hijS4Db8Z5jQ](https://mp.weixin.qq.com/s/PuG4ZFVZ-7hijS4Db8Z5jQ)
+
+[https://mp.weixin.qq.com/s/Myy4UJ4Fzj5EV1Rd1B9Hgg](https://mp.weixin.qq.com/s/Myy4UJ4Fzj5EV1Rd1B9Hgg)
 
 ## Common performance bottlenecks and optimization directions
 
@@ -36748,6 +36843,116 @@ struct PulseHub {
 ```
 
 
+### 36. Config-picked frame digests with enum dispatch
+
+Private binary frames on counter and market-data links often end with a digest field. SUM8 misses about one in 256 random errors; CRC16 and CRC32 are stronger and cost more. Multi-venue gateways do not share one algorithm: a core `if-else` on the name forces a hot-path release for every new peer.
+
+When the algorithm set is fixed at compile time, enum dispatch can inline with no vtable. Runtime registration of new algorithms needs a name-to-function table instead. The digest covers header and body and excludes the digest bytes themselves. Digests catch transport bit errors; tamper resistance needs a session layer or a signed payload.
+
+```cpp
+enum class FrameDigest : uint8_t { Sum8, Crc16, Crc32 };
+
+uint8_t sum8_fold(const uint8_t* p, std::size_t n) {
+    uint32_t s = 0;
+    for (std::size_t i = 0; i < n; ++i) s += p[i];
+    return static_cast<uint8_t>(s & 0xFFu);
+}
+
+uint16_t crc16_tab(const uint8_t* p, std::size_t n); // prebuilt table
+uint32_t crc32_tab(const uint8_t* p, std::size_t n);
+
+uint32_t digest_of(FrameDigest kind, const uint8_t* p, std::size_t n) {
+    switch (kind) {
+        case FrameDigest::Sum8:  return sum8_fold(p, n);
+        case FrameDigest::Crc16: return crc16_tab(p, n);
+        case FrameDigest::Crc32: return crc32_tab(p, n);
+    }
+    return 0;
+}
+
+struct PeerWire {
+    FrameDigest digest{FrameDigest::Sum8};
+    uint16_t hdr_bytes{4};
+};
+
+bool frame_ok(const PeerWire& peer, const uint8_t* frame, std::size_t len, std::size_t dig_n) {
+    if (len < peer.hdr_bytes + dig_n) return false;
+    const std::size_t body_n = len - dig_n;
+    const uint32_t got = read_digest_be(frame + body_n, dig_n);
+    return got == digest_of(peer.digest, frame, body_n);
+}
+```
+
+### 37. Ticket capability matrix, command objects, and version-guarded snapshots
+
+If “who may do what” lives in each callback, one missed terminal check can cancel or amend wrongly. Put capability queries on the state enum and ask the matrix at every transition entry: forbidden actions fail explicitly, and failed ops never enter history.
+
+Cancel and amend that need queueing, audit, and one dispatcher become command objects. Fill reports are external facts: they advance the state machine and are not locally undone. A command snapshots before execute and joins history only on success. Undo checks the version; a newer fill rejects the restore and keeps history. A venue-accepted cancel has no reverse; snapshot restore is for a stopped local investigation copy.
+
+```cpp
+enum class Life : uint8_t { New, Sent, Partial, Done, Voided, Denied };
+
+bool can_kill(Life s) {
+    return s == Life::Sent || s == Life::Partial;
+}
+bool can_patch(Life s) { return can_kill(s); }
+bool can_fill(Life s) { return can_kill(s); }
+
+struct TicketRow {
+    uint64_t id{0};
+    Life life{Life::New};
+    int64_t qty{0};
+    int64_t filled{0};
+    uint64_t rev{0};
+};
+
+struct TicketSnap {
+    uint64_t id{0};
+    Life life{Life::New};
+    int64_t qty{0};
+    int64_t filled{0};
+    uint64_t rev{0};
+};
+
+TicketSnap shoot(const TicketRow& t) {
+    return {t.id, t.life, t.qty, t.filled, t.rev};
+}
+
+bool kill_ticket(TicketRow& t) {
+    if (!can_kill(t.life)) return false;
+    t.life = Life::Voided;
+    ++t.rev;
+    return true;
+}
+
+struct KillCmd {
+    uint64_t id{0};
+    TicketSnap snap{};
+    uint64_t after_rev{0};
+    bool armed{false};
+
+    bool run(TicketRow& t) {
+        if (t.id != id) return false;
+        snap = shoot(t);
+        if (!kill_ticket(t)) return false;
+        after_rev = t.rev;
+        armed = true;
+        return true;
+    }
+    bool rewind(TicketRow& t) {
+        if (!armed || t.id != id) return false;
+        if (t.rev != after_rev) return false; // version conflict: do not cover newer events
+        t.life = snap.life;
+        t.qty = snap.qty;
+        t.filled = snap.filled;
+        t.rev = t.rev + 1;
+        armed = false;
+        return true;
+    }
+};
+```
+
+
 ## Business logic design-calculation
 ### 1. Log return (percent asymmetry)
 ```cpp
@@ -44711,6 +44916,66 @@ void fill_route(char* out, int n, const char* counter) {
     std::snprintf(out, n, "%s_back_respond_routing", counter);
 }
 ```
+
+### 12. Matching hub, book invariants, and synchronous fill fan-out
+
+When buy and sell tickets hold each other’s lists, price-time priority cannot be decided once for the whole book, and fill notifications tend to hard-code OMS or audit calls on the ticket. A matching hub keeps tickets as plain data and owns the books: bids prefer higher prices, asks prefer lower, same price is FIFO by arrival; a new ticket matches as taker first, then rests; the fill price is the maker price.
+
+An empty price level must leave the map immediately, or the next best-price lookup hits an empty queue. Collect fills on the hot path, then notify listeners after the match loop. Same-thread delivery in registration order keeps report order; cross-thread delivery must reorder by fill sequence.
+
+```cpp
+enum class Hand : uint8_t { Bid, Ask };
+
+struct Resting {
+    uint64_t oid{0};
+    int64_t px{0};
+    int64_t leaves{0};
+};
+
+struct FillEvt {
+    uint64_t taker{0};
+    uint64_t maker{0};
+    int64_t px{0};
+    int64_t qty{0};
+    uint64_t seq{0};
+};
+
+struct MatchHub {
+    std::map<int64_t, std::deque<Resting>, std::greater<int64_t>> bids;
+    std::map<int64_t, std::deque<Resting>> asks;
+    uint64_t seq{0};
+    std::vector<FillEvt> pending;
+
+    template <class Book>
+    void drop_empty(Book& b, int64_t px) {
+        auto it = b.find(px);
+        if (it != b.end() && it->second.empty()) b.erase(it);
+    }
+    template <class Book>
+    void eat(Resting& taker, Book& opp, bool buy) {
+        while (taker.leaves > 0 && !opp.empty()) {
+            auto it = opp.begin();
+            const int64_t best = it->first;
+            const bool cross = buy ? best <= taker.px : best >= taker.px;
+            if (!cross) break;
+            Resting& maker = it->second.front();
+            const int64_t qty = taker.leaves < maker.leaves ? taker.leaves : maker.leaves;
+            taker.leaves -= qty;
+            maker.leaves -= qty;
+            pending.push_back({taker.oid, maker.oid, best, qty, ++seq});
+            if (maker.leaves == 0) {
+                it->second.pop_front();
+                drop_empty(opp, best);
+            }
+        }
+    }
+    void take(Resting& taker, Hand side) {
+        if (side == Hand::Bid) eat(taker, asks, true);
+        else eat(taker, bids, false);
+    }
+};
+```
+
 
 ## Business logic design-monitoring
 

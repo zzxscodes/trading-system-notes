@@ -52,7 +52,9 @@ English version：[https://github.com/zzxscodes/trading-system-notes/blob/main/t
   - [43. 共享提交完成环上的内核异步收发](#43-共享提交完成环上的内核异步收发)
   - [44. 用户态块设备收发与提交完成环](#44-用户态块设备收发与提交完成环)
   - [45. 编译期可展开的事件因子执行计划](#45-编译期可展开的事件因子执行计划)
-  - [46. 系统设计优质文章](#46-系统设计优质文章)
+  - [46. 单线程与多级流水线：服务时间相对发包间隔](#46-单线程与多级流水线服务时间相对发包间隔)
+  - [47. 编译期类型态：非法订单迁移在类型上不可达](#47-编译期类型态非法订单迁移在类型上不可达)
+  - [48. 系统设计优质文章](#48-系统设计优质文章)
 - [常见性能瓶颈与优化方向](#常见性能瓶颈与优化方向)
   - [1. roofline model](#1-roofline-model)
     - [Memory Bound优化](#memory-bound优化)
@@ -118,6 +120,8 @@ English version：[https://github.com/zzxscodes/trading-system-notes/blob/main/t
   - [33. 品种大类费用与冻结价回填](#33-品种大类费用与冻结价回填)
   - [34. 配对执行的挂单量、腿价格和手数门槛](#34-配对执行的挂单量腿价格和手数门槛)
   - [35. 状态与事件分离的实盘因子编排](#35-状态与事件分离的实盘因子编排)
+  - [36. 多对手方帧校验的配置选取与枚举分发](#36-多对手方帧校验的配置选取与枚举分发)
+  - [37. 订单能力矩阵、命令对象与版本守卫快照](#37-订单能力矩阵命令对象与版本守卫快照)
 - [业务逻辑设计-计算](#业务逻辑设计-计算)
   - [1. 对数收益率(百分比非对称性)](#1-对数收益率百分比非对称性)
   - [2. 市场趋势和波动率的状态变化](#2-市场趋势和波动率的状态变化)
@@ -148,6 +152,7 @@ English version：[https://github.com/zzxscodes/trading-system-notes/blob/main/t
   - [9. 无偏交易模拟](#9-无偏交易模拟)
   - [10. 约束模拟交易日的日历与风控文档](#10-约束模拟交易日的日历与风控文档)
   - [11. 模拟持仓与资金的柜台查询回报](#11-模拟持仓与资金的柜台查询回报)
+  - [12. 撮合中介、簿不变量与成交同步扩散](#12-撮合中介簿不变量与成交同步扩散)
 - [业务逻辑设计-监控](#业务逻辑设计-监控)
   - [1. 监控进程的只读消费与发布限速](#1-监控进程的只读消费与发布限速)
   - [2. 交易进程的启停与主机采样](#2-交易进程的启停与主机采样)
@@ -17640,10 +17645,100 @@ struct TinyDag {
 };
 ```
 
-### 46. 系统设计优质文章
+### 46. 单线程与多级流水线：服务时间相对发包间隔
+
+收包到发单这条链路有两种切法：整条放在一个核上顺序做完，或按解码、簿、策略切成几级，级间用队列交接。
+
+记整条服务时间为 `T`，级数为 `N`（`N = 1` 即单线程），级间交接开销为 `h`。不排队时，单线程用时 `T`，`N` 级用时 `T + (N - 1)h`。线程空闲、包稀疏到达时，多级只会多付交接，看不到收益。
+
+真实行情包常成串到达，串与串之间空很长。相邻包间隔的低分位（例如某些期货行情发布端约 7.5 µs）才是排队阈值；平均间隔往往大两三个数量级，不能拿来估处理容量。单线程服务时间的高分位低于该发包间隔时，p99 上几乎看不到排队，拆分只会增加 `(N - 1)h`。高分位越过发包间隔后，突发末尾的包等待可涨到数倍 `T`；均分成 `N` 级后，排队等待大致不超过单线程等待的 `1/N`，并另加 `(N - 1)h`。收益由最慢一级的服务时间 `s_max` 决定，均分最好；不缩短 `s_max` 的切分只多付 `h`。有状态的一级（订单簿）按模块边界切分，并把最慢一级尽量放在入口；无状态的一级（定长二进制解码）在核数较多时，可把整包分发给多核，出口按序号重排，中位数大约是 `T + 2h`，与级数无关。只加交接、不缩短解码的切分，解决不了多消息包造成的积压。
+
+```cpp
+// arrivals 升序纳秒到达时刻；t 为整条链路服务时间；n 为级数；h 为级间交接
+std::vector<uint64_t> tandem_lat(const std::vector<uint64_t>& arrivals,
+                                 uint64_t t, uint64_t n, uint64_t h) {
+    std::vector<uint64_t> dep = arrivals;
+    const uint64_t slice = t / n;
+    for (uint64_t stage = 0; stage < n; ++stage) {
+        uint64_t free_at = 0;
+        for (std::size_t i = 0; i < dep.size(); ++i) {
+            const uint64_t arrive = stage == 0 ? arrivals[i] : dep[i] + h;
+            free_at = (arrive > free_at ? arrive : free_at) + slice;
+            dep[i] = free_at;
+        }
+    }
+    std::vector<uint64_t> out(dep.size());
+    for (std::size_t i = 0; i < dep.size(); ++i) out[i] = dep[i] - arrivals[i];
+    return out;
+}
+
+enum class CutChoice : uint8_t { KeepSolo, SplitStateful, FanoutStateless };
+
+CutChoice pick_cut(uint64_t stage_p99_ns, uint64_t gap_p01_ns,
+                   bool stateful, int cores) {
+    if (stage_p99_ns <= gap_p01_ns) return CutChoice::KeepSolo;
+    if (!stateful && cores >= 4) return CutChoice::FanoutStateless;
+    return CutChoice::SplitStateful;
+}
+```
+
+### 47. 编译期类型态：非法订单迁移在类型上不可达
+
+运行时用枚举记状态时，非法调用只能靠守卫返回错误，终态上仍可能写出 `fill`。把状态做成类型标签后，`TicketDraft` 与 `TicketLive` 是不同类型：`commit` 只挂在草稿态，`apply_fill` 只挂在在场态，非法调用在编译期失败。迁移消费旧对象并返回新类型，旧绑定不能再用来改状态。只读查询对任意状态开放。标签是空结构体，不占运行时存储。状态很多或频繁回退时不必全量类型态，可只把“未校验不可提交”这类关键不变量收成一层类型包装。
+
+```cpp
+struct TagDraft {};
+struct TagReady {};
+struct TagLive {};
+struct TagDone {};
+
+template <class Tag>
+struct Ticket {
+    uint64_t id{0};
+    int64_t leaves{0};
+};
+
+template <class Tag>
+uint64_t ticket_id(const Ticket<Tag>& t) { return t.id; }
+
+Ticket<TagReady> mark_ready(Ticket<TagDraft> t) {
+    Ticket<TagReady> r;
+    r.id = t.id;
+    r.leaves = t.leaves;
+    return r;
+}
+
+Ticket<TagLive> go_live(Ticket<TagReady> t) {
+    Ticket<TagLive> r;
+    r.id = t.id;
+    r.leaves = t.leaves;
+    return r;
+}
+
+Ticket<TagLive> apply_fill(Ticket<TagLive> t, int64_t qty) {
+    t.leaves -= qty;
+    return t;
+}
+
+Ticket<TagDone> seal(Ticket<TagLive> t) {
+    Ticket<TagDone> r;
+    r.id = t.id;
+    r.leaves = 0;
+    return r;
+}
+
+// Ticket<TagDraft> d{1, 10};
+// apply_fill(d, 1);           // 编译失败：草稿态无 apply_fill
+// auto live = go_live(mark_ready(Ticket<TagDraft>{1, 10}));
+// apply_fill(std::move(live), 3);
+```
+
+### 48. 系统设计优质文章
 [https://mp.weixin.qq.com/s/9OH1RA8POFidgQnvape6fQ](https://mp.weixin.qq.com/s/9OH1RA8POFidgQnvape6fQ)
 
 [https://mp.weixin.qq.com/s/PuG4ZFVZ-7hijS4Db8Z5jQ](https://mp.weixin.qq.com/s/PuG4ZFVZ-7hijS4Db8Z5jQ)
+
+[https://mp.weixin.qq.com/s/Myy4UJ4Fzj5EV1Rd1B9Hgg](https://mp.weixin.qq.com/s/Myy4UJ4Fzj5EV1Rd1B9Hgg)
 
 ## 常见性能瓶颈与优化方向
 ### 1. roofline model
@@ -36735,6 +36830,116 @@ struct PulseHub {
 ```
 
 
+### 36. 多对手方帧校验的配置选取与枚举分发
+
+柜台与行情通道上的私有二进制帧常在尾部挂校验字段。SUM8 漏检大约千分之四、CRC16 与 CRC32 更强也更贵。多对手方时算法并不统一：若按名字写进核心 `if-else`，每接一家新协议都要改热路径并发版。
+
+算法集合在编译期固定时，用枚举直分发可以内联，热路径上没有虚表；需要运行时注册新算法再用名字到函数的表。校验覆盖头与体，不含校验字段自身。校验防的是传输出错，防篡改要另走会话层或报文签名。
+
+```cpp
+enum class FrameDigest : uint8_t { Sum8, Crc16, Crc32 };
+
+uint8_t sum8_fold(const uint8_t* p, std::size_t n) {
+    uint32_t s = 0;
+    for (std::size_t i = 0; i < n; ++i) s += p[i];
+    return static_cast<uint8_t>(s & 0xFFu);
+}
+
+uint16_t crc16_tab(const uint8_t* p, std::size_t n); // 预生成表
+uint32_t crc32_tab(const uint8_t* p, std::size_t n);
+
+uint32_t digest_of(FrameDigest kind, const uint8_t* p, std::size_t n) {
+    switch (kind) {
+        case FrameDigest::Sum8:  return sum8_fold(p, n);
+        case FrameDigest::Crc16: return crc16_tab(p, n);
+        case FrameDigest::Crc32: return crc32_tab(p, n);
+    }
+    return 0;
+}
+
+struct PeerWire {
+    FrameDigest digest{FrameDigest::Sum8};
+    uint16_t hdr_bytes{4};
+};
+
+bool frame_ok(const PeerWire& peer, const uint8_t* frame, std::size_t len, std::size_t dig_n) {
+    if (len < peer.hdr_bytes + dig_n) return false;
+    const std::size_t body_n = len - dig_n;
+    const uint32_t got = read_digest_be(frame + body_n, dig_n);
+    return got == digest_of(peer.digest, frame, body_n);
+}
+```
+
+### 37. 订单能力矩阵、命令对象与版本守卫快照
+
+订单生命周期若把“谁允许什么”散在各回调里，漏一条终态判断就会误撤或误改。把能力问询收在状态枚举上，迁移入口统一先问矩阵：不能做的动作显式失败，失败的操作不进历史。
+
+撤单与改单需要排队、审计和统一调度时，收成命令对象；成交回报是外部事实，直接推进状态机，不做本地撤销。命令执行前拍快照，执行成功才入栈；撤销前核对版本号，中间若已有新成交则拒绝覆盖，并保留命令历史。已被交易所接受的撤单没有反向操作，快照恢复只用于停输入后的本地调查副本。
+
+```cpp
+enum class Life : uint8_t { New, Sent, Partial, Done, Voided, Denied };
+
+bool can_kill(Life s) {
+    return s == Life::Sent || s == Life::Partial;
+}
+bool can_patch(Life s) { return can_kill(s); }
+bool can_fill(Life s) { return can_kill(s); }
+
+struct TicketRow {
+    uint64_t id{0};
+    Life life{Life::New};
+    int64_t qty{0};
+    int64_t filled{0};
+    uint64_t rev{0};
+};
+
+struct TicketSnap {
+    uint64_t id{0};
+    Life life{Life::New};
+    int64_t qty{0};
+    int64_t filled{0};
+    uint64_t rev{0};
+};
+
+TicketSnap shoot(const TicketRow& t) {
+    return {t.id, t.life, t.qty, t.filled, t.rev};
+}
+
+bool kill_ticket(TicketRow& t) {
+    if (!can_kill(t.life)) return false;
+    t.life = Life::Voided;
+    ++t.rev;
+    return true;
+}
+
+struct KillCmd {
+    uint64_t id{0};
+    TicketSnap snap{};
+    uint64_t after_rev{0};
+    bool armed{false};
+
+    bool run(TicketRow& t) {
+        if (t.id != id) return false;
+        snap = shoot(t);
+        if (!kill_ticket(t)) return false;
+        after_rev = t.rev;
+        armed = true;
+        return true;
+    }
+    bool rewind(TicketRow& t) {
+        if (!armed || t.id != id) return false;
+        if (t.rev != after_rev) return false; // 版本冲突：不覆盖新事件
+        t.life = snap.life;
+        t.qty = snap.qty;
+        t.filled = snap.filled;
+        t.rev = t.rev + 1;
+        armed = false;
+        return true;
+    }
+};
+```
+
+
 ## 业务逻辑设计-计算
 ### 1. 对数收益率(百分比非对称性)
 ```cpp
@@ -44698,6 +44903,66 @@ void fill_route(char* out, int n, const char* counter) {
     std::snprintf(out, n, "%s_back_respond_routing", counter);
 }
 ```
+
+### 12. 撮合中介、簿不变量与成交同步扩散
+
+买卖单互相持有对手列表时，价格优先与时间优先无法在全局上唯一裁定，成交通知也容易写死在订单里。引入撮合中介后，订单退回纯数据，簿与撮合规则只在中介里维护：买盘价高优先、卖盘价低优先，同价位按入簿先后 FIFO；新单先作主动方撮合，剩余再挂簿；成交价取被动方价格。
+
+空价格档必须立刻出簿，否则下次取最优档会落到空队列。成交先在热路径上收集，撮合循环结束后再同步通知订阅方，同一线程内按注册顺序分发，回报天然保序；跨线程分发则要按成交序号重排。
+
+```cpp
+enum class Hand : uint8_t { Bid, Ask };
+
+struct Resting {
+    uint64_t oid{0};
+    int64_t px{0};
+    int64_t leaves{0};
+};
+
+struct FillEvt {
+    uint64_t taker{0};
+    uint64_t maker{0};
+    int64_t px{0};
+    int64_t qty{0};
+    uint64_t seq{0};
+};
+
+struct MatchHub {
+    std::map<int64_t, std::deque<Resting>, std::greater<int64_t>> bids;
+    std::map<int64_t, std::deque<Resting>> asks;
+    uint64_t seq{0};
+    std::vector<FillEvt> pending;
+
+    template <class Book>
+    void drop_empty(Book& b, int64_t px) {
+        auto it = b.find(px);
+        if (it != b.end() && it->second.empty()) b.erase(it);
+    }
+    template <class Book>
+    void eat(Resting& taker, Book& opp, bool buy) {
+        while (taker.leaves > 0 && !opp.empty()) {
+            auto it = opp.begin();
+            const int64_t best = it->first;
+            const bool cross = buy ? best <= taker.px : best >= taker.px;
+            if (!cross) break;
+            Resting& maker = it->second.front();
+            const int64_t qty = taker.leaves < maker.leaves ? taker.leaves : maker.leaves;
+            taker.leaves -= qty;
+            maker.leaves -= qty;
+            pending.push_back({taker.oid, maker.oid, best, qty, ++seq});
+            if (maker.leaves == 0) {
+                it->second.pop_front();
+                drop_empty(opp, best);
+            }
+        }
+    }
+    void take(Resting& taker, Hand side) {
+        if (side == Hand::Bid) eat(taker, asks, true);
+        else eat(taker, bids, false);
+    }
+};
+```
+
 
 ## 业务逻辑设计-监控
 
