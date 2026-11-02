@@ -126,6 +126,10 @@
   - [38. Streaming binary framing, variant dispatch, and length backfill](#38-streaming-binary-framing-variant-dispatch-and-length-backfill)
   - [39. Upstream depth deltas and downstream full snapshots](#39-upstream-depth-deltas-and-downstream-full-snapshots)
   - [40. Fan-out copies the subscriber list before send](#40-fan-out-copies-the-subscriber-list-before-send)
+  - [41. Separate structures for quote books and match books](#41-separate-structures-for-quote-books-and-match-books)
+  - [42. Chunked price slots for sparse domains](#42-chunked-price-slots-for-sparse-domains)
+  - [43. Cancel by slot handle and zeroed resting size](#43-cancel-by-slot-handle-and-zeroed-resting-size)
+  - [44. Split match paths for continuous and call auction](#44-split-match-paths-for-continuous-and-call-auction)
 - [Business logic design-calculation](#business-logic-design-calculation)
   - [1. Log return (percent asymmetry)](#1-log-return-percent-asymmetry)
   - [2. Changes in state of market trends and volatility](#2-changes-in-state-of-market-trends-and-volatility)
@@ -37216,6 +37220,194 @@ struct Conn {
 void conn_write(Conn* c, const uint8_t* frame, size_t n) {
     std::lock_guard<std::mutex> g(c->write_mu);
     (void)frame; (void)n;
+}
+```
+
+
+
+### 41. Separate structures for quote books and match books
+
+A participant quote book rebuilds from exchange prints or snapshots and usually keeps only aggregated size per price, plus an id map of side, price, and size for amend and cancel; updates cluster near the top of book, so a dense vector with best at the end and near-end linear search fits. An exchange match book must answer who fills and where remaining size rests, so each price keeps a full FIFO and cancel or amend must reach the node. The hot paths differ; tree-versus-hash advice does not transfer. Matching first consumes the opposite side; only leftover size that may rest is linked to the price tail.
+
+```cpp
+struct AggLevel {
+    int64_t tick{0};
+    int64_t qty{0};
+};
+
+struct QuoteSide {
+    std::vector<AggLevel> lv; // ascending, best at back
+    void add(int64_t tick, int64_t q) {
+        int i = int(lv.size()) - 1;
+        while (i >= 0 && lv[size_t(i)].tick > tick) --i;
+        if (i >= 0 && lv[size_t(i)].tick == tick) {
+            lv[size_t(i)].qty += q;
+            if (lv[size_t(i)].qty <= 0) lv.erase(lv.begin() + i);
+            return;
+        }
+        if (q <= 0) return;
+        lv.insert(lv.begin() + (i + 1), AggLevel{tick, q});
+    }
+};
+
+struct RestNode {
+    uint32_t prev{UINT32_MAX};
+    uint32_t next{UINT32_MAX};
+    int64_t leaves{0};
+    int64_t tick{0};
+};
+
+struct MatchLevel {
+    uint32_t head{UINT32_MAX};
+    uint32_t tail{UINT32_MAX};
+    int64_t total{0};
+};
+
+bool rest_tail(MatchLevel& lv, RestNode* pool, uint32_t slot, int64_t qty) {
+    RestNode& n = pool[slot];
+    n.leaves = qty;
+    n.prev = lv.tail;
+    n.next = UINT32_MAX;
+    if (lv.tail != UINT32_MAX) pool[lv.tail].next = slot;
+    else lv.head = slot;
+    lv.tail = slot;
+    lv.total += qty;
+    return true;
+}
+```
+
+### 42. Chunked price slots for sparse domains
+
+A contiguous level array inside a limit band turns price lookup into an index, with a bitmap to skip empty slots. IPO days without a band, fine ticks at high prices, or a market-wide grid waste memory on empty slots. Chunk by a fixed tick width: address and bitmap inside the chunk, allocate only touched chunks, and find the next chunk through an ordered directory. Reusable free chunks keep first-touch allocation off the match path. When few prices are live, a sparse tree of nonempty prices is fine if orders store a stable chunk id instead of pointers into movable tree nodes.
+
+```cpp
+constexpr int kChunkTicks = 256;
+
+struct PriceChunk {
+    MatchLevel slot[kChunkTicks]{};
+    uint64_t bits[(kChunkTicks + 63) / 64]{};
+    int64_t base_tick{0};
+    uint8_t live{0};
+};
+
+struct ChunkBook {
+    std::map<int64_t, PriceChunk*> dir;
+    std::vector<PriceChunk*> free;
+
+    static int64_t floor_tick(int64_t tick) {
+        int64_t t = tick >= 0 ? tick : tick - (kChunkTicks - 1);
+        return t - (t % kChunkTicks);
+    }
+    PriceChunk* touch(int64_t tick) {
+        const int64_t key = floor_tick(tick);
+        auto it = dir.find(key);
+        if (it != dir.end()) return it->second;
+        PriceChunk* c = free.empty() ? new PriceChunk : free.back();
+        if (!free.empty()) free.pop_back();
+        c->base_tick = key;
+        c->live = 1;
+        std::memset(c->bits, 0, sizeof c->bits);
+        dir.emplace(key, c);
+        return c;
+    }
+    MatchLevel& level(int64_t tick) {
+        PriceChunk* c = touch(tick);
+        return c->slot[size_t(tick - c->base_tick)];
+    }
+};
+```
+
+### 43. Cancel by slot handle and zeroed resting size
+
+After constant-time price addressing, cancel may still scan a long same-price queue by order id. The id index should return an operable handle: the slot, plus how many times that slot has been reused. Unlink by rewriting neighbors and checking that reuse count so a stale handle cannot hit a new order. The gateway can store the handle on accept and send it with cancel so the match thread skips the hash, still checking the count. Cancel can also write remaining size to zero and leave the node in the queue; matching skips zero size. That cancel is nearly one store, but later aggressive orders must walk those empty nodes, and cleanup cost after a cancel storm lands on later matches.
+
+```cpp
+struct Loc {
+    uint32_t slot{UINT32_MAX};
+    uint32_t reuse{0};
+};
+
+struct HotOrd {
+    uint32_t prev{UINT32_MAX};
+    uint32_t next{UINT32_MAX};
+    uint32_t reuse{0};
+    int64_t leaves{0};
+    uint32_t level{0};
+};
+
+bool unlink(HotOrd* pool, MatchLevel& lv, Loc loc) {
+    if (loc.slot == UINT32_MAX) return false;
+    HotOrd& n = pool[loc.slot];
+    if (n.reuse != loc.reuse) return false;
+    if (n.prev != UINT32_MAX) pool[n.prev].next = n.next;
+    else lv.head = n.next;
+    if (n.next != UINT32_MAX) pool[n.next].prev = n.prev;
+    else lv.tail = n.prev;
+    lv.total -= n.leaves;
+    n.leaves = 0;
+    ++n.reuse;
+    return true;
+}
+
+bool zero_keep(HotOrd* pool, MatchLevel& lv, Loc loc) {
+    if (loc.slot == UINT32_MAX) return false;
+    HotOrd& n = pool[loc.slot];
+    if (n.reuse != loc.reuse || n.leaves <= 0) return false;
+    lv.total -= n.leaves;
+    n.leaves = 0; // stay linked; matching skips zero
+    return true;
+}
+
+int64_t take_live(HotOrd& n, int64_t want) {
+    if (n.leaves <= 0) return 0;
+    const int64_t q = n.leaves < want ? n.leaves : want;
+    n.leaves -= q;
+    return q;
+}
+```
+
+### 44. Split match paths for continuous and call auction
+
+The continuous hot loop only takes the opposite best, compares price, debits size, and emits fills, then advances when a level clears. Folding call auction, pro-rata, and iceberg checks into that loop repeats irrelevant branches on every resting order. Choose the implementation from session and order type at accept; continuous and call share the order pool and price index but keep separate pricing and allocation. Call auction first finds a single clearing price from cumulative size, then allocates by priority; exchange-specific ties belong in their own pricing functions, not as “are we in call?” inside the continuous loop.
+
+```cpp
+enum class Sess : uint8_t { Cont, Call };
+
+struct MatchCtx {
+    MatchLevel* asks{nullptr};
+    MatchLevel* bids{nullptr};
+    int n_ask{0};
+    int n_bid{0};
+};
+
+using MatchFn = void (*)(MatchCtx&, HotOrd*, int64_t px, int64_t qty, bool buy);
+
+void match_cont(MatchCtx& cx, HotOrd* pool, int64_t px, int64_t qty, bool buy);
+void match_call(MatchCtx& cx, HotOrd* pool, int64_t px, int64_t qty, bool buy);
+
+MatchFn pick_match(Sess s) {
+    return s == Sess::Call ? match_call : match_cont;
+}
+
+int64_t call_px(const int64_t* buy_ge, const int64_t* sell_le,
+                int lo, int hi, int (*tie)(int, int)) {
+    // buy_ge[p] / sell_le[p] are precomputed cumulative buy / sell size at price p
+    int64_t best_vol = -1;
+    int best = lo;
+    for (int p = lo; p <= hi; ++p) {
+        const int64_t cross = buy_ge[p] < sell_le[p] ? buy_ge[p] : sell_le[p];
+        if (cross > best_vol) {
+            best_vol = cross;
+            best = p;
+        } else if (cross == best_vol) {
+            best = tie(best, p);
+        }
+    }
+    return best;
+}
+
+void on_new(Sess s, MatchCtx& cx, HotOrd* pool, int64_t px, int64_t qty, bool buy) {
+    pick_match(s)(cx, pool, px, qty, buy);
 }
 ```
 

@@ -126,6 +126,10 @@ English version：[https://github.com/zzxscodes/trading-system-notes/blob/main/t
   - [38. 流式二进制组帧、变体分派与长度回填](#38-流式二进制组帧变体分派与长度回填)
   - [39. 上游盘口增量与下游完整快照](#39-上游盘口增量与下游完整快照)
   - [40. 行情广播先复制订阅名单再发送](#40-行情广播先复制订阅名单再发送)
+  - [41. 行情簿与撮合簿的结构分流](#41-行情簿与撮合簿的结构分流)
+  - [42. 稀疏价格域的分块价位槽](#42-稀疏价格域的分块价位槽)
+  - [43. 撤单槽位句柄与零量占位](#43-撤单槽位句柄与零量占位)
+  - [44. 连续竞价与集合竞价分路径撮合](#44-连续竞价与集合竞价分路径撮合)
 - [业务逻辑设计-计算](#业务逻辑设计-计算)
   - [1. 对数收益率(百分比非对称性)](#1-对数收益率百分比非对称性)
   - [2. 市场趋势和波动率的状态变化](#2-市场趋势和波动率的状态变化)
@@ -37205,6 +37209,194 @@ void conn_write(Conn* c, const uint8_t* frame, size_t n) {
     std::lock_guard<std::mutex> g(c->write_mu);
     // send(frame, n);
     (void)frame; (void)n;
+}
+```
+
+
+
+### 41. 行情簿与撮合簿的结构分流
+
+机构侧行情簿吃交易所逐笔或快照，每个价位通常只保留汇总量，再配一张订单号到方向、价格、数量的表做改删；热点更新集中在最优价附近，价位结构可选用最优价在末尾的稠密向量加近端线性查找。交易所撮合簿要回答新单与谁成交、余量排在哪，每个价位必须保留完整 FIFO，撤改要直达节点。两者热点不同，同一套“树或哈希”结论不能混用。撮合入口先吃对侧，能成交就扣量；仍有余量且类型允许挂单时，才把节点接到该价位队尾。
+
+```cpp
+struct AggLevel {
+    int64_t tick{0};
+    int64_t qty{0};
+};
+
+struct QuoteSide {
+    std::vector<AggLevel> lv; // 升序，末尾为最优
+    void add(int64_t tick, int64_t q) {
+        int i = int(lv.size()) - 1;
+        while (i >= 0 && lv[size_t(i)].tick > tick) --i;
+        if (i >= 0 && lv[size_t(i)].tick == tick) {
+            lv[size_t(i)].qty += q;
+            if (lv[size_t(i)].qty <= 0) lv.erase(lv.begin() + i);
+            return;
+        }
+        if (q <= 0) return;
+        lv.insert(lv.begin() + (i + 1), AggLevel{tick, q});
+    }
+};
+
+struct RestNode {
+    uint32_t prev{UINT32_MAX};
+    uint32_t next{UINT32_MAX};
+    int64_t leaves{0};
+    int64_t tick{0};
+};
+
+struct MatchLevel {
+    uint32_t head{UINT32_MAX};
+    uint32_t tail{UINT32_MAX};
+    int64_t total{0};
+};
+
+bool rest_tail(MatchLevel& lv, RestNode* pool, uint32_t slot, int64_t qty) {
+    RestNode& n = pool[slot];
+    n.leaves = qty;
+    n.prev = lv.tail;
+    n.next = UINT32_MAX;
+    if (lv.tail != UINT32_MAX) pool[lv.tail].next = slot;
+    else lv.head = slot;
+    lv.tail = slot;
+    lv.total += qty;
+    return true;
+}
+```
+
+### 42. 稀疏价格域的分块价位槽
+
+涨跌停日界内的连续价位数组把价格查找收成一次下标运算，空档靠位图跳过。新股无涨跌幅、高价细 tick 或全市场铺开时，整段数组的空槽会占满内存。改成按固定 tick 宽度分块：块内仍直接寻址并维护位图，只为触达过的块分配存储；块目录用有序键找到下一块。块可预留复用，第一次踏入新区时的分配放在盘前或冷路径。活跃价位极少时，也可用稀疏树只存非空价，订单节点只保存稳定块号，避免指向树内会搬移的对象。
+
+```cpp
+constexpr int kChunkTicks = 256;
+
+struct PriceChunk {
+    MatchLevel slot[kChunkTicks]{};
+    uint64_t bits[(kChunkTicks + 63) / 64]{};
+    int64_t base_tick{0};
+    uint8_t live{0};
+};
+
+struct ChunkBook {
+    std::map<int64_t, PriceChunk*> dir; // key = floor_tick
+    std::vector<PriceChunk*> free;
+
+    static int64_t floor_tick(int64_t tick) {
+        int64_t t = tick >= 0 ? tick : tick - (kChunkTicks - 1);
+        return t - (t % kChunkTicks);
+    }
+    PriceChunk* touch(int64_t tick) {
+        const int64_t key = floor_tick(tick);
+        auto it = dir.find(key);
+        if (it != dir.end()) return it->second;
+        PriceChunk* c = free.empty() ? new PriceChunk : free.back();
+        if (!free.empty()) free.pop_back();
+        c->base_tick = key;
+        c->live = 1;
+        std::memset(c->bits, 0, sizeof c->bits);
+        dir.emplace(key, c);
+        return c;
+    }
+    MatchLevel& level(int64_t tick) {
+        PriceChunk* c = touch(tick);
+        return c->slot[size_t(tick - c->base_tick)];
+    }
+};
+```
+
+### 43. 撤单槽位句柄与零量占位
+
+价位能常数寻址之后，撤单仍可能在同价长队列上按订单号扫描。ID 索引应直接给出可操作节点的句柄：槽号，以及该槽被复用的次数。摘链时改前后邻接，并核对该次数，避免旧句柄打到新单。网关在接受回报时记下这个句柄，撤单时一并交给撮合线程，撮合侧可不再查哈希，但仍要核对次数。也可以撤单只把剩余量写成零、节点仍留在队里，撮合扫到零量就跳过；撤单本身接近一次写，但主动单要穿过这些空节点，大量撤单后的清理成本会落到后续撮合上。
+
+```cpp
+struct Loc {
+    uint32_t slot{UINT32_MAX};
+    uint32_t reuse{0};
+};
+
+struct HotOrd {
+    uint32_t prev{UINT32_MAX};
+    uint32_t next{UINT32_MAX};
+    uint32_t reuse{0};
+    int64_t leaves{0};
+    uint32_t level{0};
+};
+
+bool unlink(HotOrd* pool, MatchLevel& lv, Loc loc) {
+    if (loc.slot == UINT32_MAX) return false;
+    HotOrd& n = pool[loc.slot];
+    if (n.reuse != loc.reuse) return false;
+    if (n.prev != UINT32_MAX) pool[n.prev].next = n.next;
+    else lv.head = n.next;
+    if (n.next != UINT32_MAX) pool[n.next].prev = n.prev;
+    else lv.tail = n.prev;
+    lv.total -= n.leaves;
+    n.leaves = 0;
+    ++n.reuse;
+    return true;
+}
+
+bool zero_keep(HotOrd* pool, MatchLevel& lv, Loc loc) {
+    if (loc.slot == UINT32_MAX) return false;
+    HotOrd& n = pool[loc.slot];
+    if (n.reuse != loc.reuse || n.leaves <= 0) return false;
+    lv.total -= n.leaves;
+    n.leaves = 0; // 仍留在链上，撮合时跳过
+    return true;
+}
+
+int64_t take_live(HotOrd& n, int64_t want) {
+    if (n.leaves <= 0) return 0;
+    const int64_t q = n.leaves < want ? n.leaves : want;
+    n.leaves -= q;
+    return q;
+}
+```
+
+### 44. 连续竞价与集合竞价分路径撮合
+
+普通连续竞价的热循环只取对侧最优、比价、扣量、出成交，清空一档再进下一档。把集合竞价、比例分配、冰山等判断塞进同一循环，每张对手单都会重复无关分支。接单时按市场阶段与订单类型选好实现，连续路径与集合路径共用订单池和价位索引，但定价与分配函数分开。集合竞价先按价位累计量求统一成交价，再按优先级分配；沪深对并列价的裁决不同，应写成各自的定价函数，而不是在连续循环里问“现在是不是集合阶段”。
+
+```cpp
+enum class Sess : uint8_t { Cont, Call };
+
+struct MatchCtx {
+    MatchLevel* asks{nullptr};
+    MatchLevel* bids{nullptr};
+    int n_ask{0};
+    int n_bid{0};
+};
+
+using MatchFn = void (*)(MatchCtx&, HotOrd*, int64_t px, int64_t qty, bool buy);
+
+void match_cont(MatchCtx& cx, HotOrd* pool, int64_t px, int64_t qty, bool buy);
+void match_call(MatchCtx& cx, HotOrd* pool, int64_t px, int64_t qty, bool buy);
+
+MatchFn pick_match(Sess s) {
+    return s == Sess::Call ? match_call : match_cont;
+}
+
+int64_t call_px(const int64_t* buy_ge, const int64_t* sell_le,
+                int lo, int hi, int (*tie)(int, int)) {
+    // buy_ge[p] / sell_le[p] 为价位 p 上已累加好的可买 / 可卖量
+    int64_t best_vol = -1;
+    int best = lo;
+    for (int p = lo; p <= hi; ++p) {
+        const int64_t cross = buy_ge[p] < sell_le[p] ? buy_ge[p] : sell_le[p];
+        if (cross > best_vol) {
+            best_vol = cross;
+            best = p;
+        } else if (cross == best_vol) {
+            best = tie(best, p);
+        }
+    }
+    return best;
+}
+
+void on_new(Sess s, MatchCtx& cx, HotOrd* pool, int64_t px, int64_t qty, bool buy) {
+    pick_match(s)(cx, pool, px, qty, buy);
 }
 ```
 
