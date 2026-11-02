@@ -54,7 +54,8 @@
   - [45. Event-driven factor plans that unfold at compile time](#45-event-driven-factor-plans-that-unfold-at-compile-time)
   - [46. Single-thread vs multi-stage pipeline: service time versus packet spacing](#46-single-thread-vs-multi-stage-pipeline-service-time-versus-packet-spacing)
   - [47. Compile-time typestate: illegal ticket moves are unreachable by type](#47-compile-time-typestate-illegal-ticket-moves-are-unreachable-by-type)
-  - [48. High-quality articles on system design](#48-high-quality-articles-on-system-design)
+  - [48. Local quote ownership on the strategy hot path](#48-local-quote-ownership-on-the-strategy-hot-path)
+  - [49. High-quality articles on system design](#49-high-quality-articles-on-system-design)
 - [Common performance bottlenecks and optimization directions](#common-performance-bottlenecks-and-optimization-directions)
   - [1. roofline model](#1-roofline-model)
     - [Memory Bound optimization](#memory-bound-optimization)
@@ -122,6 +123,9 @@
   - [35. Live factor wiring that separates state from events](#35-live-factor-wiring-that-separates-state-from-events)
   - [36. Config-picked frame digests with enum dispatch](#36-config-picked-frame-digests-with-enum-dispatch)
   - [37. Ticket capability matrix, command objects, and version-guarded snapshots](#37-ticket-capability-matrix-command-objects-and-version-guarded-snapshots)
+  - [38. Streaming binary framing, variant dispatch, and length backfill](#38-streaming-binary-framing-variant-dispatch-and-length-backfill)
+  - [39. Upstream depth deltas and downstream full snapshots](#39-upstream-depth-deltas-and-downstream-full-snapshots)
+  - [40. Fan-out copies the subscriber list before send](#40-fan-out-copies-the-subscriber-list-before-send)
 - [Business logic design-calculation](#business-logic-design-calculation)
   - [1. Log return (percent asymmetry)](#1-log-return-percent-asymmetry)
   - [2. Changes in state of market trends and volatility](#2-changes-in-state-of-market-trends-and-volatility)
@@ -1768,6 +1772,13 @@ struct alignas(CACHE_LINE_SIZE) CacheLineAligned : public T {
 };
 
 // This method is more concise and ensures that the structure is aligned in memory to meet the cache line size requirements.
+```
+
+After line padding, if multi-core throughput still falls far short of a linear single-core extrapolation, run `perf c2c record` then `perf c2c report` to see contended lines and HITM. Whether useful events appear depends on the CPU and kernel; the tool finds coherence traffic at line granularity and does not replace miss ratios from `perf stat`.
+
+```shell
+perf c2c record -- ./md_pipeline
+perf c2c report
 ```
 
 A helper core that writes results into its own L1 leaves those lines Modified. When the main core harvests them, a local miss snoops the helper and flushes the dirty line: tens of nanoseconds to read, more if the main core then writes. Keep intermediate state on the helper; send back only a small hit list. For lines that must move, the helper issues `clwb` after the store so the shared L3 already has the data and the helper keeps its copy. `clflush` would invalidate the line and miss on the next use.
@@ -17765,7 +17776,63 @@ Ticket<TagDone> seal(Ticket<TagLive> t) {
 // apply_fill(std::move(live), 3);
 ```
 
-### 48. High-quality articles on system design
+
+### 48. Local quote ownership on the strategy hot path
+
+A two-venue opportunity only needs two top-of-book quotes, yet an API that returns a sixteen-slot full snapshot by value fixes the result at 1,024 bytes: default construction zeroes the whole object, then only two 64-byte slots are filled. RVO cannot fix the wrong data shape. Two shared lookups cut the copy to 128 bytes, but a writer assigning a plain quote object in place while a strategy thread copies it by value, with only matching atomic version numbers before and after, is still a data race in standard C++: the version does not create happens-before for the plain object. If the market event already inlines the changed quote, the strategy slot thread should keep both sides locally, update only the changed side on the callback, and evaluate from those local objects. After the slot queue rejects a quote, mark the slot for resync and stop sending; reseeding is a cold path once capacity returns, not continued trading on a gapped pair. If an inbox is named SPSC yet quotes, fills, and params all push into it, split a dedicated quote ring before trusting local ownership.
+
+```cpp
+struct alignas(64) TopQuote {
+    int64_t bid_px{0};
+    int64_t ask_px{0};
+    int32_t bid_sz{0};
+    int32_t ask_sz{0};
+    uint64_t src_seq{0};
+    uint8_t venue{0};
+    uint8_t live{0};
+};
+static_assert(sizeof(TopQuote) == 64);
+
+struct OwnPair {
+    TopQuote a{};
+    TopQuote b{};
+    uint8_t a_ok{0};
+    uint8_t b_ok{0};
+    uint8_t want_a{0};
+    uint8_t want_b{0};
+
+    void feed(const TopQuote& q) noexcept {
+        if (q.venue == want_a) { a = q; a_ok = 1; }
+        else if (q.venue == want_b) { b = q; b_ok = 1; }
+    }
+    bool ready() const noexcept { return a_ok && b_ok; }
+    void clear() noexcept { a_ok = 0; b_ok = 0; }
+};
+
+struct SlotGate {
+    std::atomic<uint8_t> need_seed{0};
+    OwnPair pair{};
+
+    bool on_quote(const TopQuote& q) {
+        if (need_seed.load(std::memory_order_acquire)) {
+            pair.clear();
+            return false;
+        }
+        pair.feed(q);
+        return pair.ready();
+    }
+    void on_drop() {
+        need_seed.store(1, std::memory_order_release);
+        pair.clear();
+    }
+    void seeded(const TopQuote& qa, const TopQuote& qb) {
+        pair.a = qa; pair.b = qb; pair.a_ok = 1; pair.b_ok = 1;
+        need_seed.store(0, std::memory_order_release);
+    }
+};
+```
+
+### 49. High-quality articles on system design
 [https://mp.weixin.qq.com/s/9OH1RA8POFidgQnvape6fQ](https://mp.weixin.qq.com/s/9OH1RA8POFidgQnvape6fQ)
 
 [https://mp.weixin.qq.com/s/PuG4ZFVZ-7hijS4Db8Z5jQ](https://mp.weixin.qq.com/s/PuG4ZFVZ-7hijS4Db8Z5jQ)
@@ -36950,6 +37017,206 @@ struct KillCmd {
         return true;
     }
 };
+```
+
+
+
+### 38. Streaming binary framing, variant dispatch, and length backfill
+
+SSE and SZSE streaming binary ride a continuous TCP byte stream; the codec only sees complete frames: read the fixed header for body length, then decode after header, body, and checksum are present. SSE picks among fourteen bodies by message type; SZSE first folds seventy-plus type keys into a few bodies, then NewOrder and execution confirmations enter a second-level extension by a three-byte application id. In C, a discriminant enum plus a union expresses the variant: encode trusts the caller’s tag and union member; decode writes the tag from the wire type. Fixed and dynamic strings after decode point into the input frame without copying and without a NUL terminator; copy fields before the message enters an async queue. Only repeat groups allocate on decode, with a matching free; a root message may still be freed after a mid-field failure. Encode reserves body length, fills the body, patches the length, then checksums bytes before the checksum field; every full frame starts from a reset buffer or the checksum eats the previous frame. The decoder does not recompute the checksum or force consumed bytes to equal the header body length; the adapter does those checks with max frame size and repeat-count caps.
+
+```cpp
+enum class BodyTag : uint8_t { None, Heart, Logon, NewOrd, KillOrd };
+
+struct Borrowed {
+    const char* p{nullptr};
+    uint32_t n{0};
+};
+
+struct WireLogon {
+    Borrowed sender{};
+    uint32_t hb_sec{0};
+};
+
+struct WireRoot {
+    uint32_t typ{0};
+    uint64_t seq{0};
+    uint32_t body_n{0};
+    BodyTag tag{BodyTag::None};
+    union {
+        WireLogon logon;
+    } u{};
+    uint32_t dig{0};
+};
+
+struct OutBuf {
+    uint8_t* data{nullptr};
+    size_t cap{0};
+    size_t len{0};
+    void reset() { len = 0; }
+    bool put(const void* p, size_t n) {
+        if (len + n > cap) return false;
+        std::memcpy(data + len, p, n);
+        len += n;
+        return true;
+    }
+    bool patch32_be(size_t at, uint32_t v) {
+        if (at + 4 > len) return false;
+        data[at] = uint8_t(v >> 24);
+        data[at + 1] = uint8_t(v >> 16);
+        data[at + 2] = uint8_t(v >> 8);
+        data[at + 3] = uint8_t(v);
+        return true;
+    }
+};
+
+uint32_t fold_sum8(const uint8_t* p, size_t n) {
+    uint32_t s = 0;
+    for (size_t i = 0; i < n; ++i) s += p[i];
+    return s & 0xFFu;
+}
+
+bool encode_root(OutBuf& b, uint32_t typ, uint64_t seq, BodyTag tag,
+                 const WireLogon* logon) {
+    b.reset();
+    uint8_t hdr[16]{};
+    (void)typ; (void)seq;
+    if (!b.put(hdr, 16)) return false;
+    const size_t body_at = b.len;
+    if (tag == BodyTag::Logon && logon) {
+        if (!b.put(&logon->hb_sec, 4)) return false;
+        if (!b.put(logon->sender.p, logon->sender.n)) return false;
+    }
+    const uint32_t body_n = uint32_t(b.len - body_at);
+    if (!b.patch32_be(12, body_n)) return false;
+    const uint32_t dig = fold_sum8(b.data, b.len);
+    return b.put(&dig, 4);
+}
+
+bool adapter_accept(const uint8_t* frame, size_t n, size_t max_n, uint32_t body_n) {
+    if (n > max_n || n < 20) return false;
+    if (16 + body_n + 4 != n) return false;
+    const uint32_t got = *reinterpret_cast<const uint32_t*>(frame + n - 4);
+    return got == fold_sum8(frame, n - 4);
+}
+```
+
+### 39. Upstream depth deltas and downstream full snapshots
+
+Matching changes a few price levels per event and sends the market gateway deltas: add, change, delete. The gateway applies them single-threaded per instrument into a full book; a parse failure drops the whole message; startup consumes from the queue tail and does not replay historical deltas. Downstream clients are uncontrolled—a missed frame is neither detected nor repaired—so the gateway pushes full snapshots and encodes depth count in the channel name. State channels such as depth and quote catch up with the current value on subscribe, and never catch up with an empty book before one exists; trade prints are event channels and do not catch up. When a fill yields two reports, public market data pushes one. Twenty-four-hour high, low, and volume use per-minute buckets advanced only by message timestamps, including depth messages; late messages for minutes already aged out of the window are dropped rather than rolling the window backward.
+
+```cpp
+enum class DepthOp : uint8_t { Add = 1, Chg = 2, Del = 3 };
+
+struct DepthDelta {
+    DepthOp op{DepthOp::Chg};
+    uint8_t side{0}; // 0 bid 1 ask
+    int64_t px{0};
+    int64_t qty{0};
+    uint64_t ts{0};
+};
+
+struct LevelBook {
+    std::map<int64_t, int64_t, std::greater<int64_t>> bids;
+    std::map<int64_t, int64_t> asks;
+    uint8_t built{0};
+
+    bool apply(const DepthDelta& d) {
+        if (d.side == 0) {
+            if (d.op == DepthOp::Del || d.qty <= 0) bids.erase(d.px);
+            else bids[d.px] = d.qty;
+        } else {
+            if (d.op == DepthOp::Del || d.qty <= 0) asks.erase(d.px);
+            else asks[d.px] = d.qty;
+        }
+        built = 1;
+        return true;
+    }
+};
+
+struct MinBucket {
+    uint64_t minute{0};
+    int64_t hi{0};
+    int64_t lo{0};
+    int64_t vol{0};
+};
+
+struct DayWindow {
+    std::deque<MinBucket> mins;
+    uint64_t cursor_ts{0};
+
+    void on_msg(uint64_t ts, int64_t px, int64_t qty) {
+        cursor_ts = ts;
+        const uint64_t m = ts / 60000000000ull;
+        while (!mins.empty() && cursor_ts >= mins.front().minute * 60000000000ull + 86400000000000ull)
+            mins.pop_front();
+        if (!mins.empty() && mins.back().minute == m) {
+            auto& b = mins.back();
+            if (px > b.hi) b.hi = px;
+            if (px < b.lo) b.lo = px;
+            b.vol += qty;
+        } else if (m * 60000000000ull + 86400000000000ull > cursor_ts) {
+            mins.push_back({m, px, px, qty});
+        }
+    }
+};
+
+struct SnapFrame {
+    char channel[48]{};
+    int64_t bid_px[10]{};
+    int64_t bid_sz[10]{};
+    int64_t ask_px[10]{};
+    int64_t ask_sz[10]{};
+    int n{0};
+};
+
+bool fill_top10(const LevelBook& book, SnapFrame& out, const char* chan) {
+    if (!book.built) return false;
+    std::snprintf(out.channel, sizeof out.channel, "%s", chan);
+    out.n = 0;
+    for (auto it = book.bids.begin(); it != book.bids.end() && out.n < 10; ++it, ++out.n) {
+        out.bid_px[out.n] = it->first;
+        out.bid_sz[out.n] = it->second;
+    }
+    int a = 0;
+    for (auto it = book.asks.begin(); it != book.asks.end() && a < 10; ++it, ++a) {
+        out.ask_px[a] = it->first;
+        out.ask_sz[a] = it->second;
+    }
+    return true;
+}
+```
+
+### 40. Fan-out copies the subscriber list before send
+
+The subscription table is shared by connection threads and the broadcast thread, so it needs a lock. A network write to a slow client under that lock stalls subscribe, unsubscribe, and every other channel. Copy the connection list for the channel under the lock, then send after unlock; build order-book frames under the book lock the same way, and never nest the book lock with the subscription lock. Push and read threads may write the same connection concurrently; they share one connection write lock so frame bytes do not interleave.
+
+```cpp
+struct Conn;
+struct SubTable {
+    std::mutex mu;
+    std::unordered_map<std::string, std::vector<Conn*>> by_chan;
+
+    void fanout(const std::string& chan, const uint8_t* frame, size_t n) {
+        std::vector<Conn*> targets;
+        {
+            std::lock_guard<std::mutex> g(mu);
+            auto it = by_chan.find(chan);
+            if (it == by_chan.end()) return;
+            targets = it->second;
+        }
+        for (Conn* c : targets) conn_write(c, frame, n);
+    }
+};
+
+struct Conn {
+    std::mutex write_mu;
+};
+
+void conn_write(Conn* c, const uint8_t* frame, size_t n) {
+    std::lock_guard<std::mutex> g(c->write_mu);
+    (void)frame; (void)n;
+}
 ```
 
 

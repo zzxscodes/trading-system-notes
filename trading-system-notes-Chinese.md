@@ -54,7 +54,8 @@ English version：[https://github.com/zzxscodes/trading-system-notes/blob/main/t
   - [45. 编译期可展开的事件因子执行计划](#45-编译期可展开的事件因子执行计划)
   - [46. 单线程与多级流水线：服务时间相对发包间隔](#46-单线程与多级流水线服务时间相对发包间隔)
   - [47. 编译期类型态：非法订单迁移在类型上不可达](#47-编译期类型态非法订单迁移在类型上不可达)
-  - [48. 系统设计优质文章](#48-系统设计优质文章)
+  - [48. 策略热路径本地报价所有权](#48-策略热路径本地报价所有权)
+  - [49. 系统设计优质文章](#49-系统设计优质文章)
 - [常见性能瓶颈与优化方向](#常见性能瓶颈与优化方向)
   - [1. roofline model](#1-roofline-model)
     - [Memory Bound优化](#memory-bound优化)
@@ -122,6 +123,9 @@ English version：[https://github.com/zzxscodes/trading-system-notes/blob/main/t
   - [35. 状态与事件分离的实盘因子编排](#35-状态与事件分离的实盘因子编排)
   - [36. 多对手方帧校验的配置选取与枚举分发](#36-多对手方帧校验的配置选取与枚举分发)
   - [37. 订单能力矩阵、命令对象与版本守卫快照](#37-订单能力矩阵命令对象与版本守卫快照)
+  - [38. 流式二进制组帧、变体分派与长度回填](#38-流式二进制组帧变体分派与长度回填)
+  - [39. 上游盘口增量与下游完整快照](#39-上游盘口增量与下游完整快照)
+  - [40. 行情广播先复制订阅名单再发送](#40-行情广播先复制订阅名单再发送)
 - [业务逻辑设计-计算](#业务逻辑设计-计算)
   - [1. 对数收益率(百分比非对称性)](#1-对数收益率百分比非对称性)
   - [2. 市场趋势和波动率的状态变化](#2-市场趋势和波动率的状态变化)
@@ -1770,6 +1774,13 @@ struct alignas(CACHE_LINE_SIZE) CacheLineAligned : public T {
 };
 
 // 这种方式更加简洁，并且可以确保结构体在内存中的对齐符合缓存行的大小要求。
+```
+
+布局对齐之后，若多核吞吐仍远低于单核线性外推，可用 `perf c2c record` 再 `perf c2c report` 看跨核争用的缓存行与 HITM。工具能否采到有效事件取决于处理器与内核配置；它定位的是行级一致性流量，不是替代 `perf stat` 里的未命中比例。
+
+```shell
+perf c2c record -- ./md_pipeline
+perf c2c report
 ```
 
 辅核把结果写在自己的 L1 里，行是 Modified。主核再去收割，本地 miss 后要嗅探辅核、刷脏行，一次读是几十纳秒，再写会更贵。主核只收命中列表这类小信标，中间状态留在辅核。必须交过去的行，辅核算完用 `clwb` 写回共享 L3，本地副本还在；`clflush` 会把行失效，下次辅核再用又缺。
@@ -17733,7 +17744,63 @@ Ticket<TagDone> seal(Ticket<TagLive> t) {
 // apply_fill(std::move(live), 3);
 ```
 
-### 48. 系统设计优质文章
+
+### 48. 策略热路径本地报价所有权
+
+双场所机会只比较两条最优报价，接口却按值返回十六个槽位的全量快照时，结果对象固定一千零二十四字节：默认构造先清零整块，再只覆盖两个六十四字节槽。返回值优化省不掉错误的数据形状。改成两次共享查询能把搬运缩到一百二十八字节，但写线程对普通报价对象就地赋值、策略线程同时按值复制，中间只有原子版本号前后相等判断时，在标准 C++ 里仍是数据竞争：版本号不能给普通对象读写建立 happens-before。行情事件若已内联携带本次变化的报价，策略槽线程应在本地维护两侧报价，回调只更新变化的一侧，机会计算读本地对象。槽队列拒收行情后要把该槽标成需重同步并停止发单，恢复后再经冷路径播种，不能继续用缺口后的旧组合。收件箱若名义上是单生产者、实际有行情、回报与参数多路写入，先拆成专用行情环，再谈本地所有权。
+
+```cpp
+struct alignas(64) TopQuote {
+    int64_t bid_px{0};
+    int64_t ask_px{0};
+    int32_t bid_sz{0};
+    int32_t ask_sz{0};
+    uint64_t src_seq{0};
+    uint8_t venue{0};
+    uint8_t live{0};
+};
+static_assert(sizeof(TopQuote) == 64);
+
+struct OwnPair {
+    TopQuote a{};
+    TopQuote b{};
+    uint8_t a_ok{0};
+    uint8_t b_ok{0};
+    uint8_t want_a{0};
+    uint8_t want_b{0};
+
+    void feed(const TopQuote& q) noexcept {
+        if (q.venue == want_a) { a = q; a_ok = 1; }
+        else if (q.venue == want_b) { b = q; b_ok = 1; }
+    }
+    bool ready() const noexcept { return a_ok && b_ok; }
+    void clear() noexcept { a_ok = 0; b_ok = 0; }
+};
+
+struct SlotGate {
+    std::atomic<uint8_t> need_seed{0};
+    OwnPair pair{};
+
+    bool on_quote(const TopQuote& q) {
+        if (need_seed.load(std::memory_order_acquire)) {
+            pair.clear();
+            return false;
+        }
+        pair.feed(q);
+        return pair.ready();
+    }
+    void on_drop() {
+        need_seed.store(1, std::memory_order_release);
+        pair.clear();
+    }
+    void seeded(const TopQuote& qa, const TopQuote& qb) {
+        pair.a = qa; pair.b = qb; pair.a_ok = 1; pair.b_ok = 1;
+        need_seed.store(0, std::memory_order_release);
+    }
+};
+```
+
+### 49. 系统设计优质文章
 [https://mp.weixin.qq.com/s/9OH1RA8POFidgQnvape6fQ](https://mp.weixin.qq.com/s/9OH1RA8POFidgQnvape6fQ)
 
 [https://mp.weixin.qq.com/s/PuG4ZFVZ-7hijS4Db8Z5jQ](https://mp.weixin.qq.com/s/PuG4ZFVZ-7hijS4Db8Z5jQ)
@@ -36937,6 +37004,208 @@ struct KillCmd {
         return true;
     }
 };
+```
+
+
+
+### 38. 流式二进制组帧、变体分派与长度回填
+
+沪深流式二进制跑在连续 TCP 字节上，codec 只吃完整帧：先读定长头拿到体长，凑齐头加体加校验后再解码。上交所按消息类型直接选十四种体；深交所先把七十多个类型键归成少数体，新单与成交确认再按三字节应用标识进第二级扩展体。C 里用判别枚举加联合体表达变体：编码看调用方设好的标签与联合体成员，解码看线上类型写入标签。定长与动态字符串解码后指向输入帧字节，不复制、也不保证空结尾；消息进入异步队列前必须拷走字段。重复段才在解码时分配数组，并提供对称释放；根消息即使中途失败也可安全释放。编码先占位体长，写完体再回填，再对校验字段之前的字节算校验；每一完整帧从清空后的缓冲起编，否则校验会吃进上一帧字节。解码侧默认不重算校验、也不强制实际消费长度等于头部体长，这两步留在接入层与最大帧长、重复段上界一起做。
+
+```cpp
+enum class BodyTag : uint8_t { None, Heart, Logon, NewOrd, KillOrd };
+
+struct Borrowed {
+    const char* p{nullptr};
+    uint32_t n{0};
+};
+
+struct WireLogon {
+    Borrowed sender{};
+    uint32_t hb_sec{0};
+};
+
+struct WireRoot {
+    uint32_t typ{0};
+    uint64_t seq{0};
+    uint32_t body_n{0};
+    BodyTag tag{BodyTag::None};
+    union {
+        WireLogon logon;
+    } u{};
+    uint32_t dig{0};
+};
+
+struct OutBuf {
+    uint8_t* data{nullptr};
+    size_t cap{0};
+    size_t len{0};
+    void reset() { len = 0; }
+    bool put(const void* p, size_t n) {
+        if (len + n > cap) return false;
+        std::memcpy(data + len, p, n);
+        len += n;
+        return true;
+    }
+    bool patch32_be(size_t at, uint32_t v) {
+        if (at + 4 > len) return false;
+        data[at] = uint8_t(v >> 24);
+        data[at + 1] = uint8_t(v >> 16);
+        data[at + 2] = uint8_t(v >> 8);
+        data[at + 3] = uint8_t(v);
+        return true;
+    }
+};
+
+uint32_t fold_sum8(const uint8_t* p, size_t n) {
+    uint32_t s = 0;
+    for (size_t i = 0; i < n; ++i) s += p[i];
+    return s & 0xFFu;
+}
+
+bool encode_root(OutBuf& b, uint32_t typ, uint64_t seq, BodyTag tag,
+                 const WireLogon* logon) {
+    b.reset();
+    uint8_t hdr[16]{};
+    (void)typ; (void)seq;
+    if (!b.put(hdr, 16)) return false;
+    const size_t body_at = b.len;
+    if (tag == BodyTag::Logon && logon) {
+        if (!b.put(&logon->hb_sec, 4)) return false;
+        if (!b.put(logon->sender.p, logon->sender.n)) return false;
+    }
+    const uint32_t body_n = uint32_t(b.len - body_at);
+    if (!b.patch32_be(12, body_n)) return false;
+    const uint32_t dig = fold_sum8(b.data, b.len);
+    return b.put(&dig, 4);
+}
+
+bool adapter_accept(const uint8_t* frame, size_t n, size_t max_n, uint32_t body_n) {
+    if (n > max_n || n < 20) return false;
+    if (16 + body_n + 4 != n) return false;
+    const uint32_t got = *reinterpret_cast<const uint32_t*>(frame + n - 4);
+    return got == fold_sum8(frame, n - 4);
+}
+```
+
+### 39. 上游盘口增量与下游完整快照
+
+撮合每次只改少数价位，对行情网关发增量：增档、改量、删档。网关单线程按合约顺序累加成完整簿；解析失败丢整条，不把半成品写入；启动从队尾消费，不重放历史增量。下游客户端不可控，漏帧发现不了也修不了，因此向外推完整快照，并把档数写进频道名。深度、报价这类状态频道在订阅时立刻补发当前值，且簿未建立前不补发空簿；逐笔成交是事件频道，不补发。一笔成交有主动与挂单两条回报时，公共行情只推一条。二十四小时高低与成交量按分钟分桶，窗口只由消息时间戳推进，盘口消息也要推进；早于窗口的乱序桶已淘汰则丢弃，不回退窗口。
+
+```cpp
+enum class DepthOp : uint8_t { Add = 1, Chg = 2, Del = 3 };
+
+struct DepthDelta {
+    DepthOp op{DepthOp::Chg};
+    uint8_t side{0}; // 0 bid 1 ask
+    int64_t px{0};
+    int64_t qty{0};
+    uint64_t ts{0};
+};
+
+struct LevelBook {
+    std::map<int64_t, int64_t, std::greater<int64_t>> bids;
+    std::map<int64_t, int64_t> asks;
+    uint8_t built{0};
+
+    bool apply(const DepthDelta& d) {
+        if (d.side == 0) {
+            if (d.op == DepthOp::Del || d.qty <= 0) bids.erase(d.px);
+            else bids[d.px] = d.qty;
+        } else {
+            if (d.op == DepthOp::Del || d.qty <= 0) asks.erase(d.px);
+            else asks[d.px] = d.qty;
+        }
+        built = 1;
+        return true;
+    }
+};
+
+struct MinBucket {
+    uint64_t minute{0};
+    int64_t hi{0};
+    int64_t lo{0};
+    int64_t vol{0};
+};
+
+struct DayWindow {
+    std::deque<MinBucket> mins;
+    uint64_t cursor_ts{0};
+
+    void on_msg(uint64_t ts, int64_t px, int64_t qty) {
+        cursor_ts = ts;
+        const uint64_t m = ts / 60000000000ull; // ns -> minute
+        while (!mins.empty() && cursor_ts >= mins.front().minute * 60000000000ull + 86400000000000ull)
+            mins.pop_front();
+        if (!mins.empty() && mins.back().minute == m) {
+            auto& b = mins.back();
+            if (px > b.hi) b.hi = px;
+            if (px < b.lo) b.lo = px;
+            b.vol += qty;
+        } else if (m * 60000000000ull + 86400000000000ull > cursor_ts) {
+            mins.push_back({m, px, px, qty});
+        }
+    }
+};
+
+struct SnapFrame {
+    char channel[48]{};
+    int64_t bid_px[10]{};
+    int64_t bid_sz[10]{};
+    int64_t ask_px[10]{};
+    int64_t ask_sz[10]{};
+    int n{0};
+};
+
+bool fill_top10(const LevelBook& book, SnapFrame& out, const char* chan) {
+    if (!book.built) return false;
+    std::snprintf(out.channel, sizeof out.channel, "%s", chan);
+    out.n = 0;
+    for (auto it = book.bids.begin(); it != book.bids.end() && out.n < 10; ++it, ++out.n) {
+        out.bid_px[out.n] = it->first;
+        out.bid_sz[out.n] = it->second;
+    }
+    int a = 0;
+    for (auto it = book.asks.begin(); it != book.asks.end() && a < 10; ++it, ++a) {
+        out.ask_px[a] = it->first;
+        out.ask_sz[a] = it->second;
+    }
+    return true;
+}
+```
+
+### 40. 行情广播先复制订阅名单再发送
+
+订阅表被连接线程与广播线程同时访问，需要一把锁。若在锁内对慢客户端做网络写，整表订阅、退订与其他频道广播都会堵在同一把锁后。锁内只复制当前频道的连接名单，出锁后再逐个发送；订单簿帧同样先在锁内构造完再发送，簿锁与订阅锁不嵌套。同一连接上推送线程与读线程可能并发写帧，共用一把连接写锁，避免字节交错。
+
+```cpp
+struct Conn;
+struct SubTable {
+    std::mutex mu;
+    std::unordered_map<std::string, std::vector<Conn*>> by_chan;
+
+    void fanout(const std::string& chan, const uint8_t* frame, size_t n) {
+        std::vector<Conn*> targets;
+        {
+            std::lock_guard<std::mutex> g(mu);
+            auto it = by_chan.find(chan);
+            if (it == by_chan.end()) return;
+            targets = it->second;
+        }
+        for (Conn* c : targets) conn_write(c, frame, n);
+    }
+};
+
+struct Conn {
+    std::mutex write_mu;
+    // socket...
+};
+
+void conn_write(Conn* c, const uint8_t* frame, size_t n) {
+    std::lock_guard<std::mutex> g(c->write_mu);
+    // send(frame, n);
+    (void)frame; (void)n;
+}
 ```
 
 
