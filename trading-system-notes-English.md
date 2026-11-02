@@ -130,6 +130,7 @@
   - [42. Chunked price slots for sparse domains](#42-chunked-price-slots-for-sparse-domains)
   - [43. Cancel by slot handle and zeroed resting size](#43-cancel-by-slot-handle-and-zeroed-resting-size)
   - [44. Split match paths for continuous and call auction](#44-split-match-paths-for-continuous-and-call-auction)
+  - [45. Exhaustive interleavings and breach detection for shared qty](#45-exhaustive-interleavings-and-breach-detection-for-shared-qty)
 - [Business logic design-calculation](#business-logic-design-calculation)
   - [1. Log return (percent asymmetry)](#1-log-return-percent-asymmetry)
   - [2. Changes in state of market trends and volatility](#2-changes-in-state-of-market-trends-and-volatility)
@@ -37408,6 +37409,98 @@ int64_t call_px(const int64_t* buy_ge, const int64_t* sell_le,
 
 void on_new(Sess s, MatchCtx& cx, HotOrd* pool, int64_t px, int64_t qty, bool buy) {
     pick_match(s)(cx, pool, px, qty, buy);
+}
+```
+
+
+
+### 45. Exhaustive interleavings and breach detection for shared qty
+
+Thousands of random runs only show that the schedules you hit did not fail; they do not show that no failing interleaving exists. Shared sellable size or spendable cash that reads then writes can oversell or overdraw when two threads switch between the check and the debit; the default scheduler often misses it until switches are forced between steps. Capture each thread’s program counter, the shared quantities, and who holds the lock as one snapshot, breadth-first from the start across every one-step move; at each state check invariants, record a breach, and rebuild a step-by-step schedule from parent links. Large scopes explode; a small scope often already catches check-then-act bugs; arbitrary initials need bounded unfolding or an inductive invariant. The check covers this state machine and the written conditions—if the model drops a field or the condition is too weak, a pass does not mean the live binary is right.
+
+```cpp
+enum class Step : uint8_t { Peek, Deduct, Done };
+
+struct Snap {
+    Step pc[2]{};
+    int32_t free_lots{0};
+    int32_t filled{0};
+    int8_t lock_owner{-1}; // -1 free, else thread id
+};
+
+bool ok_inv(const Snap& s, int32_t cap) {
+    if (s.free_lots < 0) return false;
+    if (s.filled > cap) return false;
+    if (s.free_lots + s.filled > cap) return false;
+    return true;
+}
+
+bool step_one(Snap& s, int tid, int32_t /*cap*/) {
+    if (s.pc[tid] == Step::Done) return false;
+    if (s.pc[tid] == Step::Peek) {
+        if (s.lock_owner >= 0 && s.lock_owner != tid) return false;
+        s.lock_owner = int8_t(tid);
+        if (s.free_lots <= 0) {
+            s.lock_owner = -1;
+            s.pc[tid] = Step::Done;
+            return true;
+        }
+        s.pc[tid] = Step::Deduct;
+        return true;
+    }
+    s.free_lots -= 1;
+    s.filled += 1;
+    s.lock_owner = -1;
+    s.pc[tid] = Step::Peek;
+    return true;
+}
+
+struct Hit {
+    bool bad{false};
+    uint32_t states{0};
+    Snap fail{};
+};
+
+Hit explore(int32_t cap) {
+    Snap init{};
+    init.free_lots = cap;
+    std::queue<Snap> q;
+    std::unordered_set<uint64_t> seen;
+    auto key = [](const Snap& s) -> uint64_t {
+        return (uint64_t(uint8_t(s.pc[0])) << 0)
+             | (uint64_t(uint8_t(s.pc[1])) << 8)
+             | (uint64_t(uint16_t(s.free_lots)) << 16)
+             | (uint64_t(uint16_t(s.filled)) << 32)
+             | (uint64_t(uint8_t(s.lock_owner + 1)) << 48);
+    };
+    q.push(init);
+    seen.insert(key(init));
+    Hit hit{};
+    while (!q.empty()) {
+        Snap cur = q.front();
+        q.pop();
+        ++hit.states;
+        if (!ok_inv(cur, cap)) {
+            hit.bad = true;
+            hit.fail = cur;
+            return hit;
+        }
+        for (int tid = 0; tid < 2; ++tid) {
+            Snap nxt = cur;
+            if (!step_one(nxt, tid, cap)) continue;
+            const uint64_t kn = key(nxt);
+            if (seen.insert(kn).second) q.push(nxt);
+        }
+    }
+    return hit;
+}
+
+bool peek_then_take_racy(int32_t& free_lots, int32_t& filled) {
+    if (free_lots <= 0) return false;
+    // schedule point: another thread may pass the same check here
+    free_lots -= 1;
+    filled += 1;
+    return true;
 }
 ```
 

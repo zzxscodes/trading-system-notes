@@ -130,6 +130,7 @@ English version：[https://github.com/zzxscodes/trading-system-notes/blob/main/t
   - [42. 稀疏价格域的分块价位槽](#42-稀疏价格域的分块价位槽)
   - [43. 撤单槽位句柄与零量占位](#43-撤单槽位句柄与零量占位)
   - [44. 连续竞价与集合竞价分路径撮合](#44-连续竞价与集合竞价分路径撮合)
+  - [45. 并发共享量的状态穷举与违例检出](#45-并发共享量的状态穷举与违例检出)
 - [业务逻辑设计-计算](#业务逻辑设计-计算)
   - [1. 对数收益率(百分比非对称性)](#1-对数收益率百分比非对称性)
   - [2. 市场趋势和波动率的状态变化](#2-市场趋势和波动率的状态变化)
@@ -37397,6 +37398,100 @@ int64_t call_px(const int64_t* buy_ge, const int64_t* sell_le,
 
 void on_new(Sess s, MatchCtx& cx, HotOrd* pool, int64_t px, int64_t qty, bool buy) {
     pick_match(s)(cx, pool, px, qty, buy);
+}
+```
+
+
+
+### 45. 并发共享量的状态穷举与违例检出
+
+随机跑几千轮测试只能说明碰上的那些调度没出错，不能说明不存在出错的交错。可卖数量、可用现金一类共享量若先读后改，两个线程在检查与扣减之间换一次，就会超卖或透支；默认调度往往碰不到，人为在每步插入切换后才会暴露。把每个线程的程序计数、共享量和锁归属收成一张状态快照，从初态做广度优先，枚举所有一步迁移；每到一态核对照不变量，违规则记下该状态，父指针链可回溯成逐步可复现的调度。规模一大状态会爆炸，小范围往往已能抓出检查后扣减类错误；要覆盖任意初值再改用有界展开或归纳不变式。验证的是这张状态机与写下的条件，模型漏了字段、条件写弱，通过也不等于实盘代码正确。
+
+```cpp
+enum class Step : uint8_t { Peek, Dec, Done };
+
+struct Snap {
+    Step pc[2]{};
+    int32_t free_lots{0};
+    int32_t filled{0};
+    int8_t lock_owner{-1}; // -1 free, else thread id
+};
+
+bool ok_inv(const Snap& s, int32_t cap) {
+    if (s.free_lots < 0) return false;
+    if (s.filled > cap) return false;
+    if (s.free_lots + s.filled > cap) return false;
+    return true;
+}
+
+bool step_one(Snap& s, int tid, int32_t /*cap*/) {
+    if (s.pc[tid] == Step::Done) return false;
+    if (s.pc[tid] == Step::Peek) {
+        if (s.lock_owner >= 0 && s.lock_owner != tid) return false;
+        s.lock_owner = int8_t(tid);
+        if (s.free_lots <= 0) {
+            s.lock_owner = -1;
+            s.pc[tid] = Step::Done;
+            return true;
+        }
+        s.pc[tid] = Step::Deduct;
+        return true;
+    }
+    // Deduct under lock
+    s.free_lots -= 1;
+    s.filled += 1;
+    s.lock_owner = -1;
+    s.pc[tid] = Step::Peek;
+    return true;
+}
+
+struct Hit {
+    bool bad{false};
+    uint32_t states{0};
+    Snap fail{};
+};
+
+Hit explore(int32_t cap) {
+    Snap init{};
+    init.free_lots = cap;
+    std::queue<Snap> q;
+    std::unordered_set<uint64_t> seen;
+    auto key = [](const Snap& s) -> uint64_t {
+        return (uint64_t(uint8_t(s.pc[0])) << 0)
+             | (uint64_t(uint8_t(s.pc[1])) << 8)
+             | (uint64_t(uint16_t(s.free_lots)) << 16)
+             | (uint64_t(uint16_t(s.filled)) << 32)
+             | (uint64_t(uint8_t(s.lock_owner + 1)) << 48);
+    };
+    q.push(init);
+    seen.insert(key(init));
+    Hit hit{};
+    while (!q.empty()) {
+        Snap cur = q.front();
+        q.pop();
+        ++hit.states;
+        if (!ok_inv(cur, cap)) {
+            hit.bad = true;
+            hit.fail = cur;
+            return hit;
+        }
+        for (int tid = 0; tid < 2; ++tid) {
+            Snap nxt = cur;
+            if (!step_one(nxt, tid, cap)) continue;
+            const uint64_t kn = key(nxt);
+            if (seen.insert(kn).second) q.push(nxt);
+        }
+    }
+    return hit;
+}
+
+// 错误写法：无锁先看 free_lots 再扣，两线程交错可把 free_lots 打成负
+bool peek_then_take_racy(int32_t& free_lots, int32_t& filled) {
+    if (free_lots <= 0) return false;
+    // 调度点：另一线程可在这里同样通过检查
+    free_lots -= 1;
+    filled += 1;
+    return true;
 }
 ```
 
