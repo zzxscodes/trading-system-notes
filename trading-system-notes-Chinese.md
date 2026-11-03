@@ -1521,6 +1521,22 @@ b = 1;                 assert(a == 1); // 可能失败？
 
 + [https://whichisfaster.dev/q/store-to-load_forwarding.html](https://whichisfaster.dev/q/store-to-load_forwarding.html)
 
+**重叠的搬移从还没写过的那一头开始**
+
+把一档价格往高地址挪一格时，若从下标 1 往上写 `px[i] = px[i - 1]`，下一轮要读的格子就是上一轮刚写入的格子。加载要等存储缓冲里这次写的地址比对完成。从最后一个下标往回写，读到的格子还没有被这次挪动写过。往低地址压紧时从下标 0 往上写，读的是更高的那一格。
+
+```cpp
+void shift_higher(int64_t* px, int n) {
+    for (int i = n - 1; i > 0; --i)
+        px[i] = px[i - 1];
+}
+
+void shift_lower(int64_t* px, int n) {
+    for (int i = 0; i + 1 < n; ++i)
+        px[i] = px[i + 1];
+}
+```
+
 **2. 无效队列（Invalidate Queue）：隐藏缓存一致性延迟**
 
 **原理**：CPU修改共享变量时，需先通过“缓存一致性协议（如MESI）”向其他CPU发送“缓存行无效（Invalidate）”请求；为避免等待所有CPU确认无效，CPU将“无效请求”存入“无效队列”并异步处理——其他CPU可能延迟收到无效请求，导致“读操作看到过时数据”。
@@ -7854,6 +7870,20 @@ float sum_parallel(const float* a, int n) {
     }
     for (; i < n; ++i) s0 += a[i];
     return (s0 + s1) + (s2 + s3);
+}
+```
+
+**前缀每步都依赖上一步，累计值留在寄存器里**
+
+成交量累计和持仓滚动里，本步的结果就是下一步的输入。把累计值放在寄存器中，本步只加新的增量，循环结束后再写入输出数组。若每步先把结果存进输出数组，下一步再从刚写入的那一格加载，这次加载要等存储缓冲里上一次写的地址比对完成，存储、加载和加法就串成一条链。
+
+```cpp
+void running_qty(const int32_t* delta, int32_t* out, int n) {
+    int32_t acc = 0;
+    for (int i = 0; i < n; ++i) {
+        acc += delta[i];
+        out[i] = acc;
+    }
 }
 ```
 

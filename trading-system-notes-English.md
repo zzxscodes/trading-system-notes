@@ -1516,6 +1516,22 @@ b = 1; assert(a == 1); // Possible failure?
 
 + [https://whichisfaster.dev/q/store-to-load_forwarding.html](https://whichisfaster.dev/q/store-to-load_forwarding.html)
 
+**Slide an overlapping range from the end that has not been written yet**
+
+When a price ladder moves one slot toward higher addresses, a forward loop `px[i] = px[i - 1]` starting at index 1 reads, on the next iteration, the cell just stored. The load waits for the address check of that store in the store buffer. Writing from the last index downward reads a cell this move has not stored yet. When the ladder moves toward lower addresses, write from index 0 upward and read the higher cell.
+
+```cpp
+void shift_higher(int64_t* px, int n) {
+    for (int i = n - 1; i > 0; --i)
+        px[i] = px[i - 1];
+}
+
+void shift_lower(int64_t* px, int n) {
+    for (int i = 0; i + 1 < n; ++i)
+        px[i] = px[i + 1];
+}
+```
+
 **2. Invalidate Queue: Hide cache consistency delay**
 
 **Principle**: When a CPU modifies a shared variable, it must first send an "Invalidate" request to other CPUs through the "cache consistency protocol (such as MESI)"; in order to avoid waiting for all CPUs to confirm the invalidity, the CPU stores the "invalid request" in the "invalidation queue" and processes it asynchronously - other CPUs may delay receiving the invalid request, causing "read operations to see outdated data."
@@ -7859,6 +7875,20 @@ float sum_parallel(const float* a, int n) {
     }
     for (; i < n; ++i) s0 += a[i];
     return (s0 + s1) + (s2 + s3);
+}
+```
+
+**A prefix step depends on the previous step; keep the running value in a register**
+
+In a cumulative volume or a rolling position, the result of this step is the input of the next step. Keep the running value in a register, add only the new delta, and write the output array when the loop finishes. If each step stores into the output array and the next step loads that cell back, the load waits for the address check of the store still in the store buffer, and the store, the load, and the add form one chain.
+
+```cpp
+void running_qty(const int32_t* delta, int32_t* out, int n) {
+    int32_t acc = 0;
+    for (int i = 0; i < n; ++i) {
+        acc += delta[i];
+        out[i] = acc;
+    }
 }
 ```
 
