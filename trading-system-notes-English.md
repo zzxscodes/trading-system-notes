@@ -2125,6 +2125,37 @@ namespace Common {
 }
 ```
 
+**Intraday objects only advance; after the close the index returns to 0**
+
+Quote blocks and scratch objects are allocated during the session and not returned. Lay out one run of fixed-size slots, take the next index with atomic `fetch_add`, and return null once the index passes the capacity. The caller placement-news into the slot. Several threads may take at once, and only that thread writes the slot it took. At the close or when the process starts, store the index as 0 so the next allocation begins at the first slot.
+
+```cpp
+#include <atomic>
+#include <cstdint>
+#include <new>
+
+template <class T, uint32_t Cap>
+struct SessionStripe {
+    alignas(T) unsigned char raw[sizeof(T) * Cap]{};
+    std::atomic<uint32_t> next{0};
+
+    T* take() {
+        uint32_t i = next.fetch_add(1, std::memory_order_relaxed);
+        if (i >= Cap) return nullptr;
+        return std::launder(reinterpret_cast<T*>(raw + i * sizeof(T)));
+    }
+
+    template <class... Args>
+    T* make(Args&&... args) {
+        T* p = take();
+        if (!p) return nullptr;
+        return new (p) T(std::forward<Args>(args)...);
+    }
+
+    void rewind() { next.store(0, std::memory_order_relaxed); }
+};
+```
+
 **2. Memory tuning**
 
 ```cpp
@@ -5189,6 +5220,54 @@ struct Lane {
 };
 ```
 
+**One task is taken by one processing thread**
+
+A decode thread writes compute tasks into a ring, and several processing threads take them. Each task is taken once. The writer only advances the tail. A reader puts the head index and a generation in one word and compare-exchanges it; the thread that succeeds moves that slot. After the head wraps to the same index the generation has increased, so the old value does not match. When the next index already equals the head, the writer returns failure.
+
+```cpp
+#include <atomic>
+#include <array>
+#include <cstdint>
+#include <utility>
+
+template <class Task, uint32_t CapPow2>
+struct TaskTakeRing {
+    static_assert((CapPow2 & (CapPow2 - 1u)) == 0u);
+    static constexpr uint32_t kMask = CapPow2 - 1u;
+    static constexpr uint32_t kIxBits = 16;
+    static constexpr uint32_t kIxMask = (1u << kIxBits) - 1u;
+
+    alignas(64) std::atomic<uint32_t> pack_head{0};
+    alignas(64) std::atomic<uint32_t> tail{0};
+    std::array<Task, CapPow2> slot{};
+
+    template <class U>
+    bool try_push(U&& u) {
+        uint32_t t = tail.load(std::memory_order_relaxed);
+        uint32_t n = (t + 1u) & kMask;
+        uint32_t h = pack_head.load(std::memory_order_acquire) & kIxMask;
+        if (n == h) return false;
+        slot[t] = std::forward<U>(u);
+        tail.store(n, std::memory_order_release);
+        return true;
+    }
+
+    bool try_take(Task& out) {
+        for (;;) {
+            uint32_t old = pack_head.load(std::memory_order_acquire);
+            uint32_t h = old & kIxMask;
+            uint32_t t = tail.load(std::memory_order_relaxed);
+            if (h == t) return false;
+            uint32_t neu = (((old >> kIxBits) + 1u) << kIxBits) | ((h + 1u) & kMask);
+            if (!pack_head.compare_exchange_weak(old, neu, std::memory_order_acq_rel))
+                continue;
+            out = std::move(slot[h]);
+            return true;
+        }
+    }
+};
+```
+
 ### 10. spmc shared memory lock-free queue application
 Source 1.[https://github.com/MengRao/SPMC_Queue](https://github.com/MengRao/SPMC_Queue)
 
@@ -5448,6 +5527,63 @@ public:
             ++cursor;
         }
         return cursor;
+    }
+};
+```
+
+**A full send ring rejects the push and leaves untaken orders in their slots**
+
+Several strategy threads write orders into one send ring. While the send thread has not taken the order in a slot, the next lap must not write that slot. The producer reads the head first and returns failure when the next index already equals the head, then compare-exchanges the tail index. The payload is still unwritten when that compare-exchange returns, so a send thread that looked only at the tail would read an unfinished cell. Each cell has its own ready bit, stored as 1 with release after the payload. The send thread moves the cell only after an acquire load sees 1, stores the bit as 0, and then advances the head. The low 16 bits of the tail word are the index and the high bits are the generation. After the index wraps, the old tail word does not match and the compare-exchange fails. Capacity is a power of two and the index wraps with a mask. Only the send thread updates the head.
+
+```cpp
+#include <atomic>
+#include <array>
+#include <cstdint>
+#include <utility>
+
+template <class Ticket, uint32_t CapPow2>
+struct SendJoinRing {
+    static_assert((CapPow2 & (CapPow2 - 1u)) == 0u);
+    static constexpr uint32_t kMask = CapPow2 - 1u;
+    static constexpr uint32_t kIxBits = 16;
+    static constexpr uint32_t kIxMask = (1u << kIxBits) - 1u;
+
+    struct Cell {
+        alignas(64) std::atomic<uint8_t> ready{0};
+        Ticket body{};
+    };
+
+    alignas(64) std::atomic<uint32_t> head{0};
+    alignas(64) std::atomic<uint32_t> pack_tail{0};
+    std::array<Cell, CapPow2> cell{};
+
+    template <class U>
+    bool try_push(U&& u) {
+        for (;;) {
+            uint32_t old = pack_tail.load(std::memory_order_acquire);
+            uint32_t ix = old & kIxMask;
+            uint32_t nxt = (ix + 1u) & kMask;
+            uint32_t hd = head.load(std::memory_order_acquire) & kIxMask;
+            if (nxt == hd) return false;
+            uint32_t neu = (((old >> kIxBits) + 1u) << kIxBits) | nxt;
+            if (!pack_tail.compare_exchange_weak(old, neu, std::memory_order_acq_rel))
+                continue;
+            cell[ix].body = std::forward<U>(u);
+            cell[ix].ready.store(1, std::memory_order_release);
+            return true;
+        }
+    }
+
+    bool try_pop(Ticket& out) {
+        uint32_t h = head.load(std::memory_order_relaxed);
+        uint32_t t = pack_tail.load(std::memory_order_acquire) & kIxMask;
+        if ((h & kIxMask) == t) return false;
+        Cell& c = cell[h & kMask];
+        if (!c.ready.load(std::memory_order_acquire)) return false;
+        out = std::move(c.body);
+        c.ready.store(0, std::memory_order_release);
+        head.store(h + 1u, std::memory_order_release);
+        return true;
     }
 };
 ```
@@ -34514,6 +34650,124 @@ public:
 };
 ```
 
+Names map to slot indexes in a fixed table inside the same shared segment. A collision continues at the next cell by a quadratic step. A cell marked removed can be written again, and lookup stops when it reaches an empty cell. Objects sit in the array beside the table, addressed by slot index. Registration and removal update the occupancy bits, and both steps take a spin lock. Lookup by name only reads the table. Removal runs the destructor in the slot, default-constructs it again, and clears the occupancy bit and the name. The creating process rounds the segment length up to a page and placement-news it. Other processes only map the segment that already exists.
+
+```cpp
+#include <atomic>
+#include <array>
+#include <bitset>
+#include <cstdint>
+#include <cstring>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <unistd.h>
+
+template <class State, uint32_t Slots>
+struct NameSlot {
+    static_assert((Slots & (Slots - 1u)) == 0u);
+    static constexpr uint32_t kMap = Slots * 2;
+    static constexpr uint32_t kMapMask = kMap - 1u;
+
+    struct Rec {
+        char code[32]{};
+        uint32_t slot{0};
+        uint8_t tag{0}; // 0 empty, 1 live, 2 removed
+    };
+
+    std::bitset<Slots> used{};
+    Rec rec[kMap]{};
+    uint32_t live{0};
+    std::array<State, Slots> body{};
+    std::atomic_flag gate = ATOMIC_FLAG_INIT;
+
+    void lock() {
+        while (gate.test_and_set(std::memory_order_acquire)) {
+#if defined(__x86_64__)
+            __builtin_ia32_pause();
+#endif
+        }
+    }
+    void unlock() { gate.clear(std::memory_order_release); }
+
+    static uint32_t mix(const char* s) {
+        uint32_t h = 2166136261u;
+        for (uint32_t i = 0; i < 31 && s[i]; ++i) {
+            h ^= (uint8_t)s[i];
+            h *= 16777619u;
+        }
+        return h;
+    }
+
+    Rec* probe(const char* code, bool for_insert) {
+        uint32_t i = mix(code) & kMapMask;
+        Rec* gap = nullptr;
+        for (uint32_t step = 0; step < kMap; ++step) {
+            Rec& r = rec[i];
+            if (r.tag == 0) return for_insert ? (gap ? gap : &r) : nullptr;
+            if (r.tag == 2 && for_insert && !gap) gap = &r;
+            if (r.tag == 1 && std::strncmp(r.code, code, 32) == 0) return &r;
+            i = (i + step * step + 1u) & kMapMask;
+        }
+        return for_insert ? gap : nullptr;
+    }
+
+    State* find(const char* code) {
+        Rec* r = probe(code, false);
+        return r ? &body[r->slot] : nullptr;
+    }
+
+    bool open(const char* code, State** out) {
+        lock();
+        if (Rec* have = probe(code, false)) {
+            *out = &body[have->slot];
+            unlock();
+            return true;
+        }
+        if (live >= Slots) { unlock(); return false; }
+        uint32_t slot = 0;
+        for (; slot < Slots; ++slot) if (!used.test(slot)) break;
+        Rec* r = probe(code, true);
+        if (!r) { unlock(); return false; }
+        std::strncpy(r->code, code, 31);
+        r->code[31] = '\0';
+        r->slot = slot;
+        r->tag = 1;
+        used.set(slot);
+        ++live;
+        *out = &body[slot];
+        unlock();
+        return true;
+    }
+
+    bool drop(const char* code) {
+        lock();
+        Rec* r = probe(code, false);
+        if (!r) { unlock(); return false; }
+        uint32_t slot = r->slot;
+        body[slot].~State();
+        new (&body[slot]) State();
+        r->tag = 2;
+        used.reset(slot);
+        --live;
+        unlock();
+        return true;
+    }
+};
+
+template <class State, uint32_t Slots>
+NameSlot<State, Slots>* map_name_slots(const char* path, bool create) {
+    int fd = shm_open(path, create ? (O_CREAT | O_RDWR) : O_RDWR, 0666);
+    if (fd < 0) return nullptr;
+    size_t page = (size_t)sysconf(_SC_PAGESIZE);
+    size_t bytes = (sizeof(NameSlot<State, Slots>) + page - 1) & ~(page - 1);
+    if (create) ftruncate(fd, (off_t)bytes);
+    void* p = mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    close(fd);
+    if (p == MAP_FAILED) return nullptr;
+    if (create) new (p) NameSlot<State, Slots>();
+    return static_cast<NameSlot<State, Slots>*>(p);
+}
+```
 
 + **Caveats**: every process must agree on shared-memory layout version; more than 64 subscribers need a wider confirm map; disagreement between local books and broker queries needs an explicit reconciliation policy.
 

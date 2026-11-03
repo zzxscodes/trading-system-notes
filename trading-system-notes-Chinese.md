@@ -2129,6 +2129,37 @@ namespace Common {
 }
 ```
 
+**盘中对象只往后分配，收盘把下标写回 0**
+
+行情块和计算临时对象在盘中分配之后不再归还。预先放好一整段定长槽，用原子下标 `fetch_add` 取下一格，下标越过容量就返回空。调用方在槽里 placement new。多个线程可以同时取，取到的槽只由该线程写入。收盘或进程拉起时把下标写成 0，下一次从第一格开始。
+
+```cpp
+#include <atomic>
+#include <cstdint>
+#include <new>
+
+template <class T, uint32_t Cap>
+struct SessionStripe {
+    alignas(T) unsigned char raw[sizeof(T) * Cap]{};
+    std::atomic<uint32_t> next{0};
+
+    T* take() {
+        uint32_t i = next.fetch_add(1, std::memory_order_relaxed);
+        if (i >= Cap) return nullptr;
+        return std::launder(reinterpret_cast<T*>(raw + i * sizeof(T)));
+    }
+
+    template <class... Args>
+    T* make(Args&&... args) {
+        T* p = take();
+        if (!p) return nullptr;
+        return new (p) T(std::forward<Args>(args)...);
+    }
+
+    void rewind() { next.store(0, std::memory_order_relaxed); }
+};
+```
+
 **2. 内存调优**
 
 ```cpp
@@ -5197,6 +5228,54 @@ struct Lane {
 };
 ```
 
+**一条任务只被一个处理线程取走**
+
+解码线程把计算任务写入环，多个处理线程来取，每条任务只被取走一次。写的一侧只推进尾。读的一侧把头下标和版本放进同一个字，比较交换成功的那个线程取走该槽。头绕回同一下标时版本已经增加，旧值对不上。下一格已经等于头时，写的一侧返回失败。
+
+```cpp
+#include <atomic>
+#include <array>
+#include <cstdint>
+#include <utility>
+
+template <class Task, uint32_t CapPow2>
+struct TaskTakeRing {
+    static_assert((CapPow2 & (CapPow2 - 1u)) == 0u);
+    static constexpr uint32_t kMask = CapPow2 - 1u;
+    static constexpr uint32_t kIxBits = 16;
+    static constexpr uint32_t kIxMask = (1u << kIxBits) - 1u;
+
+    alignas(64) std::atomic<uint32_t> pack_head{0};
+    alignas(64) std::atomic<uint32_t> tail{0};
+    std::array<Task, CapPow2> slot{};
+
+    template <class U>
+    bool try_push(U&& u) {
+        uint32_t t = tail.load(std::memory_order_relaxed);
+        uint32_t n = (t + 1u) & kMask;
+        uint32_t h = pack_head.load(std::memory_order_acquire) & kIxMask;
+        if (n == h) return false;
+        slot[t] = std::forward<U>(u);
+        tail.store(n, std::memory_order_release);
+        return true;
+    }
+
+    bool try_take(Task& out) {
+        for (;;) {
+            uint32_t old = pack_head.load(std::memory_order_acquire);
+            uint32_t h = old & kIxMask;
+            uint32_t t = tail.load(std::memory_order_relaxed);
+            if (h == t) return false;
+            uint32_t neu = (((old >> kIxBits) + 1u) << kIxBits) | ((h + 1u) & kMask);
+            if (!pack_head.compare_exchange_weak(old, neu, std::memory_order_acq_rel))
+                continue;
+            out = std::move(slot[h]);
+            return true;
+        }
+    }
+};
+```
+
 ### 10. spmc共享内存无锁队列应用
 来源1.[https://github.com/MengRao/SPMC_Queue](https://github.com/MengRao/SPMC_Queue)
 
@@ -5456,6 +5535,63 @@ public:
             ++cursor;
         }
         return cursor;
+    }
+};
+```
+
+**报盘环满时入队失败，未取走的委托留在槽里**
+
+多个策略线程把委托写入同一条报盘环。槽里还有报盘线程没取走的委托时，下一圈不能写入这一格。生产者先读头，下一格已经等于头就返回失败，再用比较交换取得尾下标。比较交换返回之后载荷还没写完，只看尾的报盘线程会读到没写完的内容。每个槽另有一个就绪位，载荷写完后用 release 写成 1。报盘线程用 acquire 读到 1 才搬走内容，再把该位写成 0，然后把头加一。尾字的低 16 位是下标，高位是版本。下标绕回以后旧尾字对不上，比较交换失败。容量取二的幂，下标用掩码折回。头只由报盘线程修改。
+
+```cpp
+#include <atomic>
+#include <array>
+#include <cstdint>
+#include <utility>
+
+template <class Ticket, uint32_t CapPow2>
+struct SendJoinRing {
+    static_assert((CapPow2 & (CapPow2 - 1u)) == 0u);
+    static constexpr uint32_t kMask = CapPow2 - 1u;
+    static constexpr uint32_t kIxBits = 16;
+    static constexpr uint32_t kIxMask = (1u << kIxBits) - 1u;
+
+    struct Cell {
+        alignas(64) std::atomic<uint8_t> ready{0};
+        Ticket body{};
+    };
+
+    alignas(64) std::atomic<uint32_t> head{0};
+    alignas(64) std::atomic<uint32_t> pack_tail{0};
+    std::array<Cell, CapPow2> cell{};
+
+    template <class U>
+    bool try_push(U&& u) {
+        for (;;) {
+            uint32_t old = pack_tail.load(std::memory_order_acquire);
+            uint32_t ix = old & kIxMask;
+            uint32_t nxt = (ix + 1u) & kMask;
+            uint32_t hd = head.load(std::memory_order_acquire) & kIxMask;
+            if (nxt == hd) return false;
+            uint32_t neu = (((old >> kIxBits) + 1u) << kIxBits) | nxt;
+            if (!pack_tail.compare_exchange_weak(old, neu, std::memory_order_acq_rel))
+                continue;
+            cell[ix].body = std::forward<U>(u);
+            cell[ix].ready.store(1, std::memory_order_release);
+            return true;
+        }
+    }
+
+    bool try_pop(Ticket& out) {
+        uint32_t h = head.load(std::memory_order_relaxed);
+        uint32_t t = pack_tail.load(std::memory_order_acquire) & kIxMask;
+        if ((h & kIxMask) == t) return false;
+        Cell& c = cell[h & kMask];
+        if (!c.ready.load(std::memory_order_acquire)) return false;
+        out = std::move(c.body);
+        c.ready.store(0, std::memory_order_release);
+        head.store(h + 1u, std::memory_order_release);
+        return true;
     }
 };
 ```
@@ -34501,6 +34637,124 @@ public:
 };
 ```
 
+名字到槽号放在同一段共享内存的定长表里。冲突时按二次步进找下一格。标记为已删除的格子可以再次写入，查找遇到空格子就停止。对象按槽号放在旁边的数组里。注册和摘掉会改占用位，这两步加自旋锁。按名字取地址只查表。摘掉时在槽内析构，再默认构造，同时清掉占用位和名字。创建进程把共享段长度补齐到页长，再做 placement new。其他进程只映射已经建好的段。
+
+```cpp
+#include <atomic>
+#include <array>
+#include <bitset>
+#include <cstdint>
+#include <cstring>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <unistd.h>
+
+template <class State, uint32_t Slots>
+struct NameSlot {
+    static_assert((Slots & (Slots - 1u)) == 0u);
+    static constexpr uint32_t kMap = Slots * 2;
+    static constexpr uint32_t kMapMask = kMap - 1u;
+
+    struct Rec {
+        char code[32]{};
+        uint32_t slot{0};
+        uint8_t tag{0}; // 0 空，1 在用，2 已删
+    };
+
+    std::bitset<Slots> used{};
+    Rec rec[kMap]{};
+    uint32_t live{0};
+    std::array<State, Slots> body{};
+    std::atomic_flag gate = ATOMIC_FLAG_INIT;
+
+    void lock() {
+        while (gate.test_and_set(std::memory_order_acquire)) {
+#if defined(__x86_64__)
+            __builtin_ia32_pause();
+#endif
+        }
+    }
+    void unlock() { gate.clear(std::memory_order_release); }
+
+    static uint32_t mix(const char* s) {
+        uint32_t h = 2166136261u;
+        for (uint32_t i = 0; i < 31 && s[i]; ++i) {
+            h ^= (uint8_t)s[i];
+            h *= 16777619u;
+        }
+        return h;
+    }
+
+    Rec* probe(const char* code, bool for_insert) {
+        uint32_t i = mix(code) & kMapMask;
+        Rec* gap = nullptr;
+        for (uint32_t step = 0; step < kMap; ++step) {
+            Rec& r = rec[i];
+            if (r.tag == 0) return for_insert ? (gap ? gap : &r) : nullptr;
+            if (r.tag == 2 && for_insert && !gap) gap = &r;
+            if (r.tag == 1 && std::strncmp(r.code, code, 32) == 0) return &r;
+            i = (i + step * step + 1u) & kMapMask;
+        }
+        return for_insert ? gap : nullptr;
+    }
+
+    State* find(const char* code) {
+        Rec* r = probe(code, false);
+        return r ? &body[r->slot] : nullptr;
+    }
+
+    bool open(const char* code, State** out) {
+        lock();
+        if (Rec* have = probe(code, false)) {
+            *out = &body[have->slot];
+            unlock();
+            return true;
+        }
+        if (live >= Slots) { unlock(); return false; }
+        uint32_t slot = 0;
+        for (; slot < Slots; ++slot) if (!used.test(slot)) break;
+        Rec* r = probe(code, true);
+        if (!r) { unlock(); return false; }
+        std::strncpy(r->code, code, 31);
+        r->code[31] = '\0';
+        r->slot = slot;
+        r->tag = 1;
+        used.set(slot);
+        ++live;
+        *out = &body[slot];
+        unlock();
+        return true;
+    }
+
+    bool drop(const char* code) {
+        lock();
+        Rec* r = probe(code, false);
+        if (!r) { unlock(); return false; }
+        uint32_t slot = r->slot;
+        body[slot].~State();
+        new (&body[slot]) State();
+        r->tag = 2;
+        used.reset(slot);
+        --live;
+        unlock();
+        return true;
+    }
+};
+
+template <class State, uint32_t Slots>
+NameSlot<State, Slots>* map_name_slots(const char* path, bool create) {
+    int fd = shm_open(path, create ? (O_CREAT | O_RDWR) : O_RDWR, 0666);
+    if (fd < 0) return nullptr;
+    size_t page = (size_t)sysconf(_SC_PAGESIZE);
+    size_t bytes = (sizeof(NameSlot<State, Slots>) + page - 1) & ~(page - 1);
+    if (create) ftruncate(fd, (off_t)bytes);
+    void* p = mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    close(fd);
+    if (p == MAP_FAILED) return nullptr;
+    if (create) new (p) NameSlot<State, Slots>();
+    return static_cast<NameSlot<State, Slots>*>(p);
+}
+```
 
 + **注意**：共享内存布局一变，所有进程都要按版本对齐；订阅者超过 64 个时，确认位图要加宽；本系统自算账本与柜台查询不一致时，要有明确的对账办法。
 
