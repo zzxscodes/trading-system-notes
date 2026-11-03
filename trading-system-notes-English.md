@@ -131,6 +131,7 @@
   - [43. Cancel by slot handle and zeroed resting size](#43-cancel-by-slot-handle-and-zeroed-resting-size)
   - [44. Split match paths for continuous and call auction](#44-split-match-paths-for-continuous-and-call-auction)
   - [45. Exhaustive interleavings and breach detection for shared qty](#45-exhaustive-interleavings-and-breach-detection-for-shared-qty)
+  - [46. One live order aligns a futures target, and split today-yesterday books close yesterday first](#46-one-live-order-aligns-a-futures-target-and-split-today-yesterday-books-close-yesterday-first)
 - [Business logic design-calculation](#business-logic-design-calculation)
   - [1. Log return (percent asymmetry)](#1-log-return-percent-asymmetry)
   - [2. Changes in state of market trends and volatility](#2-changes-in-state-of-market-trends-and-volatility)
@@ -38348,6 +38349,325 @@ bool peek_then_take_racy(int32_t& free_lots, int32_t& filled) {
     free_lots -= 1;
     filled += 1;
     return true;
+}
+```
+
+
+### 46. One live order aligns a futures target, and split today-yesterday books close yesterday first
+A contract can carry several strategy contexts. Each context returns an integer target, and the contract target is their sum. The core keeps one unfinished order on that contract and uses it to move the real long and the real short to the target size. A buy takes the ask. A sell hits the bid. An exchange that stores today and yesterday in separate fields sends close-yesterday first. An exchange that stores the position as one number covers the whole side with one plain close.
+
+**When the quote's hour and minute fall outside the trading window, the target is written as 0**
+
+The clock is the quote update time, `hour * 100 + minute`. Each day span has its start earlier than its end. A night span may have its start later than its end, and that span crosses midnight. When the start is earlier than the end, the time is inside once it has reached the start and is still before the end. When the start is later than the end, the time is inside once it has reached the start, or while it is still before the end.
+
+A tick outside the session window keeps the previous target. A tick inside the session and outside the trading window does not run the contexts, and the target is written as 0. Inside the trading window, each context computes its own target, and those targets are added.
+
+```cpp
+int hhmm(int hour, int minute) { return hour * 100 + minute; }
+
+bool in_window(int now, int begin, int end) {
+    if (begin < end) return begin <= now && now < end;
+    if (begin > end) return now >= begin || now < end;
+    return false;
+}
+
+int stored_target(int prev, int summed, bool in_session, bool in_trade) {
+    if (!in_session) return prev;
+    if (!in_trade) return 0;
+    return summed;
+}
+```
+
+**A last price within one tick of a limit, a busy slot, or a cancel count at the cap sends nothing**
+
+The send decision comes after the target write. When the last price is at least the upper limit minus one tick, or at most the lower limit plus one tick, this tick sends nothing. While the last price is inside that one-tick band, a target of 0 produces no flatten order. A slot that still holds an order sends nothing. Cancel count grows when the status becomes canceled. Once it has reached the contract cap, this tick sends nothing.
+
+```cpp
+bool may_send(bool in_session, bool slot_busy, int cancel_used, int cancel_cap,
+              double last, double up, double dn, double tick) {
+    if (!in_session) return false;
+    if (last >= up - tick || last <= dn + tick) return false;
+    if (slot_busy) return false;
+    if (cancel_used >= cancel_cap) return false;
+    return true;
+}
+```
+
+**A commodity order closes the opposite side first, then brings the desired side to the target**
+
+A positive target wants a long. While the short position is still positive, the order only closes shorts. On a split book, a positive yesterday short closes the whole yesterday short. A zero yesterday short closes the whole today short. On a single position field, a plain close uses the whole short position.
+
+After the short position is zero, subtract the target from the long position. A positive difference is excess long and is closed. On a split book, a zero yesterday long closes the excess as close-today. A positive yesterday long closes the smaller of the excess and the yesterday long, as close-yesterday. A single position field sends a plain close for the excess.
+
+A negative difference is a shortfall. The open size is the target minus the long position. The order goes out when the open cap is at least the long open volume plus the short open volume plus this size. The buy price is the ask.
+
+A negative target closes the long first, then brings the short to the absolute target, and sells any shortfall at the bid. A zero target closes the long first. A zero long then closes the short. On a split book with a zero target, a positive yesterday is closed first, and today is closed once yesterday is zero.
+
+```cpp
+enum class Act : uint8_t {
+    None,
+    BuyOpen, SellOpen,
+    BuyClose, SellClose,
+    BuyCloseTd, SellCloseTd,
+    BuyCloseYd, SellCloseYd
+};
+
+struct SideLots {
+    int pos{0};
+    int today{0};
+    int yday{0};
+    int opened{0};
+    int closed{0};
+};
+
+struct Chase {
+    SideLots lng{};
+    SideLots sht{};
+    int target{0};
+    bool split_yd{false};
+    int open_cap{0};
+};
+
+struct Step { Act act; int qty; };
+
+int smaller(int a, int b) { return a < b ? a : b; }
+
+Step close_side(bool split, bool sell, int pos, int today, int yday) {
+    if (!split) return {sell ? Act::SellClose : Act::BuyClose, pos};
+    if (yday > 0) return {sell ? Act::SellCloseYd : Act::BuyCloseYd, yday};
+    if (today > 0) return {sell ? Act::SellCloseTd : Act::BuyCloseTd, today};
+    return {};
+}
+
+Step close_extra(bool split, bool sell, int extra, int yday) {
+    if (!split) return {sell ? Act::SellClose : Act::BuyClose, extra};
+    if (yday == 0) return {sell ? Act::SellCloseTd : Act::BuyCloseTd, extra};
+    return {sell ? Act::SellCloseYd : Act::BuyCloseYd, smaller(extra, yday)};
+}
+
+bool open_fits(const Chase& c, int qty) {
+    return c.open_cap >= c.lng.opened + c.sht.opened + qty;
+}
+
+Step commodity_step(const Chase& c) {
+    if (c.target > 0) {
+        if (c.sht.pos > 0)
+            return close_side(c.split_yd, false, c.sht.pos, c.sht.today, c.sht.yday);
+        int extra = c.lng.pos - c.target;
+        if (extra > 0) return close_extra(c.split_yd, true, extra, c.lng.yday);
+        if (extra < 0 && open_fits(c, -extra)) return {Act::BuyOpen, -extra};
+        return {};
+    }
+    if (c.target < 0) {
+        if (c.lng.pos > 0)
+            return close_side(c.split_yd, true, c.lng.pos, c.lng.today, c.lng.yday);
+        int want = -c.target;
+        int extra = c.sht.pos - want;
+        if (extra > 0) return close_extra(c.split_yd, false, extra, c.sht.yday);
+        if (extra < 0 && open_fits(c, -extra)) return {Act::SellOpen, -extra};
+        return {};
+    }
+    if (c.lng.pos > 0)
+        return close_side(c.split_yd, true, c.lng.pos, c.lng.today, c.lng.yday);
+    if (c.sht.pos > 0)
+        return close_side(c.split_yd, false, c.sht.pos, c.sht.today, c.sht.yday);
+    return {};
+}
+
+double chase_px(Act act, double bid, double ask) {
+    switch (act) {
+    case Act::BuyOpen:
+    case Act::BuyClose:
+    case Act::BuyCloseTd:
+    case Act::BuyCloseYd:
+        return ask;
+    default:
+        return bid;
+    }
+}
+```
+
+**A stock-index target uses net position, and yesterday is position minus today's open volume**
+
+Index futures do not use close-today or close-yesterday flags. Net position is long position minus short position. The difference is the target minus the net. A positive difference needs a larger net long. Yesterday short is short position minus short open volume. When yesterday short is zero or negative, the whole difference goes out as a buy open when the open cap allows it. When yesterday short is at least the difference, the close size is the difference. When yesterday short is smaller, this order closes only that yesterday short. A negative difference needs a larger net short. Yesterday long is long position minus long open volume. When yesterday long is zero or negative, the shortfall goes out as a sell open when the open cap allows it. When yesterday long is at least the shortfall, the close size is the shortfall. When yesterday long is smaller, this order closes only that yesterday long. A zero difference sends nothing. A buy takes the ask. A sell hits the bid.
+
+```cpp
+Step index_step(const Chase& c) {
+    int net = c.lng.pos - c.sht.pos;
+    int diff = c.target - net;
+    if (diff > 0) {
+        int yd = c.sht.pos - c.sht.opened;
+        if (yd <= 0) {
+            if (!open_fits(c, diff)) return {};
+            return {Act::BuyOpen, diff};
+        }
+        return {Act::BuyClose, yd >= diff ? diff : yd};
+    }
+    if (diff < 0) {
+        int need = -diff;
+        int yd = c.lng.pos - c.lng.opened;
+        if (yd <= 0) {
+            if (!open_fits(c, need)) return {};
+            return {Act::SellOpen, need};
+        }
+        return {Act::SellClose, yd >= need ? need : yd};
+    }
+    return {};
+}
+```
+
+**Login stores the front id and the session id, and the next order reference starts one past the maximum**
+
+After the front connects, authentication runs, and a successful authentication sends the login. The login reply stores the front id, the session id, and the maximum order reference, then settlement is confirmed, and a successful confirm queries the instruments. The next reference is that maximum plus one, and each send adds one more. An insert fills the reference. A cancel fills the reference, the front id, and the session id. An order return whose front id or session id differs from this login is ignored, and the cancel count is left unchanged.
+
+```cpp
+struct LoginIds {
+    int front{0};
+    int session{0};
+    uint32_t next_ref{1};
+};
+
+void arm_login(LoginIds& ids, int front, int session, uint32_t max_ref) {
+    ids.front = front;
+    ids.session = session;
+    ids.next_ref = max_ref + 1;
+}
+
+uint32_t take_ref(LoginIds& ids) { return ids.next_ref++; }
+
+bool same_login(const LoginIds& ids, int front, int session) {
+    return ids.front == front && ids.session == session;
+}
+```
+
+**An order still in the queue is cancelled, and the slot clears when filled order lots equal trade lots**
+
+An order return checks the front id and the session id. When both match and the reference is the slot's order, the order's filled lots are written from the return's traded volume. When the status equals the previous one, the filled-lot write is kept and the slot stays occupied. A status that becomes partially filled and still queueing, or unfilled and still queueing, cancels that order by its reference and leaves the slot occupied. A status that becomes canceled adds one to the cancel count. After the status has left the queue, equal order-filled lots and trade lots clear the slot, and the next tick can send.
+
+A trade return adds its volume to the trade lots. While the order is still in the queue, equal counters leave the slot occupied. After the order has left the queue, equal counters clear the slot.
+
+An error return whose reference matches the slot clears the slot. A return with a different reference leaves the slot unchanged.
+
+```cpp
+enum class QSt : uint8_t { InQueue, LeftQueue, Canceled };
+
+struct Slot {
+    uint32_t ref{0};
+    int ord_done{0};
+    int trd_done{0};
+    bool busy{false};
+    bool in_queue{false};
+    int cancel_used{0};
+};
+
+void on_order(Slot& s, const LoginIds& ids, int front, int session,
+              uint32_t ref, int vol_traded, QSt st, bool status_changed) {
+    if (!same_login(ids, front, session)) return;
+    if (!s.busy || ref != s.ref) return;
+    s.ord_done = vol_traded;
+    if (!status_changed) return;
+    if (st == QSt::InQueue) {
+        s.in_queue = true;
+        return;
+    }
+    s.in_queue = false;
+    if (st == QSt::Canceled) s.cancel_used += 1;
+    if (s.ord_done == s.trd_done) s.busy = false;
+}
+
+void on_trade(Slot& s, uint32_t ref, int qty) {
+    if (!s.busy || ref != s.ref) return;
+    s.trd_done += qty;
+    if (s.in_queue) return;
+    if (s.ord_done == s.trd_done) s.busy = false;
+}
+
+void on_reject(Slot& s, uint32_t ref) {
+    if (s.busy && ref == s.ref) s.busy = false;
+}
+```
+
+**A fill updates today, yesterday, and the position from the side and the offset**
+
+A buy open adds the volume to the long open volume and the long position. On a split book it also adds the volume to long today. A sell open adds those fields on the short side.
+
+A sell with a plain close adds the volume to the long close volume and subtracts it from the long position. A buy with a plain close changes those two fields on the short side.
+
+A sell close-today adds the volume to the long close volume, subtracts it from long today, then writes the long position as today plus yesterday. A buy close-today changes those three fields on the short side.
+
+A sell close-yesterday adds the volume to the long close volume, subtracts it from long yesterday, then writes the long position as today plus yesterday. A buy close-yesterday changes those three fields on the short side.
+
+```cpp
+void add_open(SideLots& leg, int qty, bool split) {
+    leg.opened += qty;
+    leg.pos += qty;
+    if (split) leg.today += qty;
+}
+
+void add_plain_close(SideLots& leg, int qty) {
+    leg.closed += qty;
+    leg.pos -= qty;
+}
+
+void add_close_td(SideLots& leg, int qty) {
+    leg.closed += qty;
+    leg.today -= qty;
+    leg.pos = leg.today + leg.yday;
+}
+
+void add_close_yd(SideLots& leg, int qty) {
+    leg.closed += qty;
+    leg.yday -= qty;
+    leg.pos = leg.today + leg.yday;
+}
+
+void apply_fill(Chase& c, Act act, int qty) {
+    switch (act) {
+    case Act::BuyOpen: add_open(c.lng, qty, c.split_yd); break;
+    case Act::SellOpen: add_open(c.sht, qty, c.split_yd); break;
+    case Act::SellClose: add_plain_close(c.lng, qty); break;
+    case Act::BuyClose: add_plain_close(c.sht, qty); break;
+    case Act::SellCloseTd: add_close_td(c.lng, qty); break;
+    case Act::BuyCloseTd: add_close_td(c.sht, qty); break;
+    case Act::SellCloseYd: add_close_yd(c.lng, qty); break;
+    case Act::BuyCloseYd: add_close_yd(c.sht, qty); break;
+    default: break;
+    }
+}
+```
+
+**After the market API reports ready, contexts wake, then the trader's instrument list is subscribed**
+
+When the market API reports ready with error id 0, each contract on the trader's instrument list wakes its contexts. If one contract on that list is missing from the trader, the subscribe is not sent. After every contract has woken, the trader's instrument list is subscribed.
+
+```cpp
+bool arm_quotes(int md_err, int n, bool (*wake_at)(int)) {
+    if (md_err != 0) return false;
+    for (int i = 0; i < n; ++i) {
+        if (!wake_at(i)) return false;
+    }
+    return true;
+}
+```
+
+**The contract with the largest volume inside the product's trading hours is kept as the main contract**
+
+Each depth row is tested against that product's trading window. A row outside the window stays out of the comparison. Each product keeps one contract. A larger volume on the current row stores that row's contract and volume.
+
+```cpp
+struct MainKeep {
+    int contract{0};
+    int64_t vol{0};
+    bool held{false};
+};
+
+void keep_larger(MainKeep& m, int contract, int64_t vol, bool in_trade) {
+    if (!in_trade) return;
+    if (!m.held || vol > m.vol) {
+        m.contract = contract;
+        m.vol = vol;
+        m.held = true;
+    }
 }
 ```
 

@@ -131,6 +131,7 @@ English version：[https://github.com/zzxscodes/trading-system-notes/blob/main/t
   - [43. 撤单槽位句柄与零量占位](#43-撤单槽位句柄与零量占位)
   - [44. 连续竞价与集合竞价分路径撮合](#44-连续竞价与集合竞价分路径撮合)
   - [45. 并发共享量的状态穷举与违例检出](#45-并发共享量的状态穷举与违例检出)
+  - [46. 期货目标仓一次只发一笔，今昨分开的交易所先平昨](#46-期货目标仓一次只发一笔今昨分开的交易所先平昨)
 - [业务逻辑设计-计算](#业务逻辑设计-计算)
   - [1. 对数收益率(百分比非对称性)](#1-对数收益率百分比非对称性)
   - [2. 市场趋势和波动率的状态变化](#2-市场趋势和波动率的状态变化)
@@ -38339,6 +38340,325 @@ bool peek_then_take_racy(int32_t& free_lots, int32_t& filled) {
     free_lots -= 1;
     filled += 1;
     return true;
+}
+```
+
+
+### 46. 期货目标仓一次只发一笔，今昨分开的交易所先平昨
+一份合约上可以挂多份策略。每份策略给出自己的目标手数，合约目标是这些手数相加。核心让这一合约上同时只有一笔未完结的单，用这一笔把实际多头和空头调成目标手数。买方向的价格用卖一，卖方向的价格用买一。今仓和昨仓分字段的交易所，平仓先发平昨。持仓只记一个数的交易所，一笔普通平仓覆盖该侧全部持仓。
+
+**行情上的时分落在交易窗口外时，目标仓写成 0**
+
+时钟取行情更新时间里的时和分，合成 `时 * 100 + 分`。日盘每段的起点早于终点。夜盘可以出现起点晚于终点，这段跨过午夜。起点早于终点时，当前时分大于等于起点并且小于终点，算在窗口内。起点晚于终点时，当前时分大于等于起点，或者小于终点，算在窗口内。
+
+先用行情会话时段过滤。时分在会话时段外，目标保持上一次的值。时分在会话时段内、交易窗口外，各策略不再更新，目标写成 0。时分在交易窗口内，各策略先各自算出目标，再相加。
+
+```cpp
+int hhmm(int hour, int minute) { return hour * 100 + minute; }
+
+bool in_window(int now, int begin, int end) {
+    if (begin < end) return begin <= now && now < end;
+    if (begin > end) return now >= begin || now < end;
+    return false;
+}
+
+int stored_target(int prev, int summed, bool in_session, bool in_trade) {
+    if (!in_session) return prev;
+    if (!in_trade) return 0;
+    return summed;
+}
+```
+
+**最新价离涨跌停不足一跳，或槽上还有单，或撤单次数已到上限，这次不发**
+
+目标改完以后再看发单。最新价大于等于涨停价减去一个最小变动价位，或者小于等于跌停价加上一个最小变动价位，这次不发。交易窗口外目标已经写成 0。离涨跌停不足一跳时，平仓不发出。槽上还记着一笔单，这次不发。撤单次数在状态变成已撤时加一，达到该合约上限后这次不发。
+
+```cpp
+bool may_send(bool in_session, bool slot_busy, int cancel_used, int cancel_cap,
+              double last, double up, double dn, double tick) {
+    if (!in_session) return false;
+    if (last >= up - tick || last <= dn + tick) return false;
+    if (slot_busy) return false;
+    if (cancel_used >= cancel_cap) return false;
+    return true;
+}
+```
+
+**商品先平掉目标反方向的持仓，再把同方向的持仓调成目标手数**
+
+目标大于 0 表示要多头。空头持仓还大于 0 时，这一笔只平空头。分字段的交易所，昨空大于 0 就平掉全部昨空；昨空已经是 0 就平掉全部今空。持仓只记一个数时，普通平仓的数量是全部空头持仓。
+
+空头已经是 0 以后，用多头持仓减去目标。差为正，平掉多出来的多头。分字段时，昨多是 0 就按平今平掉多出的数量；昨多大于 0 时，平昨数量取多出的数量和昨多中较小的一个。持仓只记一个数时，普通平仓平掉多出的数量。
+
+差为负，开多的数量是目标减去多头持仓。开仓上限大于等于多头开仓量、空头开仓量与这一笔数量之和才发。买开用卖一。
+
+目标小于 0 时先平多头，再把空头调成目标的绝对值，不足的部分卖开，卖开用买一。目标等于 0 时先平多头，多头已经是 0 再平空头。分字段的交易所在目标为 0 时，昨仓大于 0 先平昨，昨仓是 0 再平今。
+
+```cpp
+enum class Act : uint8_t {
+    None,
+    BuyOpen, SellOpen,
+    BuyClose, SellClose,
+    BuyCloseTd, SellCloseTd,
+    BuyCloseYd, SellCloseYd
+};
+
+struct SideLots {
+    int pos{0};
+    int today{0};
+    int yday{0};
+    int opened{0};
+    int closed{0};
+};
+
+struct Chase {
+    SideLots lng{};
+    SideLots sht{};
+    int target{0};
+    bool split_yd{false};
+    int open_cap{0};
+};
+
+struct Step { Act act; int qty; };
+
+int smaller(int a, int b) { return a < b ? a : b; }
+
+Step close_side(bool split, bool sell, int pos, int today, int yday) {
+    if (!split) return {sell ? Act::SellClose : Act::BuyClose, pos};
+    if (yday > 0) return {sell ? Act::SellCloseYd : Act::BuyCloseYd, yday};
+    if (today > 0) return {sell ? Act::SellCloseTd : Act::BuyCloseTd, today};
+    return {};
+}
+
+Step close_extra(bool split, bool sell, int extra, int yday) {
+    if (!split) return {sell ? Act::SellClose : Act::BuyClose, extra};
+    if (yday == 0) return {sell ? Act::SellCloseTd : Act::BuyCloseTd, extra};
+    return {sell ? Act::SellCloseYd : Act::BuyCloseYd, smaller(extra, yday)};
+}
+
+bool open_fits(const Chase& c, int qty) {
+    return c.open_cap >= c.lng.opened + c.sht.opened + qty;
+}
+
+Step commodity_step(const Chase& c) {
+    if (c.target > 0) {
+        if (c.sht.pos > 0)
+            return close_side(c.split_yd, false, c.sht.pos, c.sht.today, c.sht.yday);
+        int extra = c.lng.pos - c.target;
+        if (extra > 0) return close_extra(c.split_yd, true, extra, c.lng.yday);
+        if (extra < 0 && open_fits(c, -extra)) return {Act::BuyOpen, -extra};
+        return {};
+    }
+    if (c.target < 0) {
+        if (c.lng.pos > 0)
+            return close_side(c.split_yd, true, c.lng.pos, c.lng.today, c.lng.yday);
+        int want = -c.target;
+        int extra = c.sht.pos - want;
+        if (extra > 0) return close_extra(c.split_yd, false, extra, c.sht.yday);
+        if (extra < 0 && open_fits(c, -extra)) return {Act::SellOpen, -extra};
+        return {};
+    }
+    if (c.lng.pos > 0)
+        return close_side(c.split_yd, true, c.lng.pos, c.lng.today, c.lng.yday);
+    if (c.sht.pos > 0)
+        return close_side(c.split_yd, false, c.sht.pos, c.sht.today, c.sht.yday);
+    return {};
+}
+
+double chase_px(Act act, double bid, double ask) {
+    switch (act) {
+    case Act::BuyOpen:
+    case Act::BuyClose:
+    case Act::BuyCloseTd:
+    case Act::BuyCloseYd:
+        return ask;
+    default:
+        return bid;
+    }
+}
+```
+
+**股指按净仓补差，昨仓等于持仓减去当日开仓量**
+
+股指不用平今、平昨标志。净仓等于多头持仓减去空头持仓，差额等于目标减去净仓。差额大于 0 时要增加净多。空头昨仓等于空头持仓减去空头当日开仓量。昨空小于等于 0 时，整笔差额按买开发出，数量要落在开仓上限里。昨空大于等于差额时，平空数量就是差额。昨空小于差额时，这一笔只平掉昨空。差额小于 0 时要增加净空。多头昨仓等于多头持仓减去多头当日开仓量。昨多小于等于 0 时，不足的数量按卖开发出，卖开的数量要落在开仓上限里。昨多大于等于不足数量时，平多数量就是不足数量。昨多小于不足数量时，这一笔只平掉昨多。差额为 0 时不发。买方向用卖一，卖方向用买一。
+
+```cpp
+Step index_step(const Chase& c) {
+    int net = c.lng.pos - c.sht.pos;
+    int diff = c.target - net;
+    if (diff > 0) {
+        int yd = c.sht.pos - c.sht.opened;
+        if (yd <= 0) {
+            if (!open_fits(c, diff)) return {};
+            return {Act::BuyOpen, diff};
+        }
+        return {Act::BuyClose, yd >= diff ? diff : yd};
+    }
+    if (diff < 0) {
+        int need = -diff;
+        int yd = c.lng.pos - c.lng.opened;
+        if (yd <= 0) {
+            if (!open_fits(c, need)) return {};
+            return {Act::SellOpen, need};
+        }
+        return {Act::SellClose, yd >= need ? need : yd};
+    }
+    return {};
+}
+```
+
+**登录记下前置编号和会话编号，报单引用从最大引用加一开始**
+
+前置连上以后先认证，认证通过再登录。登录应答里记下前置编号、会话编号和当前最大报单引用，接着做结算确认，确认通过再查合约。下一笔引用取最大引用加一，之后每发一笔再加一。报单填引用。撤单填引用、前置编号和会话编号。报单回报的前置编号或会话编号和这次登录不一致时，这条回报忽略，撤单次数不加。
+
+```cpp
+struct LoginIds {
+    int front{0};
+    int session{0};
+    uint32_t next_ref{1};
+};
+
+void arm_login(LoginIds& ids, int front, int session, uint32_t max_ref) {
+    ids.front = front;
+    ids.session = session;
+    ids.next_ref = max_ref + 1;
+}
+
+uint32_t take_ref(LoginIds& ids) { return ids.next_ref++; }
+
+bool same_login(const LoginIds& ids, int front, int session) {
+    return ids.front == front && ids.session == session;
+}
+```
+
+**委托还排在队列里就先撤掉，委托已成量等于成交量才把槽清空**
+
+报单回报先核对前置编号和会话编号。对得上、并且引用就是槽里这一笔时，委托已成量写成回报里的已成交数量。状态和上一次相同，只保留刚写下的委托已成量。状态变成部分成交还在队列，或者未成交还在队列，按这一笔的引用撤单，槽继续占用。状态变成已撤时，撤单次数加一。状态已经离开队列，并且委托已成量等于成交累计，槽清空，下一根行情可以再发。
+
+成交回报把成交量累进成交累计。委托还在队列里时，两边数量已经相等，槽仍占用。离开队列以后，两边相等才清空。
+
+错误回报的引用和槽里的引用一致时，槽直接清空。引用对不上的回报不改槽。
+
+```cpp
+enum class QSt : uint8_t { InQueue, LeftQueue, Canceled };
+
+struct Slot {
+    uint32_t ref{0};
+    int ord_done{0};
+    int trd_done{0};
+    bool busy{false};
+    bool in_queue{false};
+    int cancel_used{0};
+};
+
+void on_order(Slot& s, const LoginIds& ids, int front, int session,
+              uint32_t ref, int vol_traded, QSt st, bool status_changed) {
+    if (!same_login(ids, front, session)) return;
+    if (!s.busy || ref != s.ref) return;
+    s.ord_done = vol_traded;
+    if (!status_changed) return;
+    if (st == QSt::InQueue) {
+        s.in_queue = true;
+        return;
+    }
+    s.in_queue = false;
+    if (st == QSt::Canceled) s.cancel_used += 1;
+    if (s.ord_done == s.trd_done) s.busy = false;
+}
+
+void on_trade(Slot& s, uint32_t ref, int qty) {
+    if (!s.busy || ref != s.ref) return;
+    s.trd_done += qty;
+    if (s.in_queue) return;
+    if (s.ord_done == s.trd_done) s.busy = false;
+}
+
+void on_reject(Slot& s, uint32_t ref) {
+    if (s.busy && ref == s.ref) s.busy = false;
+}
+```
+
+**成交按开平和方向改今仓、昨仓和总仓**
+
+买开把成交量加进多头开仓量和多头持仓。分字段的交易所再加进多头今仓。卖开把这几项加在空头上。
+
+卖出并且是普通平仓时，多头平仓量加上成交量，多头持仓减去成交量。买入并且是普通平仓时，这两处改在空头上。
+
+卖出并且平今时，多头平仓量加上成交量，多头今仓减去成交量，多头持仓写成今仓加昨仓。买入平今时，这三处改在空头上。
+
+卖出并且平昨时，多头平仓量加上成交量，多头昨仓减去成交量，多头持仓写成今仓加昨仓。买入平昨时，这三处改在空头上。
+
+```cpp
+void add_open(SideLots& leg, int qty, bool split) {
+    leg.opened += qty;
+    leg.pos += qty;
+    if (split) leg.today += qty;
+}
+
+void add_plain_close(SideLots& leg, int qty) {
+    leg.closed += qty;
+    leg.pos -= qty;
+}
+
+void add_close_td(SideLots& leg, int qty) {
+    leg.closed += qty;
+    leg.today -= qty;
+    leg.pos = leg.today + leg.yday;
+}
+
+void add_close_yd(SideLots& leg, int qty) {
+    leg.closed += qty;
+    leg.yday -= qty;
+    leg.pos = leg.today + leg.yday;
+}
+
+void apply_fill(Chase& c, Act act, int qty) {
+    switch (act) {
+    case Act::BuyOpen: add_open(c.lng, qty, c.split_yd); break;
+    case Act::SellOpen: add_open(c.sht, qty, c.split_yd); break;
+    case Act::SellClose: add_plain_close(c.lng, qty); break;
+    case Act::BuyClose: add_plain_close(c.sht, qty); break;
+    case Act::SellCloseTd: add_close_td(c.lng, qty); break;
+    case Act::BuyCloseTd: add_close_td(c.sht, qty); break;
+    case Act::SellCloseYd: add_close_yd(c.lng, qty); break;
+    case Act::BuyCloseYd: add_close_yd(c.sht, qty); break;
+    default: break;
+    }
+}
+```
+
+**行情接口报就绪以后，先唤醒策略，再按交易接口的合约表订阅**
+
+行情接口回报的错误号为 0 时，按交易接口已经装好的合约表，逐个唤醒合约上的策略。合约表里有一个合约在交易接口上找不到，这次不订阅。全部唤醒以后，用这张合约表订阅行情。
+
+```cpp
+bool arm_quotes(int md_err, int n, bool (*wake_at)(int)) {
+    if (md_err != 0) return false;
+    for (int i = 0; i < n; ++i) {
+        if (!wake_at(i)) return false;
+    }
+    return true;
+}
+```
+
+**同一品种在交易时段内成交量最大的合约记为主力**
+
+逐行看深度行情时，先用该品种自己的交易时段过滤。时分在时段外的行不参加比较。每个品种只留一张合约。当前行的成交量大于已经留下的成交量时，改记成当前行的合约和成交量。
+
+```cpp
+struct MainKeep {
+    int contract{0};
+    int64_t vol{0};
+    bool held{false};
+};
+
+void keep_larger(MainKeep& m, int contract, int64_t vol, bool in_trade) {
+    if (!in_trade) return;
+    if (!m.held || vol > m.vol) {
+        m.contract = contract;
+        m.vol = vol;
+        m.held = true;
+    }
 }
 ```
 
