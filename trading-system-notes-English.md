@@ -168,6 +168,7 @@
   - [16. Simulated orders in front of a filled market order fill with it](#16-simulated-orders-in-front-of-a-filled-market-order-fill-with-it)
   - [17. Resting, taking, or expiry is decided when the order reaches the exchange](#17-resting-taking-or-expiry-is-decided-when-the-order-reaches-the-exchange)
   - [18. Notional and equity of linear and inverse contracts](#18-notional-and-equity-of-linear-and-inverse-contracts)
+  - [19. Remove the untradable ex-date gap, then scale by multipliers already in effect](#19-remove-the-untradable-ex-date-gap-then-scale-by-multipliers-already-in-effect)
 - [Business logic design-monitoring](#business-logic-design-monitoring)
   - [1. Read-only consume and publish rate limit on the monitor](#1-read-only-consume-and-publish-rate-limit-on-the-monitor)
   - [2. Process lifecycle control and host sampling](#2-process-lifecycle-control-and-host-sampling)
@@ -44470,7 +44471,7 @@ struct TradeMidGap {
 
 ## Business logic design-backtest and simulated matching
 
-Backtest and simulated matching keep the same strategy order rings and ledger query API as live trading. Historical tape is paced into quotes, a sim counter loads cash and opening lots, and a local matcher produces fills from rebuilt books and prints under session latency. Unbiased evaluation of strategy parameters stays on a separate train–test path, apart from how realistic the fills are. A high-frequency replay keeps the exchange time and the local arrival time of each market event apart, and moves local times later together before the replay. It times the outbound and return legs of an order separately, and builds those legs from feed latency when no order samples exist. A resting fill is estimated from the quantity ahead at its price, and a fill moves cash and position by side.
+Backtest and simulated matching keep the same strategy order rings and ledger query API as live trading. Historical tape is paced into quotes, a sim counter loads cash and opening lots, and a local matcher produces fills from rebuilt books and prints under session latency. Unbiased evaluation of strategy parameters stays on a separate train–test path, apart from how realistic the fills are. A high-frequency replay keeps the exchange time and the local arrival time of each market event apart, and moves local times later together before the replay. It times the outbound and return legs of an order separately, and builds those legs from feed latency when no order samples exist. A resting fill is estimated from the quantity ahead at its price, and a fill moves cash and position by side. An adjustment first removes the untradable ex-date gap, then joins the price with multipliers already in effect.
 
 ### 1. Four-process sim path: tape, quote adapter, trader, matcher
 
@@ -46798,6 +46799,144 @@ void book_fill(Acct& a, double notion, double qty, bool buy, double fee) {
 }
 ```
 
+### 19. Remove the untradable ex-date gap, then scale by multipliers already in effect
+
+**The raw jump on the ex-date is not tradable PnL**
+
+The raw price of a stock jumps on the day of a corporate action. A 2-for-1 split cuts the price about in half overnight, and a return taken from the raw price shows a loss of about half. A cash dividend pulls the price down by about the cash paid per share. A reverse split, a bonus issue, and a spinoff also leave a jump in the raw price. That move has no trade behind it, so it does not belong in PnL. The adjusted price fills the jump and keeps the move that could be traded. When the ex-date has no price change besides the corporate action, the adjusted price should meet the previous close.
+
+Divide that day's return by the raw jump ratio. The ratio of a 2-for-1 split is 0.5. When the price falls by exactly half, the return after the division is 0.
+
+```cpp
+double traded_ret(double prev_close, double ex_close, double raw_ratio) {
+    if (!(prev_close > 0.0) || !(raw_ratio > 0.0)) return 0.0;
+    return ex_close / prev_close / raw_ratio - 1.0;
+}
+```
+
+**An as-of date uses only corporate actions already in effect**
+
+The adjusted price at time t may use only actions whose ex-date is no later than t. A later split or dividend has not happened and cannot enter the factor at t. Forward adjustment pins the latest raw price and scales every earlier price by corporate actions that come after it. When a new ex-date appears, the price level before that date is rewritten. Two adjacent bars that both sit before the ex-date are scaled by the same future multiplier, so the return stays and the price level changes. A moving average, a price threshold, or a signal that compares prices then sees a corporate action that had not happened.
+
+Backward adjustment multiplies forward from the start of the series by the reciprocal of the jump ratio. After a 2-for-1 split, prices after the ex-date are multiplied by 2. An adjusted price already computed does not change when a later action arrives. Live daily PnL and an as-of replay use this series.
+
+Aligning every price to the raw price on the as-of date multiplies backward from that date, and each as-of date is recomputed because the anchor date moved. That direction multiplies by the jump ratio itself: on a 2-for-1 split, prices before the ex-date are multiplied by 0.5, and the price on the as-of date stays raw. Both directions include only actions whose ex-date is no later than the as-of date.
+
+```cpp
+bool action_in_force(int ex_at, int asof) {
+    return ex_at >= 0 && ex_at <= asof;
+}
+```
+
+**The price multiplier is the reciprocal of the raw jump**
+
+The adjusted price is the raw price times a factor. Dividing the day's return by the jump ratio, and multiplying the price by the reciprocal of that ratio, leave the same tradable move. After the running product, each as-of date can read the price directly, without replaying every return from the listing date. The price multiplier is 1 when nothing happens. The jump ratio of a 2-for-1 split is 0.5, so the price multiplier and the share multiplier are both 2. A reverse split or a bonus issue starts from the raw price ratio, and the price multiplier is the reciprocal. When a cash dividend is part of total return, the price multiplier is the previous close divided by the previous close minus the cash per share. When the series keeps the price move only, the dividend multiplier is 1. No multiplier is written when the previous close is not greater than the cash per share. Value spun off in a spinoff is filled as a cash gap. The multiplier array starts as all ones, and several actions on the same bar multiply together.
+
+```cpp
+struct PxScale {
+    double px{1};
+    double shares{1};
+};
+
+PxScale split_scale(double new_per_old) {
+    PxScale s;
+    if (new_per_old > 0.0) {
+        s.shares = new_per_old;
+        s.px = new_per_old;
+    }
+    return s;
+}
+
+PxScale cash_scale(double prev_close, double cash_ps, bool with_cash) {
+    PxScale s;
+    if (with_cash && cash_ps > 0.0 && prev_close > cash_ps)
+        s.px = prev_close / (prev_close - cash_ps);
+    return s;
+}
+
+void fill_mul(double* px_mul, int n) {
+    for (int i = 0; i < n; ++i) px_mul[i] = 1.0;
+}
+```
+
+**Adjusted price and share count go into one book**
+
+When returns use the adjusted price, the share count stays unchanged and dividend cash stays out of PnL. When returns use the raw price, the ex-date first books cash at the dividend per share, then changes the share count by the share multiplier. The cash uses the share count from before that change. Applying both counts the same corporate action once in the price and once in the shares.
+
+```cpp
+struct ShareBook {
+    double shares{0};
+    double cash{0};
+};
+
+void book_raw_ex(ShareBook& b, double share_mul, double cash_ps) {
+    if (cash_ps > 0.0) b.cash += cash_ps * b.shares;
+    if (share_mul > 0.0) b.shares *= share_mul;
+}
+
+double mark_px(double raw, double factor, bool use_factor) {
+    return use_factor ? raw * factor : raw;
+}
+```
+
+**The factor is the product of the multipliers before the bar**
+
+The factor at index t is the product of the price multipliers before t. Index 0 uses the factor already in effect before the window, or 1 when no earlier action exists. The product does not include the multiplier stored at t. The multiplier is written on the bar before the ex-date, so the ex-date bar is the first bar that includes it. The raw price on the ex-date has already jumped, and multiplying by this reciprocal brings it back to the previous close. If the multiplier is written on the ex-date and that bar is left out of the product, the adjusted price on the ex-date jumps with the raw price. If it is written on the previous bar and that bar is included in the product, the jump shows up on the bar before the ex-date. The first bar of the window has no previous slot, so an action on that bar cannot be written. On a new live bar the factor is the product left at the end of the previous bar. The multiplier on this bar is multiplied into that product for the next bar. A backtest that rebuilds up to an as-of date runs this product from the start of the window and skips an ex-date that is not yet in effect.
+
+```cpp
+void stage_scale(double* px_mul, int n, int ex_at, int asof, double mul) {
+    if (!action_in_force(ex_at, asof)) return;
+    int slot = ex_at - 1; // stored on the bar before the ex-date; the next factor includes it
+    if (slot < 0 || slot >= n || !(mul > 0.0)) return;
+    px_mul[slot] *= mul;
+}
+
+void factor_before(const double* px_mul, double* factor, int n, double acc0) {
+    double acc = acc0;
+    for (int i = 0; i < n; ++i) {
+        factor[i] = acc;
+        acc *= px_mul[i];
+    }
+}
+```
+
+**Split the product by symbol, then split a long series into segments**
+
+One symbol walks left to right and multiplies in every bar except the multiplier stored on that bar. The running product stays in a register, and each bar depends only on the previous bar. Rebuilding the whole market at every as-of date is a few thousand daily bars per symbol, and a minute series can reach a million bars, across a few thousand symbols. The number of multiplications grows with the symbol count times the length, and each bar waits for the product of the previous bar.
+
+Multiplication is associative: (a × b) × c equals a × (b × c). The product of a segment can be formed first and then applied to later indexes. Split one symbol's multipliers into segments. Each segment writes the product of the multipliers before the current index, and keeps the product of the segment. The segment totals are combined with the current segment excluded, which yields the product of every segment before it. The values inside the segment are then multiplied by that earlier product. The first step and the third step have no dependency across segments, so they can run on separate cores. The middle step is only as long as the segment count. The longest dependency is about one segment's length plus the segment count. When the segment count is near the core count and a segment is about that long, the runtime is about the single-core time divided by the core count. Fewer segments than cores leave cores idle. A segment that is too short lets the middle product and the thread start dominate the multiplications inside the segment. When the product walks from right to left so that prices line up with the raw price on the as-of date, the array holds the jump ratio itself. The segments are still multiplied inside, multiplied across, and scaled back, with the segment order reversed.
+
+Series of different symbols have no dependency on each other, so the first split is by symbol. When there are fewer symbols than cores, or one series is as long as minute bars, that series is split into segments as well. Splitting changes the rounding order of floating-point multiplies. When the result must match a left-to-right product bit for bit, do not split the series: walk the indexes in order and keep the running product in a register.
+
+```cpp
+struct ProdSeg {
+    int lo{0};
+    int hi{0};
+    double chunk{1};
+};
+
+void seg_prefix(const double* mul, double* out, ProdSeg& seg) {
+    double acc = 1.0;
+    for (int i = seg.lo; i < seg.hi; ++i) {
+        out[i] = acc;
+        acc *= mul[i];
+    }
+    seg.chunk = acc;
+}
+
+void seg_offset(const ProdSeg* seg, double* off, int nseg, double acc0) {
+    double acc = acc0;
+    for (int s = 0; s < nseg; ++s) {
+        off[s] = acc;
+        acc *= seg[s].chunk;
+    }
+}
+
+void seg_apply(double* out, const ProdSeg& seg, double off) {
+    for (int i = seg.lo; i < seg.hi; ++i)
+        out[i] *= off;
+}
+```
 
 ## Business logic design-monitoring
 
