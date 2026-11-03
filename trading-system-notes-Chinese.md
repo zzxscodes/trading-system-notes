@@ -1857,6 +1857,37 @@ void execute_trade(Order &order, bool dry_run)
 }
 ```
 
+**久未发单时，用一条标记行情执行实盘里解析、判断和填写订单的函数**
+
+真正发出的订单只占行情里的很小一部分。隔得久了，解析行情、做出判断、填写订单的指令会离开一级指令缓存，分支预测器也记不住这条路径。定时送入一条带标记的行情。这条行情调用实盘使用的解析、判断和填写订单函数，函数返回后不发送订单。
+
+```cpp
+enum class QuoteUse : uint8_t { Live, Warm };
+
+struct InQuote {
+    int64_t px{0};
+    int32_t qty{0};
+    QuoteUse use{QuoteUse::Live};
+};
+
+struct OutOrder {
+    int64_t px{0};
+    int32_t qty{0};
+};
+
+bool fill_order(const InQuote& q, OutOrder& o) {
+    if (q.qty <= 0 || q.px <= 0) return false;
+    o.px = q.px;
+    o.qty = q.qty;
+    return true;
+}
+
+bool accept_quote(const InQuote& q, OutOrder& o) {
+    if (!fill_order(q, o)) return false;
+    return q.use == QuoteUse::Live;
+}
+```
+
 真共享问题可以通过 **std::atomic（性能不敏感）和 thread_local 解决问题。**
 
 **其他优化：热点统计计数的局部批处理与 per-CPU 分桶**
@@ -2181,6 +2212,27 @@ struct SessionStripe {
 
     void rewind() { next.store(0, std::memory_order_relaxed); }
 };
+```
+
+**从堆上取得的一整段内存，由另一条线程调用 free**
+
+要归还的是 `malloc` 得到的一整段内存。`glibc` 的 `free` 先更新分配器里的空闲链表和大小记录，把页交回内核排在这次更新之后。决策线程把指针写入槽就返回，更新分配器的工作由另一条线程做：它取出指针后调用 `free`。槽里已经有指针时，这次写入失败，这段内存仍由决策线程持有，等槽空出来再写入。
+
+```cpp
+struct DropSlot {
+    std::atomic<void*> ptr{nullptr};
+};
+
+bool hand_off(DropSlot& s, void* p) {
+    void* empty = nullptr;
+    return s.ptr.compare_exchange_strong(
+        empty, p, std::memory_order_release, std::memory_order_relaxed);
+}
+
+void take_and_free(DropSlot& s) {
+    void* p = s.ptr.exchange(nullptr, std::memory_order_acq_rel);
+    if (p) std::free(p);
+}
 ```
 
 **2. 内存调优**
@@ -9076,6 +9128,24 @@ double Func2(double x) {
 + **除法（`/`）与取余（`%`）**：CPU 中除法延迟是乘法的 10-20 倍，取余运算（尤其是非 2 的幂次取余）延迟更高。编译器在除数为编译期常量时，会自动将除法/取模转换为乘法+移位（[Barrett reduction](https://en.wikipedia.org/wiki/Division_algorithm)），但运行时才确定除数时无法优化。如果同一个除数会被反复使用，可用 [libdivide](https://libdivide.com/) 库在运行时预计算乘法常数，在 switch-case 中把除数作为编译期常量也可触发此优化（[whichisfaster.dev/modulo](https://whichisfaster.dev/q/modulo.html)）；
 + **数学函数**：如 `sqrtf`（平方根）、`expf`（指数），需通过硬件指令或近似算法优化，直接调用标准库函数延迟极高。
 
+**底数接近 1 时，pow 的精确阶段会慢很多**
+
+`pow` 先做一次近似。误差在允许范围内就返回，通常几十纳秒。误差超出范围，就进入精确阶段。底数非常接近 1 时，指数稍有差别，结果就会从近似阶段换到精确阶段。底数取 1 加上一个极小量、指数为 1.4 时，通常从近似阶段返回。指数为 1.5 时，旧的 `glibc` 进入精确阶段，耗时变成几十微秒，更老的版本可以到几百微秒。价格乘数和贴近 1 的收益率用连乘。整数次幂按位拆开连乘。非整数次幂先把底数挪离 1，再换成在目标机器上量过耗时的有界近似。
+
+```cpp
+double small_int_pow(double base, int n) {
+    double acc = 1.0;
+    double b = base;
+    int k = n < 0 ? -n : n;
+    while (k > 0) {
+        if (k & 1) acc *= b;
+        b *= b;
+        k >>= 1;
+    }
+    if (n < 0) return acc == 0.0 ? acc : 1.0 / acc;
+    return acc;
+}
+```
 
 **2. 核心优化方案：用弱运算替代强运算**
 
@@ -18797,6 +18867,24 @@ unsigned int _mm_CRC32_u8(unsigned int crc, unsigned char data);
 + **尾延迟（P99/P999）**：99%/99.9%的操作能完成的最大延迟，对稳定性要求极高的系统（如做市商系统）至关重要，需控制在微秒级甚至纳秒级。
 + **延迟方差**：衡量延迟波动程度，低方差意味着系统表现更稳定，避免因延迟抖动导致策略失效。
 
+**发单延迟只统计真正发出的订单，时刻由交换机或旁路网卡记下**
+
+发单延迟的样本只包含真正发出的订单，统计这组样本的离散和尾部。按时间抽栈的采样分析器很少抽到发单路径。插桩分析器改变了被测过程的耗时。网卡和交换机上的抖动要从抓包里看。一组微基准结束后，堆上的碎片会带进下一组的耗时。
+
+用发单时刻减去行情到达时刻。这两个时刻由交换机或旁路网卡的硬件时钟写下。一台机器回放交易所行情并接收订单，被测机器接收行情、发出订单。
+
+```cpp
+struct WireStamp {
+    int64_t md_ns{0};
+    int64_t ord_ns{0};
+    bool paired{false};
+};
+
+int64_t wire_ttt(const WireStamp& s) {
+    if (!s.paired || s.ord_ns < s.md_ns) return -1;
+    return s.ord_ns - s.md_ns;
+}
+```
 
 **常见时延表**
 
@@ -44514,6 +44602,47 @@ double effective_speed(const TapePace& p, int day_sec) {
 bool load_kind(TapeKind k, bool prints_on, bool pulses_on) {
     if (k == TapeKind::Print || k == TapeKind::BookOrder) return prints_on;
     if (k == TapeKind::HfPulse) return pulses_on;
+    return true;
+}
+```
+
+**下一日行情先写入空闲槽，持仓留在引擎线程**
+
+一条回测路径按交易日顺序计算，当日持仓来自上一交易日。下一日的行情、因子和时刻对齐可以先准备好。准备线程把它们写入空闲槽，文件映射、特征和时刻都写完，再发布这一槽的日期。引擎只读当前槽。当前日算完，并且空闲槽的日期等于下一日，引擎把当前下标切到另一槽，然后把日期标记写成 0。准备线程读到 0，就往空出的槽写入再下一个交易日。下标用释放语义发布，日期标记用获取语义读取。每组参数自带持仓，各用一条引擎线程和一对槽。
+
+```cpp
+#include <atomic>
+
+struct DayPack {
+    const double* feat{nullptr};
+    const int64_t* ts{nullptr};
+    int n{0};
+    int ymd{0};
+};
+
+struct DayHand {
+    DayPack pack[2]{};
+    std::atomic<int> hot{0};
+    std::atomic<int> idle_ymd{0};
+};
+
+bool idle_open(const DayHand& h) {
+    return h.idle_ymd.load(std::memory_order_acquire) == 0;
+}
+
+int idle_slot(const DayHand& h) {
+    return h.hot.load(std::memory_order_acquire) ^ 1;
+}
+
+void publish_idle(DayHand& h, int ymd) {
+    h.idle_ymd.store(ymd, std::memory_order_release);
+}
+
+bool roll_day(DayHand& h, int want_ymd) {
+    if (h.idle_ymd.load(std::memory_order_acquire) != want_ymd) return false;
+    int cur = h.hot.load(std::memory_order_relaxed);
+    h.hot.store(cur ^ 1, std::memory_order_release);
+    h.idle_ymd.store(0, std::memory_order_release);
     return true;
 }
 ```

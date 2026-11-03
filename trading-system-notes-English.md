@@ -1855,6 +1855,37 @@ void execute_trade(Order &order, bool dry_run)
 }
 ```
 
+**After a long stretch with no orders, a marked quote runs the live parse, decision, and order-fill functions**
+
+Only a small share of quotes become orders. After a long stretch with no orders, the instructions that parse the quote, make the decision, and fill in the order leave the L1 instruction cache, and the branch predictor loses that path. On a timer, feed in a marked quote. The quote calls the functions used in production to parse, decide, and fill the order, and returns without sending.
+
+```cpp
+enum class QuoteUse : uint8_t { Live, Warm };
+
+struct InQuote {
+    int64_t px{0};
+    int32_t qty{0};
+    QuoteUse use{QuoteUse::Live};
+};
+
+struct OutOrder {
+    int64_t px{0};
+    int32_t qty{0};
+};
+
+bool fill_order(const InQuote& q, OutOrder& o) {
+    if (q.qty <= 0 || q.px <= 0) return false;
+    o.px = q.px;
+    o.qty = q.qty;
+    return true;
+}
+
+bool accept_quote(const InQuote& q, OutOrder& o) {
+    if (!fill_order(q, o)) return false;
+    return q.use == QuoteUse::Live;
+}
+```
+
 True sharing issues can be passed std::atomic (not performance sensitive) and thread_local solve the problem.
 
 **Other optimization: local batching and per-CPU buckets for hot counters**
@@ -2177,6 +2208,27 @@ struct SessionStripe {
 
     void rewind() { next.store(0, std::memory_order_relaxed); }
 };
+```
+
+**A contiguous heap region from malloc is freed by another thread**
+
+The memory to return is one contiguous region from `malloc`. `glibc` `free` first updates the allocator's free lists and size records, and returning pages to the kernel comes after that update. The decision thread stores the pointer in a slot and returns. The allocator update runs on another thread: that thread takes the pointer out and calls `free`. When the slot already holds a pointer, the store fails, and the decision thread keeps the region until the slot is empty.
+
+```cpp
+struct DropSlot {
+    std::atomic<void*> ptr{nullptr};
+};
+
+bool hand_off(DropSlot& s, void* p) {
+    void* empty = nullptr;
+    return s.ptr.compare_exchange_strong(
+        empty, p, std::memory_order_release, std::memory_order_relaxed);
+}
+
+void take_and_free(DropSlot& s) {
+    void* p = s.ptr.exchange(nullptr, std::memory_order_acq_rel);
+    if (p) std::free(p);
+}
 ```
 
 **2. Memory tuning**
@@ -9079,6 +9131,24 @@ Compilers (e.g. GCC, MSVS) will do this when optimizations are enabled (e.g. `-O
 + **Division (`/`) and remainder (`%`):** Division is often 10–20× slower than multiply; remainder with non-power-of-two divisors is especially costly at runtime (compile-time divisors can be strength-reduced). When the divisor is a compile-time constant, the compiler automatically converts division/modulo into multiplication + shift ([Barrett reduction](https://en.wikipedia.org/wiki/Division_algorithm)), but cannot optimize when the divisor is only known at runtime. If the same divisor will be used repeatedly, use [libdivide](https://libdivide.com/) to precompute the multiplication constant at runtime; using the divisor as a compile-time constant in a switch-case also triggers this optimization ([whichisfaster.dev/modulo](https://whichisfaster.dev/q/modulo.html));
 + **Math functions**: e.g. `sqrtf`(square root),`expf`(exponential), it needs to be optimized through hardware instructions or approximate algorithms, and the delay of directly calling the standard library function is extremely high.
 
+**When the base is close to 1, the exact phase of pow gets much slower**
+
+`pow` starts with one approximation. If the error is inside the allowed range, it returns, usually in a few tens of nanoseconds. If the error is outside that range, it enters the exact phase. With a base very close to 1, a small change in the exponent moves the call from the approximation into the exact phase. A base of 1 plus a tiny amount and an exponent of 1.4 usually returns from the approximation. An exponent of 1.5 enters the exact phase on older `glibc` and takes tens of microseconds. Older builds can take hundreds of microseconds. Price multipliers and returns close to 1 use a chain of multiplies. An integer power is split by bits and multiplied out. A non-integer power first moves the base away from 1, then uses a bounded approximation whose time has been measured on the target machine.
+
+```cpp
+double small_int_pow(double base, int n) {
+    double acc = 1.0;
+    double b = base;
+    int k = n < 0 ? -n : n;
+    while (k > 0) {
+        if (k & 1) acc *= b;
+        b *= b;
+        k >>= 1;
+    }
+    if (n < 0) return acc == 0.0 ? acc : 1.0 / acc;
+    return acc;
+}
+```
 
 **2. Core optimization solution: replace strong operations with weak operations**
 
@@ -18826,6 +18896,24 @@ A single `_mm_crc32_u64` accumulator is latency-bound (~3 cycles), so the theore
 + **Tail delay (P99/P999)**: The maximum delay that 99%/99.9% of operations can complete. It is crucial for systems with extremely high stability requirements (such as market maker systems) and needs to be controlled at the microsecond level or even nanosecond level.
 + **Delay Variance**: Measures the degree of delay fluctuation. Low variance means that the system performance is more stable and avoids strategy failure due to delay jitter.
 
+**Send latency counts only orders that were sent, and the times are written by a switch or a tap**
+
+Send latency includes only orders that were actually sent. Read that sample for its spread and its tail. A sampling profiler that walks the stack on a timer rarely lands on the send path. An instrumentation profiler changes the time of the run it measures. Jitter on the NIC and the switch shows up in a packet capture. After a microbenchmark, leftover heap fragments show up in the time of the next case.
+
+Subtract the market-data arrival time from the send time. Both times are written by the hardware clock on a switch or a tap NIC. One machine replays exchange market data and accepts orders. The machine under test receives the market data and sends the orders.
+
+```cpp
+struct WireStamp {
+    int64_t md_ns{0};
+    int64_t ord_ns{0};
+    bool paired{false};
+};
+
+int64_t wire_ttt(const WireStamp& s) {
+    if (!s.paired || s.ord_ns < s.md_ns) return -1;
+    return s.ord_ns - s.md_ns;
+}
+```
 
 **Common delay table**
 
@@ -44523,6 +44611,47 @@ double effective_speed(const TapePace& p, int day_sec) {
 bool load_kind(TapeKind k, bool prints_on, bool pulses_on) {
     if (k == TapeKind::Print || k == TapeKind::BookOrder) return prints_on;
     if (k == TapeKind::HfPulse) return pulses_on;
+    return true;
+}
+```
+
+**The next session's market data goes into the idle slot first, and the position stays on the engine thread**
+
+One backtest path advances session by session, because the position of a session comes from the previous session. The next session's quotes, factors, and aligned timestamps can be prepared ahead. The prepare thread writes them into the idle slot, and publishes that slot's date after the mapping, the features, and the timestamps are in place. The engine reads the current slot. When the current session is finished and the idle slot's date is the next session, the engine switches the current index to the other slot and then stores the date mark as 0. When the prepare thread reads 0, it writes the following session into the free slot. The index is published with release order, and the date mark is read with acquire order. Each parameter set keeps its own position, on its own engine thread, with its own pair of slots.
+
+```cpp
+#include <atomic>
+
+struct DayPack {
+    const double* feat{nullptr};
+    const int64_t* ts{nullptr};
+    int n{0};
+    int ymd{0};
+};
+
+struct DayHand {
+    DayPack pack[2]{};
+    std::atomic<int> hot{0};
+    std::atomic<int> idle_ymd{0};
+};
+
+bool idle_open(const DayHand& h) {
+    return h.idle_ymd.load(std::memory_order_acquire) == 0;
+}
+
+int idle_slot(const DayHand& h) {
+    return h.hot.load(std::memory_order_acquire) ^ 1;
+}
+
+void publish_idle(DayHand& h, int ymd) {
+    h.idle_ymd.store(ymd, std::memory_order_release);
+}
+
+bool roll_day(DayHand& h, int want_ymd) {
+    if (h.idle_ymd.load(std::memory_order_acquire) != want_ymd) return false;
+    int cur = h.hot.load(std::memory_order_relaxed);
+    h.hot.store(cur ^ 1, std::memory_order_release);
+    h.idle_ymd.store(0, std::memory_order_release);
     return true;
 }
 ```
