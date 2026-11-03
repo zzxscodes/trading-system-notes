@@ -149,6 +149,7 @@
   - [15. Avellaneda-Stoikov market making strategy](#15-avellaneda-stoikov-market-making-strategy)
   - [16. Fixed point number of trading system](#16-fixed-point-number-of-trading-system)
   - [17. Rolling gap of trade price versus mid at trade time](#17-rolling-gap-of-trade-price-versus-mid-at-trade-time)
+  - [18. A futures maker quotes both sides in ticks from the mid, and closes the side that fills](#18-a-futures-maker-quotes-both-sides-in-ticks-from-the-mid-and-closes-the-side-that-fills)
 - [Business logic design-backtest and simulated matching](#business-logic-design-backtest-and-simulated-matching)
   - [1. Four-process sim path: tape, quote adapter, trader, matcher](#1-four-process-sim-path-tape-quote-adapter-trader-matcher)
   - [2. Historical tape pacing, break windows, and parquet streams](#2-historical-tape-pacing-break-windows-and-parquet-streams)
@@ -44556,6 +44557,532 @@ struct TradeMidGap {
 };
 ```
 
+
+### 18. A futures maker quotes both sides in ticks from the mid, and closes the side that fills
+
+A futures maker keeps one open-long order and one open-short order. Both prices start from the mid and step outward by the minimum price increment. The cumulative book price, the distance-weighted size beyond the touch, the per-level size gap, and the recent trade direction each produce a number. Those numbers are turned into ticks and added. When the sum is below 0, both sides use the configured tick offset. When the sum is 0 or positive, both offsets increase by that sum. After one open order fills, the other open order is cancelled and a closing order is sent. During the last few minutes of a session the strategy only closes.
+
+**Cumulative prices are clamped to the neighbouring level, then written as a return against the reference**
+
+The bid side starts at the best bid and weights price by size through the current level. A best bid below 0.996 times the reference is written as 0.996 times the reference. A deeper bid average below 0.9975 times the previous level is written as 0.9975 times that previous level. The ask side starts at the second ask level. The best ask is not stored, so the ask side has one fewer value than the bid side. The first ask average above the reference times (0.001 + 1.0025) times 1.0025 is written as that product. A deeper ask average above 1.0025 times the previous ask value is written as 1.0025 times that previous value. When the reference is missing, the mean of the best bid and the best ask is used. With fewer than two levels the return is written as 0. With at least two levels the output is one of three values: the price minus the reference, that difference divided by the reference and multiplied by 10000, or the log of the price ratio multiplied by 10000.
+
+```cpp
+struct Lvl { double px{0}; double sz{0}; };
+
+struct DepthPx {
+    double bid[8]{};
+    double ask[8]{};
+    int nb{0};
+    int na{0};
+};
+
+enum class PxMode : uint8_t { Diff, Arith, Log };
+
+void fill_depth(DepthPx& o, const Lvl* bid, const Lvl* ask, int n, double& ref) {
+    constexpr double k_dn = 0.9975;
+    constexpr double k_up = 1.0025;
+    constexpr double k_b0 = 0.996;
+    o.nb = 0;
+    o.na = 0;
+    if (n < 2) return;
+    if (!(ref > 0.0)) ref = 0.5 * (bid[0].px + ask[0].px);
+    double bpx = bid[0].px, bsz = bid[0].sz;
+    double apx = ask[0].px, asz = ask[0].sz;
+    double floor0 = ref * k_b0;
+    o.bid[0] = bpx < floor0 ? floor0 : bpx;
+    o.nb = 1;
+    for (int i = 1; i < n && i < 8; ++i) {
+        double nbsz = bsz + bid[i].sz;
+        if (nbsz > 0.0) bpx = (bpx * bsz + bid[i].px * bid[i].sz) / nbsz;
+        bsz = nbsz;
+        double flo = o.bid[i - 1] * k_dn;
+        o.bid[i] = bpx < flo ? flo : bpx;
+        o.nb = i + 1;
+
+        double nasz = asz + ask[i].sz;
+        if (nasz > 0.0) apx = (apx * asz + ask[i].px * ask[i].sz) / nasz;
+        asz = nasz;
+        int ai = i - 1;
+        double cap = (i == 1) ? ref * (0.001 + k_up) * k_up : o.ask[ai - 1] * k_up;
+        o.ask[ai] = apx > cap ? cap : apx;
+        o.na = ai + 1;
+    }
+}
+
+double px_mode(double px, double ref, PxMode mode) {
+    if (!(ref > 0.0) || !(px > 0.0)) return 0.0;
+    if (mode == PxMode::Diff) return px - ref;
+    if (mode == PxMode::Arith) return (px - ref) / ref * 10000.0;
+    return std::log(px / ref) * 10000.0;
+}
+```
+
+**Size past the best prices decays with distance from the mid, and each average is weighted by the other side**
+
+Weights are taken from the second level onward. The weight of a level is the log of the displayed size times exp(−λ × |price − mid| / mid × 1000). A side's average is the sum of price times weight, divided by the sum of the weights. When a side's weights sum to 0, that side's price is the mid and its weight is 0. When both weights are positive, the combined price is the bid average times the ask weight, plus the ask average times the bid weight, divided by the two weights. The signal is (combined price − mid) / mid × 10000.
+
+```cpp
+struct SideW { double px{0}; double w{0}; };
+
+SideW deep_side(const Lvl* v, int n, double mid, double lambda) {
+    double sw = 0.0, sp = 0.0;
+    for (int i = 1; i < n; ++i) {
+        if (!(v[i].px > 0.0) || !(v[i].sz > 0.0) || !(mid > 0.0)) continue;
+        double dist = v[i].px - mid;
+        if (dist < 0.0) dist = -dist;
+        double w = std::log(v[i].sz) * std::exp(-lambda * dist / mid * 1000.0);
+        sw += w;
+        sp += v[i].px * w;
+    }
+    if (!(sw > 0.0)) return SideW{mid, 0.0};
+    return SideW{sp / sw, sw};
+}
+
+double cross_bias(SideW bid, SideW ask, double mid) {
+    if (!(bid.w > 0.0) || !(ask.w > 0.0) || !(mid > 0.0)) return 0.0;
+    double px = (bid.px * ask.w + ask.px * bid.w) / (bid.w + ask.w);
+    return (px - mid) / mid * 10000.0;
+}
+```
+
+**Each level's size gap is stored once per interval**
+
+When the exponent p is positive, level i is (bid size + 1) to the power p, minus (ask size + 1) to the power p. When p is 0 or negative, level i is log(bid size + 1) minus log(ask size + 1). When the book time has moved forward, the new gaps are written into the snapshot. When both changed levels are deeper than the watched depth, the update stays on those deeper levels and the snapshot skips it. Writes are placed one cell per base interval. A read gives how many cells back to look, counted in multiples of that interval, and returns the gaps in that cell. At the open the cell count is cleared.
+
+```cpp
+double qty_gap(double bsz, double asz, double p) {
+    double b = bsz + 1.0;
+    double a = asz + 1.0;
+    if (p > 0.0) return std::pow(b, p) - std::pow(a, p);
+    return std::log(b) - std::log(a);
+}
+
+bool skip_book(int bid_lvl, int ask_lvl, int watch, int64_t ts, int64_t last_ts) {
+    if (ts == last_ts) return true;
+    bool bid_deep = bid_lvl >= 0 && bid_lvl > watch;
+    bool ask_deep = ask_lvl >= 0 && ask_lvl > watch;
+    return bid_deep && ask_deep;
+}
+
+struct GapSnap {
+    static constexpr int L = 4;
+    static constexpr int G = 8;
+    double cell[G][L]{};
+    int n{0};
+
+    void push(const double* g) {
+        int d = n % G;
+        for (int i = 0; i < L; ++i) cell[d][i] = g[i];
+        ++n;
+    }
+    double at(int lag, int lvl) const {
+        if (lag < 0 || lag >= n || lag >= G || lvl < 0 || lvl >= L) return 0.0;
+        int idx = (n - 1 - lag) % G;
+        return cell[idx][lvl];
+    }
+    void clear() { n = 0; }
+};
+```
+
+**Trade sign uses the print's average price and the mid from before the print, and expired size is smoothed before subtraction**
+
+The bid, ask, and mid used in the comparison are the touch from before this print was written into the book. When the print time is later than the latest book message, the book has not yet included this print, and the comparison uses the bid, ask, and mid stored now. When the print time is not later than the book message, the comparison uses the bid, ask, and mid saved from the previous book update. An average price above that mid is recorded as the square root of the size. An average price below that mid is recorded as the negative of that square root. A bid or an ask that is not positive is recorded as 0. The window adds these values. When prints leave the window, their sizes are summed, that sum is exponentially smoothed, and the smoothed value is subtracted from the running total. A plain output uses the running total. A log output uses the sign of the total times the log of its absolute value.
+
+The longer signal is the current total minus the smoothed total at the start of the window, divided by the mean absolute value of earlier samples. A sample is taken on a fixed period, and only the latest samples are kept. When the absolute value is below the cutoff, this signal is written as 0.
+
+```cpp
+struct TouchMem {
+    double bid{0}, ask{0}, mid{0};
+    double prev_bid{0}, prev_ask{0}, prev_mid{0};
+    int64_t book_ns{0};
+
+    void on_book(double b, double a, int64_t ts) {
+        prev_bid = bid;
+        prev_ask = ask;
+        prev_mid = mid;
+        bid = b;
+        ask = a;
+        mid = 0.5 * (a + b);
+        book_ns = ts;
+    }
+    void before(int64_t trade_ns, double& b, double& a, double& m) const {
+        if (trade_ns > book_ns) { b = bid; a = ask; m = mid; }
+        else { b = prev_bid; a = prev_ask; m = prev_mid; }
+    }
+};
+
+double signed_sqrt(double avg_px, double mid, double qty, double bid, double ask) {
+    if (!(bid > 0.0) || !(ask > 0.0) || !(qty > 0.0)) return 0.0;
+    double mag = std::sqrt(qty);
+    if (avg_px > mid) return mag;
+    if (avg_px < mid) return -mag;
+    return 0.0;
+}
+
+double compress_log(double s) {
+    if (s == 0.0) return 0.0;
+    double a = s < 0.0 ? -s : s;
+    return (s < 0.0 ? -1.0 : 1.0) * std::log(a);
+}
+
+struct FlowWin {
+    static constexpr int N = 64;
+    double q[N]{};
+    int64_t t[N]{};
+    int n{0};
+    double sum{0};
+    double ema{0};
+    double a{0.2};
+
+    void push(int64_t now, double qty, int64_t win_ns) {
+        if (n < N) {
+            q[n] = qty;
+            t[n] = now;
+            ++n;
+            sum += qty;
+        }
+        int64_t cut = now - win_ns;
+        double expired = 0.0;
+        int w = 0;
+        for (int i = 0; i < n; ++i) {
+            if (t[i] <= cut) expired += q[i];
+            else { q[w] = q[i]; t[w] = t[i]; ++w; }
+        }
+        n = w;
+        if (expired != 0.0) {
+            ema = expired * a + (1.0 - a) * ema;
+            sum -= ema;
+        }
+    }
+};
+
+struct BaseFlow {
+    static constexpr int R = 32;
+    static constexpr int H = 16;
+    double rec_v[R]{};
+    int64_t rec_t[R]{};
+    int rn{0};
+    double hist[H]{};
+    int hn{0};
+    double start_ema{0};
+    double sa{0.12};
+    int64_t sample_ns{0};
+    int64_t last_sample{0};
+    double cutoff{0};
+
+    double update(int64_t now, double window_sum, int64_t span_ns) {
+        if (rn < R) { rec_v[rn] = window_sum; rec_t[rn] = now; ++rn; }
+        start_ema = rec_v[0] * sa + (1.0 - sa) * start_ema;
+        int w = 0;
+        for (int i = 0; i < rn; ++i) {
+            if (now - rec_t[i] <= span_ns) {
+                rec_v[w] = rec_v[i];
+                rec_t[w] = rec_t[i];
+                ++w;
+            }
+        }
+        rn = w;
+        bool take = hn == 0 || now - last_sample >= sample_ns;
+        if (take && hn < H) { hist[hn++] = window_sum; last_sample = now; }
+        double mag = 0.0;
+        for (int i = 0; i < hn; ++i) mag += hist[i] < 0.0 ? -hist[i] : hist[i];
+        if (hn > 1) mag /= double(hn - 1);
+        if (rn < 2 || !(mag > 0.0)) return 0.0;
+        double sig = (window_sum - start_ema) / mag;
+        double ax = sig < 0.0 ? -sig : sig;
+        return ax < cutoff ? 0.0 : sig;
+    }
+};
+```
+
+**Price, velocity, and acceleration share one state**
+
+Over a step Δt, price gains velocity times Δt plus acceleration times Δt squared over 2, and velocity gains acceleration times Δt. The measured price is the latest price. Velocity is the latest price minus the price from two steps earlier, divided by 2Δt. Acceleration is that velocity minus the previous velocity estimate, divided by Δt. The first price is written twice and updated twice, which starts the velocity. Later updates run once every several prices. Process noise is added on the covariance diagonal. The update uses the price and velocity measurements. The six outputs are the estimated price, the estimated velocity, the estimated price minus the market price, the price one step ahead, the velocity one step ahead, and that ahead price minus the market price.
+
+```cpp
+struct AccelKf {
+    double x[3]{};
+    double P[3][3]{};
+    double q[3]{1e-4, 1e-4, 1e-4};
+    double rpx{1e-2};
+    double rv{1e-2};
+    AccelKf() { P[0][0] = P[1][1] = P[2][2] = 1.0; }
+    double older{0};
+    double newer{0};
+    int warm{0};
+    int every{4};
+    int seen{0};
+
+    void predict(double dt) {
+        double A[3][3] = {{1, dt, 0.5 * dt * dt}, {0, 1, dt}, {0, 0, 1}};
+        double nx[3]{};
+        double AP[3][3]{};
+        double NP[3][3]{};
+        for (int i = 0; i < 3; ++i)
+            for (int k = 0; k < 3; ++k) nx[i] += A[i][k] * x[k];
+        for (int i = 0; i < 3; ++i)
+            for (int j = 0; j < 3; ++j)
+                for (int k = 0; k < 3; ++k) AP[i][j] += A[i][k] * P[k][j];
+        for (int i = 0; i < 3; ++i)
+            for (int j = 0; j < 3; ++j)
+                for (int k = 0; k < 3; ++k) NP[i][j] += AP[i][k] * A[j][k];
+        for (int i = 0; i < 3; ++i) {
+            x[i] = nx[i];
+            for (int j = 0; j < 3; ++j) P[i][j] = NP[i][j];
+            P[i][i] += q[i];
+        }
+    }
+
+    void correct(double zpx, double zv) {
+        double y0 = zpx - x[0];
+        double y1 = zv - x[1];
+        double s00 = P[0][0] + rpx, s01 = P[0][1];
+        double s10 = P[1][0], s11 = P[1][1] + rv;
+        double det = s00 * s11 - s01 * s10;
+        if (det == 0.0) return;
+        double i00 = s11 / det, i01 = -s01 / det, i10 = -s10 / det, i11 = s00 / det;
+        double K0[3], K1[3];
+        for (int i = 0; i < 3; ++i) {
+            K0[i] = P[i][0] * i00 + P[i][1] * i10;
+            K1[i] = P[i][0] * i01 + P[i][1] * i11;
+            x[i] += K0[i] * y0 + K1[i] * y1;
+        }
+        double NP[3][3]{};
+        for (int i = 0; i < 3; ++i) {
+            for (int j = 0; j < 3; ++j) {
+                double s = 0.0;
+                for (int k = 0; k < 3; ++k) {
+                    double ik = (i == k ? 1.0 : 0.0) - (k == 0 ? K0[i] : k == 1 ? K1[i] : 0.0);
+                    s += ik * P[k][j];
+                }
+                NP[i][j] = s;
+            }
+        }
+        for (int i = 0; i < 3; ++i)
+            for (int j = 0; j < 3; ++j) P[i][j] = NP[i][j];
+    }
+
+    bool push(double mkt, double dt, double out[6]) {
+        if (warm < 2) {
+            x[0] = older = newer = mkt;
+            predict(dt);
+            correct(mkt, 0.0);
+            ++warm;
+            return false;
+        }
+        if (++seen % every) return false;
+        double zv = (mkt - older) / (2.0 * dt);
+        predict(dt);
+        correct(mkt, zv);
+        older = newer;
+        newer = mkt;
+        double pp = x[0] + dt * x[1] + 0.5 * dt * dt * x[2];
+        double pv = x[1] + dt * x[2];
+        out[0] = x[0];
+        out[1] = x[1];
+        out[2] = x[0] - mkt;
+        out[3] = pp;
+        out[4] = pv;
+        out[5] = pp - mkt;
+        return true;
+    }
+};
+```
+
+**A wrapped signal is read on a fixed interval, and listeners are notified when the value changes**
+
+On each fixed interval the wrapped signal is read. When it is valid and differs from the saved value, the saved value is replaced and listeners are notified. When it is invalid and the saved value was valid, the saved value is written as 0 and listeners are notified once.
+
+```cpp
+struct HeldSig {
+    double v[8]{};
+    int n{0};
+    bool ok{false};
+
+    bool sample(const double* x, int n, bool live) {
+        if (live) {
+            bool changed = !ok || n != this->n;
+            for (int i = 0; !changed && i < n && i < 8; ++i)
+                changed = x[i] != v[i];
+            if (!changed) return false;
+            this->n = n < 8 ? n : 8;
+            for (int i = 0; i < this->n; ++i) v[i] = x[i];
+            ok = true;
+            return true;
+        }
+        if (!ok) return false;
+        ok = false;
+        this->n = 0;
+        for (int i = 0; i < 8; ++i) v[i] = 0.0;
+        return true;
+    }
+};
+```
+
+**A new quote waits until the mid has moved and the scan interval has elapsed**
+
+The scan interval is measured in seconds. When the time since the last scan is shorter than that many seconds, this market update returns immediately. When the mid has moved by less than the configured number of ticks times the minimum increment, this market update returns immediately. When both conditions hold, the new mid is stored. While placing is allowed, the open-long and open-short orders are sent and the flag is then cleared. When placing is no longer allowed, the next update that meets both conditions cancels the open orders that are still locked. After the cancel acknowledgements have cleared both open locks, a new pair is sent at the offsets of that moment. A closing fill turns the flag back on.
+
+```cpp
+enum class QuoteAct : uint8_t { None, Place, CancelOpen };
+
+struct QuoteGate {
+    int64_t last_s{0};
+    double last_mid{0};
+    bool allow_place{true};
+
+    QuoteAct on_tick(int64_t now_s, int scan_s, double mid, double tick, int need_ticks) {
+        if (now_s - last_s < scan_s) return QuoteAct::None;
+        last_s = now_s;
+        double d = mid - last_mid;
+        if (d < 0.0) d = -d;
+        if (d < tick * need_ticks) return QuoteAct::None;
+        last_mid = mid;
+        if (allow_place) {
+            allow_place = false;
+            return QuoteAct::Place;
+        }
+        return QuoteAct::CancelOpen;
+    }
+};
+```
+
+**The bid is rounded down to the tick and the ask is rounded up; a positive signal sum adds the same number of ticks on both sides**
+
+The bid is the mid minus ticks times the increment, divided by the increment, rounded down, and multiplied back. The ask is the mid plus ticks times the increment, rounded up, and multiplied back. Recent prices go into a fixed-length ring. The signal sum is used after the ring is full, and a new price then overwrites the oldest.
+
+```cpp
+int offset_ticks(int base_ticks, int signal_sum) {
+    return signal_sum < 0 ? base_ticks : base_ticks + signal_sum;
+}
+
+double bid_from_mid(double mid, double tick, int ticks) {
+    return std::floor((mid - tick * ticks) / tick) * tick;
+}
+
+double ask_from_mid(double mid, double tick, int ticks) {
+    return std::ceil((mid + tick * ticks) / tick) * tick;
+}
+
+struct PxRing {
+    static constexpr int N = 32;
+    double px[N]{};
+    int i{0};
+    int n{0};
+    bool push(double p) {
+        px[i] = p;
+        i = (i + 1) % N;
+        if (n < N) ++n;
+        return n == N;
+    }
+};
+```
+
+**Open long, open short, close long, and close short each hold a lock**
+
+Before an open pair is sent, both open locks are free, the cancel count is within the open-order cap, and the session is in the quoting period. When the best ask plus the open-long ticks has reached the limit up, or the best bid minus the open-short ticks has reached the limit down, no open order is sent on this update. After the two open orders go out, both locks are set. An order acknowledgement clears the lock for that order. While a close lock is held, that closing order is cancelled first, and no open order is sent on this update. Open orders, closing orders, and cancels each have a cancel-count cap. The close cap is 10 above the open cap. The cancel cap is 15 above the open cap. When the count is past the cap for the action being taken, that action returns immediately.
+
+```cpp
+enum class Slot : uint8_t { OpenBuy, OpenSell, CloseBuy, CloseSell, N };
+
+struct SideLock {
+    bool held{false};
+    uint32_t id{0};
+};
+
+struct LockSet {
+    SideLock s[4]{};
+    bool open_busy() const { return s[0].held || s[1].held; }
+    bool close_busy() const { return s[2].held || s[3].held; }
+};
+
+bool through_limit(double ask, double bid, double tick, int buy_ticks, int sell_ticks, double up, double dn) {
+    double buy = ask + tick * buy_ticks;
+    double sell = bid - tick * sell_ticks;
+    return buy >= up || sell <= dn;
+}
+
+bool under_band(int used, int open_cap, int band) {
+    int cap = open_cap;
+    if (band == 1) cap = open_cap + 10;
+    if (band == 2) cap = open_cap + 15;
+    return used <= cap;
+}
+```
+
+**An open-long fill cancels the open short and sends a close-long; an open-short fill cancels the open long and sends a close-short**
+
+The close-long price is the best ask plus the close ticks times the increment, held between the limit down and the limit up. The close-short price is the best bid minus the close ticks times the increment, held between the limit down and the limit up. A close-long fill clears the open-long lock and the close-long lock. A close-short fill clears the open-short lock and the close-short lock, and allows the next open pair.
+
+```cpp
+enum class FillKind : uint8_t { OpenBuy, OpenSell, CloseBuy, CloseSell };
+
+struct FillFollow {
+    bool cancel_other_open{false};
+    bool send_close{false};
+    bool allow_place{false};
+};
+
+FillFollow on_fill(FillKind k) {
+    FillFollow f;
+    if (k == FillKind::OpenBuy || k == FillKind::OpenSell) {
+        f.cancel_other_open = true;
+        f.send_close = true;
+    }
+    if (k == FillKind::CloseBuy || k == FillKind::CloseSell) f.allow_place = true;
+    return f;
+}
+
+double close_long_px(double ask, double tick, int ticks, double up, double dn) {
+    double px = ask + tick * ticks;
+    if (px > up) px = up;
+    if (px < dn) px = dn;
+    return px;
+}
+
+double close_short_px(double bid, double tick, int ticks, double up, double dn) {
+    double px = bid - tick * ticks;
+    if (px < dn) px = dn;
+    if (px > up) px = up;
+    return px;
+}
+```
+
+**A session is an hour-minute pair, and the last few minutes only close**
+
+Hour-minute is the hour times 100 plus the minute. When the start is less than or equal to now and now is less than the end, now is inside the session. When the start is greater than the end, the session crosses midnight: now is inside it when now is greater than or equal to the start, or now is less than the end. The end is moved earlier by a configured number of minutes. While now is inside that stretch, the strategy only closes. A long position is sold, and a short position is bought back.
+
+```cpp
+int to_min(int hhmm) { return (hhmm / 100) * 60 + (hhmm % 100); }
+
+bool in_session(int now, int from, int to) {
+    if (from <= to) return from <= now && now < to;
+    return now >= from || now < to;
+}
+
+bool flatten_window(int now_hhmm, int to_hhmm, int back_min) {
+    int end = to_min(to_hhmm);
+    int start = end - back_min;
+    int cur = to_min(now_hhmm);
+    if (start < 0) start += 24 * 60;
+    if (start <= end) return start <= cur && cur < end;
+    return cur >= start || cur < end;
+}
+```
+
+**Quoting resumes when both positions are near 0, and a remaining position is closed one lot at a time on the larger side**
+
+When the channel has just become ready, the positions are read first. Quoting starts when both the long quantity and the short quantity are near 0. When the long quantity is positive and at least as large as the short quantity, one long lot is sold. When the short quantity is larger, one short lot is bought back. After the channel disconnects, this check runs again.
+
+```cpp
+enum class FlatStep : uint8_t { Ready, SellOne, BuyOne };
+
+FlatStep flat_step(double long_qty, double short_qty) {
+    if (long_qty < 1e-5 && short_qty < 1e-5) return FlatStep::Ready;
+    if (long_qty > 0.0 && long_qty >= short_qty) return FlatStep::SellOne;
+    return FlatStep::BuyOne;
+}
+```
 
 ## Business logic design-backtest and simulated matching
 

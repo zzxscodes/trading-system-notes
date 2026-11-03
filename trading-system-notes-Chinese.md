@@ -149,6 +149,7 @@ English version：[https://github.com/zzxscodes/trading-system-notes/blob/main/t
   - [15. Avellaneda-Stoikov做市策略](#15-avellaneda-stoikov做市策略)
   - [16. 交易系统的定点数](#16-交易系统的定点数)
   - [17. 成交时刻相对中间价的滚动偏差](#17-成交时刻相对中间价的滚动偏差)
+  - [18. 期货做市用盘口和成交定跳数，双边挂出后成交一边就平掉](#18-期货做市用盘口和成交定跳数双边挂出后成交一边就平掉)
 - [业务逻辑设计-回测与模拟撮合](#业务逻辑设计-回测与模拟撮合)
   - [1. 四进程模拟路径：回放、行情适配、交易、撮合](#1-四进程模拟路径回放行情适配交易撮合)
   - [2. 历史回放节拍、休市加速与列式数据流](#2-历史回放节拍休市加速与列式数据流)
@@ -44545,6 +44546,533 @@ struct TradeMidGap {
   }
   double mean() const { return filled ? run / filled : 0; }
 };
+```
+
+
+### 18. 期货做市用盘口和成交定跳数，双边挂出后成交一边就平掉
+
+期货做市同时挂出一笔开多和一笔开空。两笔价格都从中间价出发，按最小变动价位往外偏若干跳。盘口累积均价、最优档以外的距离衰减、每一档买卖量之差，以及近期成交方向，各自先算出一个数，再换成跳数相加。和小于 0 时，开多和开空都用配置里的跳数。和大于等于 0 时，两边的跳数都加上这个和。一边的开仓成交以后，撤掉另一边还挂着的开仓，并挂出平仓。每个交易时段结束前的若干分钟只做平仓。
+
+**多档累积均价按相邻档夹住，再写成相对基准价的收益**
+
+买侧从买一开始，按到当前档为止的量对价格加权。买一低于基准价的 0.996 倍时，写成基准价的 0.996 倍。更外一档低于前一档的 0.9975 倍时，写成前一档的 0.9975 倍。卖侧从卖二开始按量加权，卖一不写入结果，卖侧因此比买侧少一档。第一份卖侧价格高于基准价乘以 (0.001 + 1.0025) 再乘 1.0025 时，写成这个乘积。更外一档高于前一份的 1.0025 倍时，写成前一份的 1.0025 倍。基准价无效时，用买一和卖一的平均值。档数不足两档时，收益写成 0。档数够用时，输出三者之一：价格减去基准价；这个差除以基准价再乘 10000；价格与基准价之比取对数再乘 10000。
+
+```cpp
+struct Lvl { double px{0}; double sz{0}; };
+
+struct DepthPx {
+    double bid[8]{};
+    double ask[8]{};
+    int nb{0};
+    int na{0};
+};
+
+enum class PxMode : uint8_t { Diff, Arith, Log };
+
+void fill_depth(DepthPx& o, const Lvl* bid, const Lvl* ask, int n, double& ref) {
+    constexpr double k_dn = 0.9975;
+    constexpr double k_up = 1.0025;
+    constexpr double k_b0 = 0.996;
+    o.nb = 0;
+    o.na = 0;
+    if (n < 2) return;
+    if (!(ref > 0.0)) ref = 0.5 * (bid[0].px + ask[0].px);
+    double bpx = bid[0].px, bsz = bid[0].sz;
+    double apx = ask[0].px, asz = ask[0].sz;
+    double floor0 = ref * k_b0;
+    o.bid[0] = bpx < floor0 ? floor0 : bpx;
+    o.nb = 1;
+    for (int i = 1; i < n && i < 8; ++i) {
+        double nbsz = bsz + bid[i].sz;
+        if (nbsz > 0.0) bpx = (bpx * bsz + bid[i].px * bid[i].sz) / nbsz;
+        bsz = nbsz;
+        double flo = o.bid[i - 1] * k_dn;
+        o.bid[i] = bpx < flo ? flo : bpx;
+        o.nb = i + 1;
+
+        double nasz = asz + ask[i].sz;
+        if (nasz > 0.0) apx = (apx * asz + ask[i].px * ask[i].sz) / nasz;
+        asz = nasz;
+        int ai = i - 1;
+        double cap = (i == 1) ? ref * (0.001 + k_up) * k_up : o.ask[ai - 1] * k_up;
+        o.ask[ai] = apx > cap ? cap : apx;
+        o.na = ai + 1;
+    }
+}
+
+double px_mode(double px, double ref, PxMode mode) {
+    if (!(ref > 0.0) || !(px > 0.0)) return 0.0;
+    if (mode == PxMode::Diff) return px - ref;
+    if (mode == PxMode::Arith) return (px - ref) / ref * 10000.0;
+    return std::log(px / ref) * 10000.0;
+}
+```
+
+**最优档以外的挂单按离中间价的距离衰减，两侧均价按对方权重相加**
+
+计算从第二档开始，买一和卖一不参与。一档的权重等于挂单量的对数，乘以 exp(−λ × |价格 − 中间价| / 中间价 × 1000)。一侧均价等于价格乘权重之和，除以权重之和。权重之和为 0 时，这一侧的价格用中间价，权重记为 0。两侧权重都大于 0 时，综合价等于买侧均价乘卖侧权重，加上卖侧均价乘买侧权重，再除以两侧权重之和。信号等于 (综合价 − 中间价) / 中间价 × 10000。
+
+```cpp
+struct SideW { double px{0}; double w{0}; };
+
+SideW deep_side(const Lvl* v, int n, double mid, double lambda) {
+    double sw = 0.0, sp = 0.0;
+    for (int i = 1; i < n; ++i) {
+        if (!(v[i].px > 0.0) || !(v[i].sz > 0.0) || !(mid > 0.0)) continue;
+        double dist = v[i].px - mid;
+        if (dist < 0.0) dist = -dist;
+        double w = std::log(v[i].sz) * std::exp(-lambda * dist / mid * 1000.0);
+        sw += w;
+        sp += v[i].px * w;
+    }
+    if (!(sw > 0.0)) return SideW{mid, 0.0};
+    return SideW{sp / sw, sw};
+}
+
+double cross_bias(SideW bid, SideW ask, double mid) {
+    if (!(bid.w > 0.0) || !(ask.w > 0.0) || !(mid > 0.0)) return 0.0;
+    double px = (bid.px * ask.w + ask.px * bid.w) / (bid.w + ask.w);
+    return (px - mid) / mid * 10000.0;
+}
+```
+
+**每一档买卖量的差按间隔留成快照**
+
+指数 p 大于 0 时，第 i 档等于 (买量 + 1) 的 p 次方减去 (卖量 + 1) 的 p 次方。p 不大于 0 时，第 i 档等于 log(买量 + 1) 减去 log(卖量 + 1)。盘口时间比上一笔新，就把这次差值写入快照。两侧变化档的下标都大于所看档数时，这次变化留在更深的档，快照跳过这一笔。写入按基础间隔分格。读取时指定落后几格，格数按基础间隔的倍数计，取出那一格上的各档。开盘时把格数清零。
+
+```cpp
+double qty_gap(double bsz, double asz, double p) {
+    double b = bsz + 1.0;
+    double a = asz + 1.0;
+    if (p > 0.0) return std::pow(b, p) - std::pow(a, p);
+    return std::log(b) - std::log(a);
+}
+
+bool skip_book(int bid_lvl, int ask_lvl, int watch, int64_t ts, int64_t last_ts) {
+    if (ts == last_ts) return true;
+    bool bid_deep = bid_lvl >= 0 && bid_lvl > watch;
+    bool ask_deep = ask_lvl >= 0 && ask_lvl > watch;
+    return bid_deep && ask_deep;
+}
+
+struct GapSnap {
+    static constexpr int L = 4;
+    static constexpr int G = 8;
+    double cell[G][L]{};
+    int n{0};
+
+    void push(const double* g) {
+        int d = n % G;
+        for (int i = 0; i < L; ++i) cell[d][i] = g[i];
+        ++n;
+    }
+    double at(int lag, int lvl) const {
+        if (lag < 0 || lag >= n || lag >= G || lvl < 0 || lvl >= L) return 0.0;
+        int idx = (n - 1 - lag) % G;
+        return cell[idx][lvl];
+    }
+    void clear() { n = 0; }
+};
+```
+
+**成交方向看这一笔的均价和成交前的中间价，过期量先平滑再减**
+
+比较用的买卖价和中间价，取这笔成交写进盘口之前的价。成交报文时间晚于最近一次盘口报文时，盘口还没有计入这笔成交，比较用当前保存的买卖价和中间价。成交报文时间不晚于盘口报文时，比较用上一笔盘口留下的价。这一笔的成交均价高于当时中间价，记成交量的平方根。成交均价低于当时中间价，记这个平方根的负值。买价或卖价不大于 0 时，记 0。窗口里把这些数相加。有成交离开窗口时，先把这一批过期量的合计做指数平滑，再把平滑后的值从累计值里减掉。直接输出时用累计值。取对数时，输出累计值的符号乘以绝对值的对数。
+
+更长一段的信号，用当前累计值减去窗口起点的平滑值，再除以更早各次采样的绝对值平均。采样按固定周期取一次，只保留最近若干次。绝对值小于门槛时，这个信号写成 0。
+
+```cpp
+struct TouchMem {
+    double bid{0}, ask{0}, mid{0};
+    double prev_bid{0}, prev_ask{0}, prev_mid{0};
+    int64_t book_ns{0};
+
+    void on_book(double b, double a, int64_t ts) {
+        prev_bid = bid;
+        prev_ask = ask;
+        prev_mid = mid;
+        bid = b;
+        ask = a;
+        mid = 0.5 * (a + b);
+        book_ns = ts;
+    }
+    void before(int64_t trade_ns, double& b, double& a, double& m) const {
+        if (trade_ns > book_ns) { b = bid; a = ask; m = mid; }
+        else { b = prev_bid; a = prev_ask; m = prev_mid; }
+    }
+};
+
+double signed_sqrt(double avg_px, double mid, double qty, double bid, double ask) {
+    if (!(bid > 0.0) || !(ask > 0.0) || !(qty > 0.0)) return 0.0;
+    double mag = std::sqrt(qty);
+    if (avg_px > mid) return mag;
+    if (avg_px < mid) return -mag;
+    return 0.0;
+}
+
+double compress_log(double s) {
+    if (s == 0.0) return 0.0;
+    double a = s < 0.0 ? -s : s;
+    return (s < 0.0 ? -1.0 : 1.0) * std::log(a);
+}
+
+struct FlowWin {
+    static constexpr int N = 64;
+    double q[N]{};
+    int64_t t[N]{};
+    int n{0};
+    double sum{0};
+    double ema{0};
+    double a{0.2};
+
+    void push(int64_t now, double qty, int64_t win_ns) {
+        if (n < N) {
+            q[n] = qty;
+            t[n] = now;
+            ++n;
+            sum += qty;
+        }
+        int64_t cut = now - win_ns;
+        double expired = 0.0;
+        int w = 0;
+        for (int i = 0; i < n; ++i) {
+            if (t[i] <= cut) expired += q[i];
+            else { q[w] = q[i]; t[w] = t[i]; ++w; }
+        }
+        n = w;
+        if (expired != 0.0) {
+            ema = expired * a + (1.0 - a) * ema;
+            sum -= ema;
+        }
+    }
+};
+
+struct BaseFlow {
+    static constexpr int R = 32;
+    static constexpr int H = 16;
+    double rec_v[R]{};
+    int64_t rec_t[R]{};
+    int rn{0};
+    double hist[H]{};
+    int hn{0};
+    double start_ema{0};
+    double sa{0.12};
+    int64_t sample_ns{0};
+    int64_t last_sample{0};
+    double cutoff{0};
+
+    double update(int64_t now, double window_sum, int64_t span_ns) {
+        if (rn < R) { rec_v[rn] = window_sum; rec_t[rn] = now; ++rn; }
+        start_ema = rec_v[0] * sa + (1.0 - sa) * start_ema;
+        int w = 0;
+        for (int i = 0; i < rn; ++i) {
+            if (now - rec_t[i] <= span_ns) {
+                rec_v[w] = rec_v[i];
+                rec_t[w] = rec_t[i];
+                ++w;
+            }
+        }
+        rn = w;
+        bool take = hn == 0 || now - last_sample >= sample_ns;
+        if (take && hn < H) { hist[hn++] = window_sum; last_sample = now; }
+        double mag = 0.0;
+        for (int i = 0; i < hn; ++i) mag += hist[i] < 0.0 ? -hist[i] : hist[i];
+        if (hn > 1) mag /= double(hn - 1);
+        if (rn < 2 || !(mag > 0.0)) return 0.0;
+        double sig = (window_sum - start_ema) / mag;
+        double ax = sig < 0.0 ? -sig : sig;
+        return ax < cutoff ? 0.0 : sig;
+    }
+};
+```
+
+**价格、速度和加速度放在同一个状态里**
+
+经过时间差 Δt，价格加上速度乘 Δt，再加上加速度乘 Δt 的平方除以 2；速度加上加速度乘 Δt。测到的价格用最新价。速度用最新价减去两步之前的价格，再除以 2Δt。加速度用这次的速度减去上次估计的速度，再除以 Δt。第一笔价格写入两次并更新两次，用来起出速度。之后每隔若干笔价格才更新一次。过程噪声加在协方差的对角线上。更新时用价格和速度这两维。输出六个数：估计价格、估计速度、估计价格减去市场价格，以及向前一步的价格、向前一步的速度、向前一步的价格减去市场价格。
+
+```cpp
+struct AccelKf {
+    double x[3]{};
+    double P[3][3]{};
+    double q[3]{1e-4, 1e-4, 1e-4};
+    double rpx{1e-2};
+    double rv{1e-2};
+    AccelKf() { P[0][0] = P[1][1] = P[2][2] = 1.0; }
+    double older{0};
+    double newer{0};
+    int warm{0};
+    int every{4};
+    int seen{0};
+
+    void predict(double dt) {
+        double A[3][3] = {{1, dt, 0.5 * dt * dt}, {0, 1, dt}, {0, 0, 1}};
+        double nx[3]{};
+        double AP[3][3]{};
+        double NP[3][3]{};
+        for (int i = 0; i < 3; ++i)
+            for (int k = 0; k < 3; ++k) nx[i] += A[i][k] * x[k];
+        for (int i = 0; i < 3; ++i)
+            for (int j = 0; j < 3; ++j)
+                for (int k = 0; k < 3; ++k) AP[i][j] += A[i][k] * P[k][j];
+        for (int i = 0; i < 3; ++i)
+            for (int j = 0; j < 3; ++j)
+                for (int k = 0; k < 3; ++k) NP[i][j] += AP[i][k] * A[j][k];
+        for (int i = 0; i < 3; ++i) {
+            x[i] = nx[i];
+            for (int j = 0; j < 3; ++j) P[i][j] = NP[i][j];
+            P[i][i] += q[i];
+        }
+    }
+
+    void correct(double zpx, double zv) {
+        double y0 = zpx - x[0];
+        double y1 = zv - x[1];
+        double s00 = P[0][0] + rpx, s01 = P[0][1];
+        double s10 = P[1][0], s11 = P[1][1] + rv;
+        double det = s00 * s11 - s01 * s10;
+        if (det == 0.0) return;
+        double i00 = s11 / det, i01 = -s01 / det, i10 = -s10 / det, i11 = s00 / det;
+        double K0[3], K1[3];
+        for (int i = 0; i < 3; ++i) {
+            K0[i] = P[i][0] * i00 + P[i][1] * i10;
+            K1[i] = P[i][0] * i01 + P[i][1] * i11;
+            x[i] += K0[i] * y0 + K1[i] * y1;
+        }
+        double NP[3][3]{};
+        for (int i = 0; i < 3; ++i) {
+            for (int j = 0; j < 3; ++j) {
+                double s = 0.0;
+                for (int k = 0; k < 3; ++k) {
+                    double ik = (i == k ? 1.0 : 0.0) - (k == 0 ? K0[i] : k == 1 ? K1[i] : 0.0);
+                    s += ik * P[k][j];
+                }
+                NP[i][j] = s;
+            }
+        }
+        for (int i = 0; i < 3; ++i)
+            for (int j = 0; j < 3; ++j) P[i][j] = NP[i][j];
+    }
+
+    bool push(double mkt, double dt, double out[6]) {
+        if (warm < 2) {
+            x[0] = older = newer = mkt;
+            predict(dt);
+            correct(mkt, 0.0);
+            ++warm;
+            return false;
+        }
+        if (++seen % every) return false;
+        double zv = (mkt - older) / (2.0 * dt);
+        predict(dt);
+        correct(mkt, zv);
+        older = newer;
+        newer = mkt;
+        double pp = x[0] + dt * x[1] + 0.5 * dt * dt * x[2];
+        double pv = x[1] + dt * x[2];
+        out[0] = x[0];
+        out[1] = x[1];
+        out[2] = x[0] - mkt;
+        out[3] = pp;
+        out[4] = pv;
+        out[5] = pp - mkt;
+        return true;
+    }
+};
+```
+
+**每个固定间隔读一次信号，数值有变化才通知**
+
+每个固定间隔读一次被包住的信号。信号有效，并且和上次保存的数值不同，就覆盖保存值并通知下游。信号无效，而上一次保存的是有效值，就把保存值写成 0，并通知一次。
+
+```cpp
+struct HeldSig {
+    double v[8]{};
+    int n{0};
+    bool ok{false};
+
+    bool sample(const double* x, int n, bool live) {
+        if (live) {
+            bool changed = !ok || n != this->n;
+            for (int i = 0; !changed && i < n && i < 8; ++i)
+                changed = x[i] != v[i];
+            if (!changed) return false;
+            this->n = n < 8 ? n : 8;
+            for (int i = 0; i < this->n; ++i) v[i] = x[i];
+            ok = true;
+            return true;
+        }
+        if (!ok) return false;
+        ok = false;
+        this->n = 0;
+        for (int i = 0; i < 8; ++i) v[i] = 0.0;
+        return true;
+    }
+};
+```
+
+**中间价的移动和扫描间隔都达到后才进入报价**
+
+扫描间隔按秒计。距离上次扫描还不到这个秒数，这次行情直接返回。中间价相对上次报价用的中间价，移动不足指定跳数乘最小变动价位，这次行情直接返回。两项都达到时，记下新的中间价。允许报价时，发出开多和开空，然后把允许标志关掉。允许标志已经关掉时，下一次两项都达到，就撤掉还锁着的开仓。开仓的撤单回报到达，并且两把开仓锁都已解开，就按当时的跳数再挂。平仓成交以后，允许标志重新打开。
+
+```cpp
+enum class QuoteAct : uint8_t { None, Place, CancelOpen };
+
+struct QuoteGate {
+    int64_t last_s{0};
+    double last_mid{0};
+    bool allow_place{true};
+
+    QuoteAct on_tick(int64_t now_s, int scan_s, double mid, double tick, int need_ticks) {
+        if (now_s - last_s < scan_s) return QuoteAct::None;
+        last_s = now_s;
+        double d = mid - last_mid;
+        if (d < 0.0) d = -d;
+        if (d < tick * need_ticks) return QuoteAct::None;
+        last_mid = mid;
+        if (allow_place) {
+            allow_place = false;
+            return QuoteAct::Place;
+        }
+        return QuoteAct::CancelOpen;
+    }
+};
+```
+
+**买价向下对齐最小变动，卖价向上对齐；信号和为正时两边跳数一起加上这个和**
+
+买价取中间价减去跳数乘最小变动，除以最小变动后向下取整，再乘回最小变动。卖价取中间价加上跳数乘最小变动，向上取整后乘回最小变动。最近行情写入固定长度。长度写满以后才使用信号和，新的一笔覆盖最旧的一笔。
+
+```cpp
+int offset_ticks(int base_ticks, int signal_sum) {
+    return signal_sum < 0 ? base_ticks : base_ticks + signal_sum;
+}
+
+double bid_from_mid(double mid, double tick, int ticks) {
+    return std::floor((mid - tick * ticks) / tick) * tick;
+}
+
+double ask_from_mid(double mid, double tick, int ticks) {
+    return std::ceil((mid + tick * ticks) / tick) * tick;
+}
+
+struct PxRing {
+    static constexpr int N = 32;
+    double px[N]{};
+    int i{0};
+    int n{0};
+    bool push(double p) {
+        px[i] = p;
+        i = (i + 1) % N;
+        if (n < N) ++n;
+        return n == N;
+    }
+};
+```
+
+**开多、开空、平多、平空各有一把锁**
+
+发出开仓之前，两把开仓锁都空着，撤单次数不超过开仓上限，当前处在做市时段。卖一加上开多跳数已经到达涨停，或者买一减去开空跳数已经到达跌停，这次不发开仓。两笔开仓发出后，两把锁置上。委托应答到达后，解开对应的锁。平仓锁还占着时，先撤掉这笔平仓，这次不发开仓。开仓、平仓、撤单各有一个撤单次数上限：平仓上限比开仓多 10 次，撤单上限比开仓多 15 次。次数超过当前动作的上限，这次动作直接返回。
+
+```cpp
+enum class Slot : uint8_t { OpenBuy, OpenSell, CloseBuy, CloseSell, N };
+
+struct SideLock {
+    bool held{false};
+    uint32_t id{0};
+};
+
+struct LockSet {
+    SideLock s[4]{};
+    bool open_busy() const { return s[0].held || s[1].held; }
+    bool close_busy() const { return s[2].held || s[3].held; }
+};
+
+bool through_limit(double ask, double bid, double tick, int buy_ticks, int sell_ticks, double up, double dn) {
+    double buy = ask + tick * buy_ticks;
+    double sell = bid - tick * sell_ticks;
+    return buy >= up || sell <= dn;
+}
+
+bool under_band(int used, int open_cap, int band) {
+    int cap = open_cap;
+    if (band == 1) cap = open_cap + 10;
+    if (band == 2) cap = open_cap + 15;
+    return used <= cap;
+}
+```
+
+**开多成交后撤掉开空并挂出平多，开空成交后撤掉开多并挂出平空**
+
+平多的价格是卖一加上平仓跳数乘最小变动，再限制在涨跌停之间。平空的价格是买一减去平仓跳数乘最小变动，再限制在涨跌停之间。平多成交后，放开开多锁和平多锁。平空成交后，放开开空锁和平空锁，并允许下一轮开仓。
+
+```cpp
+enum class FillKind : uint8_t { OpenBuy, OpenSell, CloseBuy, CloseSell };
+
+struct FillFollow {
+    bool cancel_other_open{false};
+    bool send_close{false};
+    bool allow_place{false};
+};
+
+FillFollow on_fill(FillKind k) {
+    FillFollow f;
+    if (k == FillKind::OpenBuy || k == FillKind::OpenSell) {
+        f.cancel_other_open = true;
+        f.send_close = true;
+    }
+    if (k == FillKind::CloseBuy || k == FillKind::CloseSell) f.allow_place = true;
+    return f;
+}
+
+double close_long_px(double ask, double tick, int ticks, double up, double dn) {
+    double px = ask + tick * ticks;
+    if (px > up) px = up;
+    if (px < dn) px = dn;
+    return px;
+}
+
+double close_short_px(double bid, double tick, int ticks, double up, double dn) {
+    double px = bid - tick * ticks;
+    if (px < dn) px = dn;
+    if (px > up) px = up;
+    return px;
+}
+```
+
+**时段用时分表示，结束前若干分钟只平仓**
+
+时分等于小时乘 100 加分钟。开始时分小于等于当前，并且当前小于结束，当前就在这个时段里。开始时分大于结束时分，表示时段跨过午夜：当前时分大于等于开始，或者当前时分小于结束，当前就在这个时段里。结束时刻往前推若干分钟，当前落在这段时间里就只做平仓。有多头就平多，有空头就平空。
+
+```cpp
+int to_min(int hhmm) { return (hhmm / 100) * 60 + (hhmm % 100); }
+
+bool in_session(int now, int from, int to) {
+    if (from <= to) return from <= now && now < to;
+    return now >= from || now < to;
+}
+
+bool flatten_window(int now_hhmm, int to_hhmm, int back_min) {
+    int end = to_min(to_hhmm);
+    int start = end - back_min;
+    int cur = to_min(now_hhmm);
+    if (start < 0) start += 24 * 60;
+    if (start <= end) return start <= cur && cur < end;
+    return cur >= start || cur < end;
+}
+```
+
+**两边持仓都接近 0 才恢复做市，还有持仓时每次把较多的一边平一手**
+
+通道刚就绪时先看持仓。多头和空头都接近 0，才开始做市。多头大于 0，并且不少于空头，就平一手多头。空头比多头多，就平一手空头。通道断开以后，重新做这一次检查。
+
+```cpp
+enum class FlatStep : uint8_t { Ready, SellOne, BuyOne };
+
+FlatStep flat_step(double long_qty, double short_qty) {
+    if (long_qty < 1e-5 && short_qty < 1e-5) return FlatStep::Ready;
+    if (long_qty > 0.0 && long_qty >= short_qty) return FlatStep::SellOne;
+    return FlatStep::BuyOne;
+}
 ```
 
 
