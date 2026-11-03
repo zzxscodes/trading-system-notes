@@ -162,6 +162,12 @@ English version：[https://github.com/zzxscodes/trading-system-notes/blob/main/t
   - [10. 约束模拟交易日的日历与风控文档](#10-约束模拟交易日的日历与风控文档)
   - [11. 模拟持仓与资金的柜台查询回报](#11-模拟持仓与资金的柜台查询回报)
   - [12. 撮合中介、簿不变量与成交同步扩散](#12-撮合中介簿不变量与成交同步扩散)
+  - [13. 策略只看到本地到达时刻，撮合用交易所时刻](#13-策略只看到本地到达时刻撮合用交易所时刻)
+  - [14. 去程和回程时延按相邻样本插值](#14-去程和回程时延按相邻样本插值)
+  - [15. 档位上的前方数量由成交和剩余量变化估计](#15-档位上的前方数量由成交和剩余量变化估计)
+  - [16. 逐笔队列里排在已成交委托前面的模拟单一起成交](#16-逐笔队列里排在已成交委托前面的模拟单一起成交)
+  - [17. 委托到达交易所时才判定挂上、吃掉或过期](#17-委托到达交易所时才判定挂上吃掉或过期)
+  - [18. 线性合约与反向合约的名义金额和权益](#18-线性合约与反向合约的名义金额和权益)
 - [业务逻辑设计-监控](#业务逻辑设计-监控)
   - [1. 监控进程的只读消费与发布限速](#1-监控进程的只读消费与发布限速)
   - [2. 交易进程的启停与主机采样](#2-交易进程的启停与主机采样)
@@ -44455,7 +44461,7 @@ struct TradeMidGap {
 
 ## 业务逻辑设计-回测与模拟撮合
 
-回测与模拟撮合沿用实盘同一套策略报单环和账本查询接口。历史行情按节拍写成报价，模拟柜台装入现金与期初持仓，本地撮合器在分时段时延下按重建盘口与成交明细给出回报。策略参数的无偏评估另走训练–测试路径，与撮合成交的真实感分开处理。
+回测与模拟撮合沿用实盘同一套策略报单环和账本查询接口。历史行情按节拍写成报价，模拟柜台装入现金与期初持仓，本地撮合器在分时段时延下按重建盘口与成交明细给出回报。策略参数的无偏评估另走训练–测试路径，与撮合成交的真实感分开处理。高频回放把每条行情的交易所时刻和本地到达时刻分开处理，本地时刻先整体后移。委托的去程和回程分开计时，没有委托样本时用行情时延来造。挂单成交按价位前方数量估计，入账按方向改现金和持仓。
 
 ### 1. 四进程模拟路径：回放、行情适配、交易、撮合
 
@@ -46268,6 +46274,519 @@ struct MatchHub {
         else eat(taker, bids, false);
     }
 };
+```
+
+### 13. 策略只看到本地到达时刻，撮合用交易所时刻
+
+每条行情带两个时刻：交易所处理时刻，以及这份数据到达策略机器的时刻。撮合簿按交易所时刻更新。策略只在本地到达时刻看见盘口和成交。本地到达时刻早于交易所时刻时，策略看见这笔行情的时刻，早于交易所产生它的时刻。委托在策略发出时记下本地时刻，加上去程时延才进入撮合簿。撮合产生的应答再加上回程时延，才回到策略。每个合约留四条待处理时刻：下一条本地行情、下一条本地应答、下一条交易所行情、下一条到达交易所的委托。全局下一步取这些时刻里最早的一个。交易所侧的事件只改撮合簿，策略的当前时刻保持不变。本地行情或本地应答把策略的当前时刻改到该事件的时刻。多个合约共用一条时间线。一个合约看见另一个合约的行情，时刻就是那笔行情的本地到达时刻。
+
+```cpp
+#include <cstdint>
+#include <climits>
+
+enum class Lane : uint8_t { LocalFeed, LocalReply, ExchFeed, ExchOrder };
+
+struct AssetClock {
+    int64_t next_ns[4]{};
+    bool open[4]{};
+};
+
+struct Due {
+    int asset{-1};
+    Lane lane{Lane::LocalFeed};
+    int64_t when{INT64_MAX};
+};
+
+Due next_due(const AssetClock* rows, int n) {
+    Due best;
+    for (int i = 0; i < n; ++i) {
+        for (int k = 0; k < 4; ++k) {
+            if (!rows[i].open[k]) continue;
+            if (rows[i].next_ns[k] < best.when) {
+                best.asset = i;
+                best.lane = Lane(k);
+                best.when = rows[i].next_ns[k];
+            }
+        }
+    }
+    return best;
+}
+
+bool wakes_strategy(Lane lane) {
+    return lane == Lane::LocalFeed || lane == Lane::LocalReply;
+}
+```
+
+**行情时延小于 0 时，按最小值把全部本地时刻一起抬高**
+
+行情时延是本地时刻减去交易所时刻。整段取最小值。最小值小于 0 时，每一行的本地时刻都加上这个最小值的绝对值，再加一段基准时延。平移之后，行情时延的最小值等于基准时延，行与行之间的间隔保持原样。最小值大于或等于 0 时，本地时刻保持原样。
+
+```cpp
+struct TapeRow {
+    int64_t exch_ns{0};
+    int64_t local_ns{0};
+    uint32_t bits{0};
+    uint64_t row_id{0};
+};
+
+int64_t lift_local(TapeRow* rows, int n, int64_t base_ns) {
+    if (n <= 0) return 0;
+    int64_t worst = rows[0].local_ns - rows[0].exch_ns;
+    for (int i = 1; i < n; ++i) {
+        int64_t gap = rows[i].local_ns - rows[i].exch_ns;
+        if (gap < worst) worst = gap;
+    }
+    if (worst >= 0) return 0;
+    int64_t shift = -worst + base_ns;
+    for (int i = 0; i < n; ++i) rows[i].local_ns += shift;
+    return shift;
+}
+```
+
+**两条时间序对不齐时拆成两条事件**
+
+原始行情先按交易所时刻排成一列，再按本地时刻排成一列，两个游标一齐向前。两个游标指到的两行，交易所时刻相同，本地时刻也相同，就写成一条同时带上两个标志的事件，两个游标都前进一步。交易所序的下一行交易所时刻更早，或者交易所时刻相同而本地时刻更早，就写成一条只带交易所标志的事件，交易所游标前进一步。其余情况下写成一条只带本地标志的事件，本地游标前进一步。一侧游标走到末尾后，另一侧剩下的行只带自己这一侧的标志。
+
+```cpp
+enum : uint32_t { ExchBit = 1u << 31, LocalBit = 1u << 30 };
+
+struct TapeRow {
+    int64_t exch_ns{0};
+    int64_t local_ns{0};
+    uint32_t bits{0};
+    uint64_t row_id{0};
+};
+
+struct ClockOut {
+    int64_t exch_ns{0};
+    int64_t local_ns{0};
+    uint32_t bits{0};
+    uint64_t row_id{0};
+};
+
+int split_clocks(const TapeRow* rows, const int* by_exch, const int* by_local, int n,
+                 ClockOut* out, int cap) {
+    int e = 0, l = 0, w = 0;
+    while ((e < n || l < n) && w < cap) {
+        const TapeRow* er = e < n ? &rows[by_exch[e]] : nullptr;
+        const TapeRow* lr = l < n ? &rows[by_local[l]] : nullptr;
+        bool same = er && lr && er->exch_ns == lr->exch_ns && er->local_ns == lr->local_ns;
+        bool exch_first = er && (!lr || er->exch_ns < lr->exch_ns
+            || (er->exch_ns == lr->exch_ns && er->local_ns < lr->local_ns));
+        const TapeRow* src = exch_first || same ? er : lr;
+        uint32_t bits = src->bits;
+        if (same) bits |= ExchBit | LocalBit;
+        else if (exch_first) bits = (bits | ExchBit) & ~LocalBit;
+        else bits = (bits | LocalBit) & ~ExchBit;
+        out[w++] = ClockOut{src->exch_ns, src->local_ns, bits, src->row_id};
+        if (same || exch_first) ++e;
+        if (same || !exch_first) ++l;
+    }
+    return w;
+}
+```
+
+**总线上新的时刻不能早于队尾**
+
+去程和回程各用一条按时刻向前排的队列。新时刻早于队尾时，改成队尾时刻再放进队列，后发出的请求排在先发出的请求后面。实盘接口上，后发出的请求可能先到达撮合。回测里队列顺序与发出顺序一致。
+
+```cpp
+struct DueItem {
+    uint64_t id{0};
+    int64_t due_ns{0};
+};
+
+bool push_due(DueItem* q, int& n, int cap, uint64_t id, int64_t due_ns) {
+    if (n >= cap) return false;
+    if (n > 0 && due_ns < q[n - 1].due_ns) due_ns = q[n - 1].due_ns;
+    q[n++] = DueItem{id, due_ns};
+    return true;
+}
+```
+
+### 14. 去程和回程时延按相邻样本插值
+
+去程时延是交易所时刻减去发出时刻，回程时延是应答到达时刻减去交易所时刻。历史样本按发出时刻排好。当前时刻落在两条样本之间，用这两条的去程时延做线性插值。早于第一条，用第一条的交易所时刻减去发出时刻。晚于最后一条，用最后一条的交易所时刻减去它的发出时刻。样本的交易所时刻为 0，表示当时拒单。插值的两端里只要有一端交易所时刻为 0，就改用应答到达时刻与发出时刻的差做插值，结果取负。这个负值的绝对值，是从发出到策略看见拒绝的时间，订单不进撮合簿。回程时延只在交易所时刻大于 0 的样本之间按交易所时刻插值。插值结果小于 0 时写成 0。
+
+```cpp
+#include <cstdint>
+
+struct LatSample {
+    int64_t req_ns{0};
+    int64_t exch_ns{0};
+    int64_t resp_ns{0};
+};
+
+int64_t lerp_lag(int64_t x, int64_t x0, int64_t y0, int64_t x1, int64_t y1) {
+    if (x1 == x0) return y0;
+    double t = double(x - x0) / double(x1 - x0);
+    return y0 + int64_t(t * double(y1 - y0));
+}
+
+int64_t entry_lag(const LatSample* s, int n, int& cursor, int64_t now) {
+    if (n <= 0) return 0;
+    if (cursor < 0) cursor = 0;
+    if (now < s[0].req_ns) return s[0].exch_ns - s[0].req_ns;
+    while (cursor + 1 < n && s[cursor + 1].req_ns <= now) ++cursor;
+    if (cursor + 1 >= n) return s[n - 1].exch_ns - s[n - 1].req_ns;
+    const LatSample& a = s[cursor];
+    const LatSample& b = s[cursor + 1];
+    if (a.exch_ns <= 0 || b.exch_ns <= 0) {
+        return -lerp_lag(now, a.req_ns, a.resp_ns - a.req_ns, b.req_ns, b.resp_ns - b.req_ns);
+    }
+    return lerp_lag(now, a.req_ns, a.exch_ns - a.req_ns, b.req_ns, b.exch_ns - b.req_ns);
+}
+
+int64_t reply_lag(const LatSample* s, int n, int& cursor, int64_t exch_now) {
+    if (n <= 0) return 0;
+    if (cursor < 0) cursor = 0;
+    while (cursor < n && s[cursor].exch_ns <= 0) ++cursor;
+    if (cursor >= n) return 0;
+    if (exch_now < s[cursor].exch_ns) return s[cursor].resp_ns - s[cursor].exch_ns;
+    for (;;) {
+        int nxt = cursor + 1;
+        while (nxt < n && s[nxt].exch_ns <= 0) ++nxt;
+        if (nxt >= n) return s[cursor].resp_ns - s[cursor].exch_ns;
+        if (exch_now < s[nxt].exch_ns) {
+            int64_t lag = lerp_lag(exch_now, s[cursor].exch_ns,
+                                   s[cursor].resp_ns - s[cursor].exch_ns,
+                                   s[nxt].exch_ns, s[nxt].resp_ns - s[nxt].exch_ns);
+            return lag < 0 ? 0 : lag;
+        }
+        cursor = nxt;
+    }
+}
+```
+
+**没有委托样本时，去程和回程按行情时延来造**
+
+只留下交易所标志和本地标志都在的行情。按固定间隔取每个间隔里的最后一条，行情时延是它的本地时刻减去交易所时刻。去程时延等于行情时延乘一个系数再加一段偏移，回程时延用另一组系数和偏移。发出时刻取这条行情的本地时刻。交易所时刻是发出时刻加去程，应答时刻是交易所时刻加回程。行情时延为负时，去程时延也是负的。
+
+```cpp
+enum : uint32_t { ExchBit = 1u << 31, LocalBit = 1u << 30 };
+
+struct FeedLag {
+    int64_t exch_ns{0};
+    int64_t local_ns{0};
+    uint32_t bits{0};
+};
+
+struct MadeLag {
+    int64_t req_ns{0};
+    int64_t exch_ns{0};
+    int64_t resp_ns{0};
+};
+
+void write_lag(MadeLag& o, const FeedLag& src, double entry_mul, int64_t entry_add,
+               double reply_mul, int64_t reply_add) {
+    int64_t feed = src.local_ns - src.exch_ns;
+    int64_t entry = int64_t(entry_mul * double(feed)) + entry_add;
+    int64_t reply = int64_t(reply_mul * double(feed)) + reply_add;
+    o.req_ns = src.local_ns;
+    o.exch_ns = src.local_ns + entry;
+    o.resp_ns = o.exch_ns + reply;
+}
+
+int make_from_feed(const FeedLag* in, int n, int64_t step_ns,
+                   double entry_mul, int64_t entry_add,
+                   double reply_mul, int64_t reply_add,
+                   MadeLag* out, int cap) {
+    if (step_ns <= 0 || cap <= 0) return 0;
+    int w = 0;
+    bool have = false;
+    int64_t bucket = 0;
+    FeedLag last{};
+    for (int i = 0; i < n; ++i) {
+        if ((in[i].bits & ExchBit) == 0 || (in[i].bits & LocalBit) == 0) continue;
+        int64_t b = in[i].local_ns / step_ns;
+        if (!have) {
+            have = true;
+            bucket = b;
+            last = in[i];
+            continue;
+        }
+        if (b == bucket) {
+            last = in[i];
+            continue;
+        }
+        if (w >= cap) return w;
+        write_lag(out[w++], last, entry_mul, entry_add, reply_mul, reply_add);
+        bucket = b;
+        last = in[i];
+    }
+    if (have && w < cap) write_lag(out[w++], last, entry_mul, entry_add, reply_mul, reply_add);
+    return w;
+}
+```
+
+### 15. 档位上的前方数量由成交和剩余量变化估计
+
+历史盘口里没有这笔模拟委托。委托被接受时，前方数量等于该价位当时的显示数量，这笔委托排在队尾。同一价位的成交从前方数量里扣减，并累加到两次档位变化之间的成交量。档位数量再变化时，变化量先减去这段成交量，同一笔成交不会被扣两次，这段成交量随即清零。变化量为负，表示该档数量增加。前方数量不因该档变大而减少，同时不超过新的显示数量。变化量为正，表示有撤单。前方取此刻的前方数量，后方取变化前的显示数量减去前方。后方小于 0 时按 0 计。撤单落在后方的比例，等于后方的幂除以后方的幂与前方的幂之和。幂越大，撤单越集中到数量更多的一侧。前后都是 0 时，这笔撤单算在后方。估计的前方等于原来的前方减去落在前方的那一部分。估计的后方若变成负数，多出来的部分改记到前方。估计值再与新的显示数量取较小值。前方数量变成负数之后，超出部分按手数四舍五入。四舍五入达到一手才记成成交，成交量不超过剩余委托量，前方随即回到 0。四舍五入不足一手时，这个负数留在前方数量里，后面的成交继续从中扣除。更严的估计里，成交减少前方数量。撤单时，前方数量不超过新的显示数量。
+
+```cpp
+#include <cmath>
+#include <cstdint>
+
+struct Ahead {
+    double front{0};
+    double traded{0};
+};
+
+void on_join(Ahead& a, int64_t shown) {
+    a.front = double(shown);
+    a.traded = 0;
+}
+
+int64_t take_overshoot(Ahead& a, int64_t lot, int64_t leaves) {
+    if (a.front >= 0 || lot <= 0) return 0;
+    int64_t lots = int64_t(std::llround(-a.front / double(lot)));
+    if (lots <= 0) return 0;
+    int64_t q = lots * lot;
+    if (q > leaves) q = leaves;
+    a.front = 0;
+    return q;
+}
+
+int64_t on_print(Ahead& a, int64_t qty, int64_t lot, int64_t leaves) {
+    a.front -= double(qty);
+    a.traded += double(qty);
+    return take_overshoot(a, lot, leaves);
+}
+
+int64_t on_level(Ahead& a, int64_t prev, int64_t now, double power, int64_t lot, int64_t leaves) {
+    double chg = double(prev) - double(now) - a.traded;
+    a.traded = 0;
+    if (chg < 0) {
+        if (a.front > double(now)) a.front = double(now);
+        return take_overshoot(a, lot, leaves);
+    }
+    double front = a.front;
+    double back = double(prev) - front;
+    if (back < 0) back = 0;
+    double pf = std::pow(front, power);
+    double pb = std::pow(back, power);
+    double den = pf + pb;
+    double behind = den == 0.0 ? 1.0 : pb / den;
+    if (!std::isfinite(behind)) behind = 1.0;
+    double est = front - (1.0 - behind) * chg;
+    double back_left = back - behind * chg;
+    if (back_left < 0) est += back_left;
+    if (est > double(now)) est = double(now);
+    a.front = est;
+    return take_overshoot(a, lot, leaves);
+}
+
+void on_level_strict(Ahead& a, int64_t now) {
+    if (a.front > double(now)) a.front = double(now);
+}
+```
+
+### 16. 逐笔队列里排在已成交委托前面的模拟单一起成交
+
+逐笔行情里，每个价位一条队列，市场委托和模拟委托排在一起。模拟委托加在队尾。一笔市场买单的成交价低于买一时，从买一到比成交价高一档为止，这些价位上的模拟买单全部成交，市场委托留在队列里。成交价这一档只成交排在这笔市场委托前面的模拟单，排在它后面的模拟单留在队列里。成交价高于卖一时，从卖一到比成交价低一档为止，这些价位上的模拟卖单全部成交，市场委托留在队列里。成交价这一档只成交排在这笔市场委托前面的模拟单，排在它后面的模拟单留在队列里。数量减少而价格不变时，委托留在原位。价格改变，或数量变大，把委托从队列中取出，再放到队尾。清空消息去掉该方向上的市场委托和模拟委托。清空之后，价位上的先后已经没有依据，模拟委托随这次清空离开队列。
+
+```cpp
+#include <cstdint>
+#include <deque>
+
+enum class QSrc : uint8_t { Mkt, Sim };
+
+struct QNode {
+    uint64_t id{0};
+    int64_t leaves{0};
+    QSrc src{QSrc::Mkt};
+};
+
+int pull_sim_before(std::deque<QNode>& q, uint64_t mkt_id, bool erase_mkt,
+                    uint64_t* out, int cap) {
+    int n = 0;
+    for (auto it = q.begin(); it != q.end();) {
+        if (it->src == QSrc::Mkt && it->id == mkt_id) {
+            if (erase_mkt) q.erase(it);
+            break;
+        }
+        if (it->src == QSrc::Sim) {
+            if (n < cap) out[n++] = it->id;
+            it = q.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    return n;
+}
+
+int pull_sim_better(std::deque<QNode>* ladder, int best, int stop,
+                    uint64_t* out, int cap) {
+    int step = best <= stop ? 1 : -1;
+    int n = 0;
+    for (int i = best; i != stop; i += step) {
+        std::deque<QNode>& q = ladder[i];
+        for (auto it = q.begin(); it != q.end();) {
+            if (it->src == QSrc::Sim) {
+                if (n < cap) out[n++] = it->id;
+                it = q.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+    return n;
+}
+
+bool rest_again(std::deque<QNode>& q, uint64_t id, int64_t new_leaves, bool price_changed) {
+    for (auto it = q.begin(); it != q.end(); ++it) {
+        if (it->src != QSrc::Sim || it->id != id) continue;
+        if (price_changed || new_leaves > it->leaves) {
+            q.erase(it);
+            q.push_back(QNode{id, new_leaves, QSrc::Sim});
+        } else {
+            it->leaves = new_leaves;
+        }
+        return true;
+    }
+    return false;
+}
+```
+
+### 17. 委托到达交易所时才判定挂上、吃掉或过期
+
+到达判定读的是委托进入交易所那一刻的盘口。买单价格不低于卖一，视为打穿。只允许挂单的委托直接过期，没有成交。立即成交否则撤销的单，从卖一扫到限价，按各档显示量成交，剩下的过期。全部成交否则撤销的单，先把卖一到限价的显示量加总，不够整笔就整笔过期，够了再按各档显示量成交。当日有效的单，比限价更好的档按吃单成交。限价这一档的剩余数量全部按吃单成交，与该档显示数量无关。回放的盘口不能插入这笔模拟单，插进去会改掉后面的行情。委托很大时，成交会多于盘口上的显示数量。买单价格低于卖一时，当日有效和只允许挂单的委托排到该价队尾，并记下前方数量。立即成交和全部成交否则撤销在没有打穿时直接过期。卖单以买一为对手价，从买一向更低的价格扫描。
+
+```cpp
+#include <cstdint>
+#include <climits>
+
+enum class Life : uint8_t { Day, Post, Imm, All };
+enum class Arrive : uint8_t { Rest, Take, Expire };
+
+struct Hit {
+    Arrive kind{Arrive::Expire};
+    int64_t filled{0};
+};
+
+Hit on_buy(Life life, int64_t px, int64_t leaves, int64_t best_ask,
+           const int64_t* ask_qty, int n_ticks) {
+    bool cross = best_ask != INT64_MAX && px >= best_ask;
+    if (!cross) {
+        if (life == Life::Imm || life == Life::All) return {Arrive::Expire, 0};
+        return {Arrive::Rest, 0};
+    }
+    if (life == Life::Post) return {Arrive::Expire, 0};
+    if (n_ticks <= 0) {
+        if (life == Life::Day) return {Arrive::Take, leaves};
+        return {Arrive::Expire, 0};
+    }
+    int64_t dist = px - best_ask;
+    if (dist < 0) dist = 0;
+    int64_t walk_end = life == Life::Day ? dist : dist + 1;
+    if (walk_end > n_ticks) walk_end = n_ticks;
+    if (life == Life::All) {
+        int64_t sum = 0;
+        for (int64_t i = 0; i < walk_end; ++i) sum += ask_qty[i];
+        if (sum < leaves) return {Arrive::Expire, 0};
+    }
+    int64_t left = leaves;
+    int64_t got = 0;
+    for (int64_t i = 0; i < walk_end && left > 0; ++i) {
+        int64_t q = ask_qty[i];
+        if (q > left) q = left;
+        got += q;
+        left -= q;
+    }
+    if (life == Life::Day && left > 0) {
+        got += left;
+        left = 0;
+    }
+    if (left > 0) return {Arrive::Expire, got};
+    return {Arrive::Take, got};
+}
+```
+
+**不扫档的撮合在最优价整笔成交**
+
+成交不沿价格逐档扫描。买单价格不低于卖一时，只允许挂单的委托过期。当日有效、立即成交、全部成交和市价单都在卖一上成交，成交数量等于剩余数量，与卖一的显示数量无关。买单价格低于卖一时，当日有效和只允许挂单的委托挂到队尾，立即成交和全部成交过期。卖单以买一为对手价，卖价不高于买一即为打穿。对手价上的显示数量小于剩余数量时，成交仍按剩余数量记满。
+
+```cpp
+#include <cstdint>
+#include <climits>
+
+enum class Life : uint8_t { Day, Post, Imm, All };
+enum class Arrive : uint8_t { Rest, Take, Expire };
+
+struct Hit {
+    Arrive kind{Arrive::Expire};
+    int64_t filled{0};
+};
+
+Hit fill_at_touch(Life life, bool market, int64_t px, int64_t leaves, int64_t best_ask) {
+    if (market) return {Arrive::Take, leaves};
+    bool cross = best_ask != INT64_MAX && px >= best_ask;
+    if (!cross) {
+        if (life == Life::Imm || life == Life::All) return {Arrive::Expire, 0};
+        return {Arrive::Rest, 0};
+    }
+    if (life == Life::Post) return {Arrive::Expire, 0};
+    return {Arrive::Take, leaves};
+}
+```
+
+### 18. 线性合约与反向合约的名义金额和权益
+
+线性合约的名义金额是合约乘数乘价格乘数量。权益是现金加上乘数乘持仓乘价格，再减去费用。反向合约的名义金额是乘数乘数量除以价格。权益是现金取负，再减去乘数乘持仓除以价格，再减去费用。排在队列里成交的按挂单费率计，打穿盘口成交的按吃单费率计。买方费率和卖方费率也乘在名义金额上。按数量计费时，挂单费率和吃单费率乘成交数量，买方费率和卖方费率乘名义金额。
+
+```cpp
+struct LinBook {
+    double mult{1};
+    double cash{0};
+    double pos{0};
+    double fee{0};
+    double notion(double px, double qty) const { return mult * px * qty; }
+    double equity(double px) const { return cash + mult * pos * px - fee; }
+};
+
+struct InvBook {
+    double mult{1};
+    double cash{0};
+    double pos{0};
+    double fee{0};
+    double notion(double px, double qty) const { return px == 0 ? 0 : mult * qty / px; }
+    double equity(double px) const { return px == 0 ? 0 : -cash - mult * pos / px - fee; }
+};
+
+double charge(double notion, double qty, bool rested, bool buy, bool by_qty,
+              double rest_rate, double take_rate, double buy_rate, double sell_rate) {
+    double side = buy ? buy_rate : sell_rate;
+    double leg = rested ? rest_rate : take_rate;
+    if (by_qty) return leg * qty + side * notion;
+    return (leg + side) * notion;
+}
+```
+
+**成交按方向改持仓和现金**
+
+买方持仓加上成交数量，现金减去名义金额。卖方持仓减去成交数量，现金加上名义金额。费用加进累计费用，成交笔数加一，成交数量和名义金额分别累加。线性合约的名义金额是乘数乘价格乘数量，反向合约是乘数乘数量除以价格。权益按入账后的现金、持仓和累计费用计算。
+
+```cpp
+#include <cstdint>
+
+struct Acct {
+    double cash{0};
+    double pos{0};
+    double fee{0};
+    int64_t fills{0};
+    double qty_sum{0};
+    double value_sum{0};
+};
+
+void book_fill(Acct& a, double notion, double qty, bool buy, double fee) {
+    double sgn = buy ? 1.0 : -1.0;
+    a.pos += qty * sgn;
+    a.cash -= notion * sgn;
+    a.fee += fee;
+    ++a.fills;
+    a.qty_sum += qty;
+    a.value_sum += notion;
+}
 ```
 
 

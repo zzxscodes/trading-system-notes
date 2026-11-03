@@ -162,6 +162,12 @@
   - [10. Calendar and risk documents that gate the sim day](#10-calendar-and-risk-documents-that-gate-the-sim-day)
   - [11. Counter-style query replies for sim position and asset](#11-counter-style-query-replies-for-sim-position-and-asset)
   - [12. Matching hub, book invariants, and synchronous fill fan-out](#12-matching-hub-book-invariants-and-synchronous-fill-fan-out)
+  - [13. The strategy sees local arrival time and matching uses exchange time](#13-the-strategy-sees-local-arrival-time-and-matching-uses-exchange-time)
+  - [14. Entry and response latency are interpolated between adjacent samples](#14-entry-and-response-latency-are-interpolated-between-adjacent-samples)
+  - [15. Quantity ahead on a level is estimated from trades and the change in size](#15-quantity-ahead-on-a-level-is-estimated-from-trades-and-the-change-in-size)
+  - [16. Simulated orders in front of a filled market order fill with it](#16-simulated-orders-in-front-of-a-filled-market-order-fill-with-it)
+  - [17. Resting, taking, or expiry is decided when the order reaches the exchange](#17-resting-taking-or-expiry-is-decided-when-the-order-reaches-the-exchange)
+  - [18. Notional and equity of linear and inverse contracts](#18-notional-and-equity-of-linear-and-inverse-contracts)
 - [Business logic design-monitoring](#business-logic-design-monitoring)
   - [1. Read-only consume and publish rate limit on the monitor](#1-read-only-consume-and-publish-rate-limit-on-the-monitor)
   - [2. Process lifecycle control and host sampling](#2-process-lifecycle-control-and-host-sampling)
@@ -44464,7 +44470,7 @@ struct TradeMidGap {
 
 ## Business logic design-backtest and simulated matching
 
-Backtest and simulated matching keep the same strategy order rings and ledger query API as live trading. Historical tape is paced into quotes, a sim counter loads cash and opening lots, and a local matcher produces fills from rebuilt books and prints under session latency. Unbiased evaluation of strategy parameters stays on a separate train–test path, apart from how realistic the fills are.
+Backtest and simulated matching keep the same strategy order rings and ledger query API as live trading. Historical tape is paced into quotes, a sim counter loads cash and opening lots, and a local matcher produces fills from rebuilt books and prints under session latency. Unbiased evaluation of strategy parameters stays on a separate train–test path, apart from how realistic the fills are. A high-frequency replay keeps the exchange time and the local arrival time of each market event apart, and moves local times later together before the replay. It times the outbound and return legs of an order separately, and builds those legs from feed latency when no order samples exist. A resting fill is estimated from the quantity ahead at its price, and a fill moves cash and position by side.
 
 ### 1. Four-process sim path: tape, quote adapter, trader, matcher
 
@@ -46277,6 +46283,519 @@ struct MatchHub {
         else eat(taker, bids, false);
     }
 };
+```
+
+### 13. The strategy sees local arrival time and matching uses exchange time
+
+Each market event carries two times: when the exchange processed it, and when it arrived at the strategy machine. The matching book advances on the exchange time. The strategy sees the book and the trades only at the local arrival time. A local arrival earlier than the exchange time shows the strategy the event before the exchange has produced it. An order records the local time when the strategy sends it, and it enters the matching book only after the outbound latency. A response produced by the match returns to the strategy only after the return latency. Each contract keeps four pending times: the next local market row, the next local response, the next exchange market row, and the next order arriving at the exchange. The next step of the run is the earliest of those times. An exchange-side event updates the matching book and leaves the strategy's current time unchanged. A local market row or a local response sets the strategy's current time to that event's time. Several contracts share one timeline. One contract sees another contract's market data at the local arrival time of that data.
+
+```cpp
+#include <cstdint>
+#include <climits>
+
+enum class Lane : uint8_t { LocalFeed, LocalReply, ExchFeed, ExchOrder };
+
+struct AssetClock {
+    int64_t next_ns[4]{};
+    bool open[4]{};
+};
+
+struct Due {
+    int asset{-1};
+    Lane lane{Lane::LocalFeed};
+    int64_t when{INT64_MAX};
+};
+
+Due next_due(const AssetClock* rows, int n) {
+    Due best;
+    for (int i = 0; i < n; ++i) {
+        for (int k = 0; k < 4; ++k) {
+            if (!rows[i].open[k]) continue;
+            if (rows[i].next_ns[k] < best.when) {
+                best.asset = i;
+                best.lane = Lane(k);
+                best.when = rows[i].next_ns[k];
+            }
+        }
+    }
+    return best;
+}
+
+bool wakes_strategy(Lane lane) {
+    return lane == Lane::LocalFeed || lane == Lane::LocalReply;
+}
+```
+
+**When the smallest feed latency is negative, every local timestamp moves later together**
+
+Feed latency is local time minus exchange time. The shift uses the minimum across the tape. When the minimum is below 0, every row's local time increases by the absolute value of that minimum and by a base latency. After the shift, the minimum feed latency equals the base latency, and the gaps between rows stay as they were. When the minimum is 0 or positive, local times stay as recorded.
+
+```cpp
+struct TapeRow {
+    int64_t exch_ns{0};
+    int64_t local_ns{0};
+    uint32_t bits{0};
+    uint64_t row_id{0};
+};
+
+int64_t lift_local(TapeRow* rows, int n, int64_t base_ns) {
+    if (n <= 0) return 0;
+    int64_t worst = rows[0].local_ns - rows[0].exch_ns;
+    for (int i = 1; i < n; ++i) {
+        int64_t gap = rows[i].local_ns - rows[i].exch_ns;
+        if (gap < worst) worst = gap;
+    }
+    if (worst >= 0) return 0;
+    int64_t shift = -worst + base_ns;
+    for (int i = 0; i < n; ++i) rows[i].local_ns += shift;
+    return shift;
+}
+```
+
+**A row is split when the two time orders disagree**
+
+The raw rows are ordered once by exchange time and once by local time, and two cursors move forward together. When the rows under the two cursors have the same exchange time and the same local time, one event is written with both flags, and both cursors advance. When the next row in exchange order has an earlier exchange time, or the same exchange time and an earlier local time, that row is written with only the exchange flag, and the exchange cursor advances. Every remaining step writes an event with only the local flag, and the local cursor advances. After one cursor reaches the end, each row left on the other side carries only that side's flag.
+
+```cpp
+enum : uint32_t { ExchBit = 1u << 31, LocalBit = 1u << 30 };
+
+struct TapeRow {
+    int64_t exch_ns{0};
+    int64_t local_ns{0};
+    uint32_t bits{0};
+    uint64_t row_id{0};
+};
+
+struct ClockOut {
+    int64_t exch_ns{0};
+    int64_t local_ns{0};
+    uint32_t bits{0};
+    uint64_t row_id{0};
+};
+
+int split_clocks(const TapeRow* rows, const int* by_exch, const int* by_local, int n,
+                 ClockOut* out, int cap) {
+    int e = 0, l = 0, w = 0;
+    while ((e < n || l < n) && w < cap) {
+        const TapeRow* er = e < n ? &rows[by_exch[e]] : nullptr;
+        const TapeRow* lr = l < n ? &rows[by_local[l]] : nullptr;
+        bool same = er && lr && er->exch_ns == lr->exch_ns && er->local_ns == lr->local_ns;
+        bool exch_first = er && (!lr || er->exch_ns < lr->exch_ns
+            || (er->exch_ns == lr->exch_ns && er->local_ns < lr->local_ns));
+        const TapeRow* src = exch_first || same ? er : lr;
+        uint32_t bits = src->bits;
+        if (same) bits |= ExchBit | LocalBit;
+        else if (exch_first) bits = (bits | ExchBit) & ~LocalBit;
+        else bits = (bits | LocalBit) & ~ExchBit;
+        out[w++] = ClockOut{src->exch_ns, src->local_ns, bits, src->row_id};
+        if (same || exch_first) ++e;
+        if (same || !exch_first) ++l;
+    }
+    return w;
+}
+```
+
+**A new time on the bus cannot be earlier than the tail**
+
+The outbound leg and the return leg each keep a queue ordered forward in time. A new time earlier than the tail is changed to the tail time and then appended, and a request sent later stands behind one sent earlier. On a live interface, a request sent later can reach the match first. In the backtest the queue follows send order.
+
+```cpp
+struct DueItem {
+    uint64_t id{0};
+    int64_t due_ns{0};
+};
+
+bool push_due(DueItem* q, int& n, int cap, uint64_t id, int64_t due_ns) {
+    if (n >= cap) return false;
+    if (n > 0 && due_ns < q[n - 1].due_ns) due_ns = q[n - 1].due_ns;
+    q[n++] = DueItem{id, due_ns};
+    return true;
+}
+```
+
+### 14. Entry and response latency are interpolated between adjacent samples
+
+Outbound latency is the exchange time minus the send time. Return latency is the response arrival minus the exchange time. Historical samples are ordered by send time. When the current time falls between two samples, the outbound latency is the linear interpolation of those two. A time before the first sample uses that sample's exchange time minus its send time. A time after the last sample uses the last sample's exchange time minus its send time. An exchange time of 0 means the order was rejected. If either sample in the interval has an exchange time of 0, interpolation uses the gap from send time to response arrival, and the result is negative. The absolute value is the time from the send until the strategy sees the rejection, and the order does not enter the matching book. Return latency is interpolated on exchange time, and only samples with an exchange time above 0 are used. An interpolated value below 0 is written as 0.
+
+```cpp
+#include <cstdint>
+
+struct LatSample {
+    int64_t req_ns{0};
+    int64_t exch_ns{0};
+    int64_t resp_ns{0};
+};
+
+int64_t lerp_lag(int64_t x, int64_t x0, int64_t y0, int64_t x1, int64_t y1) {
+    if (x1 == x0) return y0;
+    double t = double(x - x0) / double(x1 - x0);
+    return y0 + int64_t(t * double(y1 - y0));
+}
+
+int64_t entry_lag(const LatSample* s, int n, int& cursor, int64_t now) {
+    if (n <= 0) return 0;
+    if (cursor < 0) cursor = 0;
+    if (now < s[0].req_ns) return s[0].exch_ns - s[0].req_ns;
+    while (cursor + 1 < n && s[cursor + 1].req_ns <= now) ++cursor;
+    if (cursor + 1 >= n) return s[n - 1].exch_ns - s[n - 1].req_ns;
+    const LatSample& a = s[cursor];
+    const LatSample& b = s[cursor + 1];
+    if (a.exch_ns <= 0 || b.exch_ns <= 0) {
+        return -lerp_lag(now, a.req_ns, a.resp_ns - a.req_ns, b.req_ns, b.resp_ns - b.req_ns);
+    }
+    return lerp_lag(now, a.req_ns, a.exch_ns - a.req_ns, b.req_ns, b.exch_ns - b.req_ns);
+}
+
+int64_t reply_lag(const LatSample* s, int n, int& cursor, int64_t exch_now) {
+    if (n <= 0) return 0;
+    if (cursor < 0) cursor = 0;
+    while (cursor < n && s[cursor].exch_ns <= 0) ++cursor;
+    if (cursor >= n) return 0;
+    if (exch_now < s[cursor].exch_ns) return s[cursor].resp_ns - s[cursor].exch_ns;
+    for (;;) {
+        int nxt = cursor + 1;
+        while (nxt < n && s[nxt].exch_ns <= 0) ++nxt;
+        if (nxt >= n) return s[cursor].resp_ns - s[cursor].exch_ns;
+        if (exch_now < s[nxt].exch_ns) {
+            int64_t lag = lerp_lag(exch_now, s[cursor].exch_ns,
+                                   s[cursor].resp_ns - s[cursor].exch_ns,
+                                   s[nxt].exch_ns, s[nxt].resp_ns - s[nxt].exch_ns);
+            return lag < 0 ? 0 : lag;
+        }
+        cursor = nxt;
+    }
+}
+```
+
+**Outbound and return latency are built from feed latency when no order samples exist**
+
+Keep only rows that carry both the exchange flag and the local flag. Inside each fixed interval, keep the last row. Feed latency is that row's local time minus its exchange time. Outbound latency is the feed latency times one factor, plus an offset. Return latency uses another factor and another offset. The send time is the row's local time. The exchange time is the send time plus the outbound latency, and the response time is the exchange time plus the return latency. A negative feed latency produces a negative outbound latency.
+
+```cpp
+enum : uint32_t { ExchBit = 1u << 31, LocalBit = 1u << 30 };
+
+struct FeedLag {
+    int64_t exch_ns{0};
+    int64_t local_ns{0};
+    uint32_t bits{0};
+};
+
+struct MadeLag {
+    int64_t req_ns{0};
+    int64_t exch_ns{0};
+    int64_t resp_ns{0};
+};
+
+void write_lag(MadeLag& o, const FeedLag& src, double entry_mul, int64_t entry_add,
+               double reply_mul, int64_t reply_add) {
+    int64_t feed = src.local_ns - src.exch_ns;
+    int64_t entry = int64_t(entry_mul * double(feed)) + entry_add;
+    int64_t reply = int64_t(reply_mul * double(feed)) + reply_add;
+    o.req_ns = src.local_ns;
+    o.exch_ns = src.local_ns + entry;
+    o.resp_ns = o.exch_ns + reply;
+}
+
+int make_from_feed(const FeedLag* in, int n, int64_t step_ns,
+                   double entry_mul, int64_t entry_add,
+                   double reply_mul, int64_t reply_add,
+                   MadeLag* out, int cap) {
+    if (step_ns <= 0 || cap <= 0) return 0;
+    int w = 0;
+    bool have = false;
+    int64_t bucket = 0;
+    FeedLag last{};
+    for (int i = 0; i < n; ++i) {
+        if ((in[i].bits & ExchBit) == 0 || (in[i].bits & LocalBit) == 0) continue;
+        int64_t b = in[i].local_ns / step_ns;
+        if (!have) {
+            have = true;
+            bucket = b;
+            last = in[i];
+            continue;
+        }
+        if (b == bucket) {
+            last = in[i];
+            continue;
+        }
+        if (w >= cap) return w;
+        write_lag(out[w++], last, entry_mul, entry_add, reply_mul, reply_add);
+        bucket = b;
+        last = in[i];
+    }
+    if (have && w < cap) write_lag(out[w++], last, entry_mul, entry_add, reply_mul, reply_add);
+    return w;
+}
+```
+
+### 15. Quantity ahead on a level is estimated from trades and the change in size
+
+The historical book does not contain the simulated order. When the order is accepted, the quantity ahead equals the size displayed at that price, and the order stands at the tail. A trade at the same price is subtracted from the quantity ahead and added to the quantity traded since the previous level change. When the level size changes, that change first subtracts this traded quantity, so the same trade is not subtracted twice, and the traded quantity is then cleared. A negative change means the level grew. When the level grows, the quantity ahead stays unchanged, and it does not exceed the new displayed size. A positive change is a cancel. The front is the quantity still ahead. The back is the displayed size before the change minus that quantity, and a negative back is treated as 0. The share of the cancel that lands behind the order is the back raised to a power, divided by the sum of that value and the front raised to the same power. A larger power puts more of the cancel on the side with more size. When both sides are zero, the cancel is counted as behind. The estimated front is the previous front minus the part of the cancel that lands in front. If the estimated back becomes negative, the excess is moved to the front. The estimate is then limited by the new displayed size. Once the quantity ahead is negative, the excess is rounded to lots. A full lot becomes a fill, the fill does not exceed the quantity still open, and the quantity ahead returns to 0. If the rounded size is below one lot, the negative quantity ahead is kept, and later trades continue to subtract from it. In the stricter estimate, trades reduce the quantity ahead. A cancel caps that quantity at the new displayed size.
+
+```cpp
+#include <cmath>
+#include <cstdint>
+
+struct Ahead {
+    double front{0};
+    double traded{0};
+};
+
+void on_join(Ahead& a, int64_t shown) {
+    a.front = double(shown);
+    a.traded = 0;
+}
+
+int64_t take_overshoot(Ahead& a, int64_t lot, int64_t leaves) {
+    if (a.front >= 0 || lot <= 0) return 0;
+    int64_t lots = int64_t(std::llround(-a.front / double(lot)));
+    if (lots <= 0) return 0;
+    int64_t q = lots * lot;
+    if (q > leaves) q = leaves;
+    a.front = 0;
+    return q;
+}
+
+int64_t on_print(Ahead& a, int64_t qty, int64_t lot, int64_t leaves) {
+    a.front -= double(qty);
+    a.traded += double(qty);
+    return take_overshoot(a, lot, leaves);
+}
+
+int64_t on_level(Ahead& a, int64_t prev, int64_t now, double power, int64_t lot, int64_t leaves) {
+    double chg = double(prev) - double(now) - a.traded;
+    a.traded = 0;
+    if (chg < 0) {
+        if (a.front > double(now)) a.front = double(now);
+        return take_overshoot(a, lot, leaves);
+    }
+    double front = a.front;
+    double back = double(prev) - front;
+    if (back < 0) back = 0;
+    double pf = std::pow(front, power);
+    double pb = std::pow(back, power);
+    double den = pf + pb;
+    double behind = den == 0.0 ? 1.0 : pb / den;
+    if (!std::isfinite(behind)) behind = 1.0;
+    double est = front - (1.0 - behind) * chg;
+    double back_left = back - behind * chg;
+    if (back_left < 0) est += back_left;
+    if (est > double(now)) est = double(now);
+    a.front = est;
+    return take_overshoot(a, lot, leaves);
+}
+
+void on_level_strict(Ahead& a, int64_t now) {
+    if (a.front > double(now)) a.front = double(now);
+}
+```
+
+### 16. Simulated orders in front of a filled market order fill with it
+
+An order-by-order feed keeps one queue per price. Market orders and simulated orders stand in that queue, and a simulated order joins the tail. When a market bid fills below the best bid, every simulated bid from the best bid through the price one tick above the fill is filled, and the market orders on those prices stay. At the fill price, only the simulated orders in front of that market order fill, and simulated orders behind it remain in the queue. When a market ask fills above the best ask, every simulated ask from the best ask through the price one tick below the fill is filled, and at the fill price only the simulated orders in front of it fill. Simulated orders behind that ask remain in the queue. A smaller size at an unchanged price leaves the order where it is. A price change, or a larger size, takes the order out and places it at the tail. A clear message removes the market orders and the simulated orders on that side. After the clear, the previous sequence on that side is no longer known, and the simulated orders leave with the clear.
+
+```cpp
+#include <cstdint>
+#include <deque>
+
+enum class QSrc : uint8_t { Mkt, Sim };
+
+struct QNode {
+    uint64_t id{0};
+    int64_t leaves{0};
+    QSrc src{QSrc::Mkt};
+};
+
+int pull_sim_before(std::deque<QNode>& q, uint64_t mkt_id, bool erase_mkt,
+                    uint64_t* out, int cap) {
+    int n = 0;
+    for (auto it = q.begin(); it != q.end();) {
+        if (it->src == QSrc::Mkt && it->id == mkt_id) {
+            if (erase_mkt) q.erase(it);
+            break;
+        }
+        if (it->src == QSrc::Sim) {
+            if (n < cap) out[n++] = it->id;
+            it = q.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    return n;
+}
+
+int pull_sim_better(std::deque<QNode>* ladder, int best, int stop,
+                    uint64_t* out, int cap) {
+    int step = best <= stop ? 1 : -1;
+    int n = 0;
+    for (int i = best; i != stop; i += step) {
+        std::deque<QNode>& q = ladder[i];
+        for (auto it = q.begin(); it != q.end();) {
+            if (it->src == QSrc::Sim) {
+                if (n < cap) out[n++] = it->id;
+                it = q.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+    return n;
+}
+
+bool rest_again(std::deque<QNode>& q, uint64_t id, int64_t new_leaves, bool price_changed) {
+    for (auto it = q.begin(); it != q.end(); ++it) {
+        if (it->src != QSrc::Sim || it->id != id) continue;
+        if (price_changed || new_leaves > it->leaves) {
+            q.erase(it);
+            q.push_back(QNode{id, new_leaves, QSrc::Sim});
+        } else {
+            it->leaves = new_leaves;
+        }
+        return true;
+    }
+    return false;
+}
+```
+
+### 17. Resting, taking, or expiry is decided when the order reaches the exchange
+
+The arrival decision reads the book at the moment the order reaches the exchange. A buy whose price is at or above the best ask crosses. An order that may only rest expires with no fill. An immediate-or-cancel order walks from the best ask up to its limit, takes the displayed size, and the remainder expires. A fill-or-kill order first sums the displayed size from the best ask through the limit. If that sum is short of the whole order, the whole order expires. If the sum covers it, the order takes those levels. A day order takes every level strictly better than its limit. The quantity still open at the limit fills in full, past the size displayed on that level. A replayed book cannot insert the simulated order. Inserting it would change the later market data. A large order is filled for more than the size on the book. When the buy price is below the best ask, a day order and a rest-only order join the tail of that price and record the quantity ahead. Immediate-or-cancel and fill-or-kill expire at once when they do not cross. A sell crosses when its price is at or below the best bid, and the walk runs from the best bid toward lower prices.
+
+```cpp
+#include <cstdint>
+#include <climits>
+
+enum class Life : uint8_t { Day, Post, Imm, All };
+enum class Arrive : uint8_t { Rest, Take, Expire };
+
+struct Hit {
+    Arrive kind{Arrive::Expire};
+    int64_t filled{0};
+};
+
+Hit on_buy(Life life, int64_t px, int64_t leaves, int64_t best_ask,
+           const int64_t* ask_qty, int n_ticks) {
+    bool cross = best_ask != INT64_MAX && px >= best_ask;
+    if (!cross) {
+        if (life == Life::Imm || life == Life::All) return {Arrive::Expire, 0};
+        return {Arrive::Rest, 0};
+    }
+    if (life == Life::Post) return {Arrive::Expire, 0};
+    if (n_ticks <= 0) {
+        if (life == Life::Day) return {Arrive::Take, leaves};
+        return {Arrive::Expire, 0};
+    }
+    int64_t dist = px - best_ask;
+    if (dist < 0) dist = 0;
+    int64_t walk_end = life == Life::Day ? dist : dist + 1;
+    if (walk_end > n_ticks) walk_end = n_ticks;
+    if (life == Life::All) {
+        int64_t sum = 0;
+        for (int64_t i = 0; i < walk_end; ++i) sum += ask_qty[i];
+        if (sum < leaves) return {Arrive::Expire, 0};
+    }
+    int64_t left = leaves;
+    int64_t got = 0;
+    for (int64_t i = 0; i < walk_end && left > 0; ++i) {
+        int64_t q = ask_qty[i];
+        if (q > left) q = left;
+        got += q;
+        left -= q;
+    }
+    if (life == Life::Day && left > 0) {
+        got += left;
+        left = 0;
+    }
+    if (left > 0) return {Arrive::Expire, got};
+    return {Arrive::Take, got};
+}
+```
+
+**A match that does not walk the book fills the whole order at the best price**
+
+The fill does not walk the book one price at a time. When a buy is at or above the best ask, an order that may only rest expires. A day order, an immediate-or-cancel order, a fill-or-kill order, and a market order all fill at the best ask for their entire remaining quantity, independent of the size displayed there. When the buy is below the best ask, a day order and a rest-only order join the tail, and immediate-or-cancel and fill-or-kill expire. A sell uses the best bid as the opposing price. A sell price at or below the best bid is a cross. When the displayed size at the opposing price is smaller than the quantity still open, the fill is still recorded for the whole remainder.
+
+```cpp
+#include <cstdint>
+#include <climits>
+
+enum class Life : uint8_t { Day, Post, Imm, All };
+enum class Arrive : uint8_t { Rest, Take, Expire };
+
+struct Hit {
+    Arrive kind{Arrive::Expire};
+    int64_t filled{0};
+};
+
+Hit fill_at_touch(Life life, bool market, int64_t px, int64_t leaves, int64_t best_ask) {
+    if (market) return {Arrive::Take, leaves};
+    bool cross = best_ask != INT64_MAX && px >= best_ask;
+    if (!cross) {
+        if (life == Life::Imm || life == Life::All) return {Arrive::Expire, 0};
+        return {Arrive::Rest, 0};
+    }
+    if (life == Life::Post) return {Arrive::Expire, 0};
+    return {Arrive::Take, leaves};
+}
+```
+
+### 18. Notional and equity of linear and inverse contracts
+
+The notional of a linear contract is the contract multiplier times price times quantity. Equity is cash plus the multiplier times position times price, minus fees. The notional of an inverse contract is the multiplier times quantity divided by price. Equity is minus the cash balance, minus the multiplier times position divided by price, minus fees. A fill that rests in the queue uses the resting rate. A fill that crosses the book uses the taking rate. The buyer rate and the seller rate are also multiplied by notional. When the fee is charged on quantity, the resting rate or the taking rate multiplies the filled quantity, and the buyer rate or the seller rate multiplies notional.
+
+```cpp
+struct LinBook {
+    double mult{1};
+    double cash{0};
+    double pos{0};
+    double fee{0};
+    double notion(double px, double qty) const { return mult * px * qty; }
+    double equity(double px) const { return cash + mult * pos * px - fee; }
+};
+
+struct InvBook {
+    double mult{1};
+    double cash{0};
+    double pos{0};
+    double fee{0};
+    double notion(double px, double qty) const { return px == 0 ? 0 : mult * qty / px; }
+    double equity(double px) const { return px == 0 ? 0 : -cash - mult * pos / px - fee; }
+};
+
+double charge(double notion, double qty, bool rested, bool buy, bool by_qty,
+              double rest_rate, double take_rate, double buy_rate, double sell_rate) {
+    double side = buy ? buy_rate : sell_rate;
+    double leg = rested ? rest_rate : take_rate;
+    if (by_qty) return leg * qty + side * notion;
+    return (leg + side) * notion;
+}
+```
+
+**A fill moves position and cash by side**
+
+A buy adds the filled quantity to position and subtracts notional from cash. A sell subtracts the filled quantity from position and adds notional to cash. The fee is added to the cumulative fee, the fill count increases by one, and the filled quantity and the notional are accumulated separately. Linear notional is the multiplier times price times quantity. Inverse notional is the multiplier times quantity divided by price. Equity uses the cash, position, and cumulative fee after the fill is booked.
+
+```cpp
+#include <cstdint>
+
+struct Acct {
+    double cash{0};
+    double pos{0};
+    double fee{0};
+    int64_t fills{0};
+    double qty_sum{0};
+    double value_sum{0};
+};
+
+void book_fill(Acct& a, double notion, double qty, bool buy, double fee) {
+    double sgn = buy ? 1.0 : -1.0;
+    a.pos += qty * sgn;
+    a.cash -= notion * sgn;
+    a.fee += fee;
+    ++a.fills;
+    a.qty_sum += qty;
+    a.value_sum += notion;
+}
 ```
 
 
