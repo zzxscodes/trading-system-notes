@@ -4233,6 +4233,56 @@ bool dequeue(T& item) {
 + `release` 发布写入槽位数据，`acquire` 读取对端发布进度；
 + `alignas(64)` 与该优化配合使用，能进一步降低 false sharing。
 
+**这一批取完再写消费序号**
+
+消费者先把生产者发布的序号记在本地。还没取到这个序号时，后面的格子直接读，先不写共享的消费序号。取到这个序号，再做一次 release 写。生产者自己记着上次看到的消费序号。下一个序号减去环长，还没有超过这个本地值，槽还没用完，不去读共享的消费序号。超过了，用 acquire 读共享消费序号，写回本地。这一批还没取完，生产者看到的仍是上一批结束时的消费序号，环里要留得出整批的空位。这次仍然满，写入失败。
+
+```cpp
+template<class T, uint32_t N>
+class HoldTakeSpsc {
+    static_assert((N & (N - 1)) == 0, "N power of two");
+    T slot_[N]{};
+    alignas(64) std::atomic<uint64_t> published_{0};
+    alignas(64) std::atomic<uint64_t> taken_{0};
+    uint64_t claimed_{0};
+    uint64_t seen_taken_{0};
+    uint64_t cursor_{0};
+    uint64_t watermark_{0};
+public:
+    bool push(const T& msg) {
+        uint64_t seq = claimed_ + 1;
+        if (seq > N) {
+            uint64_t need = seq - N;
+            if (need > seen_taken_) {
+                seen_taken_ = taken_.load(std::memory_order_acquire);
+                if (need > seen_taken_) return false;
+            }
+        }
+        slot_[(seq - 1) & (N - 1)] = msg;
+        claimed_ = seq;
+        published_.store(seq, std::memory_order_release);
+        return true;
+    }
+    bool pop(T& out) {
+        if (cursor_ < watermark_) {
+            ++cursor_;
+            out = slot_[(cursor_ - 1) & (N - 1)];
+            if (cursor_ == watermark_)
+                taken_.store(cursor_, std::memory_order_release);
+            return true;
+        }
+        uint64_t pub = published_.load(std::memory_order_acquire);
+        if (cursor_ == pub) return false;
+        watermark_ = pub;
+        ++cursor_;
+        out = slot_[(cursor_ - 1) & (N - 1)];
+        if (cursor_ == watermark_)
+            taken_.store(cursor_, std::memory_order_release);
+        return true;
+    }
+};
+```
+
 **不留空槽的判满**
 
 上面把下标按掩码折回，用 `(write + 1) & mask == read` 判满，容量里要空出一格，否则空和满都表现为两个下标按掩码相等。另一种写法让 `head`、`tail` 只增不减，掩码只用于取数组下标。`head == tail` 为空，`head - tail == capacity` 为满，分配的槽全部可用。无符号相减要分开这两个距离，容量不能超过下标类型取值范围的一半：32 位下标最多 `2^31` 个槽。
@@ -9616,6 +9666,44 @@ struct TagPack {
 };
 ```
 
+**短代码按一个机器字比较**
+
+合约代码、交易所短名这一类长度在编译期就定死，并且落在 8 字节以内的字节串，比较时按字加载。长度正好是 4 或 8，两边各加载一个整数，相等就是同一串。长度是 3、5、6、7 时，加载会多读出几个字节，异或之后用掩码把多出来的字节清掉，结果为 0 才算相同。交易机器是小端，掩码留在低位，低位就是字符串开头。调用方要保证这两段后面还有被多读的那几个字节，否则这次加载越界。
+
+```cpp
+#include <cstdint>
+#include <cstring>
+
+bool same_code(const char* a, const char* b, int n) {
+    if (n == 8) {
+        uint64_t x, y;
+        std::memcpy(&x, a, 8);
+        std::memcpy(&y, b, 8);
+        return x == y;
+    }
+    if (n == 4) {
+        uint32_t x, y;
+        std::memcpy(&x, a, 4);
+        std::memcpy(&y, b, 4);
+        return x == y;
+    }
+    if (n >= 5 && n <= 7) {
+        uint64_t x, y;
+        std::memcpy(&x, a, 8);
+        std::memcpy(&y, b, 8);
+        uint64_t mask = (~uint64_t{0}) >> ((8 - n) * 8);
+        return ((x ^ y) & mask) == 0;
+    }
+    if (n == 3) {
+        uint32_t x, y;
+        std::memcpy(&x, a, 4);
+        std::memcpy(&y, b, 4);
+        return ((x ^ y) & 0x00ffffffu) == 0;
+    }
+    return std::memcmp(a, b, (size_t)n) == 0;
+}
+```
+
 ### 21. 无法内联的函数调用优化
 **（1）递归（Recursion）：栈开销与缓存失效**
 
@@ -11249,6 +11337,41 @@ void flush_denormals() {
 }
 ```
 
+**标记用首字节和末字节一起滤**
+
+在报文字节里找一段已知长度的标记。一个起点的首字节和末字节同时对上，中间才有必要再比。一次装入 32 个字节，首字节、末字节分别和标记的首、末比较，两个比较结果按位与，收成一个整数。整数里为 1 的位才做中间比较。标记长度是 1 或 2 时没有中间字节。窗口尾部装不满 32 字节时，剩下的起点逐字节看首尾，再比中间。
+
+```cpp
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <immintrin.h>
+
+size_t find_mark(const char* buf, size_t n, const char* mark, size_t k) {
+    if (k == 0 || n < k) return n;
+    const __m256i head_b = _mm256_set1_epi8(mark[0]);
+    const __m256i tail_b = _mm256_set1_epi8(mark[k - 1]);
+    size_t i = 0;
+    for (; i + 32 + k - 1 <= n; i += 32) {
+        __m256i head = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(buf + i));
+        __m256i tail = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(buf + i + k - 1));
+        __m256i both = _mm256_and_si256(_mm256_cmpeq_epi8(head_b, head),
+                                        _mm256_cmpeq_epi8(tail_b, tail));
+        uint32_t bits = (uint32_t)_mm256_movemask_epi8(both);
+        while (bits) {
+            unsigned s = (unsigned)__builtin_ctz(bits);
+            if (k <= 2 || std::memcmp(buf + i + s + 1, mark + 1, k - 2) == 0)
+                return i + s;
+            bits &= bits - 1;
+        }
+    }
+    for (; i + k <= n; ++i) {
+        if (buf[i] != mark[0] || buf[i + k - 1] != mark[k - 1]) continue;
+        if (k <= 2 || std::memcmp(buf + i + 1, mark + 1, k - 2) == 0) return i;
+    }
+    return n;
+}
+```
 
 **使用向量类（Vector classes）**
 
@@ -32670,6 +32793,58 @@ aggressive_route_buy(std::vector<VenueTopBuy> venues,
 
 **扩展**：每 venue 最大可买量 `venue_limit`、最小下单单位 `lot_size` 时，应对 `take` 做 `floor(take, lot)` 并处理碎股规则。
 
+**看见的数量先扣掉还没回来的吃单**
+
+几条策略同时读同一条卖档，都会把显示数量当成还能吃的量。每条簿留一个已占用数量。这次能吃的量是显示数量减去已占用，再和想吃的量取较小值。结果大于 0，才把这个结果加进已占用。委托到了终态，按当时占用的数量减回去。行情时间和上次占用时间的差取绝对值。这个差超过一笔委托从发出到应答的时间，显示数量已经是新的一档，已占用清零，时间改成这次行情的时间。只有一个策略线程吃这条簿时，已占用是普通整数。开盘前已经确定还有第二个线程要吃，占用和清零这两步才加自旋。盘中不再改这个选择。
+
+```cpp
+struct ShownHold {
+    int32_t held{0};
+    int64_t mark_ns{0};
+    int64_t fresh_ns{100000};
+
+    int32_t claim(int32_t want, int32_t shown, int64_t book_ns) {
+        int64_t gap = book_ns - mark_ns;
+        if (gap < 0) gap = -gap;
+        if (gap > fresh_ns) {
+            held = 0;
+            mark_ns = book_ns;
+        }
+        int32_t room = shown - held;
+        if (room > want) room = want;
+        if (room <= 0) return 0;
+        held += room;
+        return room;
+    }
+    void release(int32_t qty) {
+        held -= qty;
+        if (held < 0) held = 0;
+    }
+};
+
+struct ShownGate {
+    ShownHold hold{};
+    std::atomic_flag spin{};
+    bool shared{false};
+
+    int32_t claim(int32_t want, int32_t shown, int64_t book_ns) {
+        if (!shared) return hold.claim(want, shown, book_ns);
+        while (spin.test_and_set(std::memory_order_acquire)) _mm_pause();
+        int32_t q = hold.claim(want, shown, book_ns);
+        spin.clear(std::memory_order_release);
+        return q;
+    }
+    void release(int32_t qty) {
+        if (!shared) {
+            hold.release(qty);
+            return;
+        }
+        while (spin.test_and_set(std::memory_order_acquire)) _mm_pause();
+        hold.release(qty);
+        spin.clear(std::memory_order_release);
+    }
+};
+```
 
 **Passive 分配（按权重拆剩余量）**
 
@@ -34829,6 +35004,88 @@ struct Page {
 };
 ```
 
+**下一页先在旁路映射好**
+
+写线程里做文件页映射要进内核。日志的页号每次加一，下一页可以提前映射好。写线程留着当前页、上一页和下一页三块映射。要写的页号已经等于下一页，三块映射轮转，写线程里没有系统调用。换下来的那块交给旁路线程解除映射，再把后面那一页映射进空出来的位置。按序号随机读用第四块映射，读过的页留着，下一次仍是这一页就直接用。这块不参与三块轮转，补缺不会把正在写的页解掉。
+
+```cpp
+#include <cstdint>
+#include <sys/mman.h>
+
+struct FilePage {
+    uint8_t* base{nullptr};
+    int32_t index{-1};
+};
+
+void hand_off(FilePage& dst, FilePage& src) {
+    dst = src;
+    src.base = nullptr;
+    src.index = -1;
+}
+
+FilePage roll_if_ready(FilePage& older, FilePage& current, FilePage& upcoming, int32_t want) {
+    FilePage dropped{};
+    dropped.index = -1;
+    if (want != upcoming.index) return dropped;
+    dropped = older;
+    hand_off(older, current);
+    hand_off(current, upcoming);
+    return dropped;
+}
+
+uint8_t* map_page(int fd, int32_t index, size_t bytes) {
+    off_t at = off_t(index) * off_t(bytes);
+    void* p = mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, at);
+    if (p == MAP_FAILED) return nullptr;
+    return static_cast<uint8_t*>(p);
+}
+```
+
+**应用序号落到定长索引槽**
+
+正文按追加写。按应用序号取一条时，若顺着正文扫，序号越大越慢。索引文件每条 16 字节：8 字节是正文位置，4 字节是写进去的序号。页长是 2 的幂，一页能装下的槽数也是 2 的幂。页号用序号除以每页槽数，页内下标用余数。读出的序号和要查的序号不一致，这格还不是这条记录。缺号把正文位置写成全 1，序号照写，空洞和从未写过就能分开。整段重放仍走正文文件，索引只负责按序号取一条。
+
+```cpp
+struct IdxSlot {
+    uint64_t body{0};
+    uint32_t seq{0};
+    uint32_t unused{0};
+};
+
+struct SeqFile {
+    static constexpr uint32_t kBytes = 1u << 21;
+    static constexpr uint32_t kPer = kBytes / uint32_t(sizeof(IdxSlot));
+    uint8_t* base{nullptr};
+    uint32_t page{0xffffffffu};
+
+    IdxSlot* at(uint32_t seq) {
+        uint32_t pg = seq / kPer;
+        if (base == nullptr || pg != page) return nullptr;
+        return reinterpret_cast<IdxSlot*>(base) + (seq % kPer);
+    }
+
+    void write_slot(uint32_t seq, uint64_t body) {
+        IdxSlot* s = at(seq);
+        if (s == nullptr) return;
+        s->body = body;
+        s->seq = seq;
+    }
+
+    void write_gap(uint32_t seq) {
+        IdxSlot* s = at(seq);
+        if (s == nullptr) return;
+        s->body = ~uint64_t{0};
+        s->seq = seq;
+    }
+
+    bool read_slot(uint32_t seq, uint64_t& body) {
+        IdxSlot* s = at(seq);
+        if (s == nullptr || s->seq != seq || s->body == ~uint64_t{0}) return false;
+        body = s->body;
+        return true;
+    }
+};
+```
 
 **11. 三块等长分区轮转，字节位置一直往前加**
 
@@ -34904,6 +35161,66 @@ struct ControlMsg {
     char kind[32]{};
     char body[512]{};
 };
+```
+
+**回报按高优先的环先取，一轮只取有限几条**
+
+策略线程先跑完这一轮行情，再从回报环取事件。每条环只有一个写入线程。读取从最后一条环开始，这条空了再看前一条。一轮取到预算条数就停，剩下的留到下一轮。预算一般是一两笔。回报堆积时，下一轮行情不会被整段回报堵住。订单表只在这条线程上改。别的线程只往自己的环里放。新的累计成交比记下的大，差值就是这次要入账的数量，记下的值改成新的累计。
+
+```cpp
+struct OrdNote {
+    uint32_t ord_id{0};
+    int32_t cum{0};
+    uint8_t done{0};
+};
+
+struct NoteLane {
+    OrdNote slot[64]{};
+    std::atomic<uint32_t> head{0};
+    std::atomic<uint32_t> tail{0};
+
+    bool pop(OrdNote& o) {
+        uint32_t h = head.load(std::memory_order_relaxed);
+        uint32_t t = tail.load(std::memory_order_acquire);
+        if (h == t) return false;
+        o = slot[h & 63];
+        head.store(h + 1, std::memory_order_release);
+        return true;
+    }
+};
+
+struct LiveOrd {
+    int32_t seen_cum{0};
+    int32_t last_add{0};
+    uint8_t done{0};
+};
+
+int take_notes(NoteLane* lane, int nlane, int budget, LiveOrd* live, uint32_t live_n) {
+    int got = 0;
+    while (got < budget) {
+        bool hit = false;
+        for (int i = nlane - 1; i >= 0; --i) {
+            OrdNote note;
+            if (!lane[i].pop(note)) continue;
+            if (note.ord_id < live_n) {
+                LiveOrd& row = live[note.ord_id];
+                int32_t add = note.cum - row.seen_cum;
+                if (add > 0) {
+                    row.last_add = add;
+                    row.seen_cum = note.cum;
+                } else {
+                    row.last_add = 0;
+                }
+                if (note.done) row.done = 1;
+            }
+            hit = true;
+            break;
+        }
+        if (!hit) break;
+        ++got;
+    }
+    return got;
+}
 ```
 
 **13. 结构化日志与指标写入共享上报池**
@@ -35406,6 +35723,96 @@ void on_cut_tape(DeskOrder& o, int kind, int64_t qty, int err) {
 }
 ```
 
+**成交更正和成交撤销按原成交回改累计**
+
+每笔成交按成交编号记下数量和价格。更正和撤销带的是被引用的那笔编号。柜台常常不把原数量和原价格填对。先按编号取出本地记下的数量和价格。撤销用它们作为被撤掉的数量和价格。更正把它们当作原数量和原价格。撤销从累计成交减去这笔数量，从成交金额减去数量乘价格。更正的累计成交加上新数量减原数量，成交金额加上新数量乘新价格，再减去原数量乘原价格。累计或金额小于 0 时写成 0。累计回到 0，成交金额清零，状态改回已报。累计仍大于 0，按是否达到委托量写成部分成交或全部成交。同一成交编号再出现一次，直接丢掉。
+
+```cpp
+enum class LiveSt : uint8_t { Acked, Part, Done };
+
+struct OrdCum {
+    int32_t order_qty{0};
+    int32_t cum{0};
+    int64_t notional{0};
+    LiveSt st{LiveSt::Acked};
+
+    void add_fill(int32_t q, int64_t px) {
+        cum += q;
+        notional += int64_t(q) * px;
+        settle();
+    }
+    void undo(int32_t q, int64_t px) {
+        cum -= q;
+        notional -= int64_t(q) * px;
+        settle();
+    }
+    void revise(int32_t new_q, int64_t new_px, int32_t old_q, int64_t old_px) {
+        cum += new_q - old_q;
+        notional += int64_t(new_q) * new_px - int64_t(old_q) * old_px;
+        settle();
+    }
+    void settle() {
+        if (cum < 0) cum = 0;
+        if (notional < 0) notional = 0;
+        if (cum == 0) {
+            notional = 0;
+            st = LiveSt::Acked;
+        } else {
+            st = cum >= order_qty ? LiveSt::Done : LiveSt::Part;
+        }
+    }
+};
+
+struct ExecSlot {
+    uint64_t id{0};
+    int32_t qty{0};
+    int64_t px{0};
+    uint8_t used{0};
+    uint8_t dropped{0};
+};
+
+struct ExecTable {
+    static constexpr uint32_t N = 1024;
+    ExecSlot slot[N]{};
+
+    ExecSlot* probe(uint64_t id, bool vacant) {
+        uint32_t i = uint32_t(id) & (N - 1);
+        for (uint32_t n = 0; n < N; ++n) {
+            ExecSlot* s = &slot[(i + n) & (N - 1)];
+            if (s->used && s->id == id) return vacant ? nullptr : s;
+            if (!s->used) return vacant ? s : nullptr;
+        }
+        return nullptr;
+    }
+    bool remember(uint64_t id, int32_t qty, int64_t px) {
+        ExecSlot* s = probe(id, true);
+        if (!s) return false;
+        s->id = id;
+        s->qty = qty;
+        s->px = px;
+        s->used = 1;
+        return true;
+    }
+};
+
+bool apply_cancel(ExecTable& tab, OrdCum& pos, uint64_t ref_id, uint64_t cancel_id) {
+    ExecSlot* orig = tab.probe(ref_id, false);
+    if (!orig || orig->dropped) return false;
+    if (!tab.remember(cancel_id, orig->qty, orig->px)) return false;
+    pos.undo(orig->qty, orig->px);
+    orig->dropped = 1;
+    return true;
+}
+
+bool apply_correct(ExecTable& tab, OrdCum& pos, uint64_t ref_id, uint64_t new_id,
+                   int32_t new_q, int64_t new_px) {
+    ExecSlot* orig = tab.probe(ref_id, false);
+    if (!orig || orig->dropped) return false;
+    if (!tab.remember(new_id, new_q, new_px)) return false;
+    pos.revise(new_q, new_px, orig->qty, orig->px);
+    return true;
+}
+```
 
 ### 20. 关联订单元数据
 配对交易、多腿同时下发时，每条腿仍是独立报单，但需要在同一生命周期里一起观察。订单头里放关联组号、组内总腿数、本腿序号：组号为 0 表示独立单；总腿数为 1 表示无关联。策略与风控按组号聚合进度，不必另建外挂表。
@@ -37548,6 +37955,66 @@ bool rest_tail(MatchLevel& lv, RestNode* pool, uint32_t slot, int64_t qty) {
     lv.total += qty;
     return true;
 }
+```
+
+**固定档数的行情簿只交换记录指针**
+
+交易所增量按档位名次给价和量，档数有上限。档位数组里直接放价和量时，插入和删除要把后面每一档的内容往下抄。数组里改为放指向档位记录的指针，记录在启动时按最大档数备好。插入从最后一档往前挪指针，被挤出末档的那份记录放到空出来的名次上，再写入新价和新量。删除把被删档的记录放到最后并清掉，前面的指针依次前移。从最优价删到某一档时，先把这段记录清掉，指针暂存在旁边的数组里，活着的档位前移，清掉的记录再接到末尾。写线程就地改这份簿。策略线程要读时，把各档的价和量抄进自己的数组。两次抄之间被盖掉的中间价不再单独留下。卖盘用同一套记录和指针。
+
+```cpp
+struct RankPx {
+    int64_t px{0};
+    int32_t qty{0};
+    void clear() { px = 0; qty = 0; }
+};
+
+template<int Depth>
+struct RankBook {
+    RankPx rec[Depth]{};
+    RankPx* bid[Depth]{};
+    RankPx* hold[Depth]{};
+
+    RankBook() {
+        for (int i = 0; i < Depth; ++i) bid[i] = &rec[i];
+    }
+
+    void insert_bid(int at, int64_t px, int32_t qty) {
+        if (at < 0 || at >= Depth) return;
+        if (at < Depth - 1) {
+            RankPx* tail = bid[Depth - 1];
+            for (int i = Depth - 1; i > at; --i) bid[i] = bid[i - 1];
+            bid[at] = tail;
+        }
+        bid[at]->px = px;
+        bid[at]->qty = qty;
+    }
+
+    void erase_bid(int at) {
+        if (at < 0 || at >= Depth) return;
+        RankPx* gone = bid[at];
+        for (int i = at; i < Depth - 1; ++i) bid[i] = bid[i + 1];
+        bid[Depth - 1] = gone;
+        gone->clear();
+    }
+
+    void erase_through(int last) {
+        if (last < 0 || last >= Depth) return;
+        for (int i = 0; i <= last; ++i) {
+            bid[i]->clear();
+            hold[i] = bid[i];
+        }
+        int w = 0;
+        for (int i = last + 1; i < Depth; ++i) bid[w++] = bid[i];
+        for (int i = 0; i <= last; ++i) bid[w++] = hold[i];
+    }
+
+    void copy_out(RankPx* dst) const {
+        for (int i = 0; i < Depth; ++i) {
+            dst[i].px = bid[i]->px;
+            dst[i].qty = bid[i]->qty;
+        }
+    }
+};
 ```
 
 ### 42. 稀疏价格域的分块价位槽

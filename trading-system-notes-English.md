@@ -4225,6 +4225,56 @@ Implementation notes:
 - `release` publishes slot writes, `acquire` observes peer progress;
 - combine with `alignas(64)` to further reduce false sharing.
 
+**Write the consumed sequence when this batch is finished**
+
+The consumer copies the producer's published sequence into a local watermark. While its cursor is still behind that watermark, it reads the next slot and leaves the shared consumed sequence unchanged. When the cursor catches the watermark, one release store publishes it. The producer keeps the last consumed sequence it observed. If the next sequence minus the ring length is still within that local value, a slot is still free and the shared consumed sequence is not read. Past that point the producer loads the shared consumed sequence with acquire and keeps the value. Until the batch is finished, the producer still sees the consumed sequence from the end of the previous batch, so the ring needs room for the whole batch. If it is still full, the write fails.
+
+```cpp
+template<class T, uint32_t N>
+class HoldTakeSpsc {
+    static_assert((N & (N - 1)) == 0, "N power of two");
+    T slot_[N]{};
+    alignas(64) std::atomic<uint64_t> published_{0};
+    alignas(64) std::atomic<uint64_t> taken_{0};
+    uint64_t claimed_{0};
+    uint64_t seen_taken_{0};
+    uint64_t cursor_{0};
+    uint64_t watermark_{0};
+public:
+    bool push(const T& msg) {
+        uint64_t seq = claimed_ + 1;
+        if (seq > N) {
+            uint64_t need = seq - N;
+            if (need > seen_taken_) {
+                seen_taken_ = taken_.load(std::memory_order_acquire);
+                if (need > seen_taken_) return false;
+            }
+        }
+        slot_[(seq - 1) & (N - 1)] = msg;
+        claimed_ = seq;
+        published_.store(seq, std::memory_order_release);
+        return true;
+    }
+    bool pop(T& out) {
+        if (cursor_ < watermark_) {
+            ++cursor_;
+            out = slot_[(cursor_ - 1) & (N - 1)];
+            if (cursor_ == watermark_)
+                taken_.store(cursor_, std::memory_order_release);
+            return true;
+        }
+        uint64_t pub = published_.load(std::memory_order_acquire);
+        if (cursor_ == pub) return false;
+        watermark_ = pub;
+        ++cursor_;
+        out = slot_[(cursor_ - 1) & (N - 1)];
+        if (cursor_ == watermark_)
+            taken_.store(cursor_, std::memory_order_release);
+        return true;
+    }
+};
+```
+
 **Full capacity without a spare slot**
 
 The versions above fold indexes with a mask and treat the queue as full when `(write + 1) & mask == read`. One slot stays unused, because empty and full would otherwise both look like equal masked indexes. Another version keeps `head` and `tail` as monotonically increasing counters and applies the mask only when indexing the array. `head == tail` is empty, and `head - tail == capacity` is full, so every allocated slot is usable. Unsigned subtraction can tell those two distances apart only when capacity is at most half the range of the index type: a 32-bit index holds at most `2^31` slots.
@@ -9625,6 +9675,44 @@ struct TagPack {
 };
 ```
 
+**Short codes compare as one machine word**
+
+Contract codes and short venue names have a length fixed at compile time and fit in eight bytes. Compare them by loading a machine word. When the length is exactly 4 or 8, load one integer from each side; equal words are the same code. Lengths 3, 5, 6, and 7 load a few bytes past the code. XOR the words and clear those extra bytes with a mask; a zero result is a match. On a little-endian machine the mask keeps the low bits, which are the start of the string. The caller leaves readable padding after both sides, because the load extends past the code.
+
+```cpp
+#include <cstdint>
+#include <cstring>
+
+bool same_code(const char* a, const char* b, int n) {
+    if (n == 8) {
+        uint64_t x, y;
+        std::memcpy(&x, a, 8);
+        std::memcpy(&y, b, 8);
+        return x == y;
+    }
+    if (n == 4) {
+        uint32_t x, y;
+        std::memcpy(&x, a, 4);
+        std::memcpy(&y, b, 4);
+        return x == y;
+    }
+    if (n >= 5 && n <= 7) {
+        uint64_t x, y;
+        std::memcpy(&x, a, 8);
+        std::memcpy(&y, b, 8);
+        uint64_t mask = (~uint64_t{0}) >> ((8 - n) * 8);
+        return ((x ^ y) & mask) == 0;
+    }
+    if (n == 3) {
+        uint32_t x, y;
+        std::memcpy(&x, a, 4);
+        std::memcpy(&y, b, 4);
+        return ((x ^ y) & 0x00ffffffu) == 0;
+    }
+    return std::memcmp(a, b, (size_t)n) == 0;
+}
+```
+
 ### 21. Function call optimization that cannot be inlined
 **(1) Recursion: stack overhead and cache invalidation**
 
@@ -11282,6 +11370,41 @@ void flush_denormals() {
 }
 ```
 
+**Filter a marker by its first and last bytes together**
+
+A marker of known length is searched in the raw bytes of a message. The bytes in the middle are compared only when the first byte and the last byte of a candidate both match. One load takes 32 bytes. The first byte and the last byte are each compared with the marker, the two compare results are combined with a bitwise and, and the vector is reduced to an integer. Only bits that are 1 run the middle compare. A marker of length 1 or 2 has no middle. When the tail of the window cannot fill 32 bytes, the remaining starts check the first and last bytes one by one, then the middle.
+
+```cpp
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <immintrin.h>
+
+size_t find_mark(const char* buf, size_t n, const char* mark, size_t k) {
+    if (k == 0 || n < k) return n;
+    const __m256i head_b = _mm256_set1_epi8(mark[0]);
+    const __m256i tail_b = _mm256_set1_epi8(mark[k - 1]);
+    size_t i = 0;
+    for (; i + 32 + k - 1 <= n; i += 32) {
+        __m256i head = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(buf + i));
+        __m256i tail = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(buf + i + k - 1));
+        __m256i both = _mm256_and_si256(_mm256_cmpeq_epi8(head_b, head),
+                                        _mm256_cmpeq_epi8(tail_b, tail));
+        uint32_t bits = (uint32_t)_mm256_movemask_epi8(both);
+        while (bits) {
+            unsigned s = (unsigned)__builtin_ctz(bits);
+            if (k <= 2 || std::memcmp(buf + i + s + 1, mark + 1, k - 2) == 0)
+                return i + s;
+            bits &= bits - 1;
+        }
+    }
+    for (; i + k <= n; ++i) {
+        if (buf[i] != mark[0] || buf[i + k - 1] != mark[k - 1]) continue;
+        if (k <= 2 || std::memcmp(buf + i + 1, mark + 1, k - 2) == 0) return i;
+    }
+    return n;
+}
+```
 
 **Using Vector classes**
 
@@ -32684,6 +32807,58 @@ aggressive_route_buy(std::vector<VenueTopBuy> came,
 
 **Extension**: Maximum purchase amount per venue `venue_limit`, minimum order unit `lot_size` time, cope with `take` Do `floor(take, lot)` and dealing with odd lot rules.
 
+**Shown size is net of takes that have not come back**
+
+Several strategies reading the same ask each treat the displayed size as still available. The book keeps a held quantity. The size that can be taken now is the displayed size minus held, then the smaller of that and the wanted size. A positive result is added to held. When the order reaches a terminal state, the quantity held for it is subtracted. If the absolute difference between the book time and the last hold time exceeds the time from sending an order to its reply, the displayed size is a new picture: held is cleared and the stored time becomes this book time. With one strategy thread on the book, held is a plain integer. If a second thread is attached before the open, hold and clear take a spin lock. That choice stays fixed through the session.
+
+```cpp
+struct ShownHold {
+    int32_t held{0};
+    int64_t mark_ns{0};
+    int64_t fresh_ns{100000};
+
+    int32_t claim(int32_t want, int32_t shown, int64_t book_ns) {
+        int64_t gap = book_ns - mark_ns;
+        if (gap < 0) gap = -gap;
+        if (gap > fresh_ns) {
+            held = 0;
+            mark_ns = book_ns;
+        }
+        int32_t room = shown - held;
+        if (room > want) room = want;
+        if (room <= 0) return 0;
+        held += room;
+        return room;
+    }
+    void release(int32_t qty) {
+        held -= qty;
+        if (held < 0) held = 0;
+    }
+};
+
+struct ShownGate {
+    ShownHold hold{};
+    std::atomic_flag spin{};
+    bool shared{false};
+
+    int32_t claim(int32_t want, int32_t shown, int64_t book_ns) {
+        if (!shared) return hold.claim(want, shown, book_ns);
+        while (spin.test_and_set(std::memory_order_acquire)) _mm_pause();
+        int32_t q = hold.claim(want, shown, book_ns);
+        spin.clear(std::memory_order_release);
+        return q;
+    }
+    void release(int32_t qty) {
+        if (!shared) {
+            hold.release(qty);
+            return;
+        }
+        while (spin.test_and_set(std::memory_order_acquire)) _mm_pause();
+        hold.release(qty);
+        spin.clear(std::memory_order_release);
+    }
+};
+```
 
 **Passive allocation (split the remaining amount according to weight)**
 
@@ -34842,6 +35017,88 @@ struct Page {
 };
 ```
 
+**Map the next page off the writing thread**
+
+Mapping a file page on the writing thread enters the kernel. The page number of the log increases by one, so the next page can be mapped ahead of time. The writing thread keeps three mappings: the current page, the previous page, and the next page. When the page it needs is already the next mapping, the three mappings rotate and the writing thread makes no system call. The mapping that drops out is unmapped on a side thread, which then maps the page after that into the free slot. A random read by sequence uses a fourth mapping. A page already read stays mapped, and the next read of the same page uses it directly. That mapping is not part of the rotation, so a gap fill does not unmap the page being written.
+
+```cpp
+#include <cstdint>
+#include <sys/mman.h>
+
+struct FilePage {
+    uint8_t* base{nullptr};
+    int32_t index{-1};
+};
+
+void hand_off(FilePage& dst, FilePage& src) {
+    dst = src;
+    src.base = nullptr;
+    src.index = -1;
+}
+
+FilePage roll_if_ready(FilePage& older, FilePage& current, FilePage& upcoming, int32_t want) {
+    FilePage dropped{};
+    dropped.index = -1;
+    if (want != upcoming.index) return dropped;
+    dropped = older;
+    hand_off(older, current);
+    hand_off(current, upcoming);
+    return dropped;
+}
+
+uint8_t* map_page(int fd, int32_t index, size_t bytes) {
+    off_t at = off_t(index) * off_t(bytes);
+    void* p = mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, at);
+    if (p == MAP_FAILED) return nullptr;
+    return static_cast<uint8_t*>(p);
+}
+```
+
+**An application sequence lands in a fixed index slot**
+
+The body is append-only. Scanning it to fetch one application sequence gets slower as the sequence grows. The index file stores 16 bytes per sequence: 8 bytes for the position in the body, 4 bytes for the sequence that was written. The page length is a power of two, and so is the number of slots on a page. The page number is the sequence divided by the slots per page, and the index inside the page is the remainder. If the sequence read back does not match the sequence being looked up, the slot is not that record. A gap writes the body position as all ones and still writes the sequence, so a hole is distinct from a slot that was never written. A full replay still walks the body file. The index is only for fetching one sequence.
+
+```cpp
+struct IdxSlot {
+    uint64_t body{0};
+    uint32_t seq{0};
+    uint32_t unused{0};
+};
+
+struct SeqFile {
+    static constexpr uint32_t kBytes = 1u << 21;
+    static constexpr uint32_t kPer = kBytes / uint32_t(sizeof(IdxSlot));
+    uint8_t* base{nullptr};
+    uint32_t page{0xffffffffu};
+
+    IdxSlot* at(uint32_t seq) {
+        uint32_t pg = seq / kPer;
+        if (base == nullptr || pg != page) return nullptr;
+        return reinterpret_cast<IdxSlot*>(base) + (seq % kPer);
+    }
+
+    void write_slot(uint32_t seq, uint64_t body) {
+        IdxSlot* s = at(seq);
+        if (s == nullptr) return;
+        s->body = body;
+        s->seq = seq;
+    }
+
+    void write_gap(uint32_t seq) {
+        IdxSlot* s = at(seq);
+        if (s == nullptr) return;
+        s->body = ~uint64_t{0};
+        s->seq = seq;
+    }
+
+    bool read_slot(uint32_t seq, uint64_t& body) {
+        IdxSlot* s = at(seq);
+        if (s == nullptr || s->seq != seq || s->body == ~uint64_t{0}) return false;
+        body = s->body;
+        return true;
+    }
+};
+```
 
 **11. Three equal partitions rotate, and the byte position keeps increasing**
 
@@ -34917,6 +35174,66 @@ struct ControlMsg {
     char kind[32]{};
     char body[512]{};
 };
+```
+
+**Take order reports from the higher lane first, and only a few per pass**
+
+The strategy thread finishes this pass of the book, then takes order reports. Each lane has one writing thread. The read starts at the last lane and moves to the previous lane when that one is empty. A pass stops at its budget and leaves the rest for the next pass. The budget is usually one or two reports. When reports pile up, the next book pass is not stuck behind the whole pile. The order table is updated only on this thread. Other threads only push into their own lane. When the new cumulative fill is larger than the value already recorded, the difference is the quantity to book, and the recorded value becomes the new cumulative.
+
+```cpp
+struct OrdNote {
+    uint32_t ord_id{0};
+    int32_t cum{0};
+    uint8_t done{0};
+};
+
+struct NoteLane {
+    OrdNote slot[64]{};
+    std::atomic<uint32_t> head{0};
+    std::atomic<uint32_t> tail{0};
+
+    bool pop(OrdNote& o) {
+        uint32_t h = head.load(std::memory_order_relaxed);
+        uint32_t t = tail.load(std::memory_order_acquire);
+        if (h == t) return false;
+        o = slot[h & 63];
+        head.store(h + 1, std::memory_order_release);
+        return true;
+    }
+};
+
+struct LiveOrd {
+    int32_t seen_cum{0};
+    int32_t last_add{0};
+    uint8_t done{0};
+};
+
+int take_notes(NoteLane* lane, int nlane, int budget, LiveOrd* live, uint32_t live_n) {
+    int got = 0;
+    while (got < budget) {
+        bool hit = false;
+        for (int i = nlane - 1; i >= 0; --i) {
+            OrdNote note;
+            if (!lane[i].pop(note)) continue;
+            if (note.ord_id < live_n) {
+                LiveOrd& row = live[note.ord_id];
+                int32_t add = note.cum - row.seen_cum;
+                if (add > 0) {
+                    row.last_add = add;
+                    row.seen_cum = note.cum;
+                } else {
+                    row.last_add = 0;
+                }
+                if (note.done) row.done = 1;
+            }
+            hit = true;
+            break;
+        }
+        if (!hit) break;
+        ++got;
+    }
+    return got;
+}
 ```
 
 **13. Structured logs and metrics into shared report pools**
@@ -35419,6 +35736,96 @@ void on_cut_tape(DeskOrder& o, int kind, int64_t qty, int err) {
 }
 ```
 
+**A trade correct or trade cancel rewrites the cumulative from the original fill**
+
+Each fill is stored under its execution id, with quantity and price. A correct or a cancel names the execution id it refers to. Venues often leave the original quantity and price wrong. Look up the stored quantity and price first. A cancel uses them as the quantity and price being removed. A correct treats them as the original quantity and price. A cancel subtracts that quantity from the cumulative fill and subtracts quantity times price from the traded amount. A correct adds the new quantity minus the original quantity to the cumulative fill, and adds new quantity times new price minus original quantity times original price to the traded amount. A negative cumulative or amount is clamped to 0. When the cumulative returns to 0, the traded amount is cleared and the status returns to acknowledged. When the cumulative is still above 0, the status is partial or filled according to whether it has reached the order quantity. The same execution id arriving again is dropped.
+
+```cpp
+enum class LiveSt : uint8_t { Acked, Part, Done };
+
+struct OrdCum {
+    int32_t order_qty{0};
+    int32_t cum{0};
+    int64_t notional{0};
+    LiveSt st{LiveSt::Acked};
+
+    void add_fill(int32_t q, int64_t px) {
+        cum += q;
+        notional += int64_t(q) * px;
+        settle();
+    }
+    void undo(int32_t q, int64_t px) {
+        cum -= q;
+        notional -= int64_t(q) * px;
+        settle();
+    }
+    void revise(int32_t new_q, int64_t new_px, int32_t old_q, int64_t old_px) {
+        cum += new_q - old_q;
+        notional += int64_t(new_q) * new_px - int64_t(old_q) * old_px;
+        settle();
+    }
+    void settle() {
+        if (cum < 0) cum = 0;
+        if (notional < 0) notional = 0;
+        if (cum == 0) {
+            notional = 0;
+            st = LiveSt::Acked;
+        } else {
+            st = cum >= order_qty ? LiveSt::Done : LiveSt::Part;
+        }
+    }
+};
+
+struct ExecSlot {
+    uint64_t id{0};
+    int32_t qty{0};
+    int64_t px{0};
+    uint8_t used{0};
+    uint8_t dropped{0};
+};
+
+struct ExecTable {
+    static constexpr uint32_t N = 1024;
+    ExecSlot slot[N]{};
+
+    ExecSlot* probe(uint64_t id, bool vacant) {
+        uint32_t i = uint32_t(id) & (N - 1);
+        for (uint32_t n = 0; n < N; ++n) {
+            ExecSlot* s = &slot[(i + n) & (N - 1)];
+            if (s->used && s->id == id) return vacant ? nullptr : s;
+            if (!s->used) return vacant ? s : nullptr;
+        }
+        return nullptr;
+    }
+    bool remember(uint64_t id, int32_t qty, int64_t px) {
+        ExecSlot* s = probe(id, true);
+        if (!s) return false;
+        s->id = id;
+        s->qty = qty;
+        s->px = px;
+        s->used = 1;
+        return true;
+    }
+};
+
+bool apply_cancel(ExecTable& tab, OrdCum& pos, uint64_t ref_id, uint64_t cancel_id) {
+    ExecSlot* orig = tab.probe(ref_id, false);
+    if (!orig || orig->dropped) return false;
+    if (!tab.remember(cancel_id, orig->qty, orig->px)) return false;
+    pos.undo(orig->qty, orig->px);
+    orig->dropped = 1;
+    return true;
+}
+
+bool apply_correct(ExecTable& tab, OrdCum& pos, uint64_t ref_id, uint64_t new_id,
+                   int32_t new_q, int64_t new_px) {
+    ExecSlot* orig = tab.probe(ref_id, false);
+    if (!orig || orig->dropped) return false;
+    if (!tab.remember(new_id, new_q, new_px)) return false;
+    pos.revise(new_q, new_px, orig->qty, orig->px);
+    return true;
+}
+```
 
 ### 20. Linked-order metadata
 Pair trades and multi-leg submits still send each leg as its own order, but they must be observed together. Put a group id, leg count, and leg index on the header: group id 0 means standalone; leg count 1 means no linkage. Strategy and risk aggregate progress by group id without a side table.
@@ -37559,6 +37966,66 @@ bool rest_tail(MatchLevel& lv, RestNode* pool, uint32_t slot, int64_t qty) {
     lv.total += qty;
     return true;
 }
+```
+
+**A fixed-depth quote book only swaps record pointers**
+
+An exchange incremental book gives price and size by rank, and the depth has a fixed limit. When the level array stores price and size directly, an insert or delete copies every level after the change. Store pointers to level records instead, and allocate one record per rank at startup. An insert walks the pointers from the last rank toward the hole. The record pushed off the last rank is placed in the open rank, then the new price and size are written into it. A delete moves the removed record to the end and clears it, while the pointers in front shift forward. Deleting from the best price through a rank clears that prefix, keeps those pointers in a side array, shifts the live ranks forward, and appends the cleared records at the end. The writing thread updates this book in place. When a strategy thread reads, it copies each rank's price and size into its own array. Prices overwritten between two copies are not kept as separate states. The ask side is the same arrangement.
+
+```cpp
+struct RankPx {
+    int64_t px{0};
+    int32_t qty{0};
+    void clear() { px = 0; qty = 0; }
+};
+
+template<int Depth>
+struct RankBook {
+    RankPx rec[Depth]{};
+    RankPx* bid[Depth]{};
+    RankPx* hold[Depth]{};
+
+    RankBook() {
+        for (int i = 0; i < Depth; ++i) bid[i] = &rec[i];
+    }
+
+    void insert_bid(int at, int64_t px, int32_t qty) {
+        if (at < 0 || at >= Depth) return;
+        if (at < Depth - 1) {
+            RankPx* tail = bid[Depth - 1];
+            for (int i = Depth - 1; i > at; --i) bid[i] = bid[i - 1];
+            bid[at] = tail;
+        }
+        bid[at]->px = px;
+        bid[at]->qty = qty;
+    }
+
+    void erase_bid(int at) {
+        if (at < 0 || at >= Depth) return;
+        RankPx* gone = bid[at];
+        for (int i = at; i < Depth - 1; ++i) bid[i] = bid[i + 1];
+        bid[Depth - 1] = gone;
+        gone->clear();
+    }
+
+    void erase_through(int last) {
+        if (last < 0 || last >= Depth) return;
+        for (int i = 0; i <= last; ++i) {
+            bid[i]->clear();
+            hold[i] = bid[i];
+        }
+        int w = 0;
+        for (int i = last + 1; i < Depth; ++i) bid[w++] = bid[i];
+        for (int i = 0; i <= last; ++i) bid[w++] = hold[i];
+    }
+
+    void copy_out(RankPx* dst) const {
+        for (int i = 0; i < Depth; ++i) {
+            dst[i].px = bid[i]->px;
+            dst[i].qty = bid[i]->qty;
+        }
+    }
+};
 ```
 
 ### 42. Chunked price slots for sparse domains
