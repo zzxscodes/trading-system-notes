@@ -24911,7 +24911,109 @@ int main(){
 ```
 
 
-1.5 Event Sourcing 和 CQRS
+1.7 现货单上失败的事件不写回
+
+**改量不改状态，新总量不大于已成交时整行保持原样**
+
+刚建好、已挂簿、部分成交上的改量只改价格和总量，状态保持进入时的值。新总量必须大于已成交数量，剩余量是新总量减去已成交。新总量不大于已成交时函数直接返回，价格、总量、已成交、状态、版本和时刻都还是进入时的值。成功时先在副本上改完，再把副本写回，版本加一，时刻写成这次事件的时刻。
+
+```cpp
+enum class Live : uint8_t { Fresh, Working, Partial, Done, Voided, Denied };
+
+struct LiveRow {
+    Live life{Live::Fresh};
+    int64_t px{0};
+    int64_t qty{0};
+    int64_t filled{0};
+    uint64_t rev{0};
+    uint64_t ts{0};
+};
+
+bool commit_row(LiveRow& dst, LiveRow next, uint64_t ts) {
+    next.rev = dst.rev + 1;
+    next.ts = ts;
+    dst = next;
+    return true;
+}
+
+bool closed_row(Live life) {
+    return life == Live::Done || life == Live::Voided || life == Live::Denied;
+}
+
+bool resize_row(LiveRow& r, int64_t px, int64_t qty, uint64_t ts) {
+    if (closed_row(r.life)) return false;
+    if (qty <= r.filled) return false;
+    LiveRow n = r;
+    n.px = px;
+    n.qty = qty;
+    return commit_row(r, n, ts);
+}
+```
+
+**成交和改价成交按剩余量落状态，终态上的事件不改任何字段**
+
+刚建好的单还没挂上簿。这一笔成交量为 0 时，状态写成已挂簿。成交量大于 0 且小于总量时，写成部分成交。成交量达到总量时，写成全部成交。已经挂上簿的单，按已成交和总量写成已挂簿、部分成交或全部成交。
+
+改价成交先写下新价格和新总量，再把这一笔吃到的数量加进已成交，然后按已成交和总量写成已挂簿、部分成交或全部成交。新总量小于已成交，或者这一笔吃到的数量大于剩余量，整行不写。撤销把状态写成已撤销，总量写成已成交，剩余为 0。
+
+全部成交、已撤销、已拒绝上，成交、改量、撤销、改价成交都返回失败。调用前抄一份，返回后价格、总量、已成交、状态、版本和时刻都和抄件一致。
+
+```cpp
+Live life_after(int64_t filled, int64_t qty) {
+    if (filled >= qty) return Live::Done;
+    if (filled > 0) return Live::Partial;
+    return Live::Working;
+}
+
+bool cross_row(LiveRow& r, int64_t take, uint64_t ts) {
+    if (closed_row(r.life)) return false;
+    if (take < 0 || take > r.qty - r.filled) return false;
+    LiveRow n = r;
+    n.filled += take;
+    n.life = life_after(n.filled, n.qty);
+    return commit_row(r, n, ts);
+}
+
+bool reprice_cross(LiveRow& r, int64_t px, int64_t qty, int64_t take, uint64_t ts) {
+    if (closed_row(r.life)) return false;
+    if (qty < r.filled || take < 0 || take > qty - r.filled) return false;
+    LiveRow n = r;
+    n.px = px;
+    n.qty = qty;
+    n.filled += take;
+    n.life = life_after(n.filled, n.qty);
+    return commit_row(r, n, ts);
+}
+
+bool void_row(LiveRow& r, uint64_t ts) {
+    if (closed_row(r.life)) return false;
+    LiveRow n = r;
+    n.life = Live::Voided;
+    n.qty = n.filled;
+    return commit_row(r, n, ts);
+}
+
+bool row_eq(const LiveRow& a, const LiveRow& b) {
+    return a.life == b.life && a.px == b.px && a.qty == b.qty
+        && a.filled == b.filled && a.rev == b.rev && a.ts == b.ts;
+}
+
+bool terminals_hold(LiveRow seed) {
+    const Live terms[] = {Live::Done, Live::Voided, Live::Denied};
+    for (Live s : terms) {
+        LiveRow cur = seed;
+        cur.life = s;
+        LiveRow before = cur;
+        if (cross_row(cur, 1, 7) || resize_row(cur, 3, 9, 7)
+            || void_row(cur, 7) || reprice_cross(cur, 3, 9, 1, 7))
+            return false;
+        if (!row_eq(cur, before)) return false;
+    }
+    return true;
+}
+```
+
+1.8 Event Sourcing 和 CQRS
 
 事件溯源(Event Sourcing)：系统不直接存储当前状态，而是持久化所有导致状态变化的业务事件，通过重放这些不可变事件流来重建任意时间点的状态。
 

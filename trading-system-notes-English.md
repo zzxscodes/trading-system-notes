@@ -24923,7 +24923,109 @@ int main(){
 ```
 
 
-1.5 Event Sourcing and CQRS
+1.7 A failed event on a spot order writes nothing back
+
+**A size change keeps the status, and a new total that is not above the filled quantity writes nothing**
+
+On a fresh order, a working order, or a partial order, a size change writes the price and the total and leaves the status at the value it had on entry. The new total has to be greater than the filled quantity. The remainder is the new total minus the filled quantity. When the new total is not greater, the function returns, and the price, total, filled quantity, status, revision, and timestamp stay at the values they had on entry. On success the edits are made on a copy, the copy is written back, the revision increases by one, and the timestamp becomes the event time.
+
+```cpp
+enum class Live : uint8_t { Fresh, Working, Partial, Done, Voided, Denied };
+
+struct LiveRow {
+    Live life{Live::Fresh};
+    int64_t px{0};
+    int64_t qty{0};
+    int64_t filled{0};
+    uint64_t rev{0};
+    uint64_t ts{0};
+};
+
+bool commit_row(LiveRow& dst, LiveRow next, uint64_t ts) {
+    next.rev = dst.rev + 1;
+    next.ts = ts;
+    dst = next;
+    return true;
+}
+
+bool closed_row(Live life) {
+    return life == Live::Done || life == Live::Voided || life == Live::Denied;
+}
+
+bool resize_row(LiveRow& r, int64_t px, int64_t qty, uint64_t ts) {
+    if (closed_row(r.life)) return false;
+    if (qty <= r.filled) return false;
+    LiveRow n = r;
+    n.px = px;
+    n.qty = qty;
+    return commit_row(r, n, ts);
+}
+```
+
+**A cross or a reprice-and-cross sets the status from the remainder, and a terminal status writes no field**
+
+A fresh order is not on the book yet. A cross quantity of 0 writes the status as working. A cross quantity above 0 and below the total writes partial. A cross quantity that reaches the total writes filled. An order already on the book writes working, partial, or filled from the filled quantity and the total.
+
+A reprice-and-cross writes the new price and the new total, adds this cross quantity to the filled quantity, then sets the status from the filled quantity and the total. When the new total is below the filled quantity, or this cross quantity is above the remainder, the row is not written. A cancel writes the status as voided and sets the total equal to the filled quantity, so the remainder is 0.
+
+Filled, voided, and denied reject a cross, a resize, a cancel, and a reprice-and-cross. A copy taken before the call matches the row afterwards on price, total, filled quantity, status, revision, and timestamp.
+
+```cpp
+Live life_after(int64_t filled, int64_t qty) {
+    if (filled >= qty) return Live::Done;
+    if (filled > 0) return Live::Partial;
+    return Live::Working;
+}
+
+bool cross_row(LiveRow& r, int64_t take, uint64_t ts) {
+    if (closed_row(r.life)) return false;
+    if (take < 0 || take > r.qty - r.filled) return false;
+    LiveRow n = r;
+    n.filled += take;
+    n.life = life_after(n.filled, n.qty);
+    return commit_row(r, n, ts);
+}
+
+bool reprice_cross(LiveRow& r, int64_t px, int64_t qty, int64_t take, uint64_t ts) {
+    if (closed_row(r.life)) return false;
+    if (qty < r.filled || take < 0 || take > qty - r.filled) return false;
+    LiveRow n = r;
+    n.px = px;
+    n.qty = qty;
+    n.filled += take;
+    n.life = life_after(n.filled, n.qty);
+    return commit_row(r, n, ts);
+}
+
+bool void_row(LiveRow& r, uint64_t ts) {
+    if (closed_row(r.life)) return false;
+    LiveRow n = r;
+    n.life = Live::Voided;
+    n.qty = n.filled;
+    return commit_row(r, n, ts);
+}
+
+bool row_eq(const LiveRow& a, const LiveRow& b) {
+    return a.life == b.life && a.px == b.px && a.qty == b.qty
+        && a.filled == b.filled && a.rev == b.rev && a.ts == b.ts;
+}
+
+bool terminals_hold(LiveRow seed) {
+    const Live terms[] = {Live::Done, Live::Voided, Live::Denied};
+    for (Live s : terms) {
+        LiveRow cur = seed;
+        cur.life = s;
+        LiveRow before = cur;
+        if (cross_row(cur, 1, 7) || resize_row(cur, 3, 9, 7)
+            || void_row(cur, 7) || reprice_cross(cur, 3, 9, 1, 7))
+            return false;
+        if (!row_eq(cur, before)) return false;
+    }
+    return true;
+}
+```
+
+1.8 Event Sourcing and CQRS
 
 Event Sourcing: The system does not directly store the current state, but persists all business events that cause state changes, and reconstructs the state at any point in time by replaying these immutable event streams.
 
