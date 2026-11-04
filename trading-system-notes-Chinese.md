@@ -1813,7 +1813,7 @@ perf c2c record -- ./md_pipeline
 perf c2c report
 ```
 
-辅核把结果写在自己的 L1 里，行是 Modified。主核再去收割，本地 miss 后要嗅探辅核、刷脏行，一次读是几十纳秒，再写会更贵。主核只收命中列表这类小信标，中间状态留在辅核。必须交过去的行，辅核算完用 `clwb` 写回共享 L3，本地副本还在；`clflush` 会把行失效，下次辅核再用又缺。
+辅核把结果写在自己的 L1 里，行是 Modified。主核再去收割，本地 miss 后要嗅探辅核、刷脏行。读脏行走大约 28 ns；紧接着再写大约 54 ns，行要再失效、再传一次。主核只收命中列表这类小信标，中间状态留在辅核。必须交过去的行，辅核算完用 `clwb` 写回共享 L3，本地副本还在；`clflush` 会把行失效，下次辅核再用又缺。
 
 ```cpp
 #include <atomic>
@@ -9879,9 +9879,34 @@ void preorder_tail_rec(Node* root) {
 + 当数据访问模式具有固定步长和规则结构时，一般无需手动预取
 + 硬件预取通常止于 4 KiB 页边界，顺序扫描每次跨页时 compulsory miss 偏多。
 
-**Memory-Level Parallelism (MLP) 与指针追逐优化**：CPU 的 Line Fill Buffer（LFB，Intel 术语）/ Miss Status Holding Register（MSHR）允许同时追踪多个未完成的 cache miss 请求（现代 Intel 核约 12 个 LFB 条目），使多个独立的内存访问可以并行进行。但指针追逐模式（如链表遍历 `node = node->next`）天然形成串行依赖链——每次 load 必须等前一次 load 完成才能获取下一个地址，导致 LFB 中同时只有 1 个 outstanding miss，浪费了其余并行槽位。优化方式：**批量预取（Software Pipelining）**——在遍历当前节点时，对后续 N 个节点提前发射 prefetch 指令，将串行依赖转化为并行请求；**数据结构重构**——将链表改为数组索引或 B+ 树等缓存友好结构；**交错处理**——在同一循环中交错处理多个独立的数据流（如同时遍历两棵独立的树），让不同流的 cache miss 可以并行填充 LFB（[whichisfaster.dev/async](https://whichisfaster.dev/q/async.html)）。
+**Memory-Level Parallelism (MLP) 与指针追逐优化**：CPU 的 Line Fill Buffer（LFB，Intel 术语）/ Miss Status Holding Register（MSHR）允许同时追踪多个未完成的 cache miss 请求（客户端性能核常见 10 到 16 个 LFB 条目，Raptor Lake 性能核是 16 个），使多个独立的内存访问可以并行进行。但指针追逐模式（如链表遍历 `node = node->next`）天然形成串行依赖链——每次 load 必须等前一次 load 完成才能获取下一个地址，导致 LFB 中同时只有 1 个 outstanding miss，浪费了其余并行槽位。优化方式：**批量预取（Software Pipelining）**——在遍历当前节点时，对后续 N 个节点提前发射 prefetch 指令，将串行依赖转化为并行请求；**数据结构重构**——将链表改为数组索引或 B+ 树等缓存友好结构；**交错处理**——在同一循环中交错处理多个独立的数据流（如同时遍历两棵独立的树），让不同流的 cache miss 可以并行填充 LFB（[whichisfaster.dev/async](https://whichisfaster.dev/q/async.html)）。
 
-对象彼此独立时，一次 load、立刻算完、再下一笔，缺失仍然串行。先摸一批地址把 miss 送进 LFB，再集中算，让在途请求重叠。批次不要超过本核 LFB 槽数（常见十几个）；一口气摸几十个，第十七个会堵在满槽上，核心硬停。
+**查找表大于三级缓存时，在途预算按一次事件的行数来**
+
+查找表和环形缓冲合计大约 50.7 MB，这块芯片的三级缓存是 36 MB，表在缓存外面。一次事件按 64 字节一行计，行情 3 行，标的资料 9 行，64 个合约对象各 2 行，合计约 140 行，每次都从内存补进来。在途预算在表能放进三级缓存时写成 0，在表留在缓存外面时等于这一次事件的行数。热路径按这个数把缺失同时送出去。
+
+```cpp
+struct DeskLayout {
+  int wire_lines;
+  int meta_lines;
+  int names;
+  int lines_each;
+  std::size_t book_bytes;
+  std::size_t l3_bytes;
+};
+
+int event_lines(const DeskLayout& d) {
+  return d.wire_lines + d.meta_lines + d.names * d.lines_each;
+}
+
+int miss_budget(const DeskLayout& d) {
+  if (d.book_bytes <= d.l3_bytes)
+    return 0;
+  return event_lines(d);
+}
+```
+
+对象彼此独立时，一次 load、立刻算完、再下一笔，缺失仍然串行。先摸一批地址把 miss 送进 LFB，再集中算，让在途请求重叠。在 3.2 GHz 的 Raptor Lake 性能核上，64 张合约、LFB 16 槽：一批 4 个，中位数从 510 ns 降到 474 ns，p90 从 1012 ns 降到 776 ns。一批 64 个，LFB 满槽停顿大约 1001 周期，核心硬停。批次停在槽数以内。
 
 ```cpp
 struct ContractSlot {
@@ -9974,9 +9999,9 @@ void process_array(int *data, int n) {
 
 这里的关键是选择合适的 `PREFETCH_DISTANCE`。这个距离需要足够大，以保证在CPU处理当前 `i` 到 `i+PREFETCH_DISTANCE` 之间的元素时，内存预取操作有足够的时间完成。
 
-普通 `load` 有目的寄存器，数据没到就赖在 ROB 里，窗口塞满后面发不出去。`_mm_prefetch` 没有目的寄存器，发出去就算退了，只是给内存控制器一张便条。用假 `load` 冒充预取，停顿会回来。下一笔行情还会再用的合约元数据用 `_MM_HINT_T0`；`NTA` 会提前踢走热行。
+普通 `load` 有目的寄存器，数据没到就赖在 ROB 里，窗口塞满后面发不出去。`_mm_prefetch` 没有目的寄存器，发出去就算退了，只是给内存控制器一张便条。用假 `load` 冒充预取，停顿周期大约多出 292。下一批还要用的合约元数据用 `_MM_HINT_T0`，同一次测量中位数再降到 414 ns，p90 降到 710 ns。`NTA` 会把这些热行提前踢走，中位数回到 850 ns。
 
-用过即弃的事件行（环形缓冲里当前 tick）硬件当热数据留着，会挤期权/合约元数据。算完用 `clflushopt` 赶出去。它自己也占 LFB 槽，槽满时别发。
+用过即弃的事件行（环形缓冲里当前 tick）硬件当热数据留着，会挤期权和合约元数据。算完用 `clflushopt` 赶出去。这条指令占一个 LFB 槽，槽满时别发。中位数少几个纳秒。收益记在 L1 命中升高和等待周期下降上，同一次测量等待大约少两成。
 
 ```cpp
 #include <cstdint>
@@ -13976,6 +14001,8 @@ struct Walk {
 
 **Wait-Free Sticky Counter 示例**
 
+`decrement` 先做 `fetch_sub`。减之前是 1 时，字变成物理 0，零标志还没写上。另一线程的 `increment_if_not_zero` 读到这个 0，高位没有零标志，`fetch_add` 把字加回 1。减线程再 CAS，期望值是 0，对不上，换回来的值也没有协助位，于是返回 false。逻辑顺序把这次减少排在这次增加之后，两笔抵消。减线程自己的 CAS 写上零标志，或换回的值带协助位，这次减少记成真正归零。
+
 ```cpp
 #include <atomic>
 #include <cstdint>
@@ -14014,8 +14041,6 @@ struct WaitFreeCounter {
     }
 };
 ```
-
-提示：用高位偷位携带状态，读操作也参与协助；无循环，自旋抖动被消除。
 
 **紧急路径只占一个函数指针槽**
 

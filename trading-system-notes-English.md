@@ -1811,7 +1811,7 @@ perf c2c record -- ./md_pipeline
 perf c2c report
 ```
 
-A helper core that writes results into its own L1 leaves those lines Modified. When the main core harvests them, a local miss snoops the helper and flushes the dirty line: tens of nanoseconds to read, more if the main core then writes. Keep intermediate state on the helper; send back only a small hit list. For lines that must move, the helper issues `clwb` after the store so the shared L3 already has the data and the helper keeps its copy. `clflush` would invalidate the line and miss on the next use.
+A helper core that writes results into its own L1 leaves those lines Modified. When the main core harvests them, a local miss snoops the helper and flushes the dirty line. Reading that line costs about 28 ns. A write immediately after costs about 54 ns, because the line is invalidated and transferred again. Keep intermediate state on the helper; send back only a small hit list. For lines that must move, the helper issues `clwb` after the store so the shared L3 already has the data and the helper keeps its copy. `clflush` would invalidate the line and miss on the next use.
 
 ```cpp
 #include <atomic>
@@ -9891,9 +9891,34 @@ Modern processors (SSE and subsequent instruction sets) provide specific instruc
 + When the data access pattern has a fixed step size and regular structure, manual prefetching is generally not required
 + Hardware prefetch typically stops at 4 KiB page boundaries; sequential scans see more compulsory misses on each page crossing.
 
-**Memory-Level Parallelism (MLP) and Pointer Chasing Optimization**: The CPU's Line Fill Buffers (LFB, Intel terminology) / Miss Status Holding Registers (MSHR) can track multiple outstanding cache miss requests simultaneously (modern Intel cores have ~12 LFB entries), allowing independent memory accesses to proceed in parallel. However, pointer chasing patterns (e.g. linked list traversal `node = node->next`) create serial dependency chains — each load must wait for the previous load to complete before obtaining the next address, leaving only 1 outstanding miss in the LFB and wasting the remaining parallel slots. Optimization approaches: **Batch Prefetching (Software Pipelining)** — issue prefetch instructions for the next N nodes while processing the current node, converting serial dependencies into parallel requests; **Data Structure Restructuring** — replace linked lists with array indices or cache-friendly structures like B+ trees; **Interleaved Processing** — interleave multiple independent data streams in the same loop (e.g. traversing two independent trees simultaneously), allowing cache misses from different streams to fill LFB entries in parallel ([whichisfaster.dev/async](https://whichisfaster.dev/q/async.html)).
+**Memory-Level Parallelism (MLP) and Pointer Chasing Optimization**: The CPU's Line Fill Buffers (LFB, Intel terminology) / Miss Status Holding Registers (MSHR) can track multiple outstanding cache miss requests simultaneously (client performance cores commonly have 10 to 16 LFB entries; a Raptor Lake performance core has 16), allowing independent memory accesses to proceed in parallel. However, pointer chasing patterns (e.g. linked list traversal `node = node->next`) create serial dependency chains — each load must wait for the previous load to complete before obtaining the next address, leaving only 1 outstanding miss in the LFB and wasting the remaining parallel slots. Optimization approaches: **Batch Prefetching (Software Pipelining)** — issue prefetch instructions for the next N nodes while processing the current node, converting serial dependencies into parallel requests; **Data Structure Restructuring** — replace linked lists with array indices or cache-friendly structures like B+ trees; **Interleaved Processing** — interleave multiple independent data streams in the same loop (e.g. traversing two independent trees simultaneously), allowing cache misses from different streams to fill LFB entries in parallel ([whichisfaster.dev/async](https://whichisfaster.dev/q/async.html)).
 
-Independent objects still serialize if each iteration loads, computes, then moves on. Touch a small batch of addresses first so misses enter the LFB, then compute. Do not issue more outstanding misses than the core's LFB slots (a dozen or so). A batch of tens fills the buffer and stalls the core.
+**When the tables exceed L3, set the in-flight budget from the lines in one event**
+
+The lookup tables and the ring add up to about 50.7 MB. L3 on this chip is 36 MB, so the tables sit outside the cache. One event is about 140 lines of 64 bytes: 3 for the quote, 9 for the underlier, and 2 for each of 64 contracts, filled from memory every time. The in-flight budget is 0 while the book fits in L3, and equals the lines in that event once the book is larger. The hot path launches that many misses together.
+
+```cpp
+struct DeskLayout {
+  int wire_lines;
+  int meta_lines;
+  int names;
+  int lines_each;
+  std::size_t book_bytes;
+  std::size_t l3_bytes;
+};
+
+int event_lines(const DeskLayout& d) {
+  return d.wire_lines + d.meta_lines + d.names * d.lines_each;
+}
+
+int miss_budget(const DeskLayout& d) {
+  if (d.book_bytes <= d.l3_bytes)
+    return 0;
+  return event_lines(d);
+}
+```
+
+Independent objects still serialize if each iteration loads, computes, then moves on. Touch a small batch of addresses first so misses enter the LFB, then compute. On a 3.2 GHz Raptor Lake performance core, 64 contracts and 16 LFB slots: a batch of 4 moved the median from 510 ns to 474 ns and p90 from 1012 ns to 776 ns. A batch of 64 stalled for about 1001 cycles on a full fill buffer. Keep the batch inside the slot count.
 
 ```cpp
 struct ContractSlot {
@@ -9998,9 +10023,9 @@ void process_array(int *data, int n) {
 
 The key here is to choose the right `PREFETCH_DISTANCE`. This distance needs to be large enough to ensure that the CPU processes the current `i` arrive `i+PREFETCH_DISTANCE` between elements, the memory prefetch operation has enough time to complete.
 
-A normal `load` has a destination register. Until the data arrives it sits in the ROB and can stall issue. `_mm_prefetch` has no destination; it retires as soon as it is sent, a note to the memory controller. A dummy `load` used as a prefetch brings the stall back. Contract metadata reused on the next tick wants `_MM_HINT_T0`; `NTA` evicts those hot lines too soon.
+A normal `load` has a destination register. Until the data arrives it sits in the ROB and can stall issue. `_mm_prefetch` has no destination; it retires as soon as it is sent, a note to the memory controller. A dummy `load` used as a prefetch added about 292 stall cycles. Contract metadata reused on the next tick wants `_MM_HINT_T0`; in the same run the median fell further to 414 ns and p90 to 710 ns. `NTA` evicts those hot lines early and the median went back to 850 ns.
 
-A one-shot event line (the current tick in a ring) looks hot to hardware and crowds out contract metadata. After the math, evict it with `clflushopt`. That instruction also occupies an LFB slot; do not fire it when the buffer is already full.
+A one-shot event line (the current tick in a ring) looks hot to hardware and crowds out contract metadata. After the math, evict it with `clflushopt`. The instruction takes one LFB slot; leave it unissued when the buffer is full. The median moves by a few nanoseconds. The gain shows up as more L1 hits and fewer wait cycles; in the same run, wait fell by about a fifth.
 
 ```cpp
 #include <cstdint>
@@ -14008,6 +14033,8 @@ struct Walk {
 
 **Wait-Free Sticky Counter Example**
 
+`decrement` starts with `fetch_sub`. When the word was 1, it becomes a plain 0 and the zero flag is still clear. `increment_if_not_zero` on the other thread sees that 0 with the flag clear, and `fetch_add` brings the word back to 1. The decrement then compare-exchanges, expecting 0, misses, and the value it reads back has no helped bit, so it returns false. Logical order places this decrement after this increment, so the two cancel. The decrement counts as a real zero when its own compare-exchange sets the flag, or when the value it reads back carries the helped bit.
+
 ```cpp
 #include <atomic>
 #include <cstdint>
@@ -14046,8 +14073,6 @@ struct WaitFreeCounter {
     }
 };
 ```
-
-Tip: Use high bit stealing to carry the state, and the read operation also participates in assistance; there is no loop, and the spin jitter is eliminated.
 
 **The urgent path owns a single function-pointer slot**
 
