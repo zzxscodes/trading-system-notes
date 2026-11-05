@@ -36740,6 +36740,63 @@ bool listed(bool opening, const std::unordered_set<std::string>& opens,
 }
 ```
 
+合规比例按账户或按产品汇总后再拦新单。撤单比等于撤单笔数除以总委托笔数减去撤单笔数再减去废单笔数。废单比等于废单笔数除以总委托笔数减去撤单笔数。委托成交比的分子是除逆回购以外的成交金额，分母是除逆回购以外的委托金额，再减去买卖撤单金额和买卖废单金额。撤单比、废单比、每秒笔数、当日总笔数越过上限后，停止接受新委托。委托成交比低于下限后，停止接受新委托。证券净买入等于当日买入成交金额减去当日卖出成交金额。买入总额、卖出总额、当日委托金额各有上限。买入偏离度是委托价减最新价，再除以最新价。卖出偏离度是最新价减委托价，再除以最新价。单账号用本账号的计数。产品把名下几个资金账号的计数加总后再比。
+
+```cpp
+struct DayFlow {
+    int64_t orders{0};
+    int64_t cancels{0};
+    int64_t rejects{0};
+    double order_cash{0};
+    double cancel_cash{0};
+    double reject_cash{0};
+    double fill_cash{0};
+    double buy_fill{0};
+    double sell_fill{0};
+    double repo_order{0};
+    double repo_fill{0};
+};
+
+bool cancel_ok(const DayFlow& d, double cap) {
+    int64_t den = d.orders - d.cancels - d.rejects;
+    if (den <= 0) return true;
+    return double(d.cancels) / double(den) < cap;
+}
+
+bool reject_ok(const DayFlow& d, double cap) {
+    int64_t den = d.orders - d.cancels;
+    if (den <= 0) return true;
+    return double(d.rejects) / double(den) < cap;
+}
+
+bool fill_ok(const DayFlow& d, double floor) {
+    double den = (d.order_cash - d.repo_order) - d.cancel_cash - d.reject_cash;
+    if (den <= 0) return true;
+    return (d.fill_cash - d.repo_fill) / den >= floor;
+}
+
+double net_buy(const DayFlow& d) { return d.buy_fill - d.sell_fill; }
+
+double px_dev(bool buy, int64_t limit, int64_t last) {
+    if (last <= 0) return 0;
+    if (buy) return double(limit - last) / double(last);
+    return double(last - limit) / double(last);
+}
+
+void add_flow(DayFlow& dst, const DayFlow& src) {
+    dst.orders += src.orders;
+    dst.cancels += src.cancels;
+    dst.rejects += src.rejects;
+    dst.order_cash += src.order_cash;
+    dst.cancel_cash += src.cancel_cash;
+    dst.reject_cash += src.reject_cash;
+    dst.fill_cash += src.fill_cash;
+    dst.buy_fill += src.buy_fill;
+    dst.sell_fill += src.sell_fill;
+    dst.repo_order += src.repo_order;
+    dst.repo_fill += src.repo_fill;
+}
+```
 
 ### 26. 订单检查计数信号量与两阶段账本预锁
 串行“先风控再发往交易桥”会把风控排队加进报单时延。更低延迟的做法是：策略只写一次订单请求，风控进程与交易桥同时看见；交易桥不立刻外发，而是轮询订单上的检查通过计数与拒绝计数。配置里约定需要几个风控柜台签字；全部通过且拒绝为 0 才发往券商。风控内部先做全部校验与预锁计算（不写共享账本），通过后再提交冻结并递增检查计数，避免失败路径留下半截资金占用。市价单冻结价可取中间价或对手价，首写者用原子量占住冻结价量。
@@ -37854,13 +37911,52 @@ bool exit_long(const HoldPx& h, int64_t px) {
 }
 ```
 
-部成以后撤掉剩余，净头寸可能不再是整手的倍数。平仓量取净敞口的绝对值，再向下收到整手。整手大于剩余敞口时，平仓量写成 0。
+部成再撤之后，净头寸可能不是整手的倍数。多头余量向下收到整手再卖，不足一整手的多头留着。空头余量向上收到整手再买。买完若还有余量，余量落在多头。收盘不留空头余量。
 
 ```cpp
-int64_t close_qty(int64_t net, int64_t lot) {
-    int64_t q = net < 0 ? -net : net;
-    if (lot <= 1) return q;
-    return (q / lot) * lot;
+struct FlatOrd { int64_t qty{0}; bool buy{false}; };
+
+FlatOrd flat_stub(int64_t net, int64_t lot) {
+    FlatOrd o;
+    if (net == 0) return o;
+    if (lot <= 1) {
+        o.qty = net < 0 ? -net : net;
+        o.buy = net < 0;
+        return o;
+    }
+    if (net > 0) {
+        o.qty = (net / lot) * lot;
+        o.buy = false;
+        return o;
+    }
+    int64_t need = -net;
+    o.qty = ((need + lot - 1) / lot) * lot;
+    o.buy = true;
+    return o;
+}
+```
+
+一个资金账号下面可以挂多个策略单元。每个单元单独记现金和持仓，统计按单元出。直连柜台时，本系统仍然扣减并校验这个资金账号上的现金和持仓。
+
+```cpp
+struct UnitBook { int64_t cash{0}; int64_t qty{0}; };
+
+struct AcctBook {
+    int64_t cash{0};
+    int64_t qty{0};
+    UnitBook unit[8]{};
+    int n{0};
+};
+
+bool take_both(AcctBook& a, int u, int64_t cash, int64_t qty) {
+    if (u < 0 || u >= a.n) return false;
+    if (a.cash < cash || a.qty < qty) return false;
+    if (a.unit[u].cash < cash || a.unit[u].qty < qty) return false;
+    a.cash -= cash;
+    a.qty -= qty;
+    a.unit[u].cash -= cash;
+    a.unit[u].qty -= qty;
+    return true;
 }
 ```
 
@@ -45959,6 +46055,94 @@ FlatStep flat_step(double long_qty, double short_qty) {
 
 回测与模拟撮合沿用实盘同一套策略报单环和账本查询接口。历史行情按节拍写成报价，模拟柜台装入现金与期初持仓，本地撮合器在分时段时延下按重建盘口与成交明细给出回报。策略参数的无偏评估另走训练–测试路径，与撮合成交的真实感分开处理。高频回放把每条行情的交易所时刻和本地到达时刻分开处理，本地时刻先整体后移。委托的去程和回程分开计时，没有委托样本时用行情时延来造。挂单成交按价位前方数量估计，入账按方向改现金和持仓。复权先去掉除权日不能交易的跳变，再按已经生效的乘数把价格补连续。
 
+本地投研把研究数据、策略和报单分成三条线。实时行情从源送到消费端。计算另走一条，按策略把行情收成信号。现货 level1 约 3 秒一条。level2 带 10 档快照、逐笔委托、逐笔成交和委托队列，更新间隔也在数秒。期货 1 档和 5 档快照约 500 毫秒一条。历史行情按容量归档，回测读取走单独的加载路径，并带上清洗结果。回放倍率写在回放配置里。日历按市场分开。证券主数据、行业归属、指数成分、涨跌停池和 ST 池跟主数据放在一起。行业分类和股票所属行业是两张表。财务表和另类数据走同一套读接口。
+
+一次回测记下区间、基准、初始资金、费用种类和费率、期货保证金、滑点种类和滑点、最大成交比例。最大成交比例是本笔成交量占该根行情成交量的上限。引擎只加载这个区间，按调仓规则模拟成交。仿真用日行情把报单打进模拟通道，用来确认通道和程序路径。一次下完就结束的策略，成交后任务结束。靠行情信号触发的策略保持运行，信号到了再执行。
+
+策略可以跑在券商服务器上。客户机可以关机，第三方库不进这个环境。策略跑在本地交易机上时，进程保持打开，第三方库可以导入。报单不经过工作流，从内存直接到柜台。风控留在内存里。单账号和账号组可以同时各查一套规则。研究脚本用 Python，热路径用 C++，两边用绑定接上。实盘代码放在自己的仓库里改。开源引擎用来对照。线上缺陷在自己的仓库里修。
+
+```cpp
+enum class RunHost : uint8_t { BrokerServer, LocalDesk };
+
+struct ResearchJob {
+    int start_day{0};
+    int end_day{0};
+    int64_t cash{0};
+    int fee_kind{0};
+    double fee_rate{0};
+    double margin{0};
+    int slip_kind{0};
+    double slip{0};
+    double max_part{1};
+    RunHost host{RunHost::LocalDesk};
+};
+
+bool job_ready(const ResearchJob& j) {
+    if (j.end_day < j.start_day) return false;
+    if (j.cash <= 0) return false;
+    if (j.max_part < 0 || j.max_part > 1) return false;
+    return true;
+}
+
+bool desk_stays_up(RunHost h) { return h == RunHost::LocalDesk; }
+```
+
+研究的终点是时点、代码、数量和价格。执行系统拿 T 日目标持仓减去 T 日期初持仓，差额为正就买，为负就卖。订单、验资验券和风控在执行系统里做完，再经柜台接口报出。全市场的分钟线由实时行情生成。线晚了，挂在上面的因子跟着晚。策略按代码订阅信号。频率较高时，回测信号和实盘信号按同一时点比对。等权组合把每条策略的日收益平均。条数增加、组合波动下降，前提是策略之间的相关系数低。相关系数靠近 1 时，组合波动回到单条策略的水平。
+
+```cpp
+struct Target { int64_t symbol{0}; int64_t want{0}; int64_t open_qty{0}; int64_t px{0}; };
+struct Delta { int64_t symbol{0}; int64_t qty{0}; bool buy{false}; int64_t px{0}; };
+
+bool make_delta(const Target& t, Delta& d) {
+    int64_t g = t.want - t.open_qty;
+    if (g == 0) return false;
+    d.symbol = t.symbol;
+    d.px = t.px;
+    d.buy = g > 0;
+    d.qty = g > 0 ? g : -g;
+    return true;
+}
+
+struct Sig { int64_t ts{0}; int64_t symbol{0}; int64_t qty{0}; int64_t px{0}; };
+
+bool sig_match(const Sig& a, const Sig& b) {
+    return a.ts == b.ts && a.symbol == b.symbol && a.qty == b.qty && a.px == b.px;
+}
+
+double book_var(double v, int n, double corr) {
+    if (n <= 1) return v;
+    double c = corr < 0 ? 0 : (corr > 1 ? 1 : corr);
+    return v * (c + (1.0 - c) / double(n));
+}
+```
+
+报单要进券商可控的系统。PB 从客户端进后台，再进极速柜台，再到交易所。专业交易系统从 SDK、文件单或策略接口进后台，再进柜台。自研要上实盘时，券商向私募指定的持证软件公司买这套系统，装在券商机房，只给这家私募用。策略文件在这台机器上对着券商行情执行。准入看用户权限、终端 MAC、风控设置、交易端密码和交易功能。每个柜台一张网关，网关把本系统字段映射成该柜台的字段。测试柜台按固定数量成交，例如 1000 股全成、2000 股部成，只说明接口通了。核资金和持仓，用带逐日结算的测试环境。仿真撮合看得到实时盘口，改不了这个盘口。
+
+```cpp
+enum class Ingress : uint8_t { Sdk, File, StrategyApi, PbClient };
+
+struct FieldMap { int own_side{0}; int counter_side{0}; };
+
+int to_counter(const FieldMap* m, int n, int own) {
+    for (int i = 0; i < n; ++i) if (m[i].own_side == own) return m[i].counter_side;
+    return -1;
+}
+```
+
+资金、委托、成交、持仓在重启后还在。还没报出的委托不再补发。这次重启可以接受时，不必再做多活。
+
+```cpp
+struct BookSnap {
+    int64_t cash{0};
+    int64_t orders{0};
+    int64_t fills{0};
+    int64_t qty{0};
+    int64_t unsent{0};
+};
+
+void after_restart(BookSnap& b) { b.unsent = 0; }
+```
+
 ### 1. 四进程模拟路径：回放、行情适配、交易、撮合
 
 整条模拟链路拆成四个角色，在共享内存上衔接。回放进程按日期窗口载入历史并发布报价，也可附带成交或高频因子。行情适配进程订阅该流，把合约报价写入共享内存。模拟交易进程以固定柜台名注册客户，应答资金与持仓查询，接收策略的报撤请求，并把成交写回。撮合库按合约维护挂单，负责报撤、按报价撮合、按成交撮合以及到期定时处理。策略不直接调用撮合库，仍使用与挂接实盘网关时相同的共享内存报单接口。
@@ -49174,6 +49358,28 @@ UnitNv product_unit(const FundNv& f) {
     o.unit = (f.pre_nav + f.today_pnl + f.holiday_pnl + share_adj) / f.share_t;
     o.accu = o.unit + f.custody_gap;
     return o;
+}
+```
+
+个股持仓收益是持仓市值的绝对变化。收益贡献等于这份变化除以产品总资金。择时收益等于今日持仓收益减去隔夜名义金额乘以今日收益率。隔夜这一项不看今天有没有买卖。择时贡献等于择时收益除以产品总资金。持仓可以按券商、产品、资金账号三层查看。点开资产类别，落到该类别里的具体持仓。管理人维度先出前 N 大持仓，再落到每个产品上的数量和占比。
+
+```cpp
+struct NamePnl {
+    double hold_pnl{0};
+    double overnight_notional{0};
+    double day_ret{0};
+    double capital{0};
+};
+
+struct NameAttr { double contrib{0}; double timing{0}; double timing_contrib{0}; };
+
+NameAttr name_attr(const NamePnl& n) {
+    NameAttr a;
+    if (n.capital == 0) return a;
+    a.timing = n.hold_pnl - n.overnight_notional * n.day_ret;
+    a.contrib = n.hold_pnl / n.capital;
+    a.timing_contrib = a.timing / n.capital;
+    return a;
 }
 ```
 

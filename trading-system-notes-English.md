@@ -36753,6 +36753,63 @@ bool listed(bool opening, const std::unordered_set<std::string>& opens,
 }
 ```
 
+Compliance ratios gate new orders on one account or on a product rollup. The cancel ratio is cancel count divided by order count minus cancel count minus reject count. The reject ratio is reject count divided by order count minus cancel count. The fill ratio puts filled notional, excluding reverse repo, over order notional excluding reverse repo, minus cancelled buy and sell notional, minus rejected buy and sell notional. New orders stop when the cancel ratio, the reject ratio, orders per second, or the day's order count crosses its cap. New orders stop when the fill ratio sits under its floor. Net buy is the day's buy-fill notional minus sell-fill notional. Buy notional, sell notional, and the day's order notional each have a cap. Buy deviation is limit minus last, divided by last. Sell deviation is last minus limit, divided by last. One account uses its own counters. A product adds the counters of its funding accounts before the comparison.
+
+```cpp
+struct DayFlow {
+    int64_t orders{0};
+    int64_t cancels{0};
+    int64_t rejects{0};
+    double order_cash{0};
+    double cancel_cash{0};
+    double reject_cash{0};
+    double fill_cash{0};
+    double buy_fill{0};
+    double sell_fill{0};
+    double repo_order{0};
+    double repo_fill{0};
+};
+
+bool cancel_ok(const DayFlow& d, double cap) {
+    int64_t den = d.orders - d.cancels - d.rejects;
+    if (den <= 0) return true;
+    return double(d.cancels) / double(den) < cap;
+}
+
+bool reject_ok(const DayFlow& d, double cap) {
+    int64_t den = d.orders - d.cancels;
+    if (den <= 0) return true;
+    return double(d.rejects) / double(den) < cap;
+}
+
+bool fill_ok(const DayFlow& d, double floor) {
+    double den = (d.order_cash - d.repo_order) - d.cancel_cash - d.reject_cash;
+    if (den <= 0) return true;
+    return (d.fill_cash - d.repo_fill) / den >= floor;
+}
+
+double net_buy(const DayFlow& d) { return d.buy_fill - d.sell_fill; }
+
+double px_dev(bool buy, int64_t limit, int64_t last) {
+    if (last <= 0) return 0;
+    if (buy) return double(limit - last) / double(last);
+    return double(last - limit) / double(last);
+}
+
+void add_flow(DayFlow& dst, const DayFlow& src) {
+    dst.orders += src.orders;
+    dst.cancels += src.cancels;
+    dst.rejects += src.rejects;
+    dst.order_cash += src.order_cash;
+    dst.cancel_cash += src.cancel_cash;
+    dst.reject_cash += src.reject_cash;
+    dst.fill_cash += src.fill_cash;
+    dst.buy_fill += src.buy_fill;
+    dst.sell_fill += src.sell_fill;
+    dst.repo_order += src.repo_order;
+    dst.repo_fill += src.repo_fill;
+}
+```
 
 ### 26. Order check-count semaphore and two-phase ledger prelock
 A serial “risk then trade-bridge” path adds risk queueing to submit latency. A lower-latency design has the strategy write the order request once; risk and the trade bridge both see it. The bridge does not send immediately: it polls a check-passed count and a reject count on the order. Config says how many risk signers are required; only when all have passed and rejects stay zero does the bridge hit the venue. Inside risk, run every check and a prelock computation without writing the shared ledger; only then commit freezes and bump the check count, so a failed path never leaves a half-applied cash lock. For market orders the freeze price can be mid or the opposite touch; the first writer wins the freeze price/qty with atomics.
@@ -37867,13 +37924,52 @@ bool exit_long(const HoldPx& h, int64_t px) {
 }
 ```
 
-After a partial fill and a cancel of the remainder, net inventory may no longer be a multiple of the board lot. The close size is the absolute net exposure, rounded down to a lot. When one lot is larger than the remaining exposure, the close size is 0.
+After a partial fill and a cancel of the remainder, net inventory may not be a multiple of the board lot. A long remainder is sold only in whole lots. A long stub smaller than one lot stays. A short remainder is bought in whole lots, rounded up. Any leftover after that buy sits on the long side. The close does not leave a short stub.
 
 ```cpp
-int64_t close_qty(int64_t net, int64_t lot) {
-    int64_t q = net < 0 ? -net : net;
-    if (lot <= 1) return q;
-    return (q / lot) * lot;
+struct FlatOrd { int64_t qty{0}; bool buy{false}; };
+
+FlatOrd flat_stub(int64_t net, int64_t lot) {
+    FlatOrd o;
+    if (net == 0) return o;
+    if (lot <= 1) {
+        o.qty = net < 0 ? -net : net;
+        o.buy = net < 0;
+        return o;
+    }
+    if (net > 0) {
+        o.qty = (net / lot) * lot;
+        o.buy = false;
+        return o;
+    }
+    int64_t need = -net;
+    o.qty = ((need + lot - 1) / lot) * lot;
+    o.buy = true;
+    return o;
+}
+```
+
+One funding account can hold several strategy units. Each unit keeps its own cash and position, and statistics are emitted per unit. On a direct counter connection, this system still debits and checks cash and position on that funding account.
+
+```cpp
+struct UnitBook { int64_t cash{0}; int64_t qty{0}; };
+
+struct AcctBook {
+    int64_t cash{0};
+    int64_t qty{0};
+    UnitBook unit[8]{};
+    int n{0};
+};
+
+bool take_both(AcctBook& a, int u, int64_t cash, int64_t qty) {
+    if (u < 0 || u >= a.n) return false;
+    if (a.cash < cash || a.qty < qty) return false;
+    if (a.unit[u].cash < cash || a.unit[u].qty < qty) return false;
+    a.cash -= cash;
+    a.qty -= qty;
+    a.unit[u].cash -= cash;
+    a.unit[u].qty -= qty;
+    return true;
 }
 ```
 
@@ -45965,6 +46061,94 @@ FlatStep flat_step(double long_qty, double short_qty) {
 
 Backtest and simulated matching keep the same strategy order rings and ledger query API as live trading. Historical tape is paced into quotes, a sim counter loads cash and opening lots, and a local matcher produces fills from rebuilt books and prints under session latency. Unbiased evaluation of strategy parameters stays on a separate train–test path, apart from how realistic the fills are. A high-frequency replay keeps the exchange time and the local arrival time of each market event apart, and moves local times later together before the replay. It times the outbound and return legs of an order separately, and builds those legs from feed latency when no order samples exist. A resting fill is estimated from the quantity ahead at its price, and a fill moves cash and position by side. An adjustment first removes the untradable ex-date gap, then joins the price with multipliers already in effect.
 
+A local research desk keeps data, strategy, and order entry on three lines. Live quotes move from the source to consumers. A second path turns those quotes into signals for a strategy. Spot level-1 arrives about every 3 seconds. Level-2 carries a 10-deep snapshot, order-by-order messages, trade prints, and the order queue, also on a multi-second cadence. Futures 1-deep and 5-deep snapshots arrive about every 500 milliseconds. History is archived by capacity. Backtest reads use their own load path and carry the cleaning result. Replay speed sits in the replay config. Calendars are split by market. The security master, industry membership, index membership, the limit-up pool, and the ST pool sit with the master. An industry classification and a name's industry membership are two tables. Financial statements and alternative data use the same read API.
+
+One backtest run records the date window, the benchmark, starting cash, the fee kind and rate, futures margin, the slippage kind and value, and the maximum participation. Maximum participation caps this fill as a fraction of that bar's volume. The engine loads that window and simulates fills with the rebalance rule. A paper run sends orders into a sim channel on daily bars, to confirm the channel and the program path. A strategy that places once ends when that order is done. A strategy driven by a quote signal stays up and runs when the signal arrives.
+
+A strategy may run on the broker's server. The client machine can be off, and third-party libraries stay out of that environment. A strategy may run on the local trading machine. That process stays up, and third-party libraries can be imported. An order does not pass through a workflow. It leaves memory and goes to the counter. Risk stays in memory. One account and an account group can each be checked against their own rules at the same time. Research scripts are Python. The hot path is C++. A binding joins the two. Live code is edited in the firm's own repository. Open-source engines are references. A live defect is fixed in that repository.
+
+```cpp
+enum class RunHost : uint8_t { BrokerServer, LocalDesk };
+
+struct ResearchJob {
+    int start_day{0};
+    int end_day{0};
+    int64_t cash{0};
+    int fee_kind{0};
+    double fee_rate{0};
+    double margin{0};
+    int slip_kind{0};
+    double slip{0};
+    double max_part{1};
+    RunHost host{RunHost::LocalDesk};
+};
+
+bool job_ready(const ResearchJob& j) {
+    if (j.end_day < j.start_day) return false;
+    if (j.cash <= 0) return false;
+    if (j.max_part < 0 || j.max_part > 1) return false;
+    return true;
+}
+
+bool desk_stays_up(RunHost h) { return h == RunHost::LocalDesk; }
+```
+
+A research run ends as a time, a symbol, a quantity, and a price. The execution system subtracts the day's opening position from the day's target position. A positive gap is a buy. A negative gap is a sell. Orders, cash and position checks, and risk finish inside the execution system, then the order goes out through the counter API. Minute bars for the whole market are built from the live feed. A late bar makes the factors on it late. A strategy subscribes to signals by symbol. At a higher frequency, the backtest signal and the live signal are compared at the same timestamp. An equal-weight book averages each strategy's daily return. Adding names lowers the book's variance while the correlation among strategies stays low. When that correlation is near 1, the book's variance returns to the level of a single strategy.
+
+```cpp
+struct Target { int64_t symbol{0}; int64_t want{0}; int64_t open_qty{0}; int64_t px{0}; };
+struct Delta { int64_t symbol{0}; int64_t qty{0}; bool buy{false}; int64_t px{0}; };
+
+bool make_delta(const Target& t, Delta& d) {
+    int64_t g = t.want - t.open_qty;
+    if (g == 0) return false;
+    d.symbol = t.symbol;
+    d.px = t.px;
+    d.buy = g > 0;
+    d.qty = g > 0 ? g : -g;
+    return true;
+}
+
+struct Sig { int64_t ts{0}; int64_t symbol{0}; int64_t qty{0}; int64_t px{0}; };
+
+bool sig_match(const Sig& a, const Sig& b) {
+    return a.ts == b.ts && a.symbol == b.symbol && a.qty == b.qty && a.px == b.px;
+}
+
+double book_var(double v, int n, double corr) {
+    if (n <= 1) return v;
+    double c = corr < 0 ? 0 : (corr > 1 ? 1 : corr);
+    return v * (c + (1.0 - c) / double(n));
+}
+```
+
+An order enters a system the broker controls. A PB order goes from the client to the PB backend, then to the fast counter, then to the exchange. A professional trading system enters through an SDK, a file drop, or a strategy API, then through its backend to the counter. When a privately built system goes live, the broker buys it from a licensed software firm named by the fund, installs it in the broker's machine room, and runs it for that fund alone. Strategy files on that machine execute against the broker's feed. Admission checks user rights, the terminal MAC, risk settings, the trading password, and the trading functions. Each counter has its own gateway. The gateway maps this system's fields onto that counter's fields. A test counter that fills a fixed size, such as 1000 shares in full and 2000 shares in part, only shows that the API is connected. Cash and positions are checked on a test environment that settles every day. A sim matcher can read the live book. It cannot change that book.
+
+```cpp
+enum class Ingress : uint8_t { Sdk, File, StrategyApi, PbClient };
+
+struct FieldMap { int own_side{0}; int counter_side{0}; };
+
+int to_counter(const FieldMap* m, int n, int own) {
+    for (int i = 0; i < n; ++i) if (m[i].own_side == own) return m[i].counter_side;
+    return -1;
+}
+```
+
+Cash, orders, fills, and positions are still there after a restart. Orders that had not been sent are not sent again. When that restart is acceptable, a second live site is unnecessary.
+
+```cpp
+struct BookSnap {
+    int64_t cash{0};
+    int64_t orders{0};
+    int64_t fills{0};
+    int64_t qty{0};
+    int64_t unsent{0};
+};
+
+void after_restart(BookSnap& b) { b.unsent = 0; }
+```
+
 ### 1. Four-process sim path: tape, quote adapter, trader, matcher
 
 The sim path splits into four roles that join on shared memory. A tape player loads a date window of history and publishes quotes, and may also emit prints or high-frequency factors. A quote adapter subscribes that feed and writes instrument quotes into shared memory. A sim trader registers clients under a fixed counter name, answers cash and position queries, takes order and cancel requests from strategies, and writes fills back. The matcher library keeps a working book per symbol and handles place, cancel, quote-driven match, print-driven match, and due timers. Strategies never call the matcher directly; they use the same shared-memory order API as when a live gateway is attached.
@@ -49179,6 +49363,28 @@ UnitNv product_unit(const FundNv& f) {
     o.unit = (f.pre_nav + f.today_pnl + f.holiday_pnl + share_adj) / f.share_t;
     o.accu = o.unit + f.custody_gap;
     return o;
+}
+```
+
+Holding PnL is the absolute change in the position's value. Contribution is that change divided by the product's capital. Timing PnL is today's holding PnL minus overnight notional times today's return. The overnight term does not look at whether the name traded today. Timing contribution is timing PnL divided by the product's capital. Holdings can be viewed by broker, by product, and by funding account. Opening an asset class lands on the positions inside it. At the manager level the first cut is the top N names, then quantity and weight on each product.
+
+```cpp
+struct NamePnl {
+    double hold_pnl{0};
+    double overnight_notional{0};
+    double day_ret{0};
+    double capital{0};
+};
+
+struct NameAttr { double contrib{0}; double timing{0}; double timing_contrib{0}; };
+
+NameAttr name_attr(const NamePnl& n) {
+    NameAttr a;
+    if (n.capital == 0) return a;
+    a.timing = n.hold_pnl - n.overnight_notional * n.day_ret;
+    a.contrib = n.hold_pnl / n.capital;
+    a.timing_contrib = a.timing / n.capital;
+    return a;
 }
 ```
 
