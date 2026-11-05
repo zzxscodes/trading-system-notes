@@ -14514,6 +14514,47 @@ void tune_md_sock(int fd) {
 }
 ```
 
+**Turn quick ACK back on after every read, and stop sending when retransmits climb**
+
+`TCP_QUICKACK` expires after the next acknowledgement. Once that ACK goes out, the stack returns to delayed ACK. Set the option again after each read on the receive path. One retransmission on the order socket costs about one RTO, often near 200 ms. Read `tcpi_total_retrans` through `TCP_INFO`. If the read fails, treat the count as full and keep new orders off that socket.
+
+```cpp
+#include <netinet/tcp.h>
+#include <sys/socket.h>
+
+void rearm_quickack(int fd) {
+    int on = 1;
+    setsockopt(fd, IPPROTO_TCP, TCP_QUICKACK, &on, sizeof(on));
+}
+
+uint32_t retrans_seen(int fd) {
+    tcp_info info{};
+    socklen_t len = sizeof(info);
+    if (getsockopt(fd, IPPROTO_TCP, TCP_INFO, &info, &len) != 0)
+        return 0xffffffffu;
+    return info.tcpi_total_retrans;
+}
+```
+
+**A multicast join fails with ENOBUFS once the membership cap is hit**
+
+`igmp_max_memberships` defaults to 20. A full futures multicast set often has more channels than that. `IP_ADD_MEMBERSHIP` fails and `errno` is `ENOBUFS`. Raise the cap above the channel count, then join again.
+
+```cpp
+#include <cerrno>
+#include <netinet/in.h>
+#include <sys/socket.h>
+
+int join_group(int fd, in_addr group, in_addr local) {
+    ip_mreq req{};
+    req.imr_multiaddr = group;
+    req.imr_interface = local;
+    if (setsockopt(fd, IPPROTO_IP, IP_ADD_MEMBERSHIP, &req, sizeof(req)) == 0)
+        return 0;
+    return errno;
+}
+```
+
 **2. Memory optimization**
 
 | Configuration items | Operation methods | Whether BIOS/reboot is required | Core purpose | Precautions |
@@ -14611,6 +14652,31 @@ void persist_fill(int fd) {
 | Real-time scheduling | Execute chrt -f 99 taskset -c 8-15 ./app | No | Set the application to real-time priority to ensure that ordinary tasks are preempted immediately | Only used for a single critical process to avoid system unresponsiveness |
 | NUMA binding | Execute numactl --cpunodebind=0 --membind=0 ./app | No | Bind the application to a specific NUMA node to reduce cross-node delay | Use numactl --show to verify the actual binding result |
 
+**Session autogroup and the hung-task watchdog meet a busy-poll core**
+
+Set `kernel.sched_autogroup_enabled` to 0. With the switch left on, the kernel groups processes by login session, and threads in that session contend with each other. Set `kernel.hung_task_timeout_secs` to 0. A `SCHED_FIFO` busy-poll on an isolated core does not yield. The hung-task detector marks that thread stuck, and `hung_task_panic` reboots the machine. Pin the busy-poll thread after both knobs read 0.
+
+```cpp
+#include <cstdlib>
+#include <fcntl.h>
+#include <unistd.h>
+
+int read_knob(const char* path) {
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return -1;
+    char buf[16]{};
+    ssize_t n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (n <= 0) return -1;
+    return std::atoi(buf);
+}
+
+bool spin_host_ok() {
+    int group = read_knob("/proc/sys/kernel/sched_autogroup_enabled");
+    int hung = read_knob("/proc/sys/kernel/hung_task_timeout_secs");
+    return group == 0 && hung == 0;
+}
+```
 
 **3. systemd accounting and journal**
 
@@ -19441,6 +19507,55 @@ int64_t span_ns(int64_t in_ns, int64_t out_ns) {
 int64_t socket_ns(const EdgeNs& e) { return span_ns(e.sock_in, e.sock_out); }
 int64_t port_ns(const EdgeNs& e) { return span_ns(e.port_in, e.port_out); }
 int64_t cable_ns(const EdgeNs& e) { return span_ns(e.wire_in, e.wire_out); }
+```
+
+**Tick-to-cancel, tick-to-trade, and order-to-ack are subtracted on their own endpoints**
+
+Tick-to-cancel runs from the market-data arrival to the exchange cancel ack. Tick-to-trade runs from the market-data arrival to the new order becoming live at the exchange. Order-to-ack runs from the local send to the ack. When `send` returns, record the local send time.
+
+```cpp
+struct VenueLap {
+    int64_t tick_ns{0};
+    int64_t send_ns{0};
+    int64_t live_ns{0};
+    int64_t cancel_ns{0};
+};
+
+int64_t lap_ns(int64_t from_ns, int64_t to_ns) {
+    if (to_ns < from_ns) return -1;
+    return to_ns - from_ns;
+}
+
+int64_t order_to_ack(const VenueLap& t) { return lap_ns(t.send_ns, t.live_ns); }
+int64_t tick_to_trade(const VenueLap& t) { return lap_ns(t.tick_ns, t.live_ns); }
+int64_t tick_to_cancel(const VenueLap& t) { return lap_ns(t.tick_ns, t.cancel_ns); }
+```
+
+**After a fill, mark the mid against the fill at four horizons**
+
+After a fill, take the mid at 10 ms, 100 ms, 1 s, and 5 s, subtract the fill price, and multiply by side. Buy is +1, sell is -1. Negative marks at the first two horizons and a non-negative mark at 5 s mean the cancel path was late: the quote was still resting after the price had left. Negative marks at all four horizons mean the quote sat on the wrong side of the mid.
+
+```cpp
+struct FillMark {
+    int64_t fill_px{0};
+    int side{1};
+    int64_t mid_px[4]{};
+};
+
+int64_t mark_at(const FillMark& m, int i) {
+    return (m.mid_px[i] - m.fill_px) * m.side;
+}
+
+bool cancel_late(const FillMark& m) {
+    if (mark_at(m, 0) >= 0 || mark_at(m, 1) >= 0) return false;
+    return mark_at(m, 3) >= 0;
+}
+
+bool quote_bias(const FillMark& m) {
+    for (int i = 0; i < 4; ++i)
+        if (mark_at(m, i) >= 0) return false;
+    return true;
+}
 ```
 
 **Common delay table**
@@ -25395,6 +25510,34 @@ void on_phase(Link& k, uint16_t phase, bool older) {
 }
 ```
 
+**Register the heartbeat window at logon, and drop the session's resting orders once it lapses**
+
+The logon carries this session's heartbeat window, for example 200 ms, or the window the counter already uses. If no heartbeat arrives inside that window, the exchange cancels the resting orders of that session. On a local drop, or when the last heartbeat is already past the window, remove those orders from the live quote set.
+
+```cpp
+struct SessionBook {
+    uint64_t ids[64]{};
+    int n{0};
+    int64_t beat_ns{0};
+    int64_t window_ns{200000000};
+};
+
+void on_logon(SessionBook& b, int64_t now_ns) { b.beat_ns = now_ns; }
+
+void on_beat(SessionBook& b, int64_t now_ns) { b.beat_ns = now_ns; }
+
+void note_resting(SessionBook& b, uint64_t id) {
+    if (b.n < 64) b.ids[b.n++] = id;
+}
+
+void on_link_down(SessionBook& b) { b.n = 0; }
+
+void on_silent(SessionBook& b, int64_t now_ns) {
+    if (b.beat_ns == 0) return;
+    if (now_ns - b.beat_ns < b.window_ns) return;
+    b.n = 0;
+}
+```
 
 1.5 Idempotent and out-of-order return processing of order state machine
 
@@ -36548,6 +36691,28 @@ void on_trade_catch_up(LiveOrder& o, int64_t qty, double px, int64_t left) {
 }
 ```
 
+**A fill that arrives while a cancel is in flight is applied, and the old price is not replaced**
+
+The cancel has been sent and the ack has not come back. A fill in that gap is written onto this order, quantity and price together. A new order at the same price is not sent. After this order reaches a terminal state, the remaining exposure is read again.
+
+```cpp
+struct QuoteLive {
+    int64_t px{0};
+    int64_t qty{0};
+    int64_t filled{0};
+    int cancel_out{0};
+};
+
+void take_fill(QuoteLive& q, int64_t qty, int64_t px) {
+    q.filled += qty;
+    q.px = px;
+    if (q.qty > qty) q.qty -= qty;
+    else q.qty = 0;
+}
+
+bool rest_held(const QuoteLive& q) { return q.cancel_out != 0; }
+```
+
 The async API splits “the front accepted the call” from “the exchange pushed a state”. A negative return is a send failure. A non-negative return only means the call was taken, and the order state stays as it was. The cancel function’s own callback only means the cancel was handed off; whether the order is cancelled still comes on the later order push. An order already in a terminal state is not cancelled again. A failed cancel send is recorded on that cancel, and the original order state is left unchanged. Creation, repo, and ordinary orders use different cancel functions and the same client sequence, which the push uses to find the local order.
 
 When a push does not match a local order, only fills are kept. Write this print’s quantity and price, leave the cumulative fields empty, and assign a separate external id.
@@ -38589,6 +38754,23 @@ int resting_qty(bool hit_together, int cap, int goal, const LegBook& leg) {
         return std::min(0, cap);
     int room = std::abs(leg.weight) * goal - std::abs(leg.net_pos) - leg.resting;
     return std::min(room, cap);
+}
+```
+
+**After one leg is force-reduced, cut the other leg toward flat by that delta**
+
+The two legs hedge each other. The broker or the exchange force-reduces one leg. The size removed is the delta. The other leg is reduced toward flat by that delta. The reduced leg stays at the size left after the cut.
+
+```cpp
+void cut_hedge(int64_t& kept, int64_t& other, int64_t left) {
+    int64_t before = kept >= 0 ? kept : -kept;
+    int64_t after = left >= 0 ? left : -left;
+    kept = left;
+    if (after >= before) return;
+    int64_t mag = before - after;
+    if (other >= mag) other -= mag;
+    else if (other <= -mag) other += mag;
+    else other = 0;
 }
 ```
 
@@ -46169,6 +46351,25 @@ bool still_on(const GridPx& g, int64_t px) {
 bool post_only(bool buy, int64_t limit, int64_t bid1, int64_t ask1) {
     if (buy) return ask1 <= 0 || limit < ask1;
     return bid1 <= 0 || limit > bid1;
+}
+```
+
+**When risk trips, send one mass-cancel frame per symbol that still has a live order**
+
+When the risk switch opens, each symbol that still has a live order gets one cancel-all frame. Cancelling order by order waits on each order's own round trip, and tick-to-cancel stretches across all of them. One frame takes one round trip.
+
+```cpp
+struct SymLive {
+    uint32_t sym{0};
+    uint32_t live{0};
+};
+
+int cancel_frames(uint32_t* out, int cap, const SymLive* rows, int n) {
+    int w = 0;
+    for (int i = 0; i < n && w < cap; ++i) {
+        if (rows[i].live != 0) out[w++] = rows[i].sym;
+    }
+    return w;
 }
 ```
 

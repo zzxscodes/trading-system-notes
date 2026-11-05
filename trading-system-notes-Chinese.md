@@ -14482,6 +14482,47 @@ void tune_md_sock(int fd) {
 }
 ```
 
+**立即确认每次收包后再打开，重传次数用来停发**
+
+`TCP_QUICKACK` 在下一次确认之后失效。ACK 发出去，协议栈回到延迟确认。收包路径上每次读完再设一次。订单套接字上一次重传大约占用一个 RTO，常见在 200 毫秒上下。用 `TCP_INFO` 读 `tcpi_total_retrans`。读失败时按计数已满处理，这条连接上的新单先不发。
+
+```cpp
+#include <netinet/tcp.h>
+#include <sys/socket.h>
+
+void rearm_quickack(int fd) {
+    int on = 1;
+    setsockopt(fd, IPPROTO_TCP, TCP_QUICKACK, &on, sizeof(on));
+}
+
+uint32_t retrans_seen(int fd) {
+    tcp_info info{};
+    socklen_t len = sizeof(info);
+    if (getsockopt(fd, IPPROTO_TCP, TCP_INFO, &info, &len) != 0)
+        return 0xffffffffu;
+    return info.tcpi_total_retrans;
+}
+```
+
+**组播加入数超过默认上限时，加入返回 ENOBUFS**
+
+`igmp_max_memberships` 的默认值是 20。期货全市场组播的频道数经常高于这个值。`IP_ADD_MEMBERSHIP` 失败，errno 为 `ENOBUFS`。把上限调到频道数以上，再加入。
+
+```cpp
+#include <cerrno>
+#include <netinet/in.h>
+#include <sys/socket.h>
+
+int join_group(int fd, in_addr group, in_addr local) {
+    ip_mreq req{};
+    req.imr_multiaddr = group;
+    req.imr_interface = local;
+    if (setsockopt(fd, IPPROTO_IP, IP_ADD_MEMBERSHIP, &req, sizeof(req)) == 0)
+        return 0;
+    return errno;
+}
+```
+
 **2. 内存优化**
 
 | 配置项 | 操作方式 | 是否需BIOS/重启 | 核心目的 | 注意事项 |
@@ -14579,6 +14620,31 @@ void persist_fill(int fd) {
 | 实时调度 | 执行chrt -f 99 taskset -c 8-15 ./app | 否 | 将应用设置为实时优先级，确保立即抢占普通任务 | 仅用于单个关键进程，避免系统无响应 |
 | NUMA绑定 | 执行numactl --cpunodebind=0 --membind=0 ./app | 否 | 将应用绑定到特定NUMA节点，减少跨节点延迟 | 需结合numactl --show验证实际绑定结果 |
 
+**会话自动分组和挂起检测会干扰隔离核上的忙等**
+
+`kernel.sched_autogroup_enabled` 写成 0。这个开关开着时，内核按登录会话给进程分组，同一会话里的线程互相挤占。`kernel.hung_task_timeout_secs` 写成 0。隔离核上的 `SCHED_FIFO` 忙等不主动让出，挂起检测会把它记成卡住。`hung_task_panic` 开着时，机器会重启。两项都是 0，忙等线程再钉上去。
+
+```cpp
+#include <cstdlib>
+#include <fcntl.h>
+#include <unistd.h>
+
+int read_knob(const char* path) {
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return -1;
+    char buf[16]{};
+    ssize_t n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (n <= 0) return -1;
+    return std::atoi(buf);
+}
+
+bool spin_host_ok() {
+    int group = read_knob("/proc/sys/kernel/sched_autogroup_enabled");
+    int hung = read_knob("/proc/sys/kernel/hung_task_timeout_secs");
+    return group == 0 && hung == 0;
+}
+```
 
 **3. systemd 记账与日志**
 
@@ -19412,6 +19478,55 @@ int64_t span_ns(int64_t in_ns, int64_t out_ns) {
 int64_t socket_ns(const EdgeNs& e) { return span_ns(e.sock_in, e.sock_out); }
 int64_t port_ns(const EdgeNs& e) { return span_ns(e.port_in, e.port_out); }
 int64_t cable_ns(const EdgeNs& e) { return span_ns(e.wire_in, e.wire_out); }
+```
+
+**行情到撤单确认、行情到新单生效、本机发出到确认，按各自的端点相减**
+
+行情到撤单确认，从行情到达算到交易所撤单确认。行情到新单生效，从行情到达算到新单在交易所生效。本机发出到确认，从本机发出算到确认回来。`send` 返回时，记下本机发出的时刻。
+
+```cpp
+struct VenueLap {
+    int64_t tick_ns{0};
+    int64_t send_ns{0};
+    int64_t live_ns{0};
+    int64_t cancel_ns{0};
+};
+
+int64_t lap_ns(int64_t from_ns, int64_t to_ns) {
+    if (to_ns < from_ns) return -1;
+    return to_ns - from_ns;
+}
+
+int64_t order_to_ack(const VenueLap& t) { return lap_ns(t.send_ns, t.live_ns); }
+int64_t tick_to_trade(const VenueLap& t) { return lap_ns(t.tick_ns, t.live_ns); }
+int64_t tick_to_cancel(const VenueLap& t) { return lap_ns(t.tick_ns, t.cancel_ns); }
+```
+
+**成交后按四个时距看中间价相对成交价的方向**
+
+成交记下之后，取 10 毫秒、100 毫秒、1 秒、5 秒四个时点的中间价，减去成交价，再乘方向。买入方向记 +1，卖出方向记 -1。近端两个时点为负，5 秒时点不为负，撤单路径偏慢，报价在价格离开之后还留在盘口上。四个时点都为负，报价偏在中间价不利的一侧。
+
+```cpp
+struct FillMark {
+    int64_t fill_px{0};
+    int side{1};
+    int64_t mid_px[4]{};
+};
+
+int64_t mark_at(const FillMark& m, int i) {
+    return (m.mid_px[i] - m.fill_px) * m.side;
+}
+
+bool cancel_late(const FillMark& m) {
+    if (mark_at(m, 0) >= 0 || mark_at(m, 1) >= 0) return false;
+    return mark_at(m, 3) >= 0;
+}
+
+bool quote_bias(const FillMark& m) {
+    for (int i = 0; i < 4; ++i)
+        if (mark_at(m, i) >= 0) return false;
+    return true;
+}
 ```
 
 **常见时延表**
@@ -25384,6 +25499,34 @@ void on_phase(Link& k, uint16_t phase, bool older) {
 }
 ```
 
+**登录时登记心跳窗口，窗口过了就移出本会话的挂单**
+
+登录报文里写上本会话的心跳窗口，例如 200 毫秒，或柜台已经在用的窗口。窗口里没有心跳，交易所撤掉这个会话还挂着的报单。本地发现连接断开，或心跳已经晚于窗口，就把这些报单移出可报价集合。
+
+```cpp
+struct SessionBook {
+    uint64_t ids[64]{};
+    int n{0};
+    int64_t beat_ns{0};
+    int64_t window_ns{200000000};
+};
+
+void on_logon(SessionBook& b, int64_t now_ns) { b.beat_ns = now_ns; }
+
+void on_beat(SessionBook& b, int64_t now_ns) { b.beat_ns = now_ns; }
+
+void note_resting(SessionBook& b, uint64_t id) {
+    if (b.n < 64) b.ids[b.n++] = id;
+}
+
+void on_link_down(SessionBook& b) { b.n = 0; }
+
+void on_silent(SessionBook& b, int64_t now_ns) {
+    if (b.beat_ns == 0) return;
+    if (now_ns - b.beat_ns < b.window_ns) return;
+    b.n = 0;
+}
+```
 
 1.5 订单状态机的幂等与乱序回报处理
 1.幂等处理原则
@@ -36534,6 +36677,28 @@ void on_trade_catch_up(LiveOrder& o, int64_t qty, double px, int64_t left) {
 }
 ```
 
+**撤单在途时成交先到，记入这张单，同一价格先不补**
+
+撤单已经发出，确认还没回到本地。这段时间里成交先到，把数量和价格记进这张单。同一价格的新挂单先不发。这张单进入终态之后，再读剩余敞口。
+
+```cpp
+struct QuoteLive {
+    int64_t px{0};
+    int64_t qty{0};
+    int64_t filled{0};
+    int cancel_out{0};
+};
+
+void take_fill(QuoteLive& q, int64_t qty, int64_t px) {
+    q.filled += qty;
+    q.px = px;
+    if (q.qty > qty) q.qty -= qty;
+    else q.qty = 0;
+}
+
+bool rest_held(const QuoteLive& q) { return q.cancel_out != 0; }
+```
+
 异步接口把“前置收下请求”和“交易所推送”分成两次回调。前一次返回码为负，才是发送失败；非负只表示调用被收下，订单状态保持不动。撤单函数自己的回调同样只说明撤单请求已发出，是否撤销仍看后面的订单推送。原单已经终态就不再发撤。撤单发送失败只记在这次撤单上，原单状态不改。申赎、回购和普通买卖的撤单函数不同，客户流水号用同一个，推送靠它找回本地单。
 
 推送里对不上本地单时，只吃成交。写这一笔的数量和价格，累计成交留空，另外编一个外部单号。
@@ -38575,6 +38740,23 @@ int resting_qty(bool hit_together, int cap, int goal, const LegBook& leg) {
         return std::min(0, cap);
     int room = std::abs(leg.weight) * goal - std::abs(leg.net_pos) - leg.resting;
     return std::min(room, cap);
+}
+```
+
+**一条腿被强减之后，另一条腿朝平仓方向减掉这个差额**
+
+两条腿互相对冲。其中一条被柜台或交易所强减，减掉的数量就是差额。另一条腿朝平仓方向减掉这个差额。被强减的那条腿留在减完以后的数量上。
+
+```cpp
+void cut_hedge(int64_t& kept, int64_t& other, int64_t left) {
+    int64_t before = kept >= 0 ? kept : -kept;
+    int64_t after = left >= 0 ? left : -left;
+    kept = left;
+    if (after >= before) return;
+    int64_t mag = before - after;
+    if (other >= mag) other -= mag;
+    else if (other <= -mag) other += mag;
+    else other = 0;
 }
 ```
 
@@ -46161,6 +46343,25 @@ bool still_on(const GridPx& g, int64_t px) {
 bool post_only(bool buy, int64_t limit, int64_t bid1, int64_t ask1) {
     if (buy) return ask1 <= 0 || limit < ask1;
     return bid1 <= 0 || limit > bid1;
+}
+```
+
+**风险开关打开后，每个还有挂单的合约发一帧全撤**
+
+风险开关打开后，每个还有挂单的合约发一帧全撤。按单笔撤要一笔一笔等回程，从行情到撤单生效被拆成多段往返。一帧全撤占用一个往返。
+
+```cpp
+struct SymLive {
+    uint32_t sym{0};
+    uint32_t live{0};
+};
+
+int cancel_frames(uint32_t* out, int cap, const SymLive* rows, int n) {
+    int w = 0;
+    for (int i = 0; i < n && w < cap; ++i) {
+        if (rows[i].live != 0) out[w++] = rows[i].sym;
+    }
+    return w;
 }
 ```
 
