@@ -5715,6 +5715,32 @@ struct SendJoinRing {
 };
 ```
 
+**Tethered readers fold into the write limit**
+
+Each tethered reader reports the position it has consumed. The write limit is the minimum of those positions plus the window length. When no tethered reader exists, the write returns not-connected and the bytes are not left in the log for a reader that connects afterwards. When readers exist and the new position passes the limit, the write returns back-pressure. The caller retries later and does not overwrite a frame that has not been read. A region roll returns its own result, and the caller retries at once. Untethered readers, and observers that only map the log, stay out of that minimum. An observer does not report its position back to the writer. While the stream is quiet, a tethered reader still reports its current position so the writer can see that the peer is alive.
+
+```cpp
+enum class Gate : int8_t { Ok, None, Behind, Roll };
+
+struct Pace {
+    int64_t tether[8]{};
+    int n{0};
+    int64_t window{0};
+
+    int64_t limit() const {
+        int64_t m = tether[0];
+        for (int i = 1; i < n; ++i) if (tether[i] < m) m = tether[i];
+        return m + window;
+    }
+};
+
+Gate gate(const Pace& p, int64_t pos, bool need_roll) {
+    if (need_roll) return Gate::Roll;
+    if (p.n <= 0) return Gate::None;
+    if (pos > p.limit()) return Gate::Behind;
+    return Gate::Ok;
+}
+```
 
 ### 12. Memory alignment and typical memory layout optimization
 ```cpp
@@ -12786,6 +12812,38 @@ inline void signal(volatile uint32_t* flag) {
 
 `notify_all()` / `pthread_cond_broadcast`, or looping `notify_one` for far more waiters than jobs, wakes more threads than can make progress: all race the mutex, most find the predicate false and sleep again—paying O(N) context switches, futex calls, and cross-core IPIs. `perf` often shows hot `futex_wake` / `try_to_wake_up` while `perf lock` hold/wait looks normal. Wake **exactly as many workers as there is work**, or move to a lock-free queue / work-stealing design instead of waking everyone then putting them back to sleep.
 
+**Idle waiting steps through pause, yield, then sleep**
+
+While no new data arrives, the first rounds only execute a pause instruction. After that budget is spent, the waiter yields the timeslice. After the yield budget, it sleeps for a nanosecond interval that doubles until a cap. As soon as data arrives, the counters and the sleep interval return to the start. A publishing thread on the hot path uses only the pause step.
+
+```cpp
+struct IdleLadder {
+    int spins{0};
+    int yields{0};
+    int spin_budget{64};
+    int yield_budget{16};
+    int sleep_ns{1000};
+    int sleep_cap{1000000};
+
+    void once() {
+        if (spins < spin_budget) {
+            ++spins;
+            _mm_pause();
+            return;
+        }
+        if (yields < yield_budget) {
+            ++yields;
+            std::this_thread::yield();
+            return;
+        }
+        std::this_thread::sleep_for(std::chrono::nanoseconds(sleep_ns));
+        if (sleep_ns < sleep_cap / 2) sleep_ns *= 2;
+    }
+
+    void reset() { spins = 0; yields = 0; sleep_ns = 1000; }
+};
+```
+
 ### 26. Bit fields and bit operations
 **Bitfield** is a special `struct` member, which allows us to precisely define the number of binary digits occupied by a variable. Its core value in HFT is:
 
@@ -14387,6 +14445,24 @@ inline auto Common::rdtsc() noexcept {
     __asm__ __volatile__ ("rdtsc" : "=a" (lo), "=d" (hi));
     // Shift the high 32 bits to the left by 32 bits and combine them with the low 32 bits to return a 64-bit value representing the CPU clock cycle.
     return ((uint64_t) hi << 32) | lo;
+}
+```
+
+**Microseconds are written into one cache line by a side thread**
+
+The hot path does not call a time syscall. A side thread, every few microseconds, stores the current microsecond value into an atomic that occupies its own line, with a release store. The business thread loads it with acquire. That value is for stamps and for alignment at millisecond scale. Intervals of a few tens of nanoseconds still use the cycle counter.
+
+```cpp
+struct alignas(64) CachedUs {
+    std::atomic<int64_t> us{0};
+};
+
+void stamp_us(CachedUs& c, int64_t now_us) {
+    c.us.store(now_us, std::memory_order_release);
+}
+
+int64_t read_us(const CachedUs& c) {
+    return c.us.load(std::memory_order_acquire);
 }
 ```
 
@@ -16157,6 +16233,104 @@ FrameLook read_len(const FrameWord* w, uint32_t& step) {
 }
 ```
 
+**A log is three fixed regions; a message that does not fit pads the region and rolls**
+
+Each region length is a power of two. Position is the region id times that length, plus the offset inside the region. When the 32-byte-aligned size does not fit in the bytes left in the current region, the writer publishes a padding frame from the current offset to the end of the region and moves to the next region. The caller sees the roll result and writes again immediately. Of the three regions, one is being written, the previous one can still be read, and the one before that is zeroed by another thread. Zeroing stays off the writing thread. Two processes can map the same three regions. The data path does not call a send syscall.
+
+An exclusive writer advances the tail with an ordinary add. Concurrent writers reserve an aligned range with one compare-exchange. While a reserved range has not published its frame length, readers stop there. They do not jump to a later frame that is already finished. A reader may hold a frame. After it commits, the offset increases by the frame length. While it holds, the offset stays put.
+
+```cpp
+enum class LogOffer : int8_t { Ok, Roll, TooBig };
+
+struct TriLog {
+    static constexpr int Parts = 3;
+    static constexpr uint32_t Span = 65536;
+    static constexpr uint32_t Grain = 32;
+    uint8_t part[Parts][Span]{};
+    uint32_t which{0};
+    uint32_t tail{0};
+    int64_t part_id{0};
+
+    static uint32_t grain(uint32_t n) { return (n + (Grain - 1u)) & ~(Grain - 1u); }
+
+    void seal(uint32_t at, uint32_t nbytes) {
+        auto* p = reinterpret_cast<std::atomic<uint32_t>*>(part[which] + at);
+        p->store(nbytes, std::memory_order_release);
+    }
+
+    LogOffer reserve(uint32_t body, uint32_t& at, uint32_t& nbytes) {
+        nbytes = grain(32u + body);
+        if (nbytes > Span) return LogOffer::TooBig;
+        if (tail + nbytes > Span) {
+            if (tail < Span) seal(tail, Span - tail);
+            which = (which + 1) % Parts;
+            tail = 0;
+            ++part_id;
+            return LogOffer::Roll;
+        }
+        at = tail;
+        tail += nbytes;
+        return LogOffer::Ok;
+    }
+};
+
+struct SharedTail {
+    std::atomic<uint32_t> tail{0};
+
+    bool take(uint32_t nbytes, uint32_t limit, uint32_t& at) {
+        uint32_t cur = tail.load(std::memory_order_relaxed);
+        for (;;) {
+            if (cur + nbytes > limit) return false;
+            if (tail.compare_exchange_weak(cur, cur + nbytes,
+                    std::memory_order_relaxed, std::memory_order_relaxed)) {
+                at = cur;
+                return true;
+            }
+        }
+    }
+};
+
+enum class Pull : uint8_t { Take, Hold };
+
+uint32_t pull_frame(const TriLog& log, uint32_t cursor, Pull (*fn)(const uint8_t*, uint32_t)) {
+    auto* p = reinterpret_cast<const std::atomic<uint32_t>*>(log.part[log.which] + cursor);
+    uint32_t n = p->load(std::memory_order_acquire);
+    if (n == 0) return cursor;
+    if (fn(log.part[log.which] + cursor, n) == Pull::Hold) return cursor;
+    return cursor + n;
+}
+```
+
+**An append-only log records sequence to file offset at a fixed stride**
+
+A single writer appends records at the end of the file. Every fixed number of records it writes an index entry: the sequence and the file offset. A reader binary-searches the index for the target sequence, takes the offset of the greatest entry that does not pass it, and scans forward from there. The index itself has a directory of blocks, so a lookup does not scan the whole index. A new file starts when the cycle changes. A named reader stores the last finished sequence in the log metadata and continues from that sequence after a restart.
+
+```cpp
+struct IxEnt { int64_t seq{0}; int64_t file_off{0}; };
+
+struct SparseIx {
+    static constexpr int Step = 64;
+    IxEnt ent[1024]{};
+    int n{0};
+
+    void note(int64_t seq, int64_t off) {
+        if (n >= 1024 || (seq % Step) != 0) return;
+        ent[n++] = IxEnt{seq, off};
+    }
+
+    int64_t seek(int64_t seq) const {
+        if (n == 0) return 0;
+        int lo = 0, hi = n;
+        while (lo + 1 < hi) {
+            int mid = (lo + hi) / 2;
+            if (ent[mid].seq <= seq) lo = mid;
+            else hi = mid;
+        }
+        return ent[lo].seq <= seq ? ent[lo].file_off : 0;
+    }
+};
+```
+
 ### 36. Fail fast when shared capacity is exhausted
 
 Once a shared-memory ring, factor entry pool, or name index is full, overwriting or silently dropping leaves orders and books in an undefined state. Capacity faults should emit a fatal log and abort the process so operators enlarge the pool from config, instead of swallowing the error on the hot path. That differs from online services that block when a queue is full: trading middleware fears silent book corruption more than a crash.
@@ -17608,6 +17782,22 @@ struct GapLog {
         return len != 0;
     }
 };
+```
+
+**A gap is resent from the region that is still one of the three**
+
+A reader that sees a break in the region offset sends back the region id, the start of the gap, and the length. When the gap's region id is the current id or exactly one behind, those bytes are still in that region and are sent again as they were. When the region id is two or more behind the current id, that region may already have been zeroed. It is not sent again, and the image stays in front of the gap.
+
+```cpp
+struct Hole { int64_t part_id{0}; uint32_t from{0}; uint32_t len{0}; };
+
+bool replay_hole(const uint8_t part[][65536], int parts, int64_t resident,
+                 const Hole& h, const uint8_t*& src, uint32_t& n) {
+    if (h.part_id + 1 < resident) return false;
+    src = part[int(h.part_id % parts)] + h.from;
+    n = h.len;
+    return true;
+}
 ```
 
 ### 43. Kernel async I/O on shared submit and completion rings
@@ -34686,6 +34876,35 @@ struct TimeTriple {
 2. **Field contract**: know which fields change on every send vs rarely; bake fixed fields as compile-time constants or write them once at startup.
 3. **Correctness**: pre-serialization does not replace risk checks or the OMS state machine.
 4. **Protocol fidelity**: tag-value FIX needs SOH and body length; binary protocols should use generated code/SBE schema offsets.
+
+**Block length lets an older reader skip fields added later**
+
+The message header carries the block length, template id, schema id, and version. Fixed fields sit at fixed offsets after the header. Variable data sits after the span named by the block length. A reader knows only the field width it was compiled with. When the header's block length is greater than that width, the extra tail is skipped as a whole. New fields are added at the end of the fixed region. An older program skips them by the block length and does not need to be recompiled.
+
+```cpp
+struct MsgHead {
+    uint16_t block{0};
+    uint16_t tmpl{0};
+    uint16_t schema{0};
+    uint16_t ver{0};
+};
+
+struct OrderBody {
+    int64_t px{0};
+    int32_t qty{0};
+};
+
+const OrderBody* view_order(const uint8_t* p, uint16_t know) {
+    auto* h = reinterpret_cast<const MsgHead*>(p);
+    if (h->block < know) return nullptr;
+    return reinterpret_cast<const OrderBody*>(p + sizeof(MsgHead));
+}
+
+const uint8_t* after_block(const uint8_t* p) {
+    auto* h = reinterpret_cast<const MsgHead*>(p);
+    return p + sizeof(MsgHead) + h->block;
+}
+```
 
 **Example** (illustrative: fixed prefix + hot path only patches quantity; replace with real tag layout or SBE-generated structs in production):
 

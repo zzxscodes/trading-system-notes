@@ -5723,6 +5723,32 @@ struct SendJoinRing {
 };
 ```
 
+**跟上的读者限制写入，上限是最慢位置加一段窗口**
+
+要跟上这条日志，读者先把已经读过的位置报上来。写入能走到的位置，是这些位置里最小的那个，再加上一段窗口。一个跟上的读者都没有，写入返回未连接，这次的字节不放进日志，之后连上的读者从当时的写位置接着读。读者还在，但要写的位置已经越过上限，写入返回背压。调用方过一会儿再试，还没读走的帧留在原地。需要换段时单独返回一次，调用方马上再写。最慢位置只在会回报读位置的跟上读者里取。只映射日志、不回报读位置的进程，不算进最慢位置。跟上的读者暂时没有新数据，也会再报一次当前读位置。写的一侧收到这个位置，说明对方还在。
+
+```cpp
+enum class Gate : int8_t { Ok, None, Behind, Roll };
+
+struct Pace {
+    int64_t tether[8]{};
+    int n{0};
+    int64_t window{0};
+
+    int64_t limit() const {
+        int64_t m = tether[0];
+        for (int i = 1; i < n; ++i) if (tether[i] < m) m = tether[i];
+        return m + window;
+    }
+};
+
+Gate gate(const Pace& p, int64_t pos, bool need_roll) {
+    if (need_roll) return Gate::Roll;
+    if (p.n <= 0) return Gate::None;
+    if (pos > p.limit()) return Gate::Behind;
+    return Gate::Ok;
+}
+```
 
 ### 12. 内存对齐与典型内存布局优化
 ```cpp
@@ -12753,6 +12779,38 @@ inline void signal(volatile uint32_t* flag) {
 
 `notify_all()` / `pthread_cond_broadcast`，或对远超任务数的等待者循环 `notify_one`，会唤醒远多于能推进工作的线程：全部争抢互斥锁，多数发现谓词已不成立再睡回——代价是 O(N) 次上下文切换、futex 与跨核 IPI。`perf` 上常见 `futex_wake` / `try_to_wake_up` 偏热，而 `perf lock` 的 hold/wait 未必异常。应按**实际可消费的工作数**精确唤醒（一次只 wake 需要的个数），或改用无锁队列/工作窃取，避免“全员唤醒再全员睡回”。
 
+**空等先暂停，再让出，最后休眠**
+
+没有新数据时，先执行暂停指令，次数有上限。次数用完，改为让出时间片，让出也有次数上限。再往后按纳秒休眠，间隔逐次加倍，加到上限为止。读到数据以后，暂停次数、让出次数和休眠间隔都回到起点。发布线程在热路径上只做暂停。
+
+```cpp
+struct IdleLadder {
+    int spins{0};
+    int yields{0};
+    int spin_budget{64};
+    int yield_budget{16};
+    int sleep_ns{1000};
+    int sleep_cap{1000000};
+
+    void once() {
+        if (spins < spin_budget) {
+            ++spins;
+            _mm_pause();
+            return;
+        }
+        if (yields < yield_budget) {
+            ++yields;
+            std::this_thread::yield();
+            return;
+        }
+        std::this_thread::sleep_for(std::chrono::nanoseconds(sleep_ns));
+        if (sleep_ns < sleep_cap / 2) sleep_ns *= 2;
+    }
+
+    void reset() { spins = 0; yields = 0; sleep_ns = 1000; }
+};
+```
+
 ### 26. 位域与位运算
 **位域（Bitfield）** 是一种特殊的 `struct` 成员，它允许我们精确地定义一个变量占用的二进制位数。其在HFT中的核心价值在于：
 
@@ -14355,6 +14413,24 @@ inline auto Common::rdtsc() noexcept {
     __asm__ __volatile__ ("rdtsc" : "=a" (lo), "=d" (hi));
     // 将高 32 位左移 32 位后与低 32 位合并，返回一个 64 位的表示经过 CPU 时钟周期的值
     return ((uint64_t) hi << 32) | lo;
+}
+```
+
+**旁路线程把微秒数写在单独一行上**
+
+热路径不调用取时间的系统调用。专门有一条线程，每隔几微秒把当前的微秒数写进一个原子变量。这个变量单独占一个缓存行，写入用 release。业务线程用 acquire 读它，用来打时间戳，也用来把事件对齐到毫秒。要分辨几十纳秒的间隔时，直接读周期计数器。
+
+```cpp
+struct alignas(64) CachedUs {
+    std::atomic<int64_t> us{0};
+};
+
+void stamp_us(CachedUs& c, int64_t now_us) {
+    c.us.store(now_us, std::memory_order_release);
+}
+
+int64_t read_us(const CachedUs& c) {
+    return c.us.load(std::memory_order_acquire);
 }
 ```
 
@@ -16128,6 +16204,104 @@ FrameLook read_len(const FrameWord* w, uint32_t& step) {
 }
 ```
 
+**日志分成三段，当前段写不下就先补满再换段**
+
+每段长度是 2 的幂。日志里的位置是段号乘以段长，再加上段内偏移。一条消息按 32 字节对齐之后，当前段剩下的字节放不下，就从当前偏移一直补到段尾，补的这段标成填充帧，然后切到下一段。调用方看到换段，马上用新段再写一次。三段同时留着。当前这段正在写。上一段还可以读。再往前的那段由另一条线程整段写成 0。两个进程映射同一块内存，传数据时不用发送系统调用。
+
+只有一个写者时，尾偏移直接做加法。有多个写者时，用一次比较交换占住对齐后的区间。区间已经占住、帧长还没发布，读者就停在这里。后面已经写完的帧，要等前面的帧长发布之后再读。读者处理一条帧时可以先留在原地。提交以后，读偏移加上这一帧的长度。还没提交时，读偏移停在这条帧上。
+
+```cpp
+enum class LogOffer : int8_t { Ok, Roll, TooBig };
+
+struct TriLog {
+    static constexpr int Parts = 3;
+    static constexpr uint32_t Span = 65536;
+    static constexpr uint32_t Grain = 32;
+    uint8_t part[Parts][Span]{};
+    uint32_t which{0};
+    uint32_t tail{0};
+    int64_t part_id{0};
+
+    static uint32_t grain(uint32_t n) { return (n + (Grain - 1u)) & ~(Grain - 1u); }
+
+    void seal(uint32_t at, uint32_t nbytes) {
+        auto* p = reinterpret_cast<std::atomic<uint32_t>*>(part[which] + at);
+        p->store(nbytes, std::memory_order_release);
+    }
+
+    LogOffer reserve(uint32_t body, uint32_t& at, uint32_t& nbytes) {
+        nbytes = grain(32u + body);
+        if (nbytes > Span) return LogOffer::TooBig;
+        if (tail + nbytes > Span) {
+            if (tail < Span) seal(tail, Span - tail);
+            which = (which + 1) % Parts;
+            tail = 0;
+            ++part_id;
+            return LogOffer::Roll;
+        }
+        at = tail;
+        tail += nbytes;
+        return LogOffer::Ok;
+    }
+};
+
+struct SharedTail {
+    std::atomic<uint32_t> tail{0};
+
+    bool take(uint32_t nbytes, uint32_t limit, uint32_t& at) {
+        uint32_t cur = tail.load(std::memory_order_relaxed);
+        for (;;) {
+            if (cur + nbytes > limit) return false;
+            if (tail.compare_exchange_weak(cur, cur + nbytes,
+                    std::memory_order_relaxed, std::memory_order_relaxed)) {
+                at = cur;
+                return true;
+            }
+        }
+    }
+};
+
+enum class Pull : uint8_t { Take, Hold };
+
+uint32_t pull_frame(const TriLog& log, uint32_t cursor, Pull (*fn)(const uint8_t*, uint32_t)) {
+    auto* p = reinterpret_cast<const std::atomic<uint32_t>*>(log.part[log.which] + cursor);
+    uint32_t n = p->load(std::memory_order_acquire);
+    if (n == 0) return cursor;
+    if (fn(log.part[log.which] + cursor, n) == Pull::Hold) return cursor;
+    return cursor + n;
+}
+```
+
+**追加日志每隔固定条数记一次序号和偏移**
+
+只有一个写者，记录加在文件末尾。每写满固定的条数，就追加一条索引，记下这时的序号和文件偏移。查找时先对索引做二分，取序号不大于目标的最后一条，从它记下的偏移往下顺序读。索引再分成块，块上面有一层目录，查找不用扫完整份索引。到了下一个周期，换一个新文件。需要从断点续读的读者，把上次读完的序号记在日志的元数据里。进程重启以后，从这条序号接着读。
+
+```cpp
+struct IxEnt { int64_t seq{0}; int64_t file_off{0}; };
+
+struct SparseIx {
+    static constexpr int Step = 64;
+    IxEnt ent[1024]{};
+    int n{0};
+
+    void note(int64_t seq, int64_t off) {
+        if (n >= 1024 || (seq % Step) != 0) return;
+        ent[n++] = IxEnt{seq, off};
+    }
+
+    int64_t seek(int64_t seq) const {
+        if (n == 0) return 0;
+        int lo = 0, hi = n;
+        while (lo + 1 < hi) {
+            int mid = (lo + hi) / 2;
+            if (ent[mid].seq <= seq) lo = mid;
+            else hi = mid;
+        }
+        return ent[lo].seq <= seq ? ent[lo].file_off : 0;
+    }
+};
+```
+
 ### 36. 共享资源容量耗尽时快速失败
 
 共享内存里的环、因子条目池、命名索引一旦写满，若继续覆盖或静默丢弃，订单与账本会进入不可预期状态。容量类错误应打致命日志并立刻中止进程，迫使运维按配置放大池子，而不是在热路径上吞掉异常。这与“队列满则阻塞等待”的在线服务模型不同：交易中间件更怕静默错账。
@@ -17576,6 +17750,22 @@ struct GapLog {
         return len != 0;
     }
 };
+```
+
+**缺口所在的段还在，就从那段重发**
+
+读者看到段内偏移断了，把段号、缺口起点和长度送回写入侧。缺口的段号等于当前段号，或者只比当前段号小 1，这段字节还在对应的段里，按原样再发一次。段号比当前段号小了两个或更多，那段可能已经写成 0。这段不重发，读者停在缺口前面。
+
+```cpp
+struct Hole { int64_t part_id{0}; uint32_t from{0}; uint32_t len{0}; };
+
+bool replay_hole(const uint8_t part[][65536], int parts, int64_t resident,
+                 const Hole& h, const uint8_t*& src, uint32_t& n) {
+    if (h.part_id + 1 < resident) return false;
+    src = part[int(h.part_id % parts)] + h.from;
+    n = h.len;
+    return true;
+}
 ```
 
 ### 43. 共享提交完成环上的内核异步收发
@@ -34673,6 +34863,35 @@ struct TimeTriple {
 2. **字段契约**：明确哪些字段每次必变、哪些长期固定；固定字段用编译期常量或启动时写入一次。
 3. **正确性**：预序列化**不能**跳过风控与状态机校验。
 4. **与协议一致**：文本 FIX 需注意 SOH 分隔与 body length；二进制协议优先按生成代码/SBE schema 的偏移写入。
+
+**旧程序靠块长跳过后来加的字段**
+
+消息头里写着块长、模板号、结构号和版本。定长字段排在头后面，每个字段的偏移固定。变长数据放在定长区后面，定长区的长度就是块长。读取方按自己编译时的字段宽度来读。头上的块长比这个宽度大，多出来的字节整段跳过。新字段加在定长区的末尾。编译得更早的程序按块长跳过，不用重新编译。
+
+```cpp
+struct MsgHead {
+    uint16_t block{0};
+    uint16_t tmpl{0};
+    uint16_t schema{0};
+    uint16_t ver{0};
+};
+
+struct OrderBody {
+    int64_t px{0};
+    int32_t qty{0};
+};
+
+const OrderBody* view_order(const uint8_t* p, uint16_t know) {
+    auto* h = reinterpret_cast<const MsgHead*>(p);
+    if (h->block < know) return nullptr;
+    return reinterpret_cast<const OrderBody*>(p + sizeof(MsgHead));
+}
+
+const uint8_t* after_block(const uint8_t* p) {
+    auto* h = reinterpret_cast<const MsgHead*>(p);
+    return p + sizeof(MsgHead) + h->block;
+}
+```
 
 **示例**（示意：固定前缀 + 热路径只改数量与递增序号；真实项目应替换为具体 tag 布局或 SBE 生成结构体）：
 
