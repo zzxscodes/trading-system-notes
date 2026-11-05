@@ -7292,6 +7292,42 @@ int main() {
 // Generally used in high-frequency call scenarios, such as processing interfaces and abstract functions of external data sources to reuse code.
 ```
 
+Sequence numbers, heartbeats, and the write path of an order session are fixed when the program is compiled. The hot path calls the concrete functions directly.
+
+```cpp
+struct SeqCount {
+    uint32_t n{1};
+    uint32_t next() { return n++; }
+};
+
+struct BeatOn {
+    int64_t due{0};
+    bool due_now(int64_t now, int64_t gap) {
+        if (now < due) return false;
+        due = now + gap;
+        return true;
+    }
+};
+
+struct ByteWire {
+    bool write(uint32_t seq, const char* body, int n);
+    void beat();
+};
+
+template <typename Wire, typename Seq, typename Beat>
+struct OrderSession {
+    Wire wire{};
+    Seq seq{};
+    Beat beat{};
+    int64_t gap{1000};
+
+    bool send(const char* body, int n, int64_t now) {
+        if (beat.due_now(now, gap)) wire.beat();
+        return wire.write(seq.next(), body, n);
+    }
+};
+```
+
 **1.2concepts type polymorphism**
 
 ```cpp
@@ -18123,6 +18159,22 @@ CutChoice pick_cut(uint64_t stage_p99_ns, uint64_t gap_p01_ns,
 }
 ```
 
+A FAST stream keeps a dictionary that the previous message updates. Packets on that stream decode in arrival order on one core. A fixed layout whose fields do not carry state from the previous packet can be handed to several cores and reassembled by sequence at the exit.
+
+```cpp
+struct FastCursor {
+    uint32_t prev{0};
+    uint32_t seq{0};
+};
+
+bool take_fast(FastCursor& c, uint32_t seq, uint32_t delta) {
+    if (c.seq != 0 && seq != c.seq + 1) return false;
+    c.prev += delta;
+    c.seq = seq;
+    return true;
+}
+```
+
 ### 47. Compile-time typestate: illegal ticket moves are unreachable by type
 
 With a runtime enum, illegal calls only fail behind a guard, and a terminal state can still expose `fill`. Encoding state as a type tag makes `TicketDraft` and `TicketLive` distinct types: `commit` lives only on draft, `apply_fill` only on live, and illegal calls fail at compile time. A transition consumes the old object and returns a new type, so the old binding cannot mutate state again. Read-only queries stay open for every tag. Tags are empty structs with no runtime storage. When there are many states or frequent rollbacks, keep typestate only for critical invariants such as “unvalidated tickets cannot submit”.
@@ -18940,6 +18992,30 @@ int64_t wire_ttt(const WireStamp& s) {
     if (!s.paired || s.ord_ns < s.md_ns) return -1;
     return s.ord_ns - s.md_ns;
 }
+```
+
+**The socket, the NIC port, and the cable are three different pairs of endpoints**
+
+Socket-to-socket runs from the socket read return to the socket write call. Port-to-port runs from the frame arriving at the NIC to the frame leaving the NIC. Wire-to-wire runs from the frame on the cable inbound to the frame on the cable outbound, and the time on the cable is included. Each pair is subtracted on its own endpoints.
+
+```cpp
+struct EdgeNs {
+    int64_t sock_in{0};
+    int64_t sock_out{0};
+    int64_t port_in{0};
+    int64_t port_out{0};
+    int64_t wire_in{0};
+    int64_t wire_out{0};
+};
+
+int64_t span_ns(int64_t in_ns, int64_t out_ns) {
+    if (out_ns < in_ns) return -1;
+    return out_ns - in_ns;
+}
+
+int64_t socket_ns(const EdgeNs& e) { return span_ns(e.sock_in, e.sock_out); }
+int64_t port_ns(const EdgeNs& e) { return span_ns(e.port_in, e.port_out); }
+int64_t cable_ns(const EdgeNs& e) { return span_ns(e.wire_in, e.wire_out); }
 ```
 
 **Common delay table**
@@ -22696,12 +22772,71 @@ private:
 ```
 
 
+**A weighted mean adds the products and the weights in one scan**
+
+The sum of sample times weight and the sum of the weights belong in one loop. A second pass reads the same array again. Below about 50,000 elements, the cost of starting parallel work exceeds the arithmetic. Past that size, one pass that keeps both sums moves about half the memory of two separate reductions.
+
+```cpp
+struct WSum { double sw{0}; double w{0}; };
+
+WSum accumulate_w(const double* x, const double* w, int n) {
+    WSum s;
+    for (int i = 0; i < n; ++i) {
+        s.sw += x[i] * w[i];
+        s.w += w[i];
+    }
+    return s;
+}
+
+double wmean(const WSum& s) {
+    if (s.w == 0) return 0;
+    return s.sw / s.w;
+}
+```
+
 ### 5. Task Five (handling high-frequency data problems)
 **1. Data sampling (solve the problem of "irregular time")**
 
 + Closing price sampling: take the last valid quote in the time period, the code logic is "traverse the data in the time period, record the last non-empty quote" (applicable to low-frequency backtesting, assuming that the price does not change when there is no new data);
 + Linear interpolation sampling: handle uneven data intervals, the code implements the formula $ \hat{q}_{t}=q_{t, last }+\left(q_{t, next }-q_{t, last }\right) \frac{t-t_{last }}{t_{next }-t_{last }} $ ($ t $ is the target sampling time, $ q_{t, last } $ is the pre-order quotation, $ q_{t, next } $ is the subsequent quote), which is suitable for scenarios with high requirements for high-frequency data continuity;
 + Trading volume sampling: Divide "time units" according to fixed trading volume (for example, every 50 contracts is one unit). The code needs to accumulate the trading volume and record the data when the threshold is reached (to reduce the impact of time deviation on the strategy).
+
+Snapshot spacing is not fixed, so the last few prints are not the last few seconds. The anchor is the latest price whose time is no later than now minus the window. The move is the latest price minus that anchor, divided by the anchor. The function returns false when the anchor price is 0, or when the ring still has no snapshot at or before the target time.
+
+```cpp
+struct PxSnap {
+    int64_t ms{0};
+    int64_t px{0};
+};
+
+struct SecMove {
+    static constexpr int Cap = 4096;
+    PxSnap slot[Cap]{};
+    int n{0};
+    int wr{0};
+
+    void push(int64_t ms, int64_t px) {
+        slot[wr] = PxSnap{ms, px};
+        wr = (wr + 1) % Cap;
+        if (n < Cap) ++n;
+    }
+
+    bool move_ppm(int& ppm, int64_t now, int64_t span) const {
+        if (n < 2) return false;
+        int64_t need = now - span;
+        int i = (wr + Cap - 1) % Cap;
+        int64_t last = slot[i].px;
+        for (int seen = 0; seen < n; ++seen) {
+            if (slot[i].ms <= need && slot[i].px > 0) {
+                ppm = (int)((last - slot[i].px) * 10000 / slot[i].px);
+                return true;
+            }
+            i = (i + Cap - 1) % Cap;
+        }
+        return false;
+    }
+};
+```
 
 **2. Judgment of buying and selling direction (solve the problem of "no buying and selling mark")**
 
@@ -22711,6 +22846,29 @@ Code logic: If the current transaction price > the previous transaction price �
 Code logic: first determine whether the transaction price deviates from the midpoint of the bid-ask spread (transaction price > midpoint → buyer, < midpoint → seller); if it is at the midpoint, use the Tick Rule to supplement the judgment;
 + Bulk Volume Classification (batch volume probability judgment):
 The code implements the formula $ Pr\left(V_{\tau}=B\right)=Z\left(\frac{p_{\tau}-p_{\tau-1}}{\sigma \Delta P}\right) $ ($ Z $ is the standard normal distribution PDF, $ p_{\tau}-p_{\tau-1} $ is the price difference, $ \sigma \Delta P $ is the standard deviation of the price difference), and then calculate the transaction volume initiated by the buyer $ V_{\tau}^{B}=V_{\tau}×Pr\left(V_{\tau}=B\right) $.
+
+A trade print carries the bid order number and the ask order number. The larger number arrived later and is the aggressor. If either number is 0, the side is unknown. Inside one bar, each price accumulates aggressive buy size and aggressive sell size. Their difference is that price's delta. The price with the largest buy-plus-sell size is the bar's volume peak.
+
+```cpp
+enum class Agg : uint8_t { Buy, Sell, None };
+
+Agg from_seq(uint64_t bid_no, uint64_t ask_no) {
+    if (bid_no == 0 || ask_no == 0) return Agg::None;
+    if (bid_no > ask_no) return Agg::Buy;
+    if (ask_no > bid_no) return Agg::Sell;
+    return Agg::None;
+}
+
+struct FootBin { int64_t buy{0}; int64_t sell{0}; };
+
+void add_print(FootBin& b, Agg a, int64_t qty) {
+    if (a == Agg::Buy) b.buy += qty;
+    if (a == Agg::Sell) b.sell += qty;
+}
+
+int64_t foot_delta(const FootBin& b) { return b.buy - b.sell; }
+int64_t foot_total(const FootBin& b) { return b.buy + b.sell; }
+```
 
 **3. Data noise processing (correction of "ask-ask spread fluctuation")**
 
@@ -25565,6 +25723,29 @@ bool replay_after_timeout(uint64_t cmd_id) {
 + Pre-allocate large memory - 30 million elements need to be allocated by default
 + Memory waste - Sparse order books waste a lot of space
 + Limited price range
+
+When the book only covers a price window, the array length is the upper tick minus the lower tick, and the index is the price tick minus the lower bound. Prices outside the window are not stored. After the best level is removed, the next live level is the first index in the worse direction whose size is not 0. One 64-byte line holds eight doubles. With hot prices packed in the window, neighbouring levels share a line on about 87% of lookups. A hash of the price that then chases a heap node hits on about 60%.
+
+```cpp
+struct RoiDepth {
+    static constexpr int Cap = 4096;
+    int64_t lo{0};
+    double qty[Cap]{};
+
+    int slot(int64_t tick) const {
+        int64_t i = tick - lo;
+        if (i < 0 || i >= Cap) return -1;
+        return (int)i;
+    }
+
+    int next_live(int touch, int step) const {
+        for (int i = touch; i >= 0 && i < Cap; i += step) {
+            if (qty[i] > 0) return i;
+        }
+        return -1;
+    }
+};
+```
 
 If orders at one price are linked by pointers, the container that owns them must not move a live object on insert or erase. Growing a `vector` invalidates those pointers. The price point below stores an index into the order pool. The other approach keeps orders in blocks: erased slots form a free chain, a skip field jumps a run of erased slots, and the address of a live order stays put.
 
@@ -37664,6 +37845,38 @@ int how_on_fill(const ReqSnap* snap, int rsp_how) {
 }
 ```
 
+The exit price and the limit-down price are written onto the position when it opens. Later checks only compare the live price with those two numbers. For a long, the exit price is the entry minus the adverse room. A close is produced when the live price reaches the exit price, or reaches limit-down.
+
+```cpp
+struct HoldPx {
+    int64_t entry{0};
+    int64_t stop{0};
+    int64_t dn_lim{0};
+};
+
+void arm_long(HoldPx& h, int64_t entry, int64_t room, int64_t dn) {
+    h.entry = entry;
+    h.stop = entry - room;
+    h.dn_lim = dn;
+}
+
+bool exit_long(const HoldPx& h, int64_t px) {
+    if (px <= h.stop) return true;
+    if (h.dn_lim > 0 && px <= h.dn_lim) return true;
+    return false;
+}
+```
+
+After a partial fill and a cancel of the remainder, net inventory may no longer be a multiple of the board lot. The close size is the absolute net exposure, rounded down to a lot. When one lot is larger than the remaining exposure, the close size is 0.
+
+```cpp
+int64_t close_qty(int64_t net, int64_t lot) {
+    int64_t q = net < 0 ? -net : net;
+    if (lot <= 1) return q;
+    return (q / lot) * lot;
+}
+```
+
 ### 33. Instrument-class fees and frozen-price backfill
 Fees follow two formulas by instrument class. The hot path does not look up the contract master. Cash classes (stock, bond, fund, index, repo) use a multiplier of 1 and a margin ratio of 1. Every other class uses a multiplier of 100 and a margin ratio of 0.15. The caller forms notional as frozen price times frozen quantity and passes the constant 0.0003 as the second argument. The futures formula treats that constant as a rate, so the fee is notional times the rate. The cash formula treats it as a commission amount and adds it, then adds notional times the transfer rate. A sell also adds notional times the stamp rate.
 
@@ -38139,11 +38352,56 @@ void conn_write(Conn* c, const uint8_t* frame, size_t n) {
 }
 ```
 
-
-
 ### 41. Separate structures for quote books and match books
 
-A participant quote book rebuilds from exchange prints or snapshots and usually keeps only aggregated size per price, plus an id map of side, price, and size for amend and cancel; updates cluster near the top of book, so a dense vector with best at the end and near-end linear search fits. An exchange match book must answer who fills and where remaining size rests, so each price keeps a full FIFO and cancel or amend must reach the node. The hot paths differ; tree-versus-hash advice does not transfer. Matching first consumes the opposite side; only leftover size that may rest is linked to the price tail.
+**One symbol is released in exchange-time order, and a late older time is dropped**
+
+Quotes for different symbols on different receive threads can interleave. One symbol can still arrive late, from the NIC or the feed callback, with an older exchange time. Each symbol stays on one sorting slot. The slot keeps quotes in time order and releases one only when its time is newer than the last release. An older time is removed from the slot. When the slot is full, the oldest quote is dropped and the receive thread keeps reading. The queue of released quotes is read by the calculation thread alone.
+
+```cpp
+struct Qte {
+    int64_t ex_ms{0};
+    int64_t px{0};
+};
+
+struct SymbolHold {
+    static constexpr int Cap = 32;
+    Qte buf[Cap]{};
+    int n{0};
+    int64_t last_ms{0};
+
+    void drop_front() {
+        for (int i = 1; i < n; ++i) buf[i - 1] = buf[i];
+        --n;
+    }
+
+    void push(const Qte& q) {
+        if (n == Cap) drop_front();
+        int i = n;
+        while (i > 0 && buf[i - 1].ex_ms > q.ex_ms) {
+            buf[i] = buf[i - 1];
+            --i;
+        }
+        buf[i] = q;
+        ++n;
+    }
+
+    bool take(Qte& out) {
+        while (n > 0 && buf[0].ex_ms <= last_ms) drop_front();
+        if (n == 0) return false;
+        out = buf[0];
+        last_ms = out.ex_ms;
+        drop_front();
+        return true;
+    }
+};
+
+int lane_of(uint32_t sym, int lanes) {
+    return (int)(sym % (uint32_t)lanes);
+}
+```
+
+A participant quote book rebuilds from exchange prints or snapshots and usually keeps only aggregated size per price, plus an id map of side, price, and size for amend and cancel; updates cluster near the top of book, so a dense vector with best at the end and near-end linear search fits. With about a thousand levels on one side, a linear search from the end has a median around 22 ns, a branchless binary search around 29 ns, and a node-based ordered map around 63 ns. Adding size on a level that already exists is the common path. Opening a new level stays on the cold path. An exchange match book must answer who fills and where remaining size rests, so each price keeps a full FIFO and cancel or amend must reach the node. The hot paths differ; tree-versus-hash advice does not transfer. Matching first consumes the opposite side; only leftover size that may rest is linked to the price tail.
 
 ```cpp
 struct AggLevel {
@@ -38189,6 +38447,98 @@ bool rest_tail(MatchLevel& lv, RestNode* pool, uint32_t slot, int64_t qty) {
     lv.tail = slot;
     lv.total += qty;
     return true;
+}
+```
+
+**At one price, size in front decides whether the seat can move up**
+
+Orders at one price trade in arrival order. The seat moves up when size in front is filled or cancelled. At the back of the queue the share of cancels that happen in front is 1. At the front that share is 0. In between it is size in front divided by the size at that price. As this price's size grows relative to the other side, a smaller share of trades hits this price.
+
+When the best price is cleared, the next price becomes best and orders that were resting there move to the front. When the spread opens and the new best price is empty, an order that joins it also starts at the front.
+
+```cpp
+struct QueueSeat {
+    int64_t ahead{0};
+    int64_t behind{0};
+};
+
+double cancel_ahead(const QueueSeat& s) {
+    int64_t tot = s.ahead + s.behind;
+    if (tot <= 0 || s.ahead <= 0) return 0;
+    return (double)s.ahead / (double)tot;
+}
+
+double size_ratio(int64_t own, int64_t other) {
+    if (other <= 0) return own > 0 ? (double)own : 0;
+    return (double)own / (double)other;
+}
+```
+
+Divide own size by the opposite size and call the ratio p. The share of executions at that ratio is about 0.47 times p to the power -1.593.
+
+A match-book level stores order id and leaves in a fixed ring. A cancel writes 0 into that slot. When the cancelled slot is an end of the ring, the end moves past the run of empty slots. Empty slots in the middle stay until their count crosses a threshold, and the live orders are then packed to the front of the ring. The published seat is one integer: the high bits are the price-level index, and the low bits are the slot inside the level.
+
+```cpp
+struct LevelSlot { uint32_t id{0}; int32_t leaves{0}; };
+
+struct CircLevel {
+    static constexpr int Cap = 16;
+    static constexpr int Mask = Cap - 1;
+    LevelSlot slot[Cap]{};
+    int begin{-1};
+    int end{-1};
+    int live{0};
+    int holes{0};
+
+    int push(uint32_t id, int32_t qty) {
+        int i = begin < 0 ? 0 : (end + 1) & Mask;
+        if (begin >= 0 && i == begin) return -1;
+        if (begin < 0) begin = 0;
+        slot[i].id = id;
+        slot[i].leaves = qty;
+        end = i;
+        ++live;
+        return i;
+    }
+
+    void void_at(int i) {
+        if (slot[i].id == 0) return;
+        slot[i].id = 0;
+        slot[i].leaves = 0;
+        --live;
+        ++holes;
+        if (live == 0) { begin = end = -1; holes = 0; return; }
+        while (slot[begin].id == 0) begin = (begin + 1) & Mask;
+        while (slot[end].id == 0) end = (end + Mask) & Mask;
+        if (holes > 4) pack();
+    }
+
+    void pack() {
+        LevelSlot keep[Cap]{};
+        int n = 0;
+        if (begin < 0) { holes = 0; return; }
+        int i = begin;
+        for (;;) {
+            if (slot[i].id != 0) keep[n++] = slot[i];
+            if (i == end) break;
+            i = (i + 1) & Mask;
+        }
+        for (int k = 0; k < Cap; ++k) slot[k] = LevelSlot{};
+        for (int k = 0; k < n; ++k) slot[k] = keep[k];
+        begin = n == 0 ? -1 : 0;
+        end = n == 0 ? -1 : n - 1;
+        live = n;
+        holes = 0;
+    }
+};
+
+uint32_t pack_seat(uint32_t level, uint32_t slot) {
+    return (level << 4) | (slot & 15u);
+}
+
+double exec_share(double own_over_opp) {
+    if (own_over_opp <= 0) return 0;
+    return 0.47 * std::pow(own_over_opp, -1.593);
 }
 ```
 
@@ -38345,6 +38695,29 @@ int64_t take_live(HotOrd& n, int64_t want) {
 ### 44. Split match paths for continuous and call auction
 
 The continuous hot loop only takes the opposite best, compares price, debits size, and emits fills, then advances when a level clears. Folding call auction, pro-rata, and iceberg checks into that loop repeats irrelevant branches on every resting order. Choose the implementation from session and order type at accept; continuous and call share the order pool and price index but keep separate pricing and allocation. Call auction first finds a single clearing price from cumulative size, then allocates by priority; exchange-specific ties belong in their own pricing functions, not as “are we in call?” inside the continuous loop.
+
+When the simulator only has best bid, best ask, and last, a buy fills when its limit is at least the ask, and the fill price is the median of the limit, the ask, and last. A sell fills when its limit is at most the bid, and the fill price is the median of the limit, the bid, and last. The daily settlement price is the live market's settlement. On the last trading day, leftover lots cash-settle at that price.
+
+```cpp
+int64_t median3(int64_t a, int64_t b, int64_t c) {
+    if (a > b) { int64_t t = a; a = b; b = t; }
+    if (b > c) { int64_t t = b; b = c; c = t; }
+    if (a > b) { int64_t t = a; a = b; b = t; }
+    return b;
+}
+
+bool sim_buy(int64_t limit, int64_t ask1, int64_t last, int64_t& fill) {
+    if (ask1 <= 0 || limit < ask1) return false;
+    fill = median3(limit, ask1, last);
+    return true;
+}
+
+bool sim_sell(int64_t limit, int64_t bid1, int64_t last, int64_t& fill) {
+    if (bid1 <= 0 || limit > bid1) return false;
+    fill = median3(limit, bid1, last);
+    return true;
+}
+```
 
 ```cpp
 enum class Sess : uint8_t { Cont, Call };
@@ -44138,6 +44511,16 @@ Core issues facing market makers:
 + Market makers have risk aversion preferences (expressed by risk aversion coefficient γ)
 + Operates within a limited time period T
 
+When an aggressive order reaches level N, levels 1 through N-1 each took a full level of size, and level N kept only the remainder. The count is incremented only on levels 1 through N-1. After many such orders the near levels count higher than the far ones, and that curve is what gets fitted for how intensity falls with depth.
+
+```cpp
+void note_take(int* bin, int bins, int level) {
+    int full = level - 1;
+    if (full > bins) full = bins;
+    if (full < 0) full = 0;
+    for (int i = 0; i < full; ++i) ++bin[i];
+}
+```
 
 **Mathematical Model**
 
@@ -45009,6 +45392,53 @@ struct TradeMidGap {
 
 A futures maker keeps one open-long order and one open-short order. Both prices start from the mid and step outward by the minimum price increment. The cumulative book price, the distance-weighted size beyond the touch, the per-level size gap, and the recent trade direction each produce a number. Those numbers are turned into ticks and added. When the sum is below 0, both sides use the configured tick offset. When the sum is 0 or positive, both offsets increase by that sum. After one open order fills, the other open order is cancelled and a closing order is sent. During the last few minutes of a session the strategy only closes.
 
+Spacing, order count per side, and the minimum distance from the mid stay fixed. When the mid moves, the whole grid slides with it. Bids start at the mid minus that distance, snapped down to a multiple of the spacing, then step outward by the spacing. Asks start at the mid plus that distance, snapped up to a multiple of the spacing, then step outward. A side that has already reached its position limit gets no new orders. The order id is the price in ticks. A price that is still on the new grid keeps its live order. An order whose tick is absent from the new grid is cancelled. A post-only limit that would trade immediately against the opposite touch does not enter the book.
+
+```cpp
+struct GridSpec {
+    int64_t gap{1};
+    int64_t half{1};
+    int n{8};
+    int64_t max_pos{1};
+};
+
+struct GridPx {
+    int64_t bid[32]{};
+    int64_t ask[32]{};
+    int nb{0};
+    int na{0};
+};
+
+int64_t snap_down(int64_t px, int64_t step) { return (px / step) * step; }
+int64_t snap_up(int64_t px, int64_t step) { return ((px + step - 1) / step) * step; }
+
+void build_grid(GridPx& g, const GridSpec& s, int64_t mid, int64_t pos) {
+    g.nb = g.na = 0;
+    int cap = s.n < 32 ? s.n : 32;
+    if (pos < s.max_pos) {
+        int64_t b = snap_down(mid - s.half, s.gap);
+        for (int i = 0; i < cap; ++i) { g.bid[i] = b; b -= s.gap; }
+        g.nb = cap;
+    }
+    if (pos > -s.max_pos) {
+        int64_t a = snap_up(mid + s.half, s.gap);
+        for (int i = 0; i < cap; ++i) { g.ask[i] = a; a += s.gap; }
+        g.na = cap;
+    }
+}
+
+bool still_on(const GridPx& g, int64_t px) {
+    for (int i = 0; i < g.nb; ++i) if (g.bid[i] == px) return true;
+    for (int i = 0; i < g.na; ++i) if (g.ask[i] == px) return true;
+    return false;
+}
+
+bool post_only(bool buy, int64_t limit, int64_t bid1, int64_t ask1) {
+    if (buy) return ask1 <= 0 || limit < ask1;
+    return bid1 <= 0 || limit > bid1;
+}
+```
+
 **Cumulative prices are clamped to the neighbouring level, then written as a return against the reference**
 
 The bid side starts at the best bid and weights price by size through the current level. A best bid below 0.996 times the reference is written as 0.996 times the reference. A deeper bid average below 0.9975 times the previous level is written as 0.9975 times that previous level. The ask side starts at the second ask level. The best ask is not stored, so the ask side has one fewer value than the bid side. The first ask average above the reference times (0.001 + 1.0025) times 1.0025 is written as that product. A deeper ask average above 1.0025 times the previous ask value is written as 1.0025 times that previous value. When the reference is missing, the mean of the best bid and the best ask is used. With fewer than two levels the return is written as 0. With at least two levels the output is one of three values: the price minus the reference, that difference divided by the reference and multiplied by 10000, or the log of the price ratio multiplied by 10000.
@@ -45560,6 +45990,27 @@ void attach_strategy_rings(SimPlane& p) {
 ### 2. Historical tape pacing, break windows, and parquet streams
 
 The tape player reads columnar history for a date window. Spot quote, print, order, futures quote, and high-frequency factor each have their own loader. Playback starts at a configured clock and advances at a play speed relative to wall time, while the worker pool polls on a short interval. Gaps such as overnight into open, lunch, and after close are break windows and run at a higher break speed so empty time does not waste wall clock. Optional flags turn on print and order streams, and factor pulses. Output can publish on a message bus for the quote adapter, or write straight into shared memory when an in-process writer is selected.
+
+Play speed, start time, and the session date live only in the tape process. The strategy follows that clock. It does not replay a second feed and it does not keep a second speed. Two stored speeds drift apart over a long replay, and an order then arrives at a book that is still at an earlier time.
+
+The same maker is replayed on three order-delay series. Using the feed delay as the order delay gave a sample Sharpe near -0.20. Using the recorded live order delay gave a sample Sharpe near 1.54. Setting submit delay to 4 times the feed delay and ack delay to 3 times the feed delay gave a sample Sharpe near -0.38.
+
+```cpp
+struct DelayPair { int64_t submit_ns{0}; int64_t ack_ns{0}; };
+
+DelayPair order_delay(uint8_t mode, int64_t feed_ns, int64_t live_ns) {
+    if (mode == 1) return {live_ns, live_ns};
+    if (mode == 2) return {feed_ns * 4, feed_ns * 3};
+    return {feed_ns, feed_ns};
+}
+
+struct TapeClock { int64_t exch_ns{0}; int speed{1}; };
+
+void follow_clock(TapeClock& local, const TapeClock& master) {
+    local.exch_ns = master.exch_ns;
+    local.speed = master.speed;
+}
+```
 
 ```cpp
 enum class TapeKind : uint8_t { SpotQuote, Print, BookOrder, FutQuote, HfPulse };

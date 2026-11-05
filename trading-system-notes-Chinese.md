@@ -7288,6 +7288,42 @@ int main() {
 // 一般用于高频调用的场景，像处理外部数据源的接口、抽象功能而复用代码。
 ```
 
+报单会话上的序号、心跳和写出方式在编译期定死。热路径直接调用具体类型的函数，不经过虚表。
+
+```cpp
+struct SeqCount {
+    uint32_t n{1};
+    uint32_t next() { return n++; }
+};
+
+struct BeatOn {
+    int64_t due{0};
+    bool due_now(int64_t now, int64_t gap) {
+        if (now < due) return false;
+        due = now + gap;
+        return true;
+    }
+};
+
+struct ByteWire {
+    bool write(uint32_t seq, const char* body, int n);
+    void beat();
+};
+
+template <typename Wire, typename Seq, typename Beat>
+struct OrderSession {
+    Wire wire{};
+    Seq seq{};
+    Beat beat{};
+    int64_t gap{1000};
+
+    bool send(const char* body, int n, int64_t now) {
+        if (beat.due_now(now, gap)) wire.beat();
+        return wire.write(seq.next(), body, n);
+    }
+};
+```
+
 **1.2concepts类型多态**
 
 ```cpp
@@ -18091,6 +18127,22 @@ CutChoice pick_cut(uint64_t stage_p99_ns, uint64_t gap_p01_ns,
 }
 ```
 
+FAST 的前一条消息会改下一条用的字典。同一条流上的包按到达顺序在一个核上解。字段不依赖上一条消息的定长二进制，可以整包分给多个核，出口按序号重排。
+
+```cpp
+struct FastCursor {
+    uint32_t prev{0};
+    uint32_t seq{0};
+};
+
+bool take_fast(FastCursor& c, uint32_t seq, uint32_t delta) {
+    if (c.seq != 0 && seq != c.seq + 1) return false;
+    c.prev += delta;
+    c.seq = seq;
+    return true;
+}
+```
+
 ### 47. 编译期类型态：非法订单迁移在类型上不可达
 
 运行时用枚举记状态时，非法调用只能靠守卫返回错误，终态上仍可能写出 `fill`。把状态做成类型标签后，`TicketDraft` 与 `TicketLive` 是不同类型：`commit` 只挂在草稿态，`apply_fill` 只挂在在场态，非法调用在编译期失败。迁移消费旧对象并返回新类型，旧绑定不能再用来改状态。只读查询对任意状态开放。标签是空结构体，不占运行时存储。状态很多或频繁回退时不必全量类型态，可只把“未校验不可提交”这类关键不变量收成一层类型包装。
@@ -18911,6 +18963,30 @@ int64_t wire_ttt(const WireStamp& s) {
     if (!s.paired || s.ord_ns < s.md_ns) return -1;
     return s.ord_ns - s.md_ns;
 }
+```
+
+**套接字、网卡端口和线缆是三对不同的端点**
+
+socket-to-socket 从套接字读返回量到套接字写调用。port-to-port 从网卡收到帧到网卡发出帧。wire-to-wire 从线上的入帧到线上的出帧，线缆上的传播也算在里面。三对端点各减各的。
+
+```cpp
+struct EdgeNs {
+    int64_t sock_in{0};
+    int64_t sock_out{0};
+    int64_t port_in{0};
+    int64_t port_out{0};
+    int64_t wire_in{0};
+    int64_t wire_out{0};
+};
+
+int64_t span_ns(int64_t in_ns, int64_t out_ns) {
+    if (out_ns < in_ns) return -1;
+    return out_ns - in_ns;
+}
+
+int64_t socket_ns(const EdgeNs& e) { return span_ns(e.sock_in, e.sock_out); }
+int64_t port_ns(const EdgeNs& e) { return span_ns(e.port_in, e.port_out); }
+int64_t cable_ns(const EdgeNs& e) { return span_ns(e.wire_in, e.wire_out); }
 ```
 
 **常见时延表**
@@ -22666,12 +22742,71 @@ private:
 ```
 
 
+**加权平均在同一次扫描里累加样本与权重**
+
+样本与权重的乘积和、权重的和，放在同一次循环里。拆成两次扫描会把同一段数组再读一遍。元素少于大约 5 万时，并行调度的开销盖过运算。规模再大以后，一次扫描同时做两个累加，内存流量大约是拆开做的一半。
+
+```cpp
+struct WSum { double sw{0}; double w{0}; };
+
+WSum accumulate_w(const double* x, const double* w, int n) {
+    WSum s;
+    for (int i = 0; i < n; ++i) {
+        s.sw += x[i] * w[i];
+        s.w += w[i];
+    }
+    return s;
+}
+
+double wmean(const WSum& s) {
+    if (s.w == 0) return 0;
+    return s.sw / s.w;
+}
+```
+
 ### 5. 任务五(高频数据问题处理)
 **1. 数据采样（解决“时间不规则”问题）**
 
 + 收盘价格采样：取时间段内最后一条有效报价，代码逻辑为“遍历时间段内数据，记录最后一条非空报价”（适用于低频率回测，假设无新数据时价格不变）；
 + 线性插值采样：处理数据间隔不均，代码实现公式$ \hat{q}_{t}=q_{t, last }+\left(q_{t, next }-q_{t, last }\right) \frac{t-t_{last }}{t_{next }-t_{last }} $（$ t $为目标采样时间，$ q_{t, last } $为前序报价，$ q_{t, next } $为后序报价），适用于高频数据连续性要求高的场景；
 + 成交量采样：按固定成交量划分“时间单位”（如每50合约为一个单位），代码需累计成交 volume，达到阈值时记录数据（减少时间偏差对策略的影响）。
+
+快照间隔不固定，最近若干条不是最近若干秒。锚点是时间不晚于当前时刻减去窗口的最后一笔价。涨幅用最新价减去锚点价，再除以锚点价。锚点价为 0，或环里还没有不晚于目标时刻的快照，函数返回 false。
+
+```cpp
+struct PxSnap {
+    int64_t ms{0};
+    int64_t px{0};
+};
+
+struct SecMove {
+    static constexpr int Cap = 4096;
+    PxSnap slot[Cap]{};
+    int n{0};
+    int wr{0};
+
+    void push(int64_t ms, int64_t px) {
+        slot[wr] = PxSnap{ms, px};
+        wr = (wr + 1) % Cap;
+        if (n < Cap) ++n;
+    }
+
+    bool move_ppm(int& ppm, int64_t now, int64_t span) const {
+        if (n < 2) return false;
+        int64_t need = now - span;
+        int i = (wr + Cap - 1) % Cap;
+        int64_t last = slot[i].px;
+        for (int seen = 0; seen < n; ++seen) {
+            if (slot[i].ms <= need && slot[i].px > 0) {
+                ppm = (int)((last - slot[i].px) * 10000 / slot[i].px);
+                return true;
+            }
+            i = (i + Cap - 1) % Cap;
+        }
+        return false;
+    }
+};
+```
 
 **2. 买卖方向判断（解决“无买卖标识”问题）**
 
@@ -22681,6 +22816,29 @@ private:
 代码逻辑：先判断成交价是否偏离买卖价差中点（成交价>中点→买方，<中点→卖方）；若在中点，则用Tick Rule补充判断；
 + Bulk Volume Classification（批量成交量概率判断）：
 代码实现公式$ Pr\left(V_{\tau}=B\right)=Z\left(\frac{p_{\tau}-p_{\tau-1}}{\sigma \Delta P}\right) $（$ Z $为标准正态分布PDF，$ p_{\tau}-p_{\tau-1} $为价格差，$ \sigma \Delta P $为价格差标准差），再计算买方发起成交量$ V_{\tau}^{B}=V_{\tau}×Pr\left(V_{\tau}=B\right) $。
+
+逐笔成交里同时有买方委托号和卖方委托号。号更大的一侧后到，记为主动方。任一号为 0，方向不确定。一根 K 线按价格累加主动买量和主动卖量，二者之差是这一价的 delta。主动买加主动卖最大的价格，是这一根的成交量峰。
+
+```cpp
+enum class Agg : uint8_t { Buy, Sell, None };
+
+Agg from_seq(uint64_t bid_no, uint64_t ask_no) {
+    if (bid_no == 0 || ask_no == 0) return Agg::None;
+    if (bid_no > ask_no) return Agg::Buy;
+    if (ask_no > bid_no) return Agg::Sell;
+    return Agg::None;
+}
+
+struct FootBin { int64_t buy{0}; int64_t sell{0}; };
+
+void add_print(FootBin& b, Agg a, int64_t qty) {
+    if (a == Agg::Buy) b.buy += qty;
+    if (a == Agg::Sell) b.sell += qty;
+}
+
+int64_t foot_delta(const FootBin& b) { return b.buy - b.sell; }
+int64_t foot_total(const FootBin& b) { return b.buy + b.sell; }
+```
 
 **3. 数据噪声处理（修正“买卖价差波动”）**
 
@@ -25553,6 +25711,29 @@ bool replay_after_timeout(uint64_t cmd_id) {
 + 预分配大内存 - 默认需分配3000万个元素
 + 内存浪费 - 稀疏订单簿浪费大量空间
 + 价格范围受限
+
+只覆盖关心的价格窗口时，数组长度是窗口上沿减下沿，下标等于价格 tick 减去下沿。窗口以外的价不写入。最优价被删掉以后，从这一档往更差的方向找第一个量不为 0 的下标。一条 64 字节的缓存行能放下 8 个 double。热价挤在窗口里时，查找里大约有 87% 会碰到同一行上的相邻档。按价格做哈希再跳到堆上节点，命中大约 60%。
+
+```cpp
+struct RoiDepth {
+    static constexpr int Cap = 4096;
+    int64_t lo{0};
+    double qty[Cap]{};
+
+    int slot(int64_t tick) const {
+        int64_t i = tick - lo;
+        if (i < 0 || i >= Cap) return -1;
+        return (int)i;
+    }
+
+    int next_live(int touch, int step) const {
+        for (int i = touch; i >= 0 && i < Cap; i += step) {
+            if (qty[i] > 0) return i;
+        }
+        return -1;
+    }
+};
+```
 
 同一价位上的订单若用指针串起来，存订单的容器就不能在插入、删除时搬移还活着的对象，`vector` 扩容会让这些指针失效。下面的价格点存的是订单池下标。另一种做法是按块存放：删掉的槽位串成空闲链，用跳过表跳过一段已删槽，活着的订单地址不变。
 
@@ -37651,6 +37832,38 @@ int how_on_fill(const ReqSnap* snap, int rsp_how) {
 }
 ```
 
+开仓时把强平价和涨跌停价写进持仓行。之后每次检查只比较现价和这两个数。多头的强平价用开仓价减去允许的不利跳动。现价落到强平价，或落到跌停价，生成平仓。
+
+```cpp
+struct HoldPx {
+    int64_t entry{0};
+    int64_t stop{0};
+    int64_t dn_lim{0};
+};
+
+void arm_long(HoldPx& h, int64_t entry, int64_t room, int64_t dn) {
+    h.entry = entry;
+    h.stop = entry - room;
+    h.dn_lim = dn;
+}
+
+bool exit_long(const HoldPx& h, int64_t px) {
+    if (px <= h.stop) return true;
+    if (h.dn_lim > 0 && px <= h.dn_lim) return true;
+    return false;
+}
+```
+
+部成以后撤掉剩余，净头寸可能不再是整手的倍数。平仓量取净敞口的绝对值，再向下收到整手。整手大于剩余敞口时，平仓量写成 0。
+
+```cpp
+int64_t close_qty(int64_t net, int64_t lot) {
+    int64_t q = net < 0 ? -net : net;
+    if (lot <= 1) return q;
+    return (q / lot) * lot;
+}
+```
+
 ### 33. 品种大类费用与冻结价回填
 费用按品种大类走两条公式，热路径不查合约主数据。现货大类（股票、债券、基金、指数、回购）乘数取 1，保证金比例取 1；其余品种乘数取 100，保证金比例取 0.15。调用点用冻结价乘冻定量得到名义金额，第二参数传入常数 0.0003。期货公式把这个常数当作费率，费用等于名义金额乘费率。现货公式把它当作佣金金额直接相加，再加名义金额乘过户费率；卖出方向另加名义金额乘印花税率。
 
@@ -38132,7 +38345,54 @@ void conn_write(Conn* c, const uint8_t* frame, size_t n) {
 
 ### 41. 行情簿与撮合簿的结构分流
 
-机构侧行情簿吃交易所逐笔或快照，每个价位通常只保留汇总量，再配一张订单号到方向、价格、数量的表做改删；热点更新集中在最优价附近，价位结构可选用最优价在末尾的稠密向量加近端线性查找。交易所撮合簿要回答新单与谁成交、余量排在哪，每个价位必须保留完整 FIFO，撤改要直达节点。两者热点不同，同一套“树或哈希”结论不能混用。撮合入口先吃对侧，能成交就扣量；仍有余量且类型允许挂单时，才把节点接到该价位队尾。
+**同一合约按交易所时间递出，晚到的旧时间直接丢掉**
+
+不同接收线程上的不同合约可以交错到达。同一合约因为网卡或行情回调晚到，交易所时间会早于已经到达的一笔。每个合约固定进同一个排序槽。槽里按时间插好，只交出比上次已交出时间更新的一笔。时间不比上次新的，从槽里拿掉。槽满时丢掉最旧的一笔，接收线程继续收。交出行情的队列只由计算线程读取。
+
+```cpp
+struct Qte {
+    int64_t ex_ms{0};
+    int64_t px{0};
+};
+
+struct SymbolHold {
+    static constexpr int Cap = 32;
+    Qte buf[Cap]{};
+    int n{0};
+    int64_t last_ms{0};
+
+    void drop_front() {
+        for (int i = 1; i < n; ++i) buf[i - 1] = buf[i];
+        --n;
+    }
+
+    void push(const Qte& q) {
+        if (n == Cap) drop_front();
+        int i = n;
+        while (i > 0 && buf[i - 1].ex_ms > q.ex_ms) {
+            buf[i] = buf[i - 1];
+            --i;
+        }
+        buf[i] = q;
+        ++n;
+    }
+
+    bool take(Qte& out) {
+        while (n > 0 && buf[0].ex_ms <= last_ms) drop_front();
+        if (n == 0) return false;
+        out = buf[0];
+        last_ms = out.ex_ms;
+        drop_front();
+        return true;
+    }
+};
+
+int lane_of(uint32_t sym, int lanes) {
+    return (int)(sym % (uint32_t)lanes);
+}
+```
+
+机构侧行情簿吃交易所逐笔或快照，每个价位通常只保留汇总量，再配一张订单号到方向、价格、数量的表做改删；热点更新集中在最优价附近，价位结构可选用最优价在末尾的稠密向量加近端线性查找。同一侧大约一千个价位时，从末尾往前线性查找的中位数大约 22 ns，无分支二分大约 29 ns，结点散落的有序映射大约 63 ns。已有价位上加量是常路径，新开一个价位放在冷路径。交易所撮合簿要回答新单与谁成交、余量排在哪，每个价位必须保留完整 FIFO，撤改要直达节点。两者热点不同，同一套“树或哈希”结论不能混用。撮合入口先吃对侧，能成交就扣量；仍有余量且类型允许挂单时，才把节点接到该价位队尾。
 
 ```cpp
 struct AggLevel {
@@ -38178,6 +38438,98 @@ bool rest_tail(MatchLevel& lv, RestNode* pool, uint32_t slot, int64_t qty) {
     lv.tail = slot;
     lv.total += qty;
     return true;
+}
+```
+
+**同一价位上，前面的量决定位置还能不能再往前**
+
+同一价位按到达顺序成交。自己前面的量被吃掉或被撤掉，位置前移。在队尾时，前面发生撤单的比例写成 1。已经在队头时，这个比例写成 0。中间按前面的量除以这一档的总量。本档量相对对侧量越大，这一档被成交吃到的比例越低。
+
+最优档被清空以后，下一档变成最优，原来排在下一档里的单升到队头。价差被拉开、新的最优档还是空的时候，直接挂进这个空档，也从队头开始排。
+
+```cpp
+struct QueueSeat {
+    int64_t ahead{0};
+    int64_t behind{0};
+};
+
+double cancel_ahead(const QueueSeat& s) {
+    int64_t tot = s.ahead + s.behind;
+    if (tot <= 0 || s.ahead <= 0) return 0;
+    return (double)s.ahead / (double)tot;
+}
+
+double size_ratio(int64_t own, int64_t other) {
+    if (other <= 0) return own > 0 ? (double)own : 0;
+    return (double)own / (double)other;
+}
+```
+
+本方数量除以对侧数量，记为 p。成交落在这个比值上的比例，大约是 0.47 乘以 p 的 -1.593 次方。
+
+撮合簿的一档用定长环存放订单号和剩余量。撤单把该槽的订单号写成 0。被撤的是环的一端时，端点挪过连续的空槽。中间的空槽先留着。空槽数量过了阈值，再把还活着的订单收到环的前部。对外的座位号是一个整数，高位是价位下标，低位是档内槽号。
+
+```cpp
+struct LevelSlot { uint32_t id{0}; int32_t leaves{0}; };
+
+struct CircLevel {
+    static constexpr int Cap = 16;
+    static constexpr int Mask = Cap - 1;
+    LevelSlot slot[Cap]{};
+    int begin{-1};
+    int end{-1};
+    int live{0};
+    int holes{0};
+
+    int push(uint32_t id, int32_t qty) {
+        int i = begin < 0 ? 0 : (end + 1) & Mask;
+        if (begin >= 0 && i == begin) return -1;
+        if (begin < 0) begin = 0;
+        slot[i].id = id;
+        slot[i].leaves = qty;
+        end = i;
+        ++live;
+        return i;
+    }
+
+    void void_at(int i) {
+        if (slot[i].id == 0) return;
+        slot[i].id = 0;
+        slot[i].leaves = 0;
+        --live;
+        ++holes;
+        if (live == 0) { begin = end = -1; holes = 0; return; }
+        while (slot[begin].id == 0) begin = (begin + 1) & Mask;
+        while (slot[end].id == 0) end = (end + Mask) & Mask;
+        if (holes > 4) pack();
+    }
+
+    void pack() {
+        LevelSlot keep[Cap]{};
+        int n = 0;
+        if (begin < 0) { holes = 0; return; }
+        int i = begin;
+        for (;;) {
+            if (slot[i].id != 0) keep[n++] = slot[i];
+            if (i == end) break;
+            i = (i + 1) & Mask;
+        }
+        for (int k = 0; k < Cap; ++k) slot[k] = LevelSlot{};
+        for (int k = 0; k < n; ++k) slot[k] = keep[k];
+        begin = n == 0 ? -1 : 0;
+        end = n == 0 ? -1 : n - 1;
+        live = n;
+        holes = 0;
+    }
+};
+
+uint32_t pack_seat(uint32_t level, uint32_t slot) {
+    return (level << 4) | (slot & 15u);
+}
+
+double exec_share(double own_over_opp) {
+    if (own_over_opp <= 0) return 0;
+    return 0.47 * std::pow(own_over_opp, -1.593);
 }
 ```
 
@@ -38334,6 +38686,29 @@ int64_t take_live(HotOrd& n, int64_t want) {
 ### 44. 连续竞价与集合竞价分路径撮合
 
 普通连续竞价的热循环只取对侧最优、比价、扣量、出成交，清空一档再进下一档。把集合竞价、比例分配、冰山等判断塞进同一循环，每张对手单都会重复无关分支。接单时按市场阶段与订单类型选好实现，连续路径与集合路径共用订单池和价位索引，但定价与分配函数分开。集合竞价先按价位累计量求统一成交价，再按优先级分配；沪深对并列价的裁决不同，应写成各自的定价函数，而不是在连续循环里问“现在是不是集合阶段”。
+
+模拟侧只有买一、卖一和最新价时，买单限价不低于卖一时成交，成交价取限价、卖一、最新价三者的中间那个。卖单限价不高于买一时成交，成交价取限价、买一、最新价三者的中间那个。当日结算价用实盘行情的结算价。最后交易日，剩余手数按这个结算价现金了结。
+
+```cpp
+int64_t median3(int64_t a, int64_t b, int64_t c) {
+    if (a > b) { int64_t t = a; a = b; b = t; }
+    if (b > c) { int64_t t = b; b = c; c = t; }
+    if (a > b) { int64_t t = a; a = b; b = t; }
+    return b;
+}
+
+bool sim_buy(int64_t limit, int64_t ask1, int64_t last, int64_t& fill) {
+    if (ask1 <= 0 || limit < ask1) return false;
+    fill = median3(limit, ask1, last);
+    return true;
+}
+
+bool sim_sell(int64_t limit, int64_t bid1, int64_t last, int64_t& fill) {
+    if (bid1 <= 0 || limit > bid1) return false;
+    fill = median3(limit, bid1, last);
+    return true;
+}
+```
 
 ```cpp
 enum class Sess : uint8_t { Cont, Call };
@@ -44132,6 +44507,16 @@ Avellaneda-Stoikov模型是由Marco Avellaneda和Sasha Stoikov在2008年提出�
 + 做市商具有风险厌恶偏好（用风险厌恶系数γ表示）
 + 在有限时间周期T内运作
 
+主动单打到第 N 档时，第 1 档到第 N-1 档都承受了整档成交，第 N 档只剩下一部分量。计数只加在第 1 档到第 N-1 档。多笔叠起来，近端计数高、远端计数低，再用这条曲线拟合强度随档位衰减的参数。
+
+```cpp
+void note_take(int* bin, int bins, int level) {
+    int full = level - 1;
+    if (full > bins) full = bins;
+    if (full < 0) full = 0;
+    for (int i = 0; i < full; ++i) ++bin[i];
+}
+```
 
 **数学模型**
 
@@ -45000,6 +45385,53 @@ struct TradeMidGap {
 
 期货做市同时挂出一笔开多和一笔开空。两笔价格都从中间价出发，按最小变动价位往外偏若干跳。盘口累积均价、最优档以外的距离衰减、每一档买卖量之差，以及近期成交方向，各自先算出一个数，再换成跳数相加。和小于 0 时，开多和开空都用配置里的跳数。和大于等于 0 时，两边的跳数都加上这个和。一边的开仓成交以后，撤掉另一边还挂着的开仓，并挂出平仓。每个交易时段结束前的若干分钟只做平仓。
 
+网格的间距、单边档数、离中间价的最小距离保持不变。中间价变动以后，整张网格跟着平移。买侧从中间价减去最小距离，向下收到间距的整数倍，再按间距往外排满档数。卖侧从中间价加上最小距离，向上收到间距的整数倍，再按间距往外排满档数。持仓已经到上限的一侧不再挂新单。订单号用价格的 tick。新网格上还在的价格留着原单，不在新网格上的单撤掉。限价会立刻打到对侧最优价时，这张单不进簿。
+
+```cpp
+struct GridSpec {
+    int64_t gap{1};
+    int64_t half{1};
+    int n{8};
+    int64_t max_pos{1};
+};
+
+struct GridPx {
+    int64_t bid[32]{};
+    int64_t ask[32]{};
+    int nb{0};
+    int na{0};
+};
+
+int64_t snap_down(int64_t px, int64_t step) { return (px / step) * step; }
+int64_t snap_up(int64_t px, int64_t step) { return ((px + step - 1) / step) * step; }
+
+void build_grid(GridPx& g, const GridSpec& s, int64_t mid, int64_t pos) {
+    g.nb = g.na = 0;
+    int cap = s.n < 32 ? s.n : 32;
+    if (pos < s.max_pos) {
+        int64_t b = snap_down(mid - s.half, s.gap);
+        for (int i = 0; i < cap; ++i) { g.bid[i] = b; b -= s.gap; }
+        g.nb = cap;
+    }
+    if (pos > -s.max_pos) {
+        int64_t a = snap_up(mid + s.half, s.gap);
+        for (int i = 0; i < cap; ++i) { g.ask[i] = a; a += s.gap; }
+        g.na = cap;
+    }
+}
+
+bool still_on(const GridPx& g, int64_t px) {
+    for (int i = 0; i < g.nb; ++i) if (g.bid[i] == px) return true;
+    for (int i = 0; i < g.na; ++i) if (g.ask[i] == px) return true;
+    return false;
+}
+
+bool post_only(bool buy, int64_t limit, int64_t bid1, int64_t ask1) {
+    if (buy) return ask1 <= 0 || limit < ask1;
+    return bid1 <= 0 || limit > bid1;
+}
+```
+
 **多档累积均价按相邻档夹住，再写成相对基准价的收益**
 
 买侧从买一开始，按到当前档为止的量对价格加权。买一低于基准价的 0.996 倍时，写成基准价的 0.996 倍。更外一档低于前一档的 0.9975 倍时，写成前一档的 0.9975 倍。卖侧从卖二开始按量加权，卖一不写入结果，卖侧因此比买侧少一档。第一份卖侧价格高于基准价乘以 (0.001 + 1.0025) 再乘 1.0025 时，写成这个乘积。更外一档高于前一份的 1.0025 倍时，写成前一份的 1.0025 倍。基准价无效时，用买一和卖一的平均值。档数不足两档时，收益写成 0。档数够用时，输出三者之一：价格减去基准价；这个差除以基准价再乘 10000；价格与基准价之比取对数再乘 10000。
@@ -45552,6 +45984,27 @@ void attach_strategy_rings(SimPlane& p) {
 ### 2. 历史回放节拍、休市加速与列式数据流
 
 回放进程在日期窗口内读取列式历史。现货报价、成交、委托、期货报价、高频因子各有加载器。从配置的起始时刻起播，相对墙钟按播放倍率推进，线程池按短轮询间隔取数。隔夜到开盘、午休、收盘后等空档划为休市段，以更高倍率跳过，免得空转墙钟。可选打开成交与委托流、以及因子脉冲。输出既可发到消息总线供行情适配订阅，也可在选中进程内写入时直接落入共享内存。
+
+回放倍率、起始时刻和交易日只放在回放进程。策略进程跟着这份时刻走，不自己再播一份行情，也不另存一份倍率。两侧各存一份倍率时，差值随回测时长累积，订单到达的簿还停在更早的时刻。
+
+同一套做市按三条订单延迟重放。订单延迟直接用行情延迟时，样本夏普约 -0.20。用实盘采集的订单延迟时，样本夏普约 1.54。提交延迟取行情延迟的 4 倍、应答延迟取 3 倍时，样本夏普约 -0.38。
+
+```cpp
+struct DelayPair { int64_t submit_ns{0}; int64_t ack_ns{0}; };
+
+DelayPair order_delay(uint8_t mode, int64_t feed_ns, int64_t live_ns) {
+    if (mode == 1) return {live_ns, live_ns};
+    if (mode == 2) return {feed_ns * 4, feed_ns * 3};
+    return {feed_ns, feed_ns};
+}
+
+struct TapeClock { int64_t exch_ns{0}; int speed{1}; };
+
+void follow_clock(TapeClock& local, const TapeClock& master) {
+    local.exch_ns = master.exch_ns;
+    local.speed = master.speed;
+}
+```
 
 ```cpp
 enum class TapeKind : uint8_t { SpotQuote, Print, BookOrder, FutQuote, HfPulse };
