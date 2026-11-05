@@ -17760,6 +17760,79 @@ int drain_some(RxRing& rx, Fn&& handle) {
 }
 ```
 
+**The first packet waits out the rest of the burst when transmit starts after the whole batch**
+
+A poll takes n packets, spends t on each, and transmits after all of them are done. Packet 0 waits (n − 1) × t. Packet i waits (n − 1 − i) × t. The last packet's wait is 0. The mean wait is about half the first packet's wait. With n at 32 and 1 µs per packet, the first packet waits 31 µs and the mean wait is 15.5 µs. With n at 128, the first packet waits 127 µs and the mean wait is 63.5 µs. One data plane running near line rate cut the receive cap from 128 back to 32: throughput moved from 93.6 Gbps to 91.8 Gbps, the mean from 19 µs to 18 µs, P99 from 165 µs to 39 µs, P99.9 from 740 µs to 65 µs, and P99.99 from 7.6 ms to 122 µs.
+
+Hand a packet to transmit as soon as its work is done, then start the next packet.
+
+```cpp
+struct RxSlot {
+    uint16_t len{0};
+    uint8_t* data{nullptr};
+};
+
+struct PollWait {
+    int n{0};
+    int64_t svc_ns{0};
+};
+
+int64_t head_wait_ns(const PollWait& p) {
+    if (p.n <= 1 || p.svc_ns <= 0) return 0;
+    return static_cast<int64_t>(p.n - 1) * p.svc_ns;
+}
+
+int64_t mean_wait_ns(const PollWait& p) {
+    return head_wait_ns(p) / 2;
+}
+
+template <class Fn>
+int ship_each(RxSlot* slots, int n, Fn&& ship) {
+    int sent = 0;
+    for (int i = 0; i < n; ++i) {
+        if (slots[i].len == 0) continue;
+        ship(slots[i].data, slots[i].len);
+        slots[i].len = 0;
+        ++sent;
+    }
+    return sent;
+}
+```
+
+**The next receive cap follows the last cycle and how many buffers fit in the data cache**
+
+Taking several packets in one poll spreads the function call, the doorbell, and the descriptor sync across those packets. Thirty-two descriptors already cover cache locality and the PCIe batch. Out-of-order execution and prefetch form a steady pipeline at that count. From 32 to 64, throughput usually gains only a few percent. From 64 to 128, many paths show no visible throughput gain, and the batch takes longer to finish. At 256 bytes per buffer, 32 buffers are 8 KiB and 128 buffers are 32 KiB, close to L1 data cache. Session state and metadata on top of that land in L2 and L3.
+
+The next cap doubles when descriptors still waiting on the ring exceed the current cap, the last poll filled that cap, and the cycle stayed inside the budget. Every other case halves the cap, with a floor of 1. The doubled cap stops at the smaller of the cache-budget count and this path's hard cap. A market-data path sets the hard cap to 4. A heavier parse path sets it to 32.
+
+```cpp
+struct BurstKnob {
+    int last_n{0};
+    int cap{1};
+    int ring_left{0};
+    int64_t last_cyc{0};
+    int64_t budget_cyc{0};
+    int byte_budget{8192};
+    int stride{256};
+    int hard{4};
+};
+
+int next_cap(BurstKnob& k) {
+    int fit = k.stride > 0 ? k.byte_budget / k.stride : 1;
+    if (fit < 1) fit = 1;
+    int roof = k.hard < fit ? k.hard : fit;
+    bool room = k.ring_left > k.cap;
+    bool full = k.cap > 0 && k.last_n >= k.cap;
+    bool slow = k.budget_cyc > 0 && k.last_cyc > k.budget_cyc;
+    if (!full || slow || !room)
+        k.cap = k.cap > 1 ? k.cap / 2 : 1;
+    else if (k.cap < roof)
+        k.cap = k.cap * 2 < roof ? k.cap * 2 : roof;
+    if (k.cap > roof) k.cap = roof;
+    if (k.cap < 1) k.cap = 1;
+    return k.cap;
+}
+```
 
 **Copy the event out before decoding it, and write the empty value one cache line behind**
 

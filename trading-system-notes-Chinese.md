@@ -17728,6 +17728,79 @@ int drain_some(RxRing& rx, Fn&& handle) {
 }
 ```
 
+**一批收完再逐个处理、最后一起发，队首要等后面的包**
+
+一次收下 n 个包，每个处理时间记为 t，全部做完再发。第 1 个包等待 (n − 1) × t。第 i 个包等待 (n − 1 − i) × t。最后一个包的等待写成 0。平均等待大约是队首等待的一半。n 为 32、每个包 1 微秒时，队首等待 31 微秒，平均等待 15.5 微秒。n 为 128 时，队首等待 127 微秒，平均等待 63.5 微秒。一组接近线速的数据面把收包上限从 128 改回 32：吞吐从 93.6 Gbps 到 91.8 Gbps，平均时延从 19 微秒到 18 微秒，P99 从 165 微秒到 39 微秒，P99.9 从 740 微秒到 65 微秒，P99.99 从 7.6 毫秒到 122 微秒。
+
+处理完一个就交给发送，发送完成再处理下一个。
+
+```cpp
+struct RxSlot {
+    uint16_t len{0};
+    uint8_t* data{nullptr};
+};
+
+struct PollWait {
+    int n{0};
+    int64_t svc_ns{0};
+};
+
+int64_t head_wait_ns(const PollWait& p) {
+    if (p.n <= 1 || p.svc_ns <= 0) return 0;
+    return static_cast<int64_t>(p.n - 1) * p.svc_ns;
+}
+
+int64_t mean_wait_ns(const PollWait& p) {
+    return head_wait_ns(p) / 2;
+}
+
+template <class Fn>
+int ship_each(RxSlot* slots, int n, Fn&& ship) {
+    int sent = 0;
+    for (int i = 0; i < n; ++i) {
+        if (slots[i].len == 0) continue;
+        ship(slots[i].data, slots[i].len);
+        slots[i].len = 0;
+        ++sent;
+    }
+    return sent;
+}
+```
+
+**下一次收包上限看上一轮耗时，以及这批缓冲占多少数据缓存**
+
+一次多收几个包，把函数调用、门铃和描述符同步摊到这些包上。描述符一次取 32 个，缓存局部性和 PCIe 批量传输到这里已经够用。乱序执行和预取在 32 个包上形成稳定流水。从 32 加到 64，吞吐通常只多几个百分点。从 64 加到 128，很多路径上吞吐看不出增加，一批做完的时间继续变长。报文缓冲按 256 字节计，32 个是 8 KiB，128 个是 32 KiB，贴近 L1 数据缓存。会话状态和元数据再叠上去，访问落到 L2 和 L3。
+
+环上剩余描述符多于当前上限，上一轮已经收满，并且处理周期还在预算内，下一轮上限加倍。其余情况，下一轮上限减半，最小写成 1。加倍停在缓存预算能装下的个数和这条路径硬上限里较小的那个。行情路径硬上限写成 4。解析更重的路径硬上限写成 32。
+
+```cpp
+struct BurstKnob {
+    int last_n{0};
+    int cap{1};
+    int ring_left{0};
+    int64_t last_cyc{0};
+    int64_t budget_cyc{0};
+    int byte_budget{8192};
+    int stride{256};
+    int hard{4};
+};
+
+int next_cap(BurstKnob& k) {
+    int fit = k.stride > 0 ? k.byte_budget / k.stride : 1;
+    if (fit < 1) fit = 1;
+    int roof = k.hard < fit ? k.hard : fit;
+    bool room = k.ring_left > k.cap;
+    bool full = k.cap > 0 && k.last_n >= k.cap;
+    bool slow = k.budget_cyc > 0 && k.last_cyc > k.budget_cyc;
+    if (!full || slow || !room)
+        k.cap = k.cap > 1 ? k.cap / 2 : 1;
+    else if (k.cap < roof)
+        k.cap = k.cap * 2 < roof ? k.cap * 2 : roof;
+    if (k.cap > roof) k.cap = roof;
+    if (k.cap < 1) k.cap = 1;
+    return k.cap;
+}
+```
 
 **事件复制出来再解析，空槽隔一条缓存行写回**
 
