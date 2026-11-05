@@ -1629,6 +1629,29 @@ The "memory order" specified by software needs to be implemented through "hardwa
 | `seq_cst` | `mfence` + Atomic operation belt`lock`prefix | `dmb sy`(System-level full barrier) | The strongest constraint, the highest overhead, ensuring global total order |
 
 
+**Who wins on one counter depends on the architecture, the thread count, and the memory order**
+
+On ARM with four threads incrementing one counter: a relaxed compare-exchange is about 5.0 ms, a relaxed fetch-add about 7.5 ms, a sequentially consistent fetch-add about 10.5 ms, a mutex about 19.6 ms, and a sequentially consistent compare-exchange about 23.7 ms. The fastest and the slowest differ by about 4.7×. As the thread count rises, the compare-exchange grows faster than the mutex and the fetch-add, and under heavy contention the mutex becomes faster than the atomic updates. On x86 the fetch-add is faster than the mutex at both 40 threads and 4000 threads. Newer ARM cores perform the atomic update as one large-system instruction, and do not run the load-exclusive / store-conditional retry loop.
+
+```cpp
+enum class Arch : uint8_t { X86, Arm };
+enum class IncWay : uint8_t { AddRelaxed, CasRelaxed, Mutex };
+
+IncWay pick_inc(Arch arch, int threads) {
+    if (arch == Arch::X86) return IncWay::AddRelaxed;
+    if (threads <= 4) return IncWay::CasRelaxed;
+    return IncWay::Mutex;
+}
+
+void add_relaxed(std::atomic<uint64_t>& c) {
+    c.fetch_add(1, std::memory_order_relaxed);
+}
+
+void add_seq(std::atomic<uint64_t>& c) {
+    c.fetch_add(1, std::memory_order_seq_cst);
+}
+```
+
 **4. Memory barrier and compiler barrier**
 
 **(1)Memory Barrier**
@@ -6012,6 +6035,57 @@ void step_px(TickLane* lanes, int n_lane, float dt) {
 }
 ```
 
+**Keep hot fields in their own records so a scan does not pull the cold ones**
+
+Price and quantity, which every scan reads, sit in a short record. Symbol and seat sit aside. Splitting a 176-byte record down to a 56-byte hot record cut data-TLB misses from about 196,000 to 90,000, cut cache misses by about half, left the instruction count about flat, and took wall time from 0.93 s to 0.63 s.
+
+```cpp
+struct HotQuote {
+    int64_t px;
+    int32_t qty;
+    int32_t pad;
+};
+
+struct ColdQuote {
+    char symbol[32];
+    char seat[96];
+};
+
+int64_t sum_shown(const HotQuote* q, int n) {
+    int64_t s = 0;
+    for (int i = 0; i < n; ++i) s += q[i].qty;
+    return s;
+}
+```
+
+**Lay fields out from largest to smallest so padding stays small**
+
+The same fields occupy 48 bytes when the small ones sit between doubles. Put the doubles first, then the int and the short, and the chars at the end, and the record occupies 32 bytes. A scan in that order is about 1.4× faster.
+
+```cpp
+struct LooseQuote {
+    char tag;
+    double px;
+    char flag;
+    int qty;
+    short side;
+    double ts;
+    char pad;
+};
+
+struct TightQuote {
+    double px;
+    double ts;
+    int qty;
+    short side;
+    char tag;
+    char flag;
+    char pad;
+};
+
+static_assert(sizeof(LooseQuote) == 48);
+static_assert(sizeof(TightQuote) == 32);
+```
 
 **AoS View + SoA Storage**
 
@@ -8047,6 +8121,31 @@ float sum_parallel(const float* a, int n) {
         s3 += a[i + 3];
     }
     for (; i < n; ++i) s0 += a[i];
+    return (s0 + s1) + (s2 + s3);
+}
+```
+
+**Extra accumulator chains pay off while the data stays in cache**
+
+On the same multiply-add, four independent chains against one chain are about 3.7× while the data sits in L1, and about 1.02× once the working set is past L3. One vector accumulator against scalar code is about 4.7× in cache and about 1.75× past the cache.
+
+```cpp
+float dot_cached(const float* a, const float* b, int n, std::size_t cache_bytes) {
+    const std::size_t bytes = std::size_t(n) * sizeof(float) * 2u;
+    if (bytes > cache_bytes) {
+        float s = 0.f;
+        for (int i = 0; i < n; ++i) s += a[i] * b[i];
+        return s;
+    }
+    float s0 = 0.f, s1 = 0.f, s2 = 0.f, s3 = 0.f;
+    int i = 0;
+    for (; i + 3 < n; i += 4) {
+        s0 += a[i] * b[i];
+        s1 += a[i + 1] * b[i + 1];
+        s2 += a[i + 2] * b[i + 2];
+        s3 += a[i + 3] * b[i + 3];
+    }
+    for (; i < n; ++i) s0 += a[i] * b[i];
     return (s0 + s1) + (s2 + s3);
 }
 ```
@@ -12193,6 +12292,120 @@ void lock_ttas(std::atomic<int>& locked) {
 
 For higher contention and fairness, prefer MCS (implementation 2). TTAS is the necessary fix to implementation 1 under moderate contention, not the final form.
 
+**When many cores hit one word, a miss sleeps briefly**
+
+A pause leaves the lock line in this core's cache. Unlock has to take that line back to exclusive, and every core still sharing it sends an invalidate acknowledgement. More sharers make the unlock wait longer. Sleeping a very short time after a miss drops this core's copy, so the next unlock waits on fewer acknowledgements. A spin that only pauses, and stays on the core, is slower than one atomic add when many cores increment the same integer. With the short sleep, the spin lock is faster than the atomic add from two threads upward.
+
+```cpp
+#include <ctime>
+#include <atomic>
+
+void rest_brief() {
+    timespec ts{0, 1};
+    nanosleep(&ts, nullptr);
+}
+
+void lock_rest(std::atomic<uint32_t>& word) {
+    for (;;) {
+        uint32_t zero = 0;
+        if (word.compare_exchange_weak(zero, 1,
+                std::memory_order_acquire, std::memory_order_relaxed))
+            return;
+        rest_brief();
+    }
+}
+
+void unlock_rest(std::atomic<uint32_t>& word) {
+    word.store(0, std::memory_order_release);
+}
+```
+
+**A bounded tail does not leave the queue on the lock holder**
+
+When the holding thread is scheduled off the core, the lock stays with it and every waiter stops. The longer the run, the larger the maximum measured on a locked queue. With no holder, a thread that is scheduled away stalls only the step it was in, and the tail stays bounded. At the low percentiles a locked ring is faster. At p99.9 and at the maximum, the lock-free queue is faster. When a bounded tail is required, use the lock-free queue.
+
+```cpp
+struct Hold {
+    int owner{-1};
+};
+
+int64_t step_cost(const Hold& h, int self, int64_t mine, int64_t away) {
+    if (h.owner >= 0 && h.owner != self) return away;
+    return mine;
+}
+```
+
+**The lock covers only the slot claim**
+
+The push lock and the pop lock sit on two cache lines, so the two sides do not fight over one lock. Inside the lock the thread checks that the slot is free, marks it busy, and advances the index, then drops the lock. Price and quantity are written outside the lock. The slot sequence is published after that, and the busy mark is cleared last. While the busy mark is set, the other side does not read the slot. One compare-exchange on a single word is usually faster than taking a lock. Two compare-exchanges, each on a different word, are usually slower than one short lock.
+
+```cpp
+struct alignas(64) GateWord {
+    std::atomic<uint32_t> held{0};
+};
+
+struct CellPub {
+    std::atomic<uint64_t> seq{0};
+    std::atomic<uint32_t> busy{0};
+    int64_t px{0};
+    int32_t qty{0};
+};
+
+struct TwoEnd {
+    static constexpr uint32_t Cap = 1024;
+    GateWord in_gate;
+    GateWord out_gate;
+    uint32_t in_i{0};
+    uint32_t out_i{0};
+    CellPub cell[Cap]{};
+};
+
+void lock_gate(GateWord& g) {
+    for (;;) {
+        uint32_t zero = 0;
+        if (g.held.compare_exchange_weak(zero, 1,
+                std::memory_order_acquire, std::memory_order_relaxed))
+            return;
+#if defined(__x86_64__)
+        _mm_pause();
+#endif
+    }
+}
+
+void unlock_gate(GateWord& g) {
+    g.held.store(0, std::memory_order_release);
+}
+
+bool claim_in(TwoEnd& q, uint32_t& at) {
+    lock_gate(q.in_gate);
+    if (q.in_i - q.out_i >= TwoEnd::Cap) {
+        unlock_gate(q.in_gate);
+        return false;
+    }
+    at = q.in_i & (TwoEnd::Cap - 1);
+    q.cell[at].busy.store(1, std::memory_order_relaxed);
+    ++q.in_i;
+    unlock_gate(q.in_gate);
+    return true;
+}
+
+void publish_in(TwoEnd& q, uint32_t at, int64_t px, int32_t qty, uint64_t seq) {
+    q.cell[at].px = px;
+    q.cell[at].qty = qty;
+    q.cell[at].seq.store(seq, std::memory_order_release);
+    q.cell[at].busy.store(0, std::memory_order_release);
+}
+```
+
+**A low-contention exclusive update is one atomic read-modify-write**
+
+The exchange that takes a lock is a full barrier on x86. Stores still sitting in the store buffer cannot drain, and the thread's own nearby work, which does not share that line, slows down with them. One atomic read-modify-write changes the data and the order together.
+
+```cpp
+uint64_t add_one(std::atomic<uint64_t>& n) {
+    return n.fetch_add(1, std::memory_order_relaxed);
+}
+```
 
 **2. Implementation 2: MCS lock (Mellor-Crummey and Scott Lock)**
 
@@ -12811,6 +13024,28 @@ inline void signal(volatile uint32_t* flag) {
 **Other optimization: condition-variable thundering herd**
 
 `notify_all()` / `pthread_cond_broadcast`, or looping `notify_one` for far more waiters than jobs, wakes more threads than can make progress: all race the mutex, most find the predicate false and sleep again—paying O(N) context switches, futex calls, and cross-core IPIs. `perf` often shows hot `futex_wake` / `try_to_wake_up` while `perf lock` hold/wait looks normal. Wake **exactly as many workers as there is work**, or move to a lock-free queue / work-stealing design instead of waking everyone then putting them back to sleep.
+
+**Each worker has its own wake word**
+
+When every worker waits on one condition variable and one mutex, the scheduler does not queue by wait time. It prefers the thread that ran most recently and still has a warm cache. Under a burst the lock keeps handing back to that one thread, the others stay asleep, and the queue can climb past two thousand. Give each worker a wake word on its own cache line, and write the next word in turn when a task arrives. The thread whose word was written wakes up. Later wakes are written on the other threads' words.
+
+```cpp
+struct DeskWake {
+    static constexpr int N = 12;
+    alignas(64) std::atomic<uint32_t> bit[N]{};
+    uint32_t turn{0};
+
+    void ping_one() {
+        uint32_t i = turn;
+        if (++turn == N) turn = 0;
+        bit[i].store(1, std::memory_order_release);
+    }
+
+    bool took(uint32_t i) {
+        return bit[i].exchange(0, std::memory_order_acquire) != 0;
+    }
+};
+```
 
 **Idle waiting steps through pause, yield, then sleep**
 
@@ -34733,6 +34968,87 @@ void applyStateUpdate(const StateUpdate& update) {
 **Architecture Collaboration**:
 `Client -> [Matching (Command Consensus)] -> TradeEvent -> [Counter (Result Consensus)] -> AccountState`
 
+**Fill the gap before a standby is promoted**
+
+The primary sends approvals and fills to the standby in sequence order. When the standby buffer cannot hold the burst, that stretch is dropped and the standby asks for a resend. If the resend has not arrived and the primary is already gone, promoting on the heartbeat alone leaves those fills out of the position. The account still looks as if it has room, and the next order can pass the limit. Once the silence limit is reached and the sequence is still broken, this side stops confirming new orders. Recovery starts at the log position of the periodic snapshot and calls the same function that applies every command.
+
+```cpp
+bool may_lead(uint64_t gap_from, int silent_ms, int limit_ms) {
+    if (gap_from != 0) return false;
+    return silent_ms >= limit_ms;
+}
+```
+
+**Accepted means at least two replicas have stored the command**
+
+A command is marked accepted when at least two replicas have stored it. A node that cannot count two stops confirming new commands. The group that has already counted two keeps serving. A second group cannot reach a majority at the same time. Losing one replica does not take an accepted command with it. Two data centers have no place to put the third replica. A whole-site failure sits outside this failover and goes to the disaster-recovery path.
+
+```cpp
+struct Ballot {
+    uint8_t have[3]{};
+};
+
+int votes(const Ballot& b) {
+    return int(b.have[0]) + int(b.have[1]) + int(b.have[2]);
+}
+
+bool accepted(const Ballot& b) { return votes(b) >= 2; }
+
+bool still_serves(const Ballot& b, int self) {
+    return b.have[self] && votes(b) >= 2;
+}
+```
+
+**The reply and the expiry both live at a log position**
+
+Each client request carries a session id and a correlation id. The first answer is written into a fixed slot, and the slots are stored with the order book in the snapshot. On replay, the same pair returns the stored answer and skips execution. A lease expiry is a log record: the key is the lease id, and the sequence is the position where it takes effect. When a replica reaches that sequence, it deletes the same key. Expiry does not read the wall clock, and it does not depend on a second thread taking a lock to scan.
+
+```cpp
+struct RspSlot {
+    uint64_t sess{0};
+    uint64_t corr{0};
+    int64_t answer{0};
+    uint8_t used{0};
+};
+
+struct RspKeep {
+    RspSlot slot[64]{};
+
+    const RspSlot* find(uint64_t sess, uint64_t corr) const {
+        for (const RspSlot& s : slot) {
+            if (s.used && s.sess == sess && s.corr == corr) return &s;
+        }
+        return nullptr;
+    }
+
+    bool keep(uint64_t sess, uint64_t corr, int64_t answer) {
+        for (RspSlot& s : slot) {
+            if (s.used) continue;
+            s = RspSlot{sess, corr, answer, 1};
+            return true;
+        }
+        return false;
+    }
+};
+
+struct Due {
+    uint64_t key{0};
+    uint64_t seq{0};
+};
+
+int drop_due(uint64_t seq, const Due* due, int n_due, uint64_t* live, int n_live) {
+    for (int i = 0; i < n_due; ++i) {
+        if (due[i].seq != seq) continue;
+        for (int j = 0; j < n_live; ++j) {
+            if (live[j] != due[i].key) continue;
+            live[j] = live[n_live - 1];
+            --n_live;
+            break;
+        }
+    }
+    return n_live;
+}
+```
 
 ### 14. Exchange protocol layering and sequence consistency1.**Protocol layering**
 Session layer: login, heartbeat, reconnection, sequence number maintenance, retransmission negotiation.
@@ -39004,6 +39320,108 @@ int64_t take_live(HotOrd& n, int64_t want) {
     const int64_t q = n.leaves < want ? n.leaves : want;
     n.leaves -= q;
     return q;
+}
+```
+
+**A price level keeps fixed slots and a rank, so a cancel in the middle does not slide the tail**
+
+About ninety-seven percent of orders are cancelled before they trade, and many of those cancels land in the middle of the queue. Deleting from the middle of one flat array slides every later order forward. Each price becomes a run of fixed nodes. The slots inside a node are contiguous, and a slot address is the base plus the index times the stride. Each slot has a rank. Zero means empty, and the smaller rank trades first. A cancel writes that slot's rank to 0 and its quantity to 0. Later orders stay where they are. An insert writes the order once and then writes one rank. When a node is full, the highest rank moves to the next node and becomes the oldest order there. The number of such moves is capped, and past the cap an empty node is taken at the boundary. Nodes near the touch have more slots. Nodes deeper in the book have fewer.
+
+```cpp
+struct Lane8 {
+    static constexpr int Cap = 8;
+    uint32_t ord[Cap]{};
+    int32_t qty[Cap]{};
+    uint8_t pri[Cap]{};
+    int next{-1};
+};
+
+int width_at(int depth) { return depth < 4 ? 8 : 4; }
+
+int oldest_slot(const Lane8& n) {
+    int at = -1;
+    uint8_t best = 255;
+    for (int i = 0; i < Lane8::Cap; ++i) {
+        if (n.pri[i] == 0 || n.pri[i] >= best) continue;
+        best = n.pri[i];
+        at = i;
+    }
+    return at;
+}
+
+bool wipe_ord(Lane8& n, uint32_t oid) {
+    for (int i = 0; i < Lane8::Cap; ++i) {
+        if (n.pri[i] == 0 || n.ord[i] != oid) continue;
+        n.pri[i] = 0;
+        n.qty[i] = 0;
+        return true;
+    }
+    return false;
+}
+
+int newest_slot(const Lane8& n) {
+    int at = -1;
+    uint8_t best = 0;
+    for (int i = 0; i < Lane8::Cap; ++i) {
+        if (n.pri[i] <= best) continue;
+        best = n.pri[i];
+        at = i;
+    }
+    return at;
+}
+
+bool shove_one(Lane8& src, Lane8& dst) {
+    int from = newest_slot(src);
+    int to = -1;
+    if (from < 0) return false;
+    for (int i = 0; i < Lane8::Cap; ++i) {
+        if (dst.pri[i] == 0) { to = i; break; }
+    }
+    if (to < 0) return false;
+    for (int i = 0; i < Lane8::Cap; ++i) {
+        if (dst.pri[i] != 0) ++dst.pri[i];
+    }
+    dst.ord[to] = src.ord[from];
+    dst.qty[to] = src.qty[from];
+    dst.pri[to] = 1;
+    src.pri[from] = 0;
+    src.qty[from] = 0;
+    return true;
+}
+
+int shove_chain(Lane8* nodes, int head, int hops) {
+    int left = hops;
+    int cur = head;
+    while (left > 0 && cur >= 0 && nodes[cur].next >= 0) {
+        if (!shove_one(nodes[cur], nodes[nodes[cur].next])) return left;
+        --left;
+        cur = nodes[cur].next;
+    }
+    return left;
+}
+```
+
+**A new price hangs between the neighbors already in hand**
+
+A limit that lands on a price with no resting size already has the previous price and the next price in hand. Near the touch, follow the best price along the neighbor links for a step or two. Elsewhere, use the predecessor and successor query that the book was going to do anyway. When those two prices sit next to each other, one of the predecessor's right child and the successor's left child is empty, and the new price hangs there. When the two neighbors in hand are not adjacent, walk down from the root.
+
+```cpp
+struct PxNode {
+    int64_t tick{0};
+    int left{-1};
+    int right{-1};
+    int parent{-1};
+};
+
+int hang_between(PxNode* node, int pred, int succ, int fresh) {
+    const bool pred_open = pred >= 0 && node[pred].right < 0;
+    const bool succ_open = succ >= 0 && node[succ].left < 0;
+    if (pred_open == succ_open) return -1;
+    const int parent = pred_open ? pred : succ;
+    int& link = pred_open ? node[parent].right : node[parent].left;
+    link = fresh;
+    node[fresh].parent = parent;
+    return parent;
 }
 ```
 

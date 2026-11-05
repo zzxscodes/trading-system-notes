@@ -1632,6 +1632,29 @@ assert(a == 1); // 可能失败？
 | `seq_cst` | `mfence` + 原子操作带`lock`前缀 | `dmb sy`（系统级全屏障） | 最强约束，开销最高，确保全局总序 |
 
 
+**同一段自增，谁快取决于架构、线程数和内存序**
+
+ARM 上 4 个线程加同一个计数：宽松的比较交换大约 5.0 毫秒，宽松的取加大约 7.5 毫秒，顺序一致的取加大约 10.5 毫秒，互斥量大约 19.6 毫秒，顺序一致的比较交换大约 23.7 毫秒，最快和最慢大约差 4.7 倍。线程数上去之后，比较交换的耗时比互斥量和取加涨得更快，高争用时互斥量比原子操作快。x86 上取加在 40 个线程和 4000 个线程都比互斥量快。较新的 ARM 上，这次原子操作是一条大系统扩展指令。
+
+```cpp
+enum class Arch : uint8_t { X86, Arm };
+enum class IncWay : uint8_t { AddRelaxed, CasRelaxed, Mutex };
+
+IncWay pick_inc(Arch arch, int threads) {
+    if (arch == Arch::X86) return IncWay::AddRelaxed;
+    if (threads <= 4) return IncWay::CasRelaxed;
+    return IncWay::Mutex;
+}
+
+void add_relaxed(std::atomic<uint64_t>& c) {
+    c.fetch_add(1, std::memory_order_relaxed);
+}
+
+void add_seq(std::atomic<uint64_t>& c) {
+    c.fetch_add(1, std::memory_order_seq_cst);
+}
+```
+
 **4.内存屏障与编译器屏障**
 
 **（1）内存屏障**
@@ -6020,6 +6043,57 @@ void step_px(TickLane* lanes, int n_lane, float dt) {
 }
 ```
 
+**热字段单独放，冷字段不进这次扫描**
+
+每次都要读的价格和数量放进一条短记录，名字和席位放在另一边。176 字节的记录拆成 56 字节的热记录之后，数据 TLB 未命中从大约 19.6 万降到 9.0 万，缓存未命中大约少一半，指令数基本不动，墙钟从 0.93 秒降到 0.63 秒。
+
+```cpp
+struct HotQuote {
+    int64_t px;
+    int32_t qty;
+    int32_t pad;
+};
+
+struct ColdQuote {
+    char symbol[32];
+    char seat[96];
+};
+
+int64_t sum_shown(const HotQuote* q, int n) {
+    int64_t s = 0;
+    for (int i = 0; i < n; ++i) s += q[i].qty;
+    return s;
+}
+```
+
+**字段从大到小排，少留填充**
+
+同一组字段，小字段夹在 double 中间时占 48 字节。double 放前面，int 和 short 随后，char 放在尾部，占 32 字节。按这个顺序扫描，大约快 1.4 倍。
+
+```cpp
+struct LooseQuote {
+    char tag;
+    double px;
+    char flag;
+    int qty;
+    short side;
+    double ts;
+    char pad;
+};
+
+struct TightQuote {
+    double px;
+    double ts;
+    int qty;
+    short side;
+    char tag;
+    char flag;
+    char pad;
+};
+
+static_assert(sizeof(LooseQuote) == 48);
+static_assert(sizeof(TightQuote) == 32);
+```
 
 **AoS 视图 + SoA 存储**
 
@@ -8042,6 +8116,31 @@ float sum_parallel(const float* a, int n) {
         s3 += a[i + 3];
     }
     for (; i < n; ++i) s0 += a[i];
+    return (s0 + s1) + (s2 + s3);
+}
+```
+
+**多条累加链的加速留在缓存里**
+
+同一段乘加，四条独立累加链相对一条，数据在一级缓存里大约 3.7 倍，工作集超出三级缓存之后大约 1.02 倍。一条向量累加相对标量，缓存里大约 4.7 倍，超出缓存之后大约 1.75 倍。
+
+```cpp
+float dot_cached(const float* a, const float* b, int n, std::size_t cache_bytes) {
+    const std::size_t bytes = std::size_t(n) * sizeof(float) * 2u;
+    if (bytes > cache_bytes) {
+        float s = 0.f;
+        for (int i = 0; i < n; ++i) s += a[i] * b[i];
+        return s;
+    }
+    float s0 = 0.f, s1 = 0.f, s2 = 0.f, s3 = 0.f;
+    int i = 0;
+    for (; i + 3 < n; i += 4) {
+        s0 += a[i] * b[i];
+        s1 += a[i + 1] * b[i + 1];
+        s2 += a[i + 2] * b[i + 2];
+        s3 += a[i + 3] * b[i + 3];
+    }
+    for (; i < n; ++i) s0 += a[i] * b[i];
     return (s0 + s1) + (s2 + s3);
 }
 ```
@@ -12160,6 +12259,120 @@ void lock_ttas(std::atomic<int>& locked) {
 
 更高争用与公平性仍优先 MCS（实现二）；TTAS 是对实现一在中等争用下的必要修正，而非最终形态。
 
+**很多核抢同一个字时，抢不到就短睡**
+
+暂停指令还把锁行留在本核缓存里。解锁要把这一行收回独占，当时共享它的核都要回一份失效确认，核越多，这次解锁等得越久。抢不到锁时睡很短的一段时间，本核丢掉这行副本，下次解锁要等的确认就少。只暂停、不离开的自旋，在很多核同时加同一个整数时，比一次原子加更慢。加上这段短睡，从两个线程起，自旋锁比原子加快。
+
+```cpp
+#include <ctime>
+#include <atomic>
+
+void rest_brief() {
+    timespec ts{0, 1};
+    nanosleep(&ts, nullptr);
+}
+
+void lock_rest(std::atomic<uint32_t>& word) {
+    for (;;) {
+        uint32_t zero = 0;
+        if (word.compare_exchange_weak(zero, 1,
+                std::memory_order_acquire, std::memory_order_relaxed))
+            return;
+        rest_brief();
+    }
+}
+
+void unlock_rest(std::atomic<uint32_t>& word) {
+    word.store(0, std::memory_order_release);
+}
+```
+
+**尾延迟要有上界时，队列不挂在持锁者身上**
+
+持锁线程被调度离开时，锁还在它手里，等这把锁的线程一起停。运行时间越长，带锁的队列测到的最大值越大。没有持锁者时，一个线程被调离，只停它自己正在做的那一步，尾部有上界。低分位上，带锁的环更快。到 p99.9 和最大值，无锁更快。尾延迟有上界是硬要求时，用无锁队列。
+
+```cpp
+struct Hold {
+    int owner{-1};
+};
+
+int64_t step_cost(const Hold& h, int self, int64_t mine, int64_t away) {
+    if (h.owner >= 0 && h.owner != self) return away;
+    return mine;
+}
+```
+
+**锁只包住占槽那一下**
+
+入队锁和出队锁分开放在两条缓存行上，两边不抢同一把锁。锁里只做三件事：看槽还空着，标上忙，把下标前进。然后放锁。价格和数量在锁外写完，再发布槽上的序号，最后清掉忙标记。忙标记还在时，另一侧不读这个槽。对同一个字做一次比较交换，通常比拿一把锁快。对两个不同的字各做一次比较交换，通常比一把短锁慢。
+
+```cpp
+struct alignas(64) GateWord {
+    std::atomic<uint32_t> held{0};
+};
+
+struct CellPub {
+    std::atomic<uint64_t> seq{0};
+    std::atomic<uint32_t> busy{0};
+    int64_t px{0};
+    int32_t qty{0};
+};
+
+struct TwoEnd {
+    static constexpr uint32_t Cap = 1024;
+    GateWord in_gate;
+    GateWord out_gate;
+    uint32_t in_i{0};
+    uint32_t out_i{0};
+    CellPub cell[Cap]{};
+};
+
+void lock_gate(GateWord& g) {
+    for (;;) {
+        uint32_t zero = 0;
+        if (g.held.compare_exchange_weak(zero, 1,
+                std::memory_order_acquire, std::memory_order_relaxed))
+            return;
+#if defined(__x86_64__)
+        _mm_pause();
+#endif
+    }
+}
+
+void unlock_gate(GateWord& g) {
+    g.held.store(0, std::memory_order_release);
+}
+
+bool claim_in(TwoEnd& q, uint32_t& at) {
+    lock_gate(q.in_gate);
+    if (q.in_i - q.out_i >= TwoEnd::Cap) {
+        unlock_gate(q.in_gate);
+        return false;
+    }
+    at = q.in_i & (TwoEnd::Cap - 1);
+    q.cell[at].busy.store(1, std::memory_order_relaxed);
+    ++q.in_i;
+    unlock_gate(q.in_gate);
+    return true;
+}
+
+void publish_in(TwoEnd& q, uint32_t at, int64_t px, int32_t qty, uint64_t seq) {
+    q.cell[at].px = px;
+    q.cell[at].qty = qty;
+    q.cell[at].seq.store(seq, std::memory_order_release);
+    q.cell[at].busy.store(0, std::memory_order_release);
+}
+```
+
+**低争用的独占更新走一次原子读改写**
+
+锁上的交换指令在 x86 上是全屏障。存储缓冲里还没写出去的数据被拦住，本线程紧挨着的、并不共享的计算也变慢。一次原子读改写同时改掉数据和顺序。
+
+```cpp
+uint64_t add_one(std::atomic<uint64_t>& n) {
+    return n.fetch_add(1, std::memory_order_relaxed);
+}
+```
 
 **2. 实现二：MCS 锁 (Mellor-Crummey and Scott Lock)**
 
@@ -12778,6 +12991,28 @@ inline void signal(volatile uint32_t* flag) {
 **其他优化：条件变量惊群（thundering herd）**
 
 `notify_all()` / `pthread_cond_broadcast`，或对远超任务数的等待者循环 `notify_one`，会唤醒远多于能推进工作的线程：全部争抢互斥锁，多数发现谓词已不成立再睡回——代价是 O(N) 次上下文切换、futex 与跨核 IPI。`perf` 上常见 `futex_wake` / `try_to_wake_up` 偏热，而 `perf lock` 的 hold/wait 未必异常。应按**实际可消费的工作数**精确唤醒（一次只 wake 需要的个数），或改用无锁队列/工作窃取，避免“全员唤醒再全员睡回”。
+
+**每个工作线程一块自己的唤醒字**
+
+工作线程都等同一个条件变量和同一把互斥量时，调度器不按等待时间排队。它优先叫醒最近跑过、缓存还热的那个线程。突发任务到来，锁在这一个线程上交来交去，其余线程一直停着，队列可以堆到两千以上。给每个工作线程一块单独占一行的唤醒字，有新任务时按序号轮流写下一块。被写到的那个线程醒来。后面的唤醒写在别的线程那一块上。
+
+```cpp
+struct DeskWake {
+    static constexpr int N = 12;
+    alignas(64) std::atomic<uint32_t> bit[N]{};
+    uint32_t turn{0};
+
+    void ping_one() {
+        uint32_t i = turn;
+        if (++turn == N) turn = 0;
+        bit[i].store(1, std::memory_order_release);
+    }
+
+    bool took(uint32_t i) {
+        return bit[i].exchange(0, std::memory_order_acquire) != 0;
+    }
+};
+```
 
 **空等先暂停，再让出，最后休眠**
 
@@ -34719,7 +34954,87 @@ void applyStateUpdate(const StateUpdate& update) {
 **架构协同**：
 `Client -> [撮合 (命令共识)] -> TradeEvent -> [柜台 (结果共识)] -> AccountState`
 
+**提升之前，缺口先补齐**
 
+主节点把批准和成交按序号发给备节点。备节点的缓冲装不下，这段被丢掉，再向主节点要重发。重发还没到，主节点已经不在。只看心跳就把备节点提成主，缺口里的成交不在持仓里，账户看起来还有额度，下一笔会越过限额。静默时间到了，序号还断着，这一侧停止确认新单。恢复从周期快照对应的日志位置开始，调用处理每条命令的同一个函数。
+
+```cpp
+bool may_lead(uint64_t gap_from, int silent_ms, int limit_ms) {
+    if (gap_from != 0) return false;
+    return silent_ms >= limit_ms;
+}
+```
+
+**已接受表示至少两个副本已经写下**
+
+至少两个副本已经写下，这条命令记成已接受。凑不齐两个的节点停止确认新命令。已经凑齐的那一组继续服务，另一组到不了半数。少掉一个副本，已接受的命令还在。两个机房没有地方放第三个副本。整机房故障不在这次切换里，改走灾备。
+
+```cpp
+struct Ballot {
+    uint8_t have[3]{};
+};
+
+int votes(const Ballot& b) {
+    return int(b.have[0]) + int(b.have[1]) + int(b.have[2]);
+}
+
+bool accepted(const Ballot& b) { return votes(b) >= 2; }
+
+bool still_serves(const Ballot& b, int self) {
+    return b.have[self] && votes(b) >= 2;
+}
+```
+
+**应答和到期都记在日志位置上**
+
+客户端每次请求带会话号和关联号。第一次算出的应答写进定长槽，槽和订单簿一起进快照。重放碰到同一对号码，返回槽里的应答，跳过执行。租约到期是日志上的一条记录，键是租约号，序号是它生效的位置。副本走到这个序号，删掉同一个键。到期不读墙钟，也不靠另一条线程加锁去扫。
+
+```cpp
+struct RspSlot {
+    uint64_t sess{0};
+    uint64_t corr{0};
+    int64_t answer{0};
+    uint8_t used{0};
+};
+
+struct RspKeep {
+    RspSlot slot[64]{};
+
+    const RspSlot* find(uint64_t sess, uint64_t corr) const {
+        for (const RspSlot& s : slot) {
+            if (s.used && s.sess == sess && s.corr == corr) return &s;
+        }
+        return nullptr;
+    }
+
+    bool keep(uint64_t sess, uint64_t corr, int64_t answer) {
+        for (RspSlot& s : slot) {
+            if (s.used) continue;
+            s = RspSlot{sess, corr, answer, 1};
+            return true;
+        }
+        return false;
+    }
+};
+
+struct Due {
+    uint64_t key{0};
+    uint64_t seq{0};
+};
+
+int drop_due(uint64_t seq, const Due* due, int n_due, uint64_t* live, int n_live) {
+    for (int i = 0; i < n_due; ++i) {
+        if (due[i].seq != seq) continue;
+        for (int j = 0; j < n_live; ++j) {
+            if (live[j] != due[i].key) continue;
+            live[j] = live[n_live - 1];
+            --n_live;
+            break;
+        }
+    }
+    return n_live;
+}
+```
 
 ### 14. 交易所协议分层与序列一致性1.**协议分层**
     会话层：登录、心跳、重连、序列号维护、重传协商。
@@ -38995,6 +39310,108 @@ int64_t take_live(HotOrd& n, int64_t want) {
     const int64_t q = n.leaves < want ? n.leaves : want;
     n.leaves -= q;
     return q;
+}
+```
+
+**同价队列用定长槽和先后号，中间撤单不搬后面的订单**
+
+大约百分之九十七的订单在成交前被撤销，不少撤在队列中部。整段数组从中间删，要把后面的订单往前搬。每个价位改成若干定长节点。节点里的槽连续排开，槽地址是基址加下标乘步长。每个槽有一个先后号，0 表示空，号小的先成交。撤单把对应槽的先后号写成 0，数量写成 0，后面的订单留在原位。插入写一次订单，再写一个先后号。节点满了，把号最大的那一条推到后一个节点，作为那边最老的一条。连续推的跳数有上限，到上限就在边界取一个空节点。靠近盘口的节点槽多一些，深处的节点槽少一些。
+
+```cpp
+struct Lane8 {
+    static constexpr int Cap = 8;
+    uint32_t ord[Cap]{};
+    int32_t qty[Cap]{};
+    uint8_t pri[Cap]{};
+    int next{-1};
+};
+
+int width_at(int depth) { return depth < 4 ? 8 : 4; }
+
+int oldest_slot(const Lane8& n) {
+    int at = -1;
+    uint8_t best = 255;
+    for (int i = 0; i < Lane8::Cap; ++i) {
+        if (n.pri[i] == 0 || n.pri[i] >= best) continue;
+        best = n.pri[i];
+        at = i;
+    }
+    return at;
+}
+
+bool wipe_ord(Lane8& n, uint32_t oid) {
+    for (int i = 0; i < Lane8::Cap; ++i) {
+        if (n.pri[i] == 0 || n.ord[i] != oid) continue;
+        n.pri[i] = 0;
+        n.qty[i] = 0;
+        return true;
+    }
+    return false;
+}
+
+int newest_slot(const Lane8& n) {
+    int at = -1;
+    uint8_t best = 0;
+    for (int i = 0; i < Lane8::Cap; ++i) {
+        if (n.pri[i] <= best) continue;
+        best = n.pri[i];
+        at = i;
+    }
+    return at;
+}
+
+bool shove_one(Lane8& src, Lane8& dst) {
+    int from = newest_slot(src);
+    int to = -1;
+    if (from < 0) return false;
+    for (int i = 0; i < Lane8::Cap; ++i) {
+        if (dst.pri[i] == 0) { to = i; break; }
+    }
+    if (to < 0) return false;
+    for (int i = 0; i < Lane8::Cap; ++i) {
+        if (dst.pri[i] != 0) ++dst.pri[i];
+    }
+    dst.ord[to] = src.ord[from];
+    dst.qty[to] = src.qty[from];
+    dst.pri[to] = 1;
+    src.pri[from] = 0;
+    src.qty[from] = 0;
+    return true;
+}
+
+int shove_chain(Lane8* nodes, int head, int hops) {
+    int left = hops;
+    int cur = head;
+    while (left > 0 && cur >= 0 && nodes[cur].next >= 0) {
+        if (!shove_one(nodes[cur], nodes[nodes[cur].next])) return left;
+        --left;
+        cur = nodes[cur].next;
+    }
+    return left;
+}
+```
+
+**新价位挂在已经拿到的前后邻之间**
+
+新来的限价落在一个还没有挂单的价格上，前后两个价位当时已经在手里。盘口附近从最优价顺着相邻链接走一两步。其余位置用本来就要做的前驱、后继查询。这两个价位按价格紧挨着时，前一个的右指针和后一个的左指针里有一个空位，新价位挂在那个空位上。手里没有紧挨的前后邻时，从根往下找。
+
+```cpp
+struct PxNode {
+    int64_t tick{0};
+    int left{-1};
+    int right{-1};
+    int parent{-1};
+};
+
+int hang_between(PxNode* node, int pred, int succ, int fresh) {
+    const bool pred_open = pred >= 0 && node[pred].right < 0;
+    const bool succ_open = succ >= 0 && node[succ].left < 0;
+    if (pred_open == succ_open) return -1;
+    const int parent = pred_open ? pred : succ;
+    int& link = pred_open ? node[parent].right : node[parent].left;
+    link = fresh;
+    node[fresh].parent = parent;
+    return parent;
 }
 ```
 
