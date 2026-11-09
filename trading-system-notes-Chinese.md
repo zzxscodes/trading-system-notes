@@ -25610,6 +25610,45 @@ void on_silent(SessionBook& b, int64_t now_ns) {
     通过中间态（如 `CANCEL_PENDING`）表达时序竞争，避免非法跃迁。
 
 
+**等待表和注册表都占着订单号，超时要把等待项摘掉**
+
+同一个订单号已经在注册表或等待表里，再次提交直接拒绝。终态之后这个号留在表里，新单换一个号。等待超时要把等待项摘掉。等待项留着，后面再用这个号提交会被拒绝。查询用的订单表和余额表按结果事件重算，不读撮合核心里的账户。
+
+```cpp
+struct IdSlot {
+    uint64_t id{0};
+    uint64_t acct{0};
+    uint8_t kind{0}; // 0 empty, 1 waiting, 2 live, 3 final
+};
+
+int find_id(const IdSlot* rows, int n, uint64_t id) {
+    for (int i = 0; i < n; ++i)
+        if (rows[i].kind != 0 && rows[i].id == id) return i;
+    return -1;
+}
+
+bool claim_id(IdSlot* rows, int n, uint64_t id, uint64_t acct) {
+    if (find_id(rows, n, id) >= 0) return false;
+    for (int i = 0; i < n; ++i) {
+        if (rows[i].kind != 0) continue;
+        rows[i].id = id;
+        rows[i].acct = acct;
+        rows[i].kind = 1;
+        return true;
+    }
+    return false;
+}
+
+void drop_wait(IdSlot* rows, int n, uint64_t id) {
+    int i = find_id(rows, n, id);
+    if (i >= 0 && rows[i].kind == 1) rows[i].kind = 0;
+}
+
+void seal_id(IdSlot& s) {
+    if (s.kind == 1 || s.kind == 2) s.kind = 3;
+}
+```
+
 1.6 其他订单管理系统接口设计
 
 ```cpp
@@ -26332,6 +26371,61 @@ bool replay_after_timeout(uint64_t cmd_id) {
 }
 ```
 
+
+**风控按账户分片，撮合按合约分片，拒绝码留在命令上**
+
+分片数是 2 的幂。账户号的低位决定风控分片，合约号的低位决定撮合分片。一条命令经过每一个风控分片，分片只改落在自己身上的账户。撮合只处理结果码仍是风控已通过的命令。更早写下的拒绝码留在命令上。成交、拒绝和减量写在这条命令里，结算读这些事件。
+
+```cpp
+struct PipeCmd {
+    uint64_t uid{0};
+    int32_t sym{0};
+    int32_t code{0}; // 0 new, 1 risk ok, >1 reject
+    int n_ev{0};
+};
+
+int risk_shard(uint64_t uid, int n) {
+    return static_cast<int>(uid & static_cast<uint64_t>(n - 1));
+}
+
+int book_shard(int32_t sym, int n) {
+    return static_cast<int>(static_cast<uint32_t>(sym) & static_cast<uint32_t>(n - 1));
+}
+
+bool enter_book(const PipeCmd& c) { return c.code == 1; }
+
+void keep_reject(PipeCmd& c, int32_t rej) {
+    if (c.code <= 1) c.code = rej;
+}
+```
+
+**命令先刷进日志，再放进环**
+
+命令追加写完并刷到盘上，再放进撮合环。进程被直接杀掉时，已经收下的命令还在日志里。簿跟着消费线程走，发布线程上看不到簿。重启把这条命令日志重放一遍。快照在消费线程里取。
+
+```cpp
+struct CmdLog {
+    int fd{-1};
+};
+
+bool append_flush(CmdLog& log, const void* bytes, int n) {
+    if (log.fd < 0 || n <= 0) return false;
+    const char* p = static_cast<const char*>(bytes);
+    int left = n;
+    while (left > 0) {
+        ssize_t w = ::write(log.fd, p, static_cast<size_t>(left));
+        if (w <= 0) return false;
+        p += w;
+        left -= static_cast<int>(w);
+    }
+    return ::fsync(log.fd) == 0;
+}
+
+bool push_after_flush(CmdLog& log, const void* bytes, int n, bool (*push)(const void*, int)) {
+    if (!append_flush(log, bytes, n)) return false;
+    return push(bytes, n);
+}
+```
 
 ### 2. 订单簿设计**方案1：向量订单簿 (Vector-based LOB)**
 
@@ -35298,6 +35392,43 @@ public:
 };
 ```
 
+**按帧头里的长度切帧，未知类型丢掉这一帧，连接保持**
+
+缓冲里先攒字节。帧头里的长度还不够一整帧，就等下一次读。长度够了再切出去，后面的字节留给下一帧。类型不认识时丢掉这一帧，连接保持。一笔成交写出两条回报，买卖双方各一条，字段从各自的订单跟踪行回填。撤单报文没有账户时，用订单号到注册表查出账户。上交所这一侧，登录完成之前的业务报文回拒单并断开。深交所这一侧，业务报文不要求先登录。心跳超时断开。序列号往回走时记一笔，连接留着。
+
+```cpp
+struct FrameIn {
+    const uint8_t* p{nullptr};
+    int n{0};
+    int off{0};
+};
+
+int take_frame(FrameIn& in, int hdr, uint16_t known_max, uint16_t* typ_out, const uint8_t** body) {
+    if (hdr < 4 || in.n - in.off < hdr) return 0;
+    const uint8_t* h = in.p + in.off;
+    uint32_t body_n = uint32_t(h[hdr - 4]) | (uint32_t(h[hdr - 3]) << 8) |
+                      (uint32_t(h[hdr - 2]) << 16) | (uint32_t(h[hdr - 1]) << 24);
+    if (in.n - in.off < hdr + static_cast<int>(body_n)) return 0;
+    uint16_t typ = uint16_t(h[0]) | (uint16_t(h[1]) << 8);
+    in.off += hdr + static_cast<int>(body_n);
+    if (typ > known_max) return 1;
+    *typ_out = typ;
+    *body = h + hdr;
+    return 2;
+}
+
+struct SideNote {
+    uint64_t acct{0};
+    int64_t qty{0};
+    int64_t px{0};
+};
+
+void two_notes(SideNote* out, uint64_t buy_acct, uint64_t sell_acct, int64_t qty, int64_t px) {
+    out[0] = SideNote{buy_acct, qty, px};
+    out[1] = SideNote{sell_acct, qty, px};
+}
+```
+
 **2.序列一致性处理**
     每路行情流维护 `last_seq`，严格检查连续性。
     检测到 gap 后进入恢复态：请求重传、合并回放、再切回实时流。
@@ -39739,6 +39870,105 @@ void on_new(Sess s, MatchCtx& cx, HotOrd* pool, int64_t px, int64_t qty, bool bu
 ```
 
 
+
+**冰山单分开记显示量和真实量，整笔成交先看真实量**
+
+价位上同时记真实剩余量和显示量。冰山单的显示量取显示上限和真实剩余里较小的那个。成交扣掉真实量之后，显示量再取这个上限和新剩余里较小的那个。对外深度用显示量。要求整笔成交的单，先把限价以内的真实量加总。不够整笔就整笔拒绝，簿上不留下成交。止损单先放在簿外。买止损在最近一笔成交价不低于触发价时进入簿，卖止损在最近一笔成交价不高于触发价时进入簿。进入之后按它自己的限价走普通路径。到期时间已经过了的单，在这一档撮合时跳过并摘掉，不参与成交。
+
+```cpp
+struct RestLot {
+    int64_t px{0};
+    int64_t real_left{0};
+    int64_t shown{0};
+    int64_t show_cap{0};
+    int64_t stop_px{0};
+    int64_t expire_ns{0};
+    int8_t side{1};
+    uint8_t where{0}; // 0 gone, 1 book, 2 stop
+};
+
+void seal_shown(RestLot& o) {
+    if (o.show_cap > 0 && o.show_cap < o.real_left) o.shown = o.show_cap;
+    else o.shown = o.real_left;
+}
+
+void on_print(RestLot& o, int64_t qty) {
+    if (qty > o.real_left) qty = o.real_left;
+    o.real_left -= qty;
+    seal_shown(o);
+    if (o.real_left == 0) o.where = 0;
+}
+
+bool fok_room(const RestLot* rows, int n, int64_t limit, int64_t need, int8_t taker) {
+    int64_t sum = 0;
+    for (int i = 0; i < n; ++i) {
+        if (rows[i].where != 1 || rows[i].side == taker) continue;
+        if (taker > 0 && rows[i].px > limit) continue;
+        if (taker < 0 && rows[i].px < limit) continue;
+        sum += rows[i].real_left;
+        if (sum >= need) return true;
+    }
+    return false;
+}
+
+bool release_stop(RestLot& o, int64_t last_px) {
+    if (o.where != 2) return false;
+    const bool fire = o.side > 0 ? last_px >= o.stop_px : last_px <= o.stop_px;
+    if (!fire) return false;
+    o.where = 1;
+    seal_shown(o);
+    return true;
+}
+
+bool drop_expired(RestLot& o, int64_t now_ns) {
+    if (o.where != 1 || o.expire_ns <= 0 || now_ns <= o.expire_ns) return false;
+    o.where = 0;
+    o.shown = 0;
+    return true;
+}
+```
+
+**买单按预留价加手续费冻结，成交后退回预留价和成交价的差**
+
+买单冻结额是数量乘预留价乘计价乘数，再加上数量乘吃单手续费。预留价可以高于委托价。卖单冻结的是数量乘数量乘数。成交事件上带上买方的预留价。买方收回的金额是数量乘以（预留价减成交价）再乘计价乘数，并记入数量乘数量乘数的证券。成交价高于预留价时，这个差写成 0。卖方记入数量乘成交价乘计价乘数，再减去这一侧的手续费。吃单侧用吃单手续费，挂单侧用挂单手续费。撤掉未成交的部分时，按同一套冻结额退回。按金额控制的立即成交和全部成交，冻结用委托价。
+
+```cpp
+struct SpecK {
+    int64_t qty_k{1};
+    int64_t px_k{1};
+    int64_t take_fee{0};
+    int64_t make_fee{0};
+};
+
+struct CashLine {
+    int64_t quote{0};
+    int64_t base{0};
+};
+
+int64_t buy_hold(int64_t qty, int64_t hold_px, const SpecK& s) {
+    return qty * hold_px * s.px_k + qty * s.take_fee;
+}
+
+int64_t sell_hold(int64_t qty, const SpecK& s) {
+    return qty * s.qty_k;
+}
+
+void apply_fill(CashLine& buyer, CashLine& seller, int64_t qty, int64_t px,
+                int64_t hold_px, int64_t fee, const SpecK& s) {
+    const int64_t gap = hold_px > px ? hold_px - px : 0;
+    buyer.quote += qty * gap * s.px_k;
+    buyer.base += qty * s.qty_k;
+    seller.quote += qty * px * s.px_k - qty * fee;
+}
+
+void refund_buy(CashLine& buyer, int64_t qty, int64_t hold_px, const SpecK& s) {
+    buyer.quote += buy_hold(qty, hold_px, s);
+}
+
+void refund_sell(CashLine& seller, int64_t qty, const SpecK& s) {
+    seller.base += sell_hold(qty, s);
+}
+```
 
 ### 45. 并发共享量的状态穷举与违例检出
 

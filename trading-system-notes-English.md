@@ -25622,6 +25622,45 @@ Use stable primary keys (such as order key + exchange return serial number) to r
 through intermediate states (e.g. `CANCEL_PENDING`) to express timing competition and avoid illegal transitions.
 
 
+**The waiter table and the registry both hold an order id, and a timeout drops the waiter**
+
+If the same order id is already in the registry or the waiter table, a second submit is rejected. After a terminal state the id stays in the table, and a new order takes a different id. A wait that times out drops the waiter entry. If that entry remains, a later submit of the same id is rejected as a duplicate. The order table and the balance table used for queries are rebuilt from result events, and they do not read the accounts inside the matching core.
+
+```cpp
+struct IdSlot {
+    uint64_t id{0};
+    uint64_t acct{0};
+    uint8_t kind{0}; // 0 empty, 1 waiting, 2 live, 3 final
+};
+
+int find_id(const IdSlot* rows, int n, uint64_t id) {
+    for (int i = 0; i < n; ++i)
+        if (rows[i].kind != 0 && rows[i].id == id) return i;
+    return -1;
+}
+
+bool claim_id(IdSlot* rows, int n, uint64_t id, uint64_t acct) {
+    if (find_id(rows, n, id) >= 0) return false;
+    for (int i = 0; i < n; ++i) {
+        if (rows[i].kind != 0) continue;
+        rows[i].id = id;
+        rows[i].acct = acct;
+        rows[i].kind = 1;
+        return true;
+    }
+    return false;
+}
+
+void drop_wait(IdSlot* rows, int n, uint64_t id) {
+    int i = find_id(rows, n, id);
+    if (i >= 0 && rows[i].kind == 1) rows[i].kind = 0;
+}
+
+void seal_id(IdSlot& s) {
+    if (s.kind == 1 || s.kind == 2) s.kind = 3;
+}
+```
+
 1.6 Other order management system interface design
 
 ```cpp
@@ -26344,6 +26383,61 @@ bool replay_after_timeout(uint64_t cmd_id) {
 }
 ```
 
+
+**Risk shards by account, matching shards by symbol, and a reject code stays on the command**
+
+The shard count is a power of two. The low bits of the account id pick the risk shard. The low bits of the symbol id pick the matching shard. One command visits every risk shard, and a shard only moves accounts that land on it. Matching runs only while the result code is still risk-passed. A reject written earlier stays on the command. Trades, rejects, and size cuts are stored on that command, and settlement reads those events.
+
+```cpp
+struct PipeCmd {
+    uint64_t uid{0};
+    int32_t sym{0};
+    int32_t code{0}; // 0 new, 1 risk ok, >1 reject
+    int n_ev{0};
+};
+
+int risk_shard(uint64_t uid, int n) {
+    return static_cast<int>(uid & static_cast<uint64_t>(n - 1));
+}
+
+int book_shard(int32_t sym, int n) {
+    return static_cast<int>(static_cast<uint32_t>(sym) & static_cast<uint32_t>(n - 1));
+}
+
+bool enter_book(const PipeCmd& c) { return c.code == 1; }
+
+void keep_reject(PipeCmd& c, int32_t rej) {
+    if (c.code <= 1) c.code = rej;
+}
+```
+
+**Flush the command to the log, then place it on the ring**
+
+Append the command and flush it to disk, then place it on the matching ring. If the process is killed outright, a command already accepted is still in the log. The books live with the consumer thread, and the publishing thread does not see them. A restart replays that command log. A snapshot is taken on the consumer thread.
+
+```cpp
+struct CmdLog {
+    int fd{-1};
+};
+
+bool append_flush(CmdLog& log, const void* bytes, int n) {
+    if (log.fd < 0 || n <= 0) return false;
+    const char* p = static_cast<const char*>(bytes);
+    int left = n;
+    while (left > 0) {
+        ssize_t w = ::write(log.fd, p, static_cast<size_t>(left));
+        if (w <= 0) return false;
+        p += w;
+        left -= static_cast<int>(w);
+    }
+    return ::fsync(log.fd) == 0;
+}
+
+bool push_after_flush(CmdLog& log, const void* bytes, int n, bool (*push)(const void*, int)) {
+    if (!append_flush(log, bytes, n)) return false;
+    return push(bytes, n);
+}
+```
 
 ### 2. Order book design**Option 1: Vector-based LOB**
 
@@ -35312,6 +35406,43 @@ public:
 };
 ```
 
+**Cut frames by the length in the header, and leave the connection up on an unknown type**
+
+Bytes accumulate in a buffer. If the length in the header is not yet a whole frame, wait for the next read. Once the length is complete, cut that frame out and leave the rest for the next frame. An unrecognized type is dropped and the connection stays up. One fill writes two reports, one for each side, and the fields are filled from that side's order-tracking row. A cancel with no account looks the account up from the registry by order id. On the Shanghai side, a business message before logon completes is rejected and the connection is dropped. On the Shenzhen side, a business message does not require a prior logon. A heartbeat timeout drops the connection. A sequence number that moves backward is recorded, and the connection stays up.
+
+```cpp
+struct FrameIn {
+    const uint8_t* p{nullptr};
+    int n{0};
+    int off{0};
+};
+
+int take_frame(FrameIn& in, int hdr, uint16_t known_max, uint16_t* typ_out, const uint8_t** body) {
+    if (hdr < 4 || in.n - in.off < hdr) return 0;
+    const uint8_t* h = in.p + in.off;
+    uint32_t body_n = uint32_t(h[hdr - 4]) | (uint32_t(h[hdr - 3]) << 8) |
+                      (uint32_t(h[hdr - 2]) << 16) | (uint32_t(h[hdr - 1]) << 24);
+    if (in.n - in.off < hdr + static_cast<int>(body_n)) return 0;
+    uint16_t typ = uint16_t(h[0]) | (uint16_t(h[1]) << 8);
+    in.off += hdr + static_cast<int>(body_n);
+    if (typ > known_max) return 1;
+    *typ_out = typ;
+    *body = h + hdr;
+    return 2;
+}
+
+struct SideNote {
+    uint64_t acct{0};
+    int64_t qty{0};
+    int64_t px{0};
+};
+
+void two_notes(SideNote* out, uint64_t buy_acct, uint64_t sell_acct, int64_t qty, int64_t px) {
+    out[0] = SideNote{buy_acct, qty, px};
+    out[1] = SideNote{sell_acct, qty, px};
+}
+```
+
 **2. Sequence consistency processing**
 Market flow maintenance for each channel `last_seq`, strictly check continuity.
 After detecting the gap, it enters the recovery state: request retransmission, merge playback, and then switch back to the real-time stream.
@@ -39749,6 +39880,105 @@ void on_new(Sess s, MatchCtx& cx, HotOrd* pool, int64_t px, int64_t qty, bool bu
 ```
 
 
+
+**An iceberg keeps shown size apart from real size, and fill-or-kill checks the real size first**
+
+A level stores the real remainder and the shown size. An iceberg's shown size is the smaller of the display cap and the real remainder. After a fill, the shown size is the smaller of that cap and the new remainder. Published depth uses the shown size. An order that must fill in full first sums the real size inside the limit. If that sum is short of the whole order, the order is rejected and the book takes no fill. A stop sits off the book. A buy stop enters when the last trade price is at or above the trigger. A sell stop enters when the last trade price is at or below the trigger. After it enters, it follows the ordinary limit path at its own limit. An order whose expiry is already past is skipped and removed on that level, and it does not trade.
+
+```cpp
+struct RestLot {
+    int64_t px{0};
+    int64_t real_left{0};
+    int64_t shown{0};
+    int64_t show_cap{0};
+    int64_t stop_px{0};
+    int64_t expire_ns{0};
+    int8_t side{1};
+    uint8_t where{0}; // 0 gone, 1 book, 2 stop
+};
+
+void seal_shown(RestLot& o) {
+    if (o.show_cap > 0 && o.show_cap < o.real_left) o.shown = o.show_cap;
+    else o.shown = o.real_left;
+}
+
+void on_print(RestLot& o, int64_t qty) {
+    if (qty > o.real_left) qty = o.real_left;
+    o.real_left -= qty;
+    seal_shown(o);
+    if (o.real_left == 0) o.where = 0;
+}
+
+bool fok_room(const RestLot* rows, int n, int64_t limit, int64_t need, int8_t taker) {
+    int64_t sum = 0;
+    for (int i = 0; i < n; ++i) {
+        if (rows[i].where != 1 || rows[i].side == taker) continue;
+        if (taker > 0 && rows[i].px > limit) continue;
+        if (taker < 0 && rows[i].px < limit) continue;
+        sum += rows[i].real_left;
+        if (sum >= need) return true;
+    }
+    return false;
+}
+
+bool release_stop(RestLot& o, int64_t last_px) {
+    if (o.where != 2) return false;
+    const bool fire = o.side > 0 ? last_px >= o.stop_px : last_px <= o.stop_px;
+    if (!fire) return false;
+    o.where = 1;
+    seal_shown(o);
+    return true;
+}
+
+bool drop_expired(RestLot& o, int64_t now_ns) {
+    if (o.where != 1 || o.expire_ns <= 0 || now_ns <= o.expire_ns) return false;
+    o.where = 0;
+    o.shown = 0;
+    return true;
+}
+```
+
+**A buy freezes the reserve price plus the taker fee, and the fill returns the gap to the trade price**
+
+A buy hold is size times reserve price times the quote scale, plus size times the taker fee. The reserve price may sit above the limit. A sell hold is size times the quantity scale. The trade event carries the buyer's reserve price. The buyer receives size times the reserve-minus-trade gap times the quote scale, and size times the quantity scale of the security. When the trade price is above the reserve, that gap is written as 0. The seller receives size times the trade price times the quote scale, minus that side's fee. The taking side uses the taker fee. The resting side uses the maker fee. The unfilled remainder of a cancel is returned with the same hold. A budget immediate-or-cancel and a budget fill-or-kill freeze at the order price.
+
+```cpp
+struct SpecK {
+    int64_t qty_k{1};
+    int64_t px_k{1};
+    int64_t take_fee{0};
+    int64_t make_fee{0};
+};
+
+struct CashLine {
+    int64_t quote{0};
+    int64_t base{0};
+};
+
+int64_t buy_hold(int64_t qty, int64_t hold_px, const SpecK& s) {
+    return qty * hold_px * s.px_k + qty * s.take_fee;
+}
+
+int64_t sell_hold(int64_t qty, const SpecK& s) {
+    return qty * s.qty_k;
+}
+
+void apply_fill(CashLine& buyer, CashLine& seller, int64_t qty, int64_t px,
+                int64_t hold_px, int64_t fee, const SpecK& s) {
+    const int64_t gap = hold_px > px ? hold_px - px : 0;
+    buyer.quote += qty * gap * s.px_k;
+    buyer.base += qty * s.qty_k;
+    seller.quote += qty * px * s.px_k - qty * fee;
+}
+
+void refund_buy(CashLine& buyer, int64_t qty, int64_t hold_px, const SpecK& s) {
+    buyer.quote += buy_hold(qty, hold_px, s);
+}
+
+void refund_sell(CashLine& seller, int64_t qty, const SpecK& s) {
+    seller.base += sell_hold(qty, s);
+}
+```
 
 ### 45. Exhaustive interleavings and breach detection for shared qty
 
