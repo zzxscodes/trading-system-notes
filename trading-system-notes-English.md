@@ -132,6 +132,12 @@
   - [44. Split match paths for continuous and call auction](#44-split-match-paths-for-continuous-and-call-auction)
   - [45. Exhaustive interleavings and breach detection for shared qty](#45-exhaustive-interleavings-and-breach-detection-for-shared-qty)
   - [46. One live order aligns a futures target, and split today-yesterday books close yesterday first](#46-one-live-order-aligns-a-futures-target-and-split-today-yesterday-books-close-yesterday-first)
+  - [47. A volume curve sets each minute, and lag is shared over the curve that remains](#47-a-volume-curve-sets-each-minute-and-lag-is-shared-over-the-curve-that-remains)
+  - [48. A signal sets the wait inside a slice, lag and working size latch, and the tail cancels by count](#48-a-signal-sets-the-wait-inside-a-slice-lag-and-working-size-latch-and-the-tail-cancels-by-count)
+  - [49. Self-trade compares only the best level of an integer price key](#49-self-trade-compares-only-the-best-level-of-an-integer-price-key)
+  - [50. Position queries fold today and yesterday by venue, and option free size drops combined lots](#50-position-queries-fold-today-and-yesterday-by-venue-and-option-free-size-drops-combined-lots)
+  - [51. Short stock size is rebuilt from the liability tape, and the special pool stays separate](#51-short-stock-size-is-rebuilt-from-the-liability-tape-and-the-special-pool-stays-separate)
+  - [52. Past the auction deadline, the cached gap becomes one estimated fill](#52-past-the-auction-deadline-the-cached-gap-becomes-one-estimated-fill)
 - [Business logic design-calculation](#business-logic-design-calculation)
   - [1. Log return (percent asymmetry)](#1-log-return-percent-asymmetry)
   - [2. Changes in state of market trends and volatility](#2-changes-in-state-of-market-trends-and-volatility)
@@ -38128,6 +38134,20 @@ bool should_pull(bool buy, double neu, double old, bool opp_live, double opp_cap
 
 The execution grain is greater than 0 and at most 100. Start and end are clamped into the trading session. The executor is not created when the start is after the end, the end is before the current time, or the latest tolerate time is before the end. A limit-up book does not sell. A limit-down book does not buy. A buy at the limit-up price and a sell at the limit-down price may be posted in one order.
 
+A last price, an up limit, or a down limit at or below zero leaves the comparison without a bound, and execution continues. A last price strictly between the two limits continues. A buy whose last price has reached the up limit continues. A sell whose last price has reached the down limit continues. A buy sitting on the down limit continues only when the parent allows a down-limit buy. A sell sitting on the up limit continues only when the parent allows an up-limit sell. Every other case stops the parent and cancels children that are still working.
+
+```cpp
+bool limit_allows(bool buy, double last, double up, double down, bool buy_down, bool sell_up) {
+    if (last <= 0 || up <= 0 || down <= 0) return true;
+    if (last > down && last < up) return true;
+    if (buy && last >= up) return true;
+    if (!buy && last <= down) return true;
+    if (buy && last <= down && buy_down) return true;
+    if (!buy && last >= up && sell_up) return true;
+    return false;
+}
+```
+
 The child price is taken from the book. Hitting level one, two, or three reads the opposite side at that depth: a buy reads the ask, a sell reads the bid. When only the top level is allowed, levels two and three fall back to level one. A join reads bid one for a buy and ask one for a sell. The middle price is the mean of bid one and ask one. If one side is missing, the other side is used. If both are missing, there is no price. When the chosen price has absolute value below 1e-6 and rerouting is allowed, the order moves to level one on the other side. A short sale uses the last price for a hit and for the middle price.
 
 A passive order walks from its own touch into the spread. When the step count is positive and smaller than half the spread in ticks, a buy moves up from bid one and a sell moves down from ask one. When the count reaches or passes half the spread, the price stays on its own touch. A chase starts from the opposite touch, from its own touch, or from a price carried on the quote. A carried price whose absolute value is below 1e-6 does not chase. A positive step count moves a buy up and a sell down. A negative count reverses that direction. The result is aligned to the tick, and a remainder of at least half a tick steps one more tick.
@@ -38461,6 +38481,75 @@ public:
         }
     }
 };
+```
+
+When the account already holds a complete snapshot younger than 30 seconds, the query filters that snapshot by symbol and replies from the local copy. A missing snapshot, or one older than those 30 seconds, puts the query on a wait list. The first query in an empty in-flight slot owns the send and clears the rows being assembled. Later queries only wait. Counter rows append into that buffer. When the end mark arrives, the buffer becomes the snapshot, the clock is stored, the in-flight bit clears, and each waiter is replayed. A filter that matches nothing replies with one empty row carrying the end mark. A failed send gives every waiter that same empty row, and the snapshot stays unready. Replay copies the request account onto every row. The end mark is set only on the last row.
+
+```cpp
+struct SnapRow {
+    uint32_t name{0};
+    int64_t qty{0};
+};
+
+struct SnapGate {
+    SnapRow row[256];
+    int n{0};
+    int waiters{0};
+    int64_t ready_at{0};
+    int64_t ttl{30000};
+    uint8_t ready{0};
+    uint8_t busy{0};
+};
+
+enum class SnapDo : uint8_t { Serve, Start, Wait };
+
+SnapDo begin_query(SnapGate& g, int64_t now) {
+    if (g.ready && now - g.ready_at < g.ttl) return SnapDo::Serve;
+    if (g.busy) {
+        g.waiters += 1;
+        return SnapDo::Wait;
+    }
+    g.busy = 1;
+    g.n = 0;
+    g.waiters = 1;
+    return SnapDo::Start;
+}
+
+void finish_query(SnapGate& g, int64_t now, bool ok) {
+    g.busy = 0;
+    g.waiters = 0;
+    if (!ok) {
+        g.ready = 0;
+        g.n = 0;
+        return;
+    }
+    g.ready = 1;
+    g.ready_at = now;
+}
+
+struct Replay {
+    uint32_t acct{0};
+    uint32_t name{0};
+    int64_t qty{0};
+    uint8_t end{0};
+};
+
+int replay_rows(const SnapGate& g, uint32_t name, uint32_t acct, Replay* out, int cap) {
+    if (cap <= 0) return 0;
+    int last = -1;
+    for (int i = 0; i < g.n; ++i)
+        if (name == 0 || g.row[i].name == name) last = i;
+    if (last < 0) {
+        out[0] = Replay{acct, 0, 0, 1};
+        return 1;
+    }
+    int w = 0;
+    for (int i = 0; i < g.n && w < cap; ++i) {
+        if (name != 0 && g.row[i].name != name) continue;
+        out[w++] = Replay{acct, g.row[i].name, g.row[i].qty, uint8_t(i == last)};
+    }
+    return w;
+}
 ```
 
 
@@ -38803,6 +38892,31 @@ struct ReqSnap { int status; int close_how; };
 
 int how_on_fill(const ReqSnap* snap, int rsp_how) {
     return snap ? snap->close_how : rsp_how;
+}
+```
+
+A plain close consumes yesterday size that is not yet locked. The amount available is yesterday left minus yesterday locked, and it stops at zero. Size beyond that stays in the today book. A report already marked close-yesterday subtracts the fill from yesterday left directly. Yesterday locked decreases only when the offset stored on the original request is also close-yesterday, and the decrease equals the quantity released from the total lock. A close-today report leaves both yesterday fields unchanged. All three closes subtract the fill from total size and from the total lock.
+
+```cpp
+struct CloseFill {
+    int64_t qty{0};
+    CloseHow how{CloseHow::Close};
+    CloseHow asked{CloseHow::Close};
+};
+
+void apply_close_fill(LotBook& b, CloseFill f) {
+    if (f.how == CloseHow::Open) return;
+    int64_t rel = f.qty < b.locked ? f.qty : b.locked;
+    b.total -= f.qty;
+    b.locked -= rel;
+    if (f.how == CloseHow::Close) {
+        int64_t free_yd = b.yday_left - b.yday_locked;
+        if (free_yd > 0) b.yday_left -= free_yd < f.qty ? free_yd : f.qty;
+    } else if (f.how == CloseHow::CloseYday) {
+        b.yday_left -= f.qty;
+        if (f.asked == CloseHow::CloseYday) b.yday_locked -= rel;
+    }
+    b.free_lots = b.total - b.locked;
 }
 ```
 
@@ -40389,6 +40503,560 @@ void keep_larger(MainKeep& m, int contract, int64_t vol, bool in_trade) {
 }
 ```
 
+
+### 47. A volume curve sets each minute, and lag is shared over the curve that remains
+
+A parent is cut into 60-second slices. The size of a slice is the cumulative participation at the slice end minus the cumulative participation at the previous slice end, multiplied by the parent quantity. Participation is stored in parts per million, and a full curve is 1000000.
+
+The curve stores cumulative participation in time order. A lookup takes the first point that is not earlier than the target. A target before the first point stays on the first point. A target after the last point stays on the last point. The completion ratio is the gap from the start point to the current point, divided by the gap from the start point to the end point. A zero denominator yields 1. A ratio above 1 is clamped to 1.
+
+Time must strictly increase, and cumulative participation must not fall. Any broken point discards the whole curve. The replacement writes 240 minute points from 09:30. After the first 120 points the clock jumps 90 minutes across the lunch break, then the afternoon points are written. Shanghai steps by 1/237. Other venues step by 1/240. Any sum above 1 is clamped to 1, and the last point is written as 1.
+
+When the previous slice’s target exceeds the filled quantity, the slice is behind. Its quantity is the curve increment plus the lag times the share ratio. The share ratio is the fraction of the curve from this slice’s start to the algorithm end that has been passed by the slice end. The last slice sets that ratio to 1. When lag plus the curve increment minus working quantity already reaches the minimum lot, the slice sends at least one lot. When the schedule is ahead, only the curve increment is sent. When the absolute lead plus working quantity reaches one tenth of the parent, the slice quantity is 0. The result is rounded to a whole lot by half-up. When the slice end is within 7 seconds of the algorithm end, the slice end moves to the algorithm end.
+
+```cpp
+struct Curve {
+    int64_t tod_ms[240]{};
+    int32_t cum_ppm[240]{};
+    int n{0};
+};
+
+void fill_flat(Curve& c, bool sh) {
+    c.n = 240;
+    int32_t step = sh ? 1000000 / 237 : 1000000 / 240;
+    int32_t acc = 0;
+    int64_t t = (9 * 60 + 30) * 60000;
+    for (int i = 0; i < 240; ++i) {
+        if (i == 120) t += 90 * 60000;
+        acc += step;
+        if (acc > 1000000 || i == 239) acc = 1000000;
+        c.tod_ms[i] = t;
+        c.cum_ppm[i] = acc;
+        t += 60000;
+    }
+}
+
+int curve_at(const Curve& c, int64_t t) {
+    int i = 0;
+    while (i < c.n && c.tod_ms[i] < t) ++i;
+    if (i >= c.n) return c.n - 1;
+    return i;
+}
+
+int32_t curve_ppm(const Curve& c, int64_t now, int64_t start, int64_t end) {
+    if (c.n <= 0) return 0;
+    int32_t a = c.cum_ppm[curve_at(c, start)];
+    int32_t b = c.cum_ppm[curve_at(c, end)];
+    int32_t m = c.cum_ppm[curve_at(c, now)];
+    if (b <= a) return 1000000;
+    int64_t r = int64_t(m - a) * 1000000 / int64_t(b - a);
+    if (r < 0) return 0;
+    if (r > 1000000) return 1000000;
+    return int32_t(r);
+}
+
+int64_t round_lot(int64_t qty, int64_t lot) {
+    if (qty <= 0) return 0;
+    if (lot <= 1) return qty;
+    return ((qty + lot / 2) / lot) * lot;
+}
+
+int64_t clip_slice_end(int64_t end, int64_t algo_end) {
+    if (algo_end - end <= 7000) return algo_end;
+    return end;
+}
+
+int64_t slice_qty(int64_t parent, int64_t done, int64_t working,
+                  int32_t prev_ppm, int32_t curr_ppm, int32_t share_ppm,
+                  int64_t lot, bool last_slice) {
+    int64_t piece = parent * int64_t(curr_ppm - prev_ppm) / 1000000;
+    if (piece < 0) piece = 0;
+    int64_t lag = parent * int64_t(prev_ppm) / 1000000 - done;
+    int64_t qty = piece;
+    if (lag > 0) {
+        int32_t share = last_slice ? 1000000 : share_ppm;
+        if (share < 0) share = 0;
+        qty = piece + lag * share / 1000000;
+        if (lag + piece - working >= lot && qty < lot) qty = lot;
+    } else if ((-lag) + working >= parent / 10) {
+        qty = 0;
+    }
+    return round_lot(qty, lot);
+}
+```
+
+When the quantity per minute is below one fifth of the minimum lot, the parent switches to sparse segments. The segment count is the total quantity divided by the minimum lot. Minutes per segment are the total minutes divided by the segment count, rounded half-up, and at least 1. Segment bounds are already on continuous-auction time. The caller skips lunch. When the next segment would end less than one segment length before the algorithm end, this segment’s end moves to the algorithm end.
+
+The send instant has three placements. The early placement uses the segment start. The late placement steps 60 seconds back from the segment end. The nearest placement adds half the segment length plus one minute to the segment start. An ordinary name rounds the total divided by the segment count up to a whole lot, and a segment never exceeds the quantity still unscheduled. A tech board name sends the preset size while the remainder is still at least two presets. The last segment's quantity equals what is still left, and that quantity may be an odd lot. A segment sends once, at its send instant, and only if it has not sent yet. A sparse parent cancels the current child on every state exit.
+
+```cpp
+struct Seg {
+    int64_t begin_ms{0};
+    int64_t end_ms{0};
+    int64_t send_ms{0};
+    int64_t qty{0};
+};
+
+bool thin_parent(int64_t qty, int64_t minutes, int64_t lot) {
+    if (minutes <= 0 || lot <= 0) return false;
+    return qty * 5 < lot * minutes;
+}
+
+int64_t ceil_lot(int64_t num, int64_t den, int64_t lot) {
+    if (den <= 0 || lot <= 0 || num <= 0) return 0;
+    return ((num + den * lot - 1) / (den * lot)) * lot;
+}
+
+int build_segs(Seg* out, int cap, int64_t qty, int64_t lot, int minutes,
+               int place, bool tech, int64_t parent_end, int64_t origin) {
+    if (cap <= 0 || lot <= 0 || minutes <= 0 || qty < lot) return 0;
+    int n = int(qty / lot);
+    if (n > cap) n = cap;
+    int len = (minutes + n / 2) / n;
+    if (len < 1) len = 1;
+    int64_t preset = ceil_lot(qty, n, lot);
+    int64_t left = qty;
+    int64_t begin = origin;
+    int written = 0;
+    for (int i = 0; i < n && left > 0 && written < cap; ++i) {
+        if (begin >= parent_end) break;
+        int64_t span = int64_t(len) * 60000;
+        int64_t end = begin + span;
+        if (parent_end - end < span || end > parent_end) end = parent_end;
+        Seg s;
+        s.begin_ms = begin;
+        s.end_ms = end;
+        if (place == 1) s.send_ms = end - 60000;
+        else if (place == 2) s.send_ms = begin + int64_t(len / 2 + 1) * 60000;
+        else s.send_ms = begin;
+        if (s.send_ms < begin) s.send_ms = begin;
+        if (s.send_ms > end) s.send_ms = end;
+        if (tech && left < preset * 2) s.qty = left;
+        else s.qty = preset < left ? preset : left;
+        left -= s.qty;
+        out[written++] = s;
+        begin = end;
+    }
+    return written;
+}
+```
+
+### 48. A signal sets the wait inside a slice, lag and working size latch, and the tail cancels by count
+
+A slice with more than 30 seconds of trading time left reads the 60-second factor. A shorter remainder reads the 30-second factor. Absolute value above 0.0025 is very strong. Absolute value above 0.0015 is strong. Anything smaller has no direction. Forecast ticks are the factor times the mid price, divided by the tick. Spread ticks below 1 are treated as 1.
+
+Passive wait in milliseconds is 60000 divided by 1 plus exp(coeff). coeff is the signed forecast in ticks minus twice the spread in ticks. A buy uses a positive sign. A sell uses a negative sign. The result is clamped between 10 and 30 seconds. A forecast that favors the parent makes coeff larger and the wait shorter.
+
+A signal in the parent’s direction joins its own touch. A very strong opposing signal steps two ticks away from that touch. A merely strong opposing signal steps one tick away. An unknown direction still joins the touch. After the forecast ticks are signed by the side, a value of at least 1.5 spread ticks switches to the opposite price, and a value of at least 1.5 ticks switches to the aggressive path.
+
+The cancel ratio is 0 while fewer than 10 orders have been sent. A slice that still has quantity, and has reached the opposite-only instant, hits the opposite price directly. A cancel ratio above 0.95 hits the opposite price once and does not chase. A cancel ratio above 0.55, the force-cancel instant, or an open trim of extra working size, takes the ordinary aggressive path. Every other open starts passive.
+
+Strict mode cancels the current child on every state exit. An ordinary parent leaving the passive state cancels only when the absolute forecast in ticks is above 0.5 and the mid plus the forecast deviates from the limit by more than 0.2 percent. A buy cancels when the mid plus the forecast is above the limit times 1.002. A sell cancels when it is below the limit times 0.998.
+
+```cpp
+struct Sig {
+    int dir{0};
+    int heat{0};
+    double ticks{0};
+    double spread{1};
+};
+
+Sig make_sig(double factor, double mid, double bid, double ask, double tick) {
+    Sig s;
+    double mag = factor < 0 ? -factor : factor;
+    if (mag > 0.0025) { s.dir = factor > 0 ? 1 : -1; s.heat = 2; }
+    else if (mag > 0.0015) { s.dir = factor > 0 ? 1 : -1; s.heat = 1; }
+    if (tick > 0 && mid > 0) {
+        s.ticks = factor * mid / tick;
+        double sp = (ask - bid) / tick;
+        s.spread = sp < 1 ? 1 : sp;
+    }
+    return s;
+}
+
+int passive_ms(bool buy, const Sig& s) {
+    double coeff = (buy ? s.ticks : -s.ticks) - 2.0 * s.spread;
+    int ms = int(60000.0 / (1.0 + std::exp(coeff)));
+    if (ms < 10000) return 10000;
+    if (ms > 30000) return 30000;
+    return ms;
+}
+
+int retreat_ticks(bool buy, const Sig& s) {
+    int want = buy ? 1 : -1;
+    if (s.dir == 0 || s.dir == want) return 0;
+    return s.heat >= 2 ? 2 : 1;
+}
+
+enum class SlicePh : uint8_t { Make, Take, Cross };
+
+SlicePh escalate(bool buy, const Sig& s) {
+    double signed_ticks = buy ? s.ticks : -s.ticks;
+    if (signed_ticks >= 1.5 * s.spread) return SlicePh::Cross;
+    if (signed_ticks >= 1.5) return SlicePh::Take;
+    return SlicePh::Make;
+}
+
+enum class OpenPh : uint8_t { Make, Take, Hit, Cross, Idle };
+
+OpenPh open_ph(int64_t now, int64_t cross_at, int64_t pull_at,
+               int placed, int cancelled, bool trimming, bool has_qty) {
+    if (!has_qty) return OpenPh::Idle;
+    if (now >= cross_at) return OpenPh::Cross;
+    int ppm = placed < 10 ? 0 : int(int64_t(cancelled) * 1000000 / placed);
+    if (ppm > 950000) return OpenPh::Hit;
+    if (ppm > 550000 || now >= pull_at || trimming) return OpenPh::Take;
+    return OpenPh::Make;
+}
+
+bool leave_make(bool strict, bool buy, double mid, double pred, double ticks, double limit) {
+    if (strict) return true;
+    if (!(mid > 0 && (ticks > 0.5 || ticks < -0.5))) return false;
+    if (buy) return mid + pred > 1.002 * limit;
+    return mid + pred < 0.998 * limit;
+}
+```
+
+Execution deviation is the curve target minus the filled quantity, divided by the parent quantity. Crossing above 0.05 allows the opposite-price path by time. Falling below 0.03, together with a cancel ratio below 0.55, turns that path off. A deviation between 0.03 and 0.05 leaves the switch as it is.
+
+Working quantity at or above one tenth of the parent plus the curve lag opens the trim. Falling below one twentieth of the parent plus that lag closes it. While the trim is open, each slice cancels only the first child after sorting.
+
+The tail window is the larger of 30 seconds and one tenth of the whole duration. The opposite-only window is the larger of 7 seconds and five percent of the duration. Both windows are measured backward from the end. The instant the tail window is entered is stored as the start. The number of children to cancel is the time from that start until now, divided by the time from that start until the opposite-only instant, times the live child count, rounded half-up.
+
+Equal prices sort the newer child first. Buys sort the lower price first. Sells sort the higher price first. A size cancel pulls a child only when its remaining size is strictly smaller than the quantity still to cancel, then subtracts that remaining size. A child whose remaining size is already at least the quantity still to cancel stops the scan, and that large child stays on the book.
+
+```cpp
+struct PaceLatch {
+    uint8_t cross_on{0};
+    uint8_t trim_on{0};
+};
+
+void latch_cross(PaceLatch& p, int64_t parent, int64_t aim, int64_t done, int cancel_ppm) {
+    if (parent <= 0) return;
+    int64_t gap = aim - done;
+    if (!p.cross_on && gap * 20 > parent) p.cross_on = 1;
+    if (p.cross_on && gap * 100 < parent * 3 && cancel_ppm < 550000) p.cross_on = 0;
+}
+
+void latch_trim(PaceLatch& p, int64_t parent, int64_t working, int64_t lag) {
+    if (parent <= 0) return;
+    int64_t behind = lag > 0 ? lag : 0;
+    if (!p.trim_on && working * 10 >= parent + behind * 10) p.trim_on = 1;
+    if (p.trim_on && working * 20 < parent + behind * 20) p.trim_on = 0;
+}
+
+int64_t window_back(int64_t span_ms, int64_t floor_ms, int64_t ratio_ppm) {
+    int64_t by_ratio = span_ms * ratio_ppm / 1000000;
+    return by_ratio > floor_ms ? by_ratio : floor_ms;
+}
+
+struct ChildLive {
+    int64_t px{0};
+    int64_t left{0};
+    int64_t born_ms{0};
+};
+
+void order_live(ChildLive* a, int n, bool buy) {
+    for (int i = 1; i < n; ++i) {
+        ChildLive v = a[i];
+        int j = i;
+        while (j > 0) {
+            const ChildLive& p = a[j - 1];
+            bool before = v.px == p.px ? v.born_ms > p.born_ms
+                         : (buy ? v.px < p.px : v.px > p.px);
+            if (!before) break;
+            a[j] = a[j - 1];
+            --j;
+        }
+        a[j] = v;
+    }
+}
+
+int pull_until(ChildLive* a, int n, int64_t need, bool buy) {
+    order_live(a, n, buy);
+    int k = 0;
+    for (int i = 0; i < n; ++i) {
+        if (a[i].left >= need) break;
+        need -= a[i].left;
+        a[i].left = 0;
+        ++k;
+    }
+    return k;
+}
+
+int pull_tail(ChildLive* a, int n, int64_t now, int64_t started, int64_t cross_at, bool buy) {
+    order_live(a, n, buy);
+    if (cross_at <= started || n <= 0) return 0;
+    double coeff = double(now - started) / double(cross_at - started);
+    if (coeff < 0) coeff = 0;
+    if (coeff > 1) coeff = 1;
+    int k = int(coeff * n + 0.5);
+    if (k > n) k = n;
+    for (int i = 0; i < k; ++i) a[i].left = 0;
+    return k;
+}
+```
+
+### 49. Self-trade compares only the best level of an integer price key
+
+Only a new limit order is checked for self-trade. A market order passes through. The price key is the price times 1000, rounded to the nearest integer. Each symbol keeps two fixed level arrays. The bid book is ordered high to low, so the first level is the best bid. The ask book is ordered low to high, so the first level is the best ask. A buy whose key is at least the best ask, or a sell whose key is at most the best bid, is rejected.
+
+The order is inserted on its own side only after the check passes. A terminal state removes it. When the count on a key falls to 0, that level is deleted and the later levels move forward. A full array refuses a new level, and that order is rejected. One thread checks and then inserts, so the next order sees the level the previous order already wrote.
+
+```cpp
+struct PxLvl {
+    int64_t key{0};
+    uint32_t n{0};
+};
+
+struct PxBook {
+    PxLvl lv[64];
+    int n{0};
+    uint8_t high_first{0};
+};
+
+int64_t milli_key(double px) {
+    double x = px * 1000.0;
+    return int64_t(x >= 0 ? x + 0.5 : x - 0.5);
+}
+
+bool crosses_touch(bool buy, int64_t key, const PxBook& opp) {
+    if (opp.n <= 0) return false;
+    return buy ? key >= opp.lv[0].key : key <= opp.lv[0].key;
+}
+
+bool allow_new(bool limit, bool buy, int64_t key, const PxBook& opp) {
+    if (!limit) return true;
+    return !crosses_touch(buy, key, opp);
+}
+
+bool push_lvl(PxBook& b, int64_t key) {
+    int i = 0;
+    while (i < b.n) {
+        if (b.lv[i].key == key) {
+            b.lv[i].n += 1;
+            return true;
+        }
+        bool earlier = b.high_first ? key > b.lv[i].key : key < b.lv[i].key;
+        if (earlier) break;
+        ++i;
+    }
+    if (b.n >= 64) return false;
+    for (int j = b.n; j > i; --j) b.lv[j] = b.lv[j - 1];
+    b.lv[i].key = key;
+    b.lv[i].n = 1;
+    b.n += 1;
+    return true;
+}
+
+void pop_lvl(PxBook& b, int64_t key) {
+    for (int i = 0; i < b.n; ++i) {
+        if (b.lv[i].key != key) continue;
+        if (b.lv[i].n > 1) {
+            b.lv[i].n -= 1;
+            return;
+        }
+        for (int j = i + 1; j < b.n; ++j) b.lv[j - 1] = b.lv[j];
+        b.n -= 1;
+        return;
+    }
+}
+```
+
+### 50. Position queries fold today and yesterday by venue, and option free size drops combined lots
+
+One symbol and one side can come back as several rows. SHFE and INE write yesterday left and the initial yesterday size only on the history row. A today row on those venues leaves both fields unchanged. Every other venue rewrites yesterday left and the initial yesterday size from that row’s position minus that row’s today position, and the later row keeps the final value. Total size, margin, and profit are added across rows, because the today row and the yesterday row each arrive once.
+
+Futures free size adds the position. Option free size adds the position minus the size already combined. The side is published after the last row arrives.
+
+```cpp
+enum class YdaySrc : uint8_t { EachRow, HistoryOnly };
+
+struct FoldPos {
+    int64_t total{0};
+    int64_t yday_left{0};
+    int64_t yday_init{0};
+    int64_t sellable{0};
+    int64_t margin{0};
+};
+
+void fold_pos(FoldPos& d, YdaySrc src, bool history_row, bool drop_comb,
+              int64_t qty, int64_t today, int64_t yday, int64_t comb, int64_t margin) {
+    if (src == YdaySrc::HistoryOnly) {
+        if (history_row) {
+            d.yday_left = qty;
+            d.yday_init = yday;
+        }
+    } else {
+        d.yday_init = yday;
+        d.yday_left = qty - today;
+    }
+    d.total += qty;
+    d.margin += margin;
+    d.sellable += drop_comb ? qty - comb : qty;
+}
+```
+
+### 51. Short stock size is rebuilt from the liability tape, and the special pool stays separate
+
+A long position copies the counter’s current quantity, previous quantity, free quantity, and locked quantity. Yesterday left is the previous quantity minus shares sold today.
+
+A short position writes its lock as 0. The previous quantity is the liability quantity. Yesterday left is the liability quantity minus shares returned. Total quantity is the liability quantity plus shares shorted today, minus shares returned. Free quantity equals yesterday left. The today-buy field stores shares shorted today. The today-sell field stores shares returned.
+
+A side carries both a business code and a pool. Collateral buy and sell, margin buy, sell-to-repay, and cash repay use the normal pool. Short sell, buy-to-cover, and a stock-return transfer use the special pool. A side that matches none of these fails before it is sent.
+
+Credit cash keeps available margin, financing debt, securities debt, total debt, and the maintenance ratio in separate fields. Financing room is the financing line minus financing used. Short room is the short line minus short used. Realized profit is financing profit plus short profit.
+
+```cpp
+enum class Pool : uint8_t { Normal, Special };
+
+struct SideOut {
+    int code{0};
+    Pool pool{Pool::Normal};
+    uint8_t ok{0};
+};
+
+SideOut map_credit(int side) {
+    if (side == 0) return SideOut{1, Pool::Normal, 1};
+    if (side == 1) return SideOut{2, Pool::Normal, 1};
+    if (side == 2) return SideOut{3, Pool::Normal, 1};
+    if (side == 3) return SideOut{4, Pool::Special, 1};
+    if (side == 4) return SideOut{5, Pool::Normal, 1};
+    if (side == 5) return SideOut{6, Pool::Special, 1};
+    if (side == 6) return SideOut{7, Pool::Normal, 1};
+    if (side == 7) return SideOut{8, Pool::Special, 1};
+    return SideOut{};
+}
+
+struct LongSrc {
+    int64_t cur{0};
+    int64_t pre{0};
+    int64_t sold{0};
+    int64_t bought{0};
+    int64_t free{0};
+    int64_t locked{0};
+};
+
+struct ShortSrc {
+    int64_t debt{0};
+    int64_t opened{0};
+    int64_t returned{0};
+};
+
+struct BookQty {
+    int64_t total{0};
+    int64_t yday_init{0};
+    int64_t yday_left{0};
+    int64_t free{0};
+    int64_t locked{0};
+    int64_t today_buy{0};
+    int64_t today_sell{0};
+};
+
+BookQty from_long(const LongSrc& s) {
+    BookQty h;
+    h.total = s.cur;
+    h.yday_init = s.pre;
+    h.yday_left = s.pre - s.sold;
+    h.free = s.free;
+    h.locked = s.locked;
+    h.today_buy = s.bought;
+    h.today_sell = s.sold;
+    return h;
+}
+
+BookQty from_short(const ShortSrc& s) {
+    BookQty h;
+    h.yday_init = s.debt;
+    h.yday_left = s.debt - s.returned;
+    h.total = s.debt + s.opened - s.returned;
+    h.free = h.yday_left;
+    h.today_buy = s.opened;
+    h.today_sell = s.returned;
+    return h;
+}
+
+struct CreditCash {
+    int64_t margin{0};
+    int64_t fin_debt{0};
+    int64_t sec_debt{0};
+    int64_t debt{0};
+    int64_t assure{0};
+    int64_t fin_room{0};
+    int64_t sec_room{0};
+    int64_t pnl{0};
+};
+
+CreditCash pack_credit(int64_t margin, int64_t fin_debt, int64_t sec_debt, int64_t debt,
+                       int64_t assure, int64_t fin_line, int64_t fin_used,
+                       int64_t sec_line, int64_t sec_used, int64_t fin_pnl, int64_t sec_pnl) {
+    CreditCash c;
+    c.margin = margin;
+    c.fin_debt = fin_debt;
+    c.sec_debt = sec_debt;
+    c.debt = debt;
+    c.assure = assure;
+    c.fin_room = fin_line - fin_used;
+    c.sec_room = sec_line - sec_used;
+    c.pnl = fin_pnl + sec_pnl;
+    return c;
+}
+```
+
+### 52. Past the auction deadline, the cached gap becomes one estimated fill
+
+The open-auction result deadline is the start of continuous trading. The close-auction result deadline is two minutes after the close auction ends. The child keeps the early final state, the cumulative quantity at that moment, and the cumulative amount at that moment.
+
+When the clock sees a final state in the cache and the local book has not caught up, it keeps waiting until the deadline. After the deadline, the missing quantity is the cached quantity minus the booked quantity, and the missing amount is computed the same way. The parent and the child both take that gap. When both the missing quantity and the missing amount are positive, the estimated price is the missing amount divided by the missing quantity. Otherwise the estimated price is 0. The three cache fields are cleared after the gap is applied.
+
+When the open child is already final and the unfinished quantity may roll into continuous trading, the type becomes continuous, the start and end are clamped into the continuous window, and the pinned price is cleared. The first cancel stamps its time at the continuous start, so the two-second cancel gap does not fire again before the open.
+
+```cpp
+struct EarlyFinal {
+    int64_t qty{0};
+    int64_t amt{0};
+    uint8_t state{0};
+    uint8_t on{0};
+};
+
+struct GapFill {
+    int64_t qty{0};
+    int64_t px{0};
+    uint8_t state{0};
+    uint8_t ready{0};
+};
+
+GapFill take_gap(EarlyFinal& e, int64_t booked_qty, int64_t booked_amt, int64_t now, int64_t deadline) {
+    GapFill g;
+    if (!e.on || now <= deadline) return g;
+    g.qty = e.qty - booked_qty;
+    g.state = e.state;
+    if (g.qty > 0 && e.amt > booked_amt) g.px = (e.amt - booked_amt) / g.qty;
+    g.ready = 1;
+    e = EarlyFinal{};
+    return g;
+}
+
+struct AuctionWin {
+    int64_t start{0};
+    int64_t end{0};
+    int64_t pin_px{0};
+    uint8_t cont{0};
+};
+
+void roll_open(AuctionWin& w, int64_t cont_begin, int64_t cont_end, bool child_final, bool allow) {
+    if (!child_final || !allow) return;
+    w.cont = 1;
+    w.start = cont_begin;
+    w.end = cont_end;
+    w.pin_px = 0;
+}
+
+int64_t pin_cancel_ms(int64_t asked_ms, int64_t cont_begin, bool first) {
+    if (first) return cont_begin;
+    return asked_ms;
+}
+```
 
 ## Business logic design-calculation
 ### 1. Log return (percent asymmetry)

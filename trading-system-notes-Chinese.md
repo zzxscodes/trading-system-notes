@@ -132,6 +132,12 @@ English version：[https://github.com/zzxscodes/trading-system-notes/blob/main/t
   - [44. 连续竞价与集合竞价分路径撮合](#44-连续竞价与集合竞价分路径撮合)
   - [45. 并发共享量的状态穷举与违例检出](#45-并发共享量的状态穷举与违例检出)
   - [46. 期货目标仓一次只发一笔，今昨分开的交易所先平昨](#46-期货目标仓一次只发一笔今昨分开的交易所先平昨)
+  - [47. 成交量曲线给出每分钟数量，落后量按剩余曲线分摊](#47-成交量曲线给出每分钟数量落后量按剩余曲线分摊)
+  - [48. 片内等待由信号决定，偏离和在途用滞回，尾盘按张数撤](#48-片内等待由信号决定偏离和在途用滞回尾盘按张数撤)
+  - [49. 自成交只比较整数价键上的最优一档](#49-自成交只比较整数价键上的最优一档)
+  - [50. 持仓查询按交易所合并今昨行，期权可平扣掉组合量](#50-持仓查询按交易所合并今昨行期权可平扣掉组合量)
+  - [51. 融券空头按负债流水重算，专项头寸单独成池](#51-融券空头按负债流水重算专项头寸单独成池)
+  - [52. 集合竞价过了截止时刻就用缓存差额补估计成交](#52-集合竞价过了截止时刻就用缓存差额补估计成交)
 - [业务逻辑设计-计算](#业务逻辑设计-计算)
   - [1. 对数收益率(百分比非对称性)](#1-对数收益率百分比非对称性)
   - [2. 市场趋势和波动率的状态变化](#2-市场趋势和波动率的状态变化)
@@ -38114,6 +38120,20 @@ bool should_pull(bool buy, double neu, double old, bool opp_live, double opp_cap
 
 执行粒度大于 0，且不超过 100。开始时刻和结束时刻先夹进交易时段。开始晚于结束、结束早于当前时刻、最大容忍时刻早于结束，执行器不创建。涨停不卖出，跌停不买入。涨停价上的买入和跌停价上的卖出可以一次挂完。
 
+最新价、涨停价、跌停价里有一个不大于 0，这次没有可比的边界，执行继续。最新价严格落在两个边界之间，执行继续。买方向的最新价已经到达涨停，执行继续。卖方向的最新价已经到达跌停，执行继续。买方向打在跌停上，母单打开跌停可买才继续。卖方向打在涨停上，母单打开涨停可卖才继续。其余情况停掉这一笔，并撤掉还挂着的子单。
+
+```cpp
+bool limit_allows(bool buy, double last, double up, double down, bool buy_down, bool sell_up) {
+    if (last <= 0 || up <= 0 || down <= 0) return true;
+    if (last > down && last < up) return true;
+    if (buy && last >= up) return true;
+    if (!buy && last <= down) return true;
+    if (buy && last <= down && buy_down) return true;
+    if (!buy && last >= up && sell_up) return true;
+    return false;
+}
+```
+
 子单价格从盘口取出。打一档、二档、三档时，买读卖盘对应档，卖读买盘对应档。只允许一档时，二档和三档都退回一档。排队时买读买一，卖读卖一。中间价是买一和卖一的均值，缺一边就用另一边，两边都没有则没有价格。取出的价格绝对值小于 1e-6 且允许改挂时，改挂到另一侧的一档。融券卖出在打档和中间价上改用最新价。
 
 被动挂单从己方一档向价差内部移动。移动档数大于 0，并且小于半个价差所含的档数时，买从买一向上移，卖从卖一向下移。档数到达或超过半个价差时，价格停在己方一档。追价基准可以是对侧一档、己方一档，或行情里单独给出的价格。该价格绝对值小于 1e-6 时不追。档数为正时买向上、卖向下，档数为负时方向相反。结果按最小变动价位对齐，余数达到半档就再进一档。
@@ -38447,6 +38467,75 @@ public:
         }
     }
 };
+```
+
+同一账号在 30 秒内已经有一份完整快照时，按请求里的代码过滤后直接回放，这一次查询在本地完成。快照还没生成，或者已经超过这 30 秒，请求进入等待队列。队列里没有在途查询时，当前请求独占发送，并清空正在组装的行。后面的请求只排队。柜台行追加进组装缓冲。结束标记到达后，组装缓冲换成快照，记下生成时刻，清掉在途标记，再按每个等待者回放。过滤后没有行，回一条带结束标记的空记录。发送失败时等待者同样收到这条空记录，快照保持未就绪。回放把请求上的账户抄回每一行，结束标记只打在最后一行。
+
+```cpp
+struct SnapRow {
+    uint32_t name{0};
+    int64_t qty{0};
+};
+
+struct SnapGate {
+    SnapRow row[256];
+    int n{0};
+    int waiters{0};
+    int64_t ready_at{0};
+    int64_t ttl{30000};
+    uint8_t ready{0};
+    uint8_t busy{0};
+};
+
+enum class SnapDo : uint8_t { Serve, Start, Wait };
+
+SnapDo begin_query(SnapGate& g, int64_t now) {
+    if (g.ready && now - g.ready_at < g.ttl) return SnapDo::Serve;
+    if (g.busy) {
+        g.waiters += 1;
+        return SnapDo::Wait;
+    }
+    g.busy = 1;
+    g.n = 0;
+    g.waiters = 1;
+    return SnapDo::Start;
+}
+
+void finish_query(SnapGate& g, int64_t now, bool ok) {
+    g.busy = 0;
+    g.waiters = 0;
+    if (!ok) {
+        g.ready = 0;
+        g.n = 0;
+        return;
+    }
+    g.ready = 1;
+    g.ready_at = now;
+}
+
+struct Replay {
+    uint32_t acct{0};
+    uint32_t name{0};
+    int64_t qty{0};
+    uint8_t end{0};
+};
+
+int replay_rows(const SnapGate& g, uint32_t name, uint32_t acct, Replay* out, int cap) {
+    if (cap <= 0) return 0;
+    int last = -1;
+    for (int i = 0; i < g.n; ++i)
+        if (name == 0 || g.row[i].name == name) last = i;
+    if (last < 0) {
+        out[0] = Replay{acct, 0, 0, 1};
+        return 1;
+    }
+    int w = 0;
+    for (int i = 0; i < g.n && w < cap; ++i) {
+        if (name != 0 && g.row[i].name != name) continue;
+        out[w++] = Replay{acct, g.row[i].name, g.row[i].qty, uint8_t(i == last)};
+    }
+    return w;
+}
 ```
 
 
@@ -38789,6 +38878,31 @@ struct ReqSnap { int status; int close_how; };
 
 int how_on_fill(const ReqSnap* snap, int rsp_how) {
     return snap ? snap->close_how : rsp_how;
+}
+```
+
+普通平仓的成交先减还没冻住的昨仓。能减的数量是剩余昨仓减去昨仓冻结，减到 0 为止，减不完的部分留在今仓上。回报已经写成平昨时，剩余昨仓直接减去成交量。昨仓冻结只在报单当时记下的开平也是平昨时才减，减去的数量和这次从总冻结里释放的数量相同。回报写成平今时，剩余昨仓和昨仓冻结都不动。三种平仓都从总仓和总冻结里减去成交量。
+
+```cpp
+struct CloseFill {
+    int64_t qty{0};
+    CloseHow how{CloseHow::Close};
+    CloseHow asked{CloseHow::Close};
+};
+
+void apply_close_fill(LotBook& b, CloseFill f) {
+    if (f.how == CloseHow::Open) return;
+    int64_t rel = f.qty < b.locked ? f.qty : b.locked;
+    b.total -= f.qty;
+    b.locked -= rel;
+    if (f.how == CloseHow::Close) {
+        int64_t free_yd = b.yday_left - b.yday_locked;
+        if (free_yd > 0) b.yday_left -= free_yd < f.qty ? free_yd : f.qty;
+    } else if (f.how == CloseHow::CloseYday) {
+        b.yday_left -= f.qty;
+        if (f.asked == CloseHow::CloseYday) b.yday_locked -= rel;
+    }
+    b.free_lots = b.total - b.locked;
 }
 ```
 
@@ -40381,6 +40495,560 @@ void keep_larger(MainKeep& m, int contract, int64_t vol, bool in_trade) {
 }
 ```
 
+
+### 47. 成交量曲线给出每分钟数量，落后量按剩余曲线分摊
+
+母单按 60 秒切成一片。这一片的数量用该标的的累计成交占比，当前片结束时刻的累计占比减去上一片结束时刻的累计占比，再乘以母单总量。占比用百万分之一的整数保存，满额写成 1000000。
+
+曲线按时间升序存放累计占比。查询取第一个不早于目标时刻的点。目标早于首点时停在首点，晚于末点时停在末点。完成率是当前点与起点的差，除以终点与起点的差。分母为 0 时完成率取 1，大于 1 的完成率写成 1。
+
+时间必须严格变大，累计占比不得下降。任一格不满足，整条曲线作废。作废之后从 9:30 起写 240 个分钟点，写完前 120 个点把时钟加上 90 分钟，跳过午休，再写下午。沪市每步取 1/237，其他市场每步取 1/240。累加超过 1 的部分写成 1，最后一格也写成 1。
+
+落后时，上一片应完成量大于已成交。本片数量等于曲线增量，加上落后量乘以分摊比。分摊比是从本片起点走到算法结束的这段曲线里，本片结束时已经走过的比例。最后一片把分摊比写成 1。落后量加上曲线增量，再减去在途量，已经达到最小下单量时，本片至少发一手。超前时只发曲线增量。超前量的绝对值加上在途量达到母单的十分之一，本片数量写成 0。数量再按整手四舍五入。片尾距离算法结束不超过 7 秒时，这一片的终点改成算法结束。
+
+```cpp
+struct Curve {
+    int64_t tod_ms[240]{};
+    int32_t cum_ppm[240]{};
+    int n{0};
+};
+
+void fill_flat(Curve& c, bool sh) {
+    c.n = 240;
+    int32_t step = sh ? 1000000 / 237 : 1000000 / 240;
+    int32_t acc = 0;
+    int64_t t = (9 * 60 + 30) * 60000;
+    for (int i = 0; i < 240; ++i) {
+        if (i == 120) t += 90 * 60000;
+        acc += step;
+        if (acc > 1000000 || i == 239) acc = 1000000;
+        c.tod_ms[i] = t;
+        c.cum_ppm[i] = acc;
+        t += 60000;
+    }
+}
+
+int curve_at(const Curve& c, int64_t t) {
+    int i = 0;
+    while (i < c.n && c.tod_ms[i] < t) ++i;
+    if (i >= c.n) return c.n - 1;
+    return i;
+}
+
+int32_t curve_ppm(const Curve& c, int64_t now, int64_t start, int64_t end) {
+    if (c.n <= 0) return 0;
+    int32_t a = c.cum_ppm[curve_at(c, start)];
+    int32_t b = c.cum_ppm[curve_at(c, end)];
+    int32_t m = c.cum_ppm[curve_at(c, now)];
+    if (b <= a) return 1000000;
+    int64_t r = int64_t(m - a) * 1000000 / int64_t(b - a);
+    if (r < 0) return 0;
+    if (r > 1000000) return 1000000;
+    return int32_t(r);
+}
+
+int64_t round_lot(int64_t qty, int64_t lot) {
+    if (qty <= 0) return 0;
+    if (lot <= 1) return qty;
+    return ((qty + lot / 2) / lot) * lot;
+}
+
+int64_t clip_slice_end(int64_t end, int64_t algo_end) {
+    if (algo_end - end <= 7000) return algo_end;
+    return end;
+}
+
+int64_t slice_qty(int64_t parent, int64_t done, int64_t working,
+                  int32_t prev_ppm, int32_t curr_ppm, int32_t share_ppm,
+                  int64_t lot, bool last_slice) {
+    int64_t piece = parent * int64_t(curr_ppm - prev_ppm) / 1000000;
+    if (piece < 0) piece = 0;
+    int64_t lag = parent * int64_t(prev_ppm) / 1000000 - done;
+    int64_t qty = piece;
+    if (lag > 0) {
+        int32_t share = last_slice ? 1000000 : share_ppm;
+        if (share < 0) share = 0;
+        qty = piece + lag * share / 1000000;
+        if (lag + piece - working >= lot && qty < lot) qty = lot;
+    } else if ((-lag) + working >= parent / 10) {
+        qty = 0;
+    }
+    return round_lot(qty, lot);
+}
+```
+
+每分钟分到的数量小于最小下单量的五分之一时，整单改走稀疏段。段数等于总量除以最小下单量。每段分钟数等于总分钟数除以段数，四舍五入，至少 1 分钟。段的起止已经落在连续竞价时间上，午休由调用方跳过。下一段终点离算法结束不足一个段长时，这一段的终点改成算法结束。
+
+发送时刻有三种。靠前用段起点。靠后用段终点回退 60 秒。就近用段起点加上半个段长再加 1 分钟。普通标的把总量除以段数后按整手向上取整，排程时不超过还没排完的数量。科创板在剩余量仍不少于两个预设段量时发预设量，最后一段的数量等于剩余量，段内可以带零股。到点并且这一段还没发过，才按该段数量发一笔。稀疏单离开每个状态都撤掉当前子单。
+
+```cpp
+struct Seg {
+    int64_t begin_ms{0};
+    int64_t end_ms{0};
+    int64_t send_ms{0};
+    int64_t qty{0};
+};
+
+bool thin_parent(int64_t qty, int64_t minutes, int64_t lot) {
+    if (minutes <= 0 || lot <= 0) return false;
+    return qty * 5 < lot * minutes;
+}
+
+int64_t ceil_lot(int64_t num, int64_t den, int64_t lot) {
+    if (den <= 0 || lot <= 0 || num <= 0) return 0;
+    return ((num + den * lot - 1) / (den * lot)) * lot;
+}
+
+int build_segs(Seg* out, int cap, int64_t qty, int64_t lot, int minutes,
+               int place, bool tech, int64_t parent_end, int64_t origin) {
+    if (cap <= 0 || lot <= 0 || minutes <= 0 || qty < lot) return 0;
+    int n = int(qty / lot);
+    if (n > cap) n = cap;
+    int len = (minutes + n / 2) / n;
+    if (len < 1) len = 1;
+    int64_t preset = ceil_lot(qty, n, lot);
+    int64_t left = qty;
+    int64_t begin = origin;
+    int written = 0;
+    for (int i = 0; i < n && left > 0 && written < cap; ++i) {
+        if (begin >= parent_end) break;
+        int64_t span = int64_t(len) * 60000;
+        int64_t end = begin + span;
+        if (parent_end - end < span || end > parent_end) end = parent_end;
+        Seg s;
+        s.begin_ms = begin;
+        s.end_ms = end;
+        if (place == 1) s.send_ms = end - 60000;
+        else if (place == 2) s.send_ms = begin + int64_t(len / 2 + 1) * 60000;
+        else s.send_ms = begin;
+        if (s.send_ms < begin) s.send_ms = begin;
+        if (s.send_ms > end) s.send_ms = end;
+        if (tech && left < preset * 2) s.qty = left;
+        else s.qty = preset < left ? preset : left;
+        left -= s.qty;
+        out[written++] = s;
+        begin = end;
+    }
+    return written;
+}
+```
+
+### 48. 片内等待由信号决定，偏离和在途用滞回，尾盘按张数撤
+
+本片剩余交易时间大于 30 秒时读 60 秒因子，否则读 30 秒因子。因子绝对值超过 0.0025 为很强，超过 0.0015 为强，否则方向不明。预测折成 tick 时用因子乘中间价再除以最小变动。价差折成 tick 时，小于 1 的按 1 计。
+
+被动等待的毫秒数等于 60000 除以 1 加 exp(coeff)。coeff 等于方向符号乘预测 tick，再减去 2 倍价差 tick。买方向符号为正，卖方向为负。结果夹在 10 秒和 30 秒之间。预测对己方有利时 coeff 变大，等待变短。
+
+顺着信号挂在己方一档。信号相反而且很强，从己方一档退 2 个 tick。只是偏强则退 1 个 tick。方向不明时仍挂己方一档。预测 tick 乘上买卖符号之后，达到 1.5 倍价差 tick 就改打对手价，达到 1.5 个 tick 就改走主动。
+
+已发单数小于 10 时撤单率按 0 计。本片有数量时，已经到只许对手价的时刻就直接打对手价。撤单率高于 0.95 时只打一次对手价，之后不再追。撤单率高于 0.55，或者已经到强制撤在途的时刻，或者正在清超额在途，走普通主动。其余从被动开始。
+
+严格模式离开任一状态都撤掉当前子单。普通单离开被动时，预测 tick 的绝对值要大于 0.5，并且中间价加预测相对限价的偏离超过 0.2%，才撤。买方向看中间价加预测是否高于限价乘 1.002。卖方向看是否低于限价乘 0.998。
+
+```cpp
+struct Sig {
+    int dir{0};
+    int heat{0};
+    double ticks{0};
+    double spread{1};
+};
+
+Sig make_sig(double factor, double mid, double bid, double ask, double tick) {
+    Sig s;
+    double mag = factor < 0 ? -factor : factor;
+    if (mag > 0.0025) { s.dir = factor > 0 ? 1 : -1; s.heat = 2; }
+    else if (mag > 0.0015) { s.dir = factor > 0 ? 1 : -1; s.heat = 1; }
+    if (tick > 0 && mid > 0) {
+        s.ticks = factor * mid / tick;
+        double sp = (ask - bid) / tick;
+        s.spread = sp < 1 ? 1 : sp;
+    }
+    return s;
+}
+
+int passive_ms(bool buy, const Sig& s) {
+    double coeff = (buy ? s.ticks : -s.ticks) - 2.0 * s.spread;
+    int ms = int(60000.0 / (1.0 + std::exp(coeff)));
+    if (ms < 10000) return 10000;
+    if (ms > 30000) return 30000;
+    return ms;
+}
+
+int retreat_ticks(bool buy, const Sig& s) {
+    int want = buy ? 1 : -1;
+    if (s.dir == 0 || s.dir == want) return 0;
+    return s.heat >= 2 ? 2 : 1;
+}
+
+enum class SlicePh : uint8_t { Make, Take, Cross };
+
+SlicePh escalate(bool buy, const Sig& s) {
+    double signed_ticks = buy ? s.ticks : -s.ticks;
+    if (signed_ticks >= 1.5 * s.spread) return SlicePh::Cross;
+    if (signed_ticks >= 1.5) return SlicePh::Take;
+    return SlicePh::Make;
+}
+
+enum class OpenPh : uint8_t { Make, Take, Hit, Cross, Idle };
+
+OpenPh open_ph(int64_t now, int64_t cross_at, int64_t pull_at,
+               int placed, int cancelled, bool trimming, bool has_qty) {
+    if (!has_qty) return OpenPh::Idle;
+    if (now >= cross_at) return OpenPh::Cross;
+    int ppm = placed < 10 ? 0 : int(int64_t(cancelled) * 1000000 / placed);
+    if (ppm > 950000) return OpenPh::Hit;
+    if (ppm > 550000 || now >= pull_at || trimming) return OpenPh::Take;
+    return OpenPh::Make;
+}
+
+bool leave_make(bool strict, bool buy, double mid, double pred, double ticks, double limit) {
+    if (strict) return true;
+    if (!(mid > 0 && (ticks > 0.5 || ticks < -0.5))) return false;
+    if (buy) return mid + pred > 1.002 * limit;
+    return mid + pred < 0.998 * limit;
+}
+```
+
+执行偏离等于曲线目标数量减去已成交，再除以母单总量。偏离升过 0.05 才允许按时间进入对手价。降到 0.03 以下，并且撤单率低于 0.55，才关掉。偏离停在 0.03 和 0.05 之间时，开关保持原样。
+
+在途量达到母单的十分之一再加上曲线落后股数时，打开清撤。降到母单的二十分之一再加上落后股数以下时关掉。打开期间每一片只撤排序后的第一张。
+
+尾盘窗口取 30 秒和总时长一成里较大的那个。只许对手价的窗口取 7 秒和总时长百分之五里较大的那个。两个窗口都从结束时刻往回量。进入尾盘窗口的那一刻记下起点。要撤的张数等于从起点走到现在的时长，除以起点到只许对手价时刻的时长，再乘当前活跃张数，四舍五入。
+
+排序时价格相同，创建更晚的排在前面。买单把更低的价格排在前面，卖单把更高的价格排在前面。按量撤时，只有剩余量严格小于还要撤的数量才撤，撤完把这个数量减掉。遇到剩余量已经不小于还要撤的数量就停，一张大单留在簿上。
+
+```cpp
+struct PaceLatch {
+    uint8_t cross_on{0};
+    uint8_t trim_on{0};
+};
+
+void latch_cross(PaceLatch& p, int64_t parent, int64_t aim, int64_t done, int cancel_ppm) {
+    if (parent <= 0) return;
+    int64_t gap = aim - done;
+    if (!p.cross_on && gap * 20 > parent) p.cross_on = 1;
+    if (p.cross_on && gap * 100 < parent * 3 && cancel_ppm < 550000) p.cross_on = 0;
+}
+
+void latch_trim(PaceLatch& p, int64_t parent, int64_t working, int64_t lag) {
+    if (parent <= 0) return;
+    int64_t behind = lag > 0 ? lag : 0;
+    if (!p.trim_on && working * 10 >= parent + behind * 10) p.trim_on = 1;
+    if (p.trim_on && working * 20 < parent + behind * 20) p.trim_on = 0;
+}
+
+int64_t window_back(int64_t span_ms, int64_t floor_ms, int64_t ratio_ppm) {
+    int64_t by_ratio = span_ms * ratio_ppm / 1000000;
+    return by_ratio > floor_ms ? by_ratio : floor_ms;
+}
+
+struct ChildLive {
+    int64_t px{0};
+    int64_t left{0};
+    int64_t born_ms{0};
+};
+
+void order_live(ChildLive* a, int n, bool buy) {
+    for (int i = 1; i < n; ++i) {
+        ChildLive v = a[i];
+        int j = i;
+        while (j > 0) {
+            const ChildLive& p = a[j - 1];
+            bool before = v.px == p.px ? v.born_ms > p.born_ms
+                         : (buy ? v.px < p.px : v.px > p.px);
+            if (!before) break;
+            a[j] = a[j - 1];
+            --j;
+        }
+        a[j] = v;
+    }
+}
+
+int pull_until(ChildLive* a, int n, int64_t need, bool buy) {
+    order_live(a, n, buy);
+    int k = 0;
+    for (int i = 0; i < n; ++i) {
+        if (a[i].left >= need) break;
+        need -= a[i].left;
+        a[i].left = 0;
+        ++k;
+    }
+    return k;
+}
+
+int pull_tail(ChildLive* a, int n, int64_t now, int64_t started, int64_t cross_at, bool buy) {
+    order_live(a, n, buy);
+    if (cross_at <= started || n <= 0) return 0;
+    double coeff = double(now - started) / double(cross_at - started);
+    if (coeff < 0) coeff = 0;
+    if (coeff > 1) coeff = 1;
+    int k = int(coeff * n + 0.5);
+    if (k > n) k = n;
+    for (int i = 0; i < k; ++i) a[i].left = 0;
+    return k;
+}
+```
+
+### 49. 自成交只比较整数价键上的最优一档
+
+限价新单才做自成交检查，市价单直接放过。价格键把价格乘 1000 后四舍五入成整数。每个合约两本定长档位。买簿按键从高到低排，第一档是最高买价。卖簿按键从低到高排，第一档是最低卖价。买单的键不小于最低卖价，或者卖单的键不大于最高买价，就拒绝。
+
+检查通过之后才把这一笔插进本侧。终态才从本侧摘掉。同一键上的计数减到 0，这一档从数组里删除，后面的档前移。数组写满时新的一档插不进去，这一笔拒绝。单线程里先检查再插入，后一笔能看见前一笔已经写下的档。
+
+```cpp
+struct PxLvl {
+    int64_t key{0};
+    uint32_t n{0};
+};
+
+struct PxBook {
+    PxLvl lv[64];
+    int n{0};
+    uint8_t high_first{0};
+};
+
+int64_t milli_key(double px) {
+    double x = px * 1000.0;
+    return int64_t(x >= 0 ? x + 0.5 : x - 0.5);
+}
+
+bool crosses_touch(bool buy, int64_t key, const PxBook& opp) {
+    if (opp.n <= 0) return false;
+    return buy ? key >= opp.lv[0].key : key <= opp.lv[0].key;
+}
+
+bool allow_new(bool limit, bool buy, int64_t key, const PxBook& opp) {
+    if (!limit) return true;
+    return !crosses_touch(buy, key, opp);
+}
+
+bool push_lvl(PxBook& b, int64_t key) {
+    int i = 0;
+    while (i < b.n) {
+        if (b.lv[i].key == key) {
+            b.lv[i].n += 1;
+            return true;
+        }
+        bool earlier = b.high_first ? key > b.lv[i].key : key < b.lv[i].key;
+        if (earlier) break;
+        ++i;
+    }
+    if (b.n >= 64) return false;
+    for (int j = b.n; j > i; --j) b.lv[j] = b.lv[j - 1];
+    b.lv[i].key = key;
+    b.lv[i].n = 1;
+    b.n += 1;
+    return true;
+}
+
+void pop_lvl(PxBook& b, int64_t key) {
+    for (int i = 0; i < b.n; ++i) {
+        if (b.lv[i].key != key) continue;
+        if (b.lv[i].n > 1) {
+            b.lv[i].n -= 1;
+            return;
+        }
+        for (int j = i + 1; j < b.n; ++j) b.lv[j - 1] = b.lv[j];
+        b.n -= 1;
+        return;
+    }
+}
+```
+
+### 50. 持仓查询按交易所合并今昨行，期权可平扣掉组合量
+
+同一合约、同一方向的持仓可能分多行回来。上期所和能源中心只在历史仓那一行写下剩余昨仓和初始昨仓，今仓行不改这两个字段。其他交易所每一行都用该行持仓减去该行今仓，改写剩余昨仓和初始昨仓，后到的一行留下最终值。总仓、保证金和盈亏按行相加，今仓行和昨仓行会各到一次。
+
+可平在期货侧按持仓累加。期权侧按持仓减去已组合量再累加。最后一行到达之后才把这一方向的结果发出。
+
+```cpp
+enum class YdaySrc : uint8_t { EachRow, HistoryOnly };
+
+struct FoldPos {
+    int64_t total{0};
+    int64_t yday_left{0};
+    int64_t yday_init{0};
+    int64_t sellable{0};
+    int64_t margin{0};
+};
+
+void fold_pos(FoldPos& d, YdaySrc src, bool history_row, bool drop_comb,
+              int64_t qty, int64_t today, int64_t yday, int64_t comb, int64_t margin) {
+    if (src == YdaySrc::HistoryOnly) {
+        if (history_row) {
+            d.yday_left = qty;
+            d.yday_init = yday;
+        }
+    } else {
+        d.yday_init = yday;
+        d.yday_left = qty - today;
+    }
+    d.total += qty;
+    d.margin += margin;
+    d.sellable += drop_comb ? qty - comb : qty;
+}
+```
+
+### 51. 融券空头按负债流水重算，专项头寸单独成池
+
+多头持仓直接取柜台的当前数量、昨持仓、可卖和冻结。剩余昨仓等于昨持仓减去当日卖出成交。
+
+空头冻结写成 0。昨持仓取负债数量。剩余昨仓等于负债数量减去还券成交。总数量等于负债数量加上当日融券成交，再减还券成交。可卖等于剩余昨仓。当日买入字段填写当日融券成交，当日卖出字段填写还券成交。
+
+方向同时给出业务码和头寸池。担保买卖、融资买入、卖券还款、直接还款用普通头寸池。融券卖出、买券还券、还券划转用专项头寸池。对不上的方向在发送前失败。
+
+信用资金把可用保证金、融资负债、融券负债、总负债和维持担保比例分开保存。融资可用额度等于融资授信减去融资占用。融券可用额度等于融券授信减去融券占用。已实现盈亏等于融资盈亏加上融券盈亏。
+
+```cpp
+enum class Pool : uint8_t { Normal, Special };
+
+struct SideOut {
+    int code{0};
+    Pool pool{Pool::Normal};
+    uint8_t ok{0};
+};
+
+SideOut map_credit(int side) {
+    if (side == 0) return SideOut{1, Pool::Normal, 1};
+    if (side == 1) return SideOut{2, Pool::Normal, 1};
+    if (side == 2) return SideOut{3, Pool::Normal, 1};
+    if (side == 3) return SideOut{4, Pool::Special, 1};
+    if (side == 4) return SideOut{5, Pool::Normal, 1};
+    if (side == 5) return SideOut{6, Pool::Special, 1};
+    if (side == 6) return SideOut{7, Pool::Normal, 1};
+    if (side == 7) return SideOut{8, Pool::Special, 1};
+    return SideOut{};
+}
+
+struct LongSrc {
+    int64_t cur{0};
+    int64_t pre{0};
+    int64_t sold{0};
+    int64_t bought{0};
+    int64_t free{0};
+    int64_t locked{0};
+};
+
+struct ShortSrc {
+    int64_t debt{0};
+    int64_t opened{0};
+    int64_t returned{0};
+};
+
+struct BookQty {
+    int64_t total{0};
+    int64_t yday_init{0};
+    int64_t yday_left{0};
+    int64_t free{0};
+    int64_t locked{0};
+    int64_t today_buy{0};
+    int64_t today_sell{0};
+};
+
+BookQty from_long(const LongSrc& s) {
+    BookQty h;
+    h.total = s.cur;
+    h.yday_init = s.pre;
+    h.yday_left = s.pre - s.sold;
+    h.free = s.free;
+    h.locked = s.locked;
+    h.today_buy = s.bought;
+    h.today_sell = s.sold;
+    return h;
+}
+
+BookQty from_short(const ShortSrc& s) {
+    BookQty h;
+    h.yday_init = s.debt;
+    h.yday_left = s.debt - s.returned;
+    h.total = s.debt + s.opened - s.returned;
+    h.free = h.yday_left;
+    h.today_buy = s.opened;
+    h.today_sell = s.returned;
+    return h;
+}
+
+struct CreditCash {
+    int64_t margin{0};
+    int64_t fin_debt{0};
+    int64_t sec_debt{0};
+    int64_t debt{0};
+    int64_t assure{0};
+    int64_t fin_room{0};
+    int64_t sec_room{0};
+    int64_t pnl{0};
+};
+
+CreditCash pack_credit(int64_t margin, int64_t fin_debt, int64_t sec_debt, int64_t debt,
+                       int64_t assure, int64_t fin_line, int64_t fin_used,
+                       int64_t sec_line, int64_t sec_used, int64_t fin_pnl, int64_t sec_pnl) {
+    CreditCash c;
+    c.margin = margin;
+    c.fin_debt = fin_debt;
+    c.sec_debt = sec_debt;
+    c.debt = debt;
+    c.assure = assure;
+    c.fin_room = fin_line - fin_used;
+    c.sec_room = sec_line - sec_used;
+    c.pnl = fin_pnl + sec_pnl;
+    return c;
+}
+```
+
+### 52. 集合竞价过了截止时刻就用缓存差额补估计成交
+
+开盘集合竞价的结果截止时刻定在连续竞价开始。收盘集合竞价的结果截止时刻是收盘集合竞价结束再加 2 分钟。子单上留着先到的终态、该时刻的累计成交量和累计成交额。
+
+时钟看到缓存已经是终态、本地还没记满时，没到截止就继续等。过了截止，丢失量等于缓存成交量减去已记账成交量，丢失额同样相减。母单和子单都补上这份差额。丢失量和丢失额都为正时，估计价等于丢失额除以丢失量。否则估计价写成 0。补完把三份缓存清零。
+
+开盘子单已经终态，并且允许把没完成的量转进连续竞价时，类型改成连续竞价，起止时间夹进连续竞价区间，指定价清零。第一次撤单把撤单时间戳钉在连续竞价开始，开盘前不会按 2 秒间隔反复撤。
+
+```cpp
+struct EarlyFinal {
+    int64_t qty{0};
+    int64_t amt{0};
+    uint8_t state{0};
+    uint8_t on{0};
+};
+
+struct GapFill {
+    int64_t qty{0};
+    int64_t px{0};
+    uint8_t state{0};
+    uint8_t ready{0};
+};
+
+GapFill take_gap(EarlyFinal& e, int64_t booked_qty, int64_t booked_amt, int64_t now, int64_t deadline) {
+    GapFill g;
+    if (!e.on || now <= deadline) return g;
+    g.qty = e.qty - booked_qty;
+    g.state = e.state;
+    if (g.qty > 0 && e.amt > booked_amt) g.px = (e.amt - booked_amt) / g.qty;
+    g.ready = 1;
+    e = EarlyFinal{};
+    return g;
+}
+
+struct AuctionWin {
+    int64_t start{0};
+    int64_t end{0};
+    int64_t pin_px{0};
+    uint8_t cont{0};
+};
+
+void roll_open(AuctionWin& w, int64_t cont_begin, int64_t cont_end, bool child_final, bool allow) {
+    if (!child_final || !allow) return;
+    w.cont = 1;
+    w.start = cont_begin;
+    w.end = cont_end;
+    w.pin_px = 0;
+}
+
+int64_t pin_cancel_ms(int64_t asked_ms, int64_t cont_begin, bool first) {
+    if (first) return cont_begin;
+    return asked_ms;
+}
+```
 
 ## 业务逻辑设计-计算
 ### 1. 对数收益率(百分比非对称性)
