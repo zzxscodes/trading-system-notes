@@ -35780,6 +35780,60 @@ uint32_t fold_crc(const uint8_t* p, int n, uint32_t seed) {
 }
 ```
 
+**协议先落到一份中间模型，再由确定性后端生成各语言编解码**
+
+交易所二进制协议的字段布局、报文分支、长度字段与校验和规则写成一份领域描述。解析器把描述收成中间模型：包名、字段表、按类型码分派的子包、由负载回填的长度槽、由整帧计算的校验槽。语义检查在生成之前跑完：重复字段名、定长字符串缺长度、枚举未定义、长度槽指向不存在的负载，一律挡下。通过后同一份模型喂给 C++、Rust、Go、Java、Python、Lua 解包器等后端，转换关系是前端数加后端数，而不是每种输入协议乘每种语言。热路径上的编解码只跑生成结果；文档理解与描述起草可以放在离线工具链，不进撮合与报单环。跨语言一致性用同一组黄金字节做往返：解码再编码必须与输入逐字节相同。
+
+```cpp
+struct FieldSpec {
+    char name[24]{};
+    uint8_t kind{0};   // 0 u32, 1 u64, 2 char_n, 3 match, 4 len_of, 5 crc_of
+    uint16_t width{0};
+    uint16_t points{0}; // len_of / crc_of target index
+};
+
+struct ProtoIr {
+    FieldSpec fields[64]{};
+    int n{0};
+    uint16_t match_key{0};
+    uint16_t match_arm[8]{};
+    uint16_t match_pkt[8]{};
+    int arms{0};
+};
+
+int check_ir(const ProtoIr& m) {
+    for (int i = 0; i < m.n; ++i) {
+        for (int j = i + 1; j < m.n; ++j)
+            if (std::memcmp(m.fields[i].name, m.fields[j].name, 24) == 0) return 1;
+        if (m.fields[i].kind == 2 && m.fields[i].width == 0) return 2;
+        if (m.fields[i].kind == 4 || m.fields[i].kind == 5) {
+            if (m.fields[i].points >= static_cast<uint16_t>(m.n)) return 3;
+        }
+    }
+    return 0;
+}
+
+int pick_arm(const ProtoIr& m, uint16_t key) {
+    for (int i = 0; i < m.arms; ++i)
+        if (m.match_arm[i] == key) return static_cast<int>(m.match_pkt[i]);
+    return -1;
+}
+
+void patch_len(uint8_t* frame, int len_off, uint32_t body_n) {
+    frame[len_off] = static_cast<uint8_t>(body_n);
+    frame[len_off + 1] = static_cast<uint8_t>(body_n >> 8);
+    frame[len_off + 2] = static_cast<uint8_t>(body_n >> 16);
+    frame[len_off + 3] = static_cast<uint8_t>(body_n >> 24);
+}
+
+bool golden_roundtrip(const uint8_t* in, int n, uint8_t* out) {
+    std::memcpy(out, in, static_cast<size_t>(n));
+    for (int i = 0; i < n; ++i)
+        if (out[i] != in[i]) return false;
+    return true;
+}
+```
+
 
 **示例**（示意：固定前缀 + 热路径只改数量与递增序号；真实项目应替换为具体 tag 布局或 SBE 生成结构体）：
 
@@ -48159,6 +48213,60 @@ bool job_ready(const ResearchJob& j) {
 bool desk_stays_up(RunHost h) { return h == RunHost::LocalDesk; }
 ```
 
+**风控规则写成表项，热路径只跑确定性判定**
+
+账户一分钟买入金额上限、笔数上限、黑名单一类约束先写成结构化规则，再编译成定宽表项。自然语言或离线工具可以起草规则，装载进内存之后，发单前的检查只读表、累加滑动窗口、比较阈值，不再解释文本。规则变更走版本号；热路径命中的是当前已装载的那一版。拒单动作写在表项里，与桥上的错误码分层对齐。
+
+```cpp
+enum class RuleAct : uint8_t { Pass = 0, Reject = 1 };
+
+struct RuleRow {
+    uint64_t acct{0};
+    uint8_t kind{0};     // 0 buy_amt_1m, 1 order_count_1m, 2 symbol_block
+    int64_t limit{0};
+    uint64_t symbol{0};
+    RuleAct act{RuleAct::Reject};
+    uint32_t ver{0};
+};
+
+struct SlideBin {
+    int64_t t_ms[64]{};
+    int64_t v[64]{};
+    int n{0};
+};
+
+int64_t sum_1m(SlideBin& b, int64_t now_ms) {
+    int w = 0;
+    int64_t s = 0;
+    for (int i = 0; i < b.n; ++i) {
+        if (now_ms - b.t_ms[i] > 60000) continue;
+        b.t_ms[w] = b.t_ms[i];
+        b.v[w] = b.v[i];
+        s += b.v[w];
+        ++w;
+    }
+    b.n = w;
+    return s;
+}
+
+void push_1m(SlideBin& b, int64_t now_ms, int64_t x) {
+    sum_1m(b, now_ms);
+    if (b.n < 64) {
+        b.t_ms[b.n] = now_ms;
+        b.v[b.n] = x;
+        ++b.n;
+    }
+}
+
+RuleAct eval_buy_cap(const RuleRow& r, SlideBin& b, int64_t now_ms, int64_t add) {
+    if (r.kind != 0) return RuleAct::Pass;
+    int64_t s = sum_1m(b, now_ms) + add;
+    if (s > r.limit) return r.act;
+    push_1m(b, now_ms, add);
+    return RuleAct::Pass;
+}
+```
+
 研究的终点是时点、代码、数量和价格。执行系统拿 T 日目标持仓减去 T 日期初持仓，差额为正就买，为负就卖。订单、验资验券和风控在执行系统里做完，再经柜台接口报出。全市场的分钟线由实时行情生成。线晚了，挂在上面的因子跟着晚。策略按代码订阅信号。频率较高时，回测信号和实盘信号按同一时点比对。等权组合把每条策略的日收益平均。条数增加、组合波动下降，前提是策略之间的相关系数低。相关系数靠近 1 时，组合波动回到单条策略的水平。
 
 ```cpp
@@ -49946,6 +50054,64 @@ int main() {
     std::cout << "All tests passed!" << std::endl;
 
     return 0;
+}
+```
+
+**特征与标签按可交易时点生效，反向折分也要留隔离带**
+
+财务报表以交易所实际披露时刻为最早可用时点，报告期截止日与审计签署日都不能拿来对齐特征矩阵。日内信号时刻只能看见该时刻之前已经闭合的行情；上午九点三十五发出的调仓，滚动波动率窗口终点停在九点三十四，不能改用当日收盘价算好的日频指标。预测未来若干根收益时，训练集末尾标签会盖住测试集开头若干根，测试集起点要剥掉这段重叠。交叉验证里测试集排在训练集之前，按日历顺序构不成偷看未来，滚动特征与自相关仍会把测试集状态沿时间轴向后渗进训练集开头，测试集结束之后仍要空出一段隔离期再开始训练。大规模因子筛选按有效独立试验数修正显著性，截面相关高时有效次数远小于名义试验数，偏度与峰度一并进入阈值。
+
+```cpp
+struct FundStamp {
+    int64_t period_end_ms{0};
+    int64_t audit_ms{0};
+    int64_t publish_ms{0};
+};
+
+int64_t ready_ms(const FundStamp& f) {
+    return f.publish_ms;
+}
+
+int64_t feat_end_ms(int64_t signal_ms) {
+    return signal_ms - 1;
+}
+
+struct FoldCut {
+    int train0{0};
+    int train1{0};
+    int test0{0};
+    int test1{0};
+    int label_h{0};
+    int feat_w{0};
+};
+
+void purge_test_head(FoldCut& c) {
+    int cut = c.test0 + c.label_h;
+    if (cut > c.test1) cut = c.test1;
+    c.test0 = cut;
+}
+
+void embargo_before_train(FoldCut& c) {
+    if (c.test1 <= c.train0) {
+        int gap = c.feat_w;
+        if (c.train0 - gap < c.test1) c.train0 = c.test1 + gap;
+    }
+}
+
+double eff_trials(int n_raw, double mean_abs_corr) {
+    if (n_raw <= 1) return 1.0;
+    double r = mean_abs_corr;
+    if (r < 0) r = 0;
+    if (r > 1) r = 1;
+    double m = 1.0 + (n_raw - 1) * (1.0 - r);
+    return static_cast<double>(n_raw) / m;
+}
+
+bool pass_t(double t_stat, double eff_n, double skew, double kurt) {
+    double adj = 1.0 + 0.1 * (skew < 0 ? -skew : skew) + 0.05 * (kurt < 0 ? 0 : kurt);
+    double thr = 1.96 * adj;
+    if (eff_n > 1.0) thr *= 1.0 + 0.15 * (eff_n / (eff_n + 50.0));
+    return t_stat >= thr || t_stat <= -thr;
 }
 ```
 

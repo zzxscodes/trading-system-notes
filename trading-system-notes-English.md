@@ -35794,6 +35794,60 @@ uint32_t fold_crc(const uint8_t* p, int n, uint32_t seed) {
 }
 ```
 
+**Land the protocol on one intermediate model, then emit codecs from deterministic backends**
+
+Field layout, message branches, length slots, and checksum rules for an exchange binary protocol are written once as a domain description. A parser folds that description into an intermediate model: packet names, a field table, sub-packets selected by a type code, length slots filled from the payload, and checksum slots computed over the frame. Semantic checks run before any emit: duplicate field names, fixed strings without a width, undefined enums, and length slots that point at a missing payload all fail the build. The same model then feeds C++, Rust, Go, Java, Python, and Lua dissector backends, so the conversion graph is frontends plus backends rather than every input protocol times every language. Hot-path encode and decode run only the generated code; document understanding and drafting the description stay on the offline toolchain and never enter matching or order entry. Cross-language sameness is locked with shared golden bytes: decode then re-encode must match the input byte for byte.
+
+```cpp
+struct FieldSpec {
+    char name[24]{};
+    uint8_t kind{0};   // 0 u32, 1 u64, 2 char_n, 3 match, 4 len_of, 5 crc_of
+    uint16_t width{0};
+    uint16_t points{0}; // len_of / crc_of target index
+};
+
+struct ProtoIr {
+    FieldSpec fields[64]{};
+    int n{0};
+    uint16_t match_key{0};
+    uint16_t match_arm[8]{};
+    uint16_t match_pkt[8]{};
+    int arms{0};
+};
+
+int check_ir(const ProtoIr& m) {
+    for (int i = 0; i < m.n; ++i) {
+        for (int j = i + 1; j < m.n; ++j)
+            if (std::memcmp(m.fields[i].name, m.fields[j].name, 24) == 0) return 1;
+        if (m.fields[i].kind == 2 && m.fields[i].width == 0) return 2;
+        if (m.fields[i].kind == 4 || m.fields[i].kind == 5) {
+            if (m.fields[i].points >= static_cast<uint16_t>(m.n)) return 3;
+        }
+    }
+    return 0;
+}
+
+int pick_arm(const ProtoIr& m, uint16_t key) {
+    for (int i = 0; i < m.arms; ++i)
+        if (m.match_arm[i] == key) return static_cast<int>(m.match_pkt[i]);
+    return -1;
+}
+
+void patch_len(uint8_t* frame, int len_off, uint32_t body_n) {
+    frame[len_off] = static_cast<uint8_t>(body_n);
+    frame[len_off + 1] = static_cast<uint8_t>(body_n >> 8);
+    frame[len_off + 2] = static_cast<uint8_t>(body_n >> 16);
+    frame[len_off + 3] = static_cast<uint8_t>(body_n >> 24);
+}
+
+bool golden_roundtrip(const uint8_t* in, int n, uint8_t* out) {
+    std::memcpy(out, in, static_cast<size_t>(n));
+    for (int i = 0; i < n; ++i)
+        if (out[i] != in[i]) return false;
+    return true;
+}
+```
+
 
 **Example** (illustrative: fixed prefix + hot path only patches quantity; replace with real tag layout or SBE-generated structs in production):
 
@@ -48166,6 +48220,60 @@ bool job_ready(const ResearchJob& j) {
 bool desk_stays_up(RunHost h) { return h == RunHost::LocalDesk; }
 ```
 
+**Risk rules become table rows; the hot path only runs deterministic checks**
+
+Caps such as one-minute buy notional, one-minute order count, and a symbol block list are written as structured rules and compiled into fixed-width rows. Natural language or an offline tool may draft the rules. After load, pre-trade checks only read the table, accumulate a sliding window, and compare thresholds; they do not interpret text. A rule change bumps a version; the hot path sees the version already loaded. The reject action lives on the row and lines up with the bridge error-code bands.
+
+```cpp
+enum class RuleAct : uint8_t { Pass = 0, Reject = 1 };
+
+struct RuleRow {
+    uint64_t acct{0};
+    uint8_t kind{0};     // 0 buy_amt_1m, 1 order_count_1m, 2 symbol_block
+    int64_t limit{0};
+    uint64_t symbol{0};
+    RuleAct act{RuleAct::Reject};
+    uint32_t ver{0};
+};
+
+struct SlideBin {
+    int64_t t_ms[64]{};
+    int64_t v[64]{};
+    int n{0};
+};
+
+int64_t sum_1m(SlideBin& b, int64_t now_ms) {
+    int w = 0;
+    int64_t s = 0;
+    for (int i = 0; i < b.n; ++i) {
+        if (now_ms - b.t_ms[i] > 60000) continue;
+        b.t_ms[w] = b.t_ms[i];
+        b.v[w] = b.v[i];
+        s += b.v[w];
+        ++w;
+    }
+    b.n = w;
+    return s;
+}
+
+void push_1m(SlideBin& b, int64_t now_ms, int64_t x) {
+    sum_1m(b, now_ms);
+    if (b.n < 64) {
+        b.t_ms[b.n] = now_ms;
+        b.v[b.n] = x;
+        ++b.n;
+    }
+}
+
+RuleAct eval_buy_cap(const RuleRow& r, SlideBin& b, int64_t now_ms, int64_t add) {
+    if (r.kind != 0) return RuleAct::Pass;
+    int64_t s = sum_1m(b, now_ms) + add;
+    if (s > r.limit) return r.act;
+    push_1m(b, now_ms, add);
+    return RuleAct::Pass;
+}
+```
+
 A research run ends as a time, a symbol, a quantity, and a price. The execution system subtracts the day's opening position from the day's target position. A positive gap is a buy. A negative gap is a sell. Orders, cash and position checks, and risk finish inside the execution system, then the order goes out through the counter API. Minute bars for the whole market are built from the live feed. A late bar makes the factors on it late. A strategy subscribes to signals by symbol. At a higher frequency, the backtest signal and the live signal are compared at the same timestamp. An equal-weight book averages each strategy's daily return. Adding names lowers the book's variance while the correlation among strategies stays low. When that correlation is near 1, the book's variance returns to the level of a single strategy.
 
 ```cpp
@@ -49953,6 +50061,64 @@ int main() {
     std::cout << "All tests passed!" << std::endl;
 
     return 0;
+}
+```
+
+**Features and labels take effect at tradeable timestamps; reverse folds still need an embargo**
+
+Fundamental fields become usable at the exchange publish time, not at period end and not at the audit signature time. An intraday signal may only see bars already closed before that clock; a rebalance fired at 09:35 ends its rolling-volatility window at 09:34 and must not reuse a daily indicator computed from that day's close. When the label covers the next several bars of return, the last training labels overlap the first test bars, so those overlapping rows are stripped from the test head. When a cross-validation fold places the test block before the train block, calendar order alone does not stop leakage: rolling features and autocorrelation still push test-set state forward into the start of training, so an embargo gap still sits after the test block before training begins. Large factor screens adjust significance by the effective number of independent trials; high cross-sectional correlation shrinks that number far below the nominal count, and skew and kurtosis enter the threshold.
+
+```cpp
+struct FundStamp {
+    int64_t period_end_ms{0};
+    int64_t audit_ms{0};
+    int64_t publish_ms{0};
+};
+
+int64_t ready_ms(const FundStamp& f) {
+    return f.publish_ms;
+}
+
+int64_t feat_end_ms(int64_t signal_ms) {
+    return signal_ms - 1;
+}
+
+struct FoldCut {
+    int train0{0};
+    int train1{0};
+    int test0{0};
+    int test1{0};
+    int label_h{0};
+    int feat_w{0};
+};
+
+void purge_test_head(FoldCut& c) {
+    int cut = c.test0 + c.label_h;
+    if (cut > c.test1) cut = c.test1;
+    c.test0 = cut;
+}
+
+void embargo_before_train(FoldCut& c) {
+    if (c.test1 <= c.train0) {
+        int gap = c.feat_w;
+        if (c.train0 - gap < c.test1) c.train0 = c.test1 + gap;
+    }
+}
+
+double eff_trials(int n_raw, double mean_abs_corr) {
+    if (n_raw <= 1) return 1.0;
+    double r = mean_abs_corr;
+    if (r < 0) r = 0;
+    if (r > 1) r = 1;
+    double m = 1.0 + (n_raw - 1) * (1.0 - r);
+    return static_cast<double>(n_raw) / m;
+}
+
+bool pass_t(double t_stat, double eff_n, double skew, double kurt) {
+    double adj = 1.0 + 0.1 * (skew < 0 ? -skew : skew) + 0.05 * (kurt < 0 ? 0 : kurt);
+    double thr = 1.96 * adj;
+    if (eff_n > 1.0) thr *= 1.0 + 0.15 * (eff_n / (eff_n + 50.0));
+    return t_stat >= thr || t_stat <= -thr;
 }
 ```
 
