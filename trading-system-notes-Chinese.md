@@ -25607,6 +25607,63 @@ void on_silent(SessionBook& b, int64_t now_ns) {
 }
 ```
 
+
+**请求序号只要求单调，回报序号必须连续**
+
+请求通道靠订单号做幂等，序号只需单调递增。回报通道要做缺口检测，序号必须连续。两条通道可以共用一条双工连接，序号空间彼此独立。登录时带上本端已经连续应用的最大回报序号；柜台从下一号起按留存窗口补发。补发保留原始序号，不去掉重复标记位。心跳里带上本端在对向业务通道上已连续收到的最大序号，超时取两倍心跳间隔。交易日切换时柜台下发日切注销，两端序号与订单号空间一并清零，再重新登录与 schema 协商。
+
+```cpp
+struct DualLane {
+    uint64_t req_sent{0};
+    uint64_t rpt_applied{0};
+    uint64_t peer_seen{0};
+    uint64_t hold_lo{0};
+    uint64_t hold_hi{0};
+    int64_t beat_ns{0};
+    int64_t gap_ns{2000000000};
+};
+
+uint64_t next_req(DualLane& d) {
+    d.req_sent += 1;
+    return d.req_sent;
+}
+
+int on_report(DualLane& d, uint64_t seq) {
+    if (seq <= d.rpt_applied) return 0;
+    if (seq == d.rpt_applied + 1) {
+        d.rpt_applied = seq;
+        return 1;
+    }
+    return 2;
+}
+
+uint64_t sync_from(const DualLane& d) {
+    uint64_t a = d.rpt_applied + 1;
+    return a < d.hold_lo ? d.hold_lo : a;
+}
+
+bool window_ok(const DualLane& d) {
+    return d.rpt_applied + 1 >= d.hold_lo;
+}
+
+void on_beat_lane(DualLane& d, uint64_t peer, int64_t now_ns) {
+    d.peer_seen = peer;
+    d.beat_ns = now_ns;
+}
+
+bool lane_dead(const DualLane& d, int64_t now_ns) {
+    if (d.beat_ns == 0) return false;
+    return now_ns - d.beat_ns >= d.gap_ns;
+}
+
+void day_cut(DualLane& d) {
+    d.req_sent = 0;
+    d.rpt_applied = 0;
+    d.peer_seen = 0;
+}
+```
+
+
 1.5 订单状态机的幂等与乱序回报处理
 1.幂等处理原则
     同一执行回报重复到达，最终状态不可二次推进。
@@ -25654,6 +25711,47 @@ void seal_id(IdSlot& s) {
     if (s.kind == 1 || s.kind == 2) s.kind = 3;
 }
 ```
+
+
+**同号重提看终态，撤单拒绝不推进订单状态**
+
+断线后用同一个订单号重提，柜台命中本地缓存：订单尚未终态就丢掉这次重提；已经终态就把缓存的终态回报再送一遍，不再向交易所二次申报。委托确认用一种报文承载多种执行类型，新确认、撤成、业务拒单共用同一布局，可选字段由存在位图标明。撤单失败走单独的撤单拒绝报文，订单状态保持原样。会话层无法处理的报文走会话拒绝；风控、资金、参数类业务拒绝仍走委托确认里的拒单执行类型。
+
+```cpp
+struct OrdRow {
+    uint64_t cl_id{0};
+    uint8_t st{0};   // 0 live, 1 final
+    uint8_t kind{0}; // 0 new ack, 1 cxl ok, 2 biz rej
+    uint64_t seq{0};
+};
+
+struct CxlFail {
+    uint64_t cl_id{0};
+    uint64_t orig{0};
+    uint16_t why{0};
+};
+
+int resubmit(OrdRow* rows, int n, uint64_t cl_id, OrdRow* out) {
+    for (int i = 0; i < n; ++i) {
+        if (rows[i].cl_id != cl_id) continue;
+        if (rows[i].st == 0) return 0;
+        *out = rows[i];
+        return 1;
+    }
+    return 2;
+}
+
+void apply_confirm(OrdRow& r, uint8_t kind, uint64_t seq) {
+    r.kind = kind;
+    r.seq = seq;
+    if (kind == 1 || kind == 2) r.st = 1;
+}
+
+void on_cxl_fail(OrdRow& r, const CxlFail&) {
+    (void)r;
+}
+```
+
 
 1.6 其他订单管理系统接口设计
 
@@ -35435,6 +35533,83 @@ void two_notes(SideNote* out, uint64_t buy_acct, uint64_t sell_acct, int64_t qty
 }
 ```
 
+
+**SDK 热路径只带映射后的整数标识，会话固定字段由柜台补全**
+
+策略到柜台的热路径报文只带账户映射号、证券数值编号、订单号这类定宽整数。席位、应用标识、分市场股东代码等会话期固定字段在登录时绑定，由柜台在转交易所报文时注入。交易所订单编号留在柜台侧的订单号映射表里，撤单与对账从这张表回填，不进 SDK 热路径。时间统一成 UTC 纳秒整数，两市本地时间格式只在柜台边界转换。
+
+```cpp
+struct BindRow {
+    uint32_t acct_map{0};
+    uint8_t mkt{0};
+    char code[16]{};
+};
+
+struct WireNew {
+    uint64_t seq{0};
+    uint64_t cl_id{0};
+    uint32_t sec{0};
+    uint32_t acct_map{0};
+    int64_t qty{0};
+    int64_t px_m{0};
+    int8_t px_s{0};
+};
+
+struct ExchMap {
+    uint64_t cl_id{0};
+    char exch_id[24]{};
+};
+
+const BindRow* find_bind(const BindRow* rows, int n, uint32_t acct_map, uint8_t mkt) {
+    for (int i = 0; i < n; ++i)
+        if (rows[i].acct_map == acct_map && rows[i].mkt == mkt) return &rows[i];
+    return nullptr;
+}
+
+void put_exch(ExchMap* rows, int& n, int cap, uint64_t cl_id, const char* eid) {
+    if (n >= cap) return;
+    rows[n].cl_id = cl_id;
+    for (int i = 0; i < 23 && eid[i]; ++i) rows[n].exch_id[i] = eid[i];
+    ++n;
+}
+
+const char* get_exch(const ExchMap* rows, int n, uint64_t cl_id) {
+    for (int i = 0; i < n; ++i)
+        if (rows[i].cl_id == cl_id) return rows[i].exch_id;
+    return nullptr;
+}
+```
+
+**查询走冷路径线程，多段应答靠最后一帧标记收齐**
+
+资金与持仓查询不进热路径。柜台把查询丢给冷路径线程读内存快照，用自描述编码回包。应答可能拆成多帧，每一帧带是否最后一帧的标记；客户端收到最后一帧标记后，本轮查询结束。
+
+```cpp
+struct QryAck {
+    uint16_t st{0};
+    uint8_t last{0};
+    uint32_t acct{0};
+    int64_t cash{0};
+};
+
+struct QryBag {
+    QryAck rows[32]{};
+    int n{0};
+    uint8_t done{0};
+};
+
+int on_qry_ack(QryBag& b, const QryAck& a) {
+    if (b.done) return 0;
+    if (b.n < 32) b.rows[b.n++] = a;
+    if (a.last) {
+        b.done = 1;
+        return 2;
+    }
+    return 1;
+}
+```
+
+
 **2.序列一致性处理**
     每路行情流维护 `last_seq`，严格检查连续性。
     检测到 gap 后进入恢复态：请求重传、合并回放、再切回实时流。
@@ -35560,6 +35735,51 @@ const uint8_t* after_block(const uint8_t* p) {
     return p + sizeof(MsgHead) + h->block;
 }
 ```
+
+
+**业务热路径固定布局加存在位图，版本区间无交集再降到自描述编码**
+
+五条热路径业务报文用固定字段偏移编码，可选字段占位字节保留，是否在场由固定宽度的存在位图标明。登录成功后立刻流水线发出 schema 能力表，柜台取双方版本区间的最高公共版本走固定布局；无公共版本但标签语义兼容则降到自描述编码；标签语义也不兼容则禁用该报文类型。会话内协商结果固定，重连再协商。未就绪就发业务报文，会话层直接拒绝。帧尾可选带硬件加速的校验和，同城短链路可协商关闭。未知枚举值收成原始整数值继续走，不因单字段把整帧判废。
+
+```cpp
+struct CapRow {
+    uint16_t sid{0};
+    uint16_t vmin{0};
+    uint16_t vmax{0};
+};
+
+enum class WireMode : uint8_t { Fast = 1, Tag = 2, Off = 3 };
+
+WireMode pick_mode(uint16_t a_min, uint16_t a_max, uint16_t b_min, uint16_t b_max, bool tag_ok) {
+    uint16_t hi = a_max < b_max ? a_max : b_max;
+    uint16_t lo = a_min > b_min ? a_min : b_min;
+    if (hi >= lo) return WireMode::Fast;
+    if (tag_ok) return WireMode::Tag;
+    return WireMode::Off;
+}
+
+struct FastHead {
+    uint16_t block{0};
+    uint16_t ver{0};
+    uint32_t bits{0};
+};
+
+bool bit_on(uint32_t bits, int i) {
+    return (bits & (1u << i)) != 0;
+}
+
+uint8_t read_side(uint8_t raw) {
+    if (raw == 1 || raw == 2) return raw;
+    return 255;
+}
+
+uint32_t fold_crc(const uint8_t* p, int n, uint32_t seed) {
+    uint32_t c = seed;
+    for (int i = 0; i < n; ++i) c = (c * 16777619u) ^ p[i];
+    return c;
+}
+```
+
 
 **示例**（示意：固定前缀 + 热路径只改数量与递增序号；真实项目应替换为具体 tag 布局或 SBE 生成结构体）：
 
@@ -47172,6 +47392,50 @@ private:
 + **舍入规则**：
     - 价格 → 向下对齐 tick（`align_price_to_tick`）
     - 资金/盈亏 → 四舍五入到分
+
+
+
+**线上价格用尾数加指数，进引擎前一次换成引擎定点刻度**
+
+跨市场报文把价格写成 64 位有符号尾数加 8 位有符号指数，共九字节。引擎内部仍用对齐 tick 的单一刻度整数。柜台或网关在边界做一次换算，热路径不再反复乘除。数量用 64 位整数股数，资金与盈亏继续用模块内约定的资金刻度。
+
+```cpp
+struct WirePx {
+    int64_t m{0};
+    int8_t s{0};
+};
+
+int64_t to_engine(WirePx w, int64_t eng_sc) {
+    int64_t v = w.m;
+    int e = static_cast<int>(w.s);
+    while (e > 0) {
+        v *= 10;
+        --e;
+    }
+    while (e < 0) {
+        v /= 10;
+        ++e;
+    }
+    if (eng_sc <= 1) return v;
+    return (v / eng_sc) * eng_sc;
+}
+
+WirePx from_engine(int64_t px, int8_t wire_s) {
+    WirePx w{};
+    w.s = wire_s;
+    w.m = px;
+    int e = static_cast<int>(wire_s);
+    while (e < 0) {
+        w.m *= 10;
+        ++e;
+    }
+    while (e > 0) {
+        w.m /= 10;
+        --e;
+    }
+    return w;
+}
+```
 
 **三、工程化实现**
 

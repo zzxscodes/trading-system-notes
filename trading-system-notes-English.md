@@ -25618,6 +25618,63 @@ void on_silent(SessionBook& b, int64_t now_ns) {
 }
 ```
 
+
+**Request sequence stays monotonic; report sequence stays contiguous**
+
+The request lane relies on client order id for idempotency, so its sequence only needs to rise. The report lane needs gap detection, so its sequence must be contiguous. Both lanes may share one duplex link with separate sequence spaces. On logon the client sends the highest report sequence it has applied continuously; the counter replays from the next number inside its retention window. Replays keep the original sequence and do not need a duplicate flag. Heartbeats carry the highest contiguous sequence seen on the peer's business lane, and silence for twice the heartbeat interval ends the session. On a trading-day roll the counter logs out with a day-cut reason, both sequence spaces and the client-order-id space reset, and the client logs on and renegotiates schema again.
+
+```cpp
+struct DualLane {
+    uint64_t req_sent{0};
+    uint64_t rpt_applied{0};
+    uint64_t peer_seen{0};
+    uint64_t hold_lo{0};
+    uint64_t hold_hi{0};
+    int64_t beat_ns{0};
+    int64_t gap_ns{2000000000};
+};
+
+uint64_t next_req(DualLane& d) {
+    d.req_sent += 1;
+    return d.req_sent;
+}
+
+int on_report(DualLane& d, uint64_t seq) {
+    if (seq <= d.rpt_applied) return 0;
+    if (seq == d.rpt_applied + 1) {
+        d.rpt_applied = seq;
+        return 1;
+    }
+    return 2;
+}
+
+uint64_t sync_from(const DualLane& d) {
+    uint64_t a = d.rpt_applied + 1;
+    return a < d.hold_lo ? d.hold_lo : a;
+}
+
+bool window_ok(const DualLane& d) {
+    return d.rpt_applied + 1 >= d.hold_lo;
+}
+
+void on_beat_lane(DualLane& d, uint64_t peer, int64_t now_ns) {
+    d.peer_seen = peer;
+    d.beat_ns = now_ns;
+}
+
+bool lane_dead(const DualLane& d, int64_t now_ns) {
+    if (d.beat_ns == 0) return false;
+    return now_ns - d.beat_ns >= d.gap_ns;
+}
+
+void day_cut(DualLane& d) {
+    d.req_sent = 0;
+    d.rpt_applied = 0;
+    d.peer_seen = 0;
+}
+```
+
+
 1.5 Idempotent and out-of-order return processing of order state machine
 
 1. Idempotent processing principle
@@ -25666,6 +25723,47 @@ void seal_id(IdSlot& s) {
     if (s.kind == 1 || s.kind == 2) s.kind = 3;
 }
 ```
+
+
+**Resubmit the same client order id by terminal state; a cancel reject does not move order status**
+
+After a reconnect, a resubmit with the same client order id hits the counter cache: if the order is not terminal, the resubmit is dropped; if it is terminal, the cached terminal report is replayed and the exchange is not hit again. One confirm message carries several execution kinds—new ack, cancel done, business reject—with optional fields marked by a presence bitmap. A failed cancel uses a separate cancel-reject message and leaves order status unchanged. Session-layer failures use a session reject; risk, buying-power, and parameter rejects stay on the confirm message as a reject execution kind.
+
+```cpp
+struct OrdRow {
+    uint64_t cl_id{0};
+    uint8_t st{0};   // 0 live, 1 final
+    uint8_t kind{0}; // 0 new ack, 1 cxl ok, 2 biz rej
+    uint64_t seq{0};
+};
+
+struct CxlFail {
+    uint64_t cl_id{0};
+    uint64_t orig{0};
+    uint16_t why{0};
+};
+
+int resubmit(OrdRow* rows, int n, uint64_t cl_id, OrdRow* out) {
+    for (int i = 0; i < n; ++i) {
+        if (rows[i].cl_id != cl_id) continue;
+        if (rows[i].st == 0) return 0;
+        *out = rows[i];
+        return 1;
+    }
+    return 2;
+}
+
+void apply_confirm(OrdRow& r, uint8_t kind, uint64_t seq) {
+    r.kind = kind;
+    r.seq = seq;
+    if (kind == 1 || kind == 2) r.st = 1;
+}
+
+void on_cxl_fail(OrdRow& r, const CxlFail&) {
+    (void)r;
+}
+```
+
 
 1.6 Other order management system interface design
 
@@ -35449,6 +35547,83 @@ void two_notes(SideNote* out, uint64_t buy_acct, uint64_t sell_acct, int64_t qty
 }
 ```
 
+
+**The SDK hot path carries mapped integer ids; the counter fills session-constant fields**
+
+Hot-path messages from strategy to counter carry fixed-width integers such as account map id, numeric security id, and client order id. Seat, application id, and per-market account codes are bound at logon and injected when the counter builds the exchange message. Exchange order ids stay in a counter-side map keyed by client order id for cancel and reconciliation, and they never ride the SDK hot path. Timestamps are UTC nanoseconds end to end; venue-local time formats convert only at the counter boundary.
+
+```cpp
+struct BindRow {
+    uint32_t acct_map{0};
+    uint8_t mkt{0};
+    char code[16]{};
+};
+
+struct WireNew {
+    uint64_t seq{0};
+    uint64_t cl_id{0};
+    uint32_t sec{0};
+    uint32_t acct_map{0};
+    int64_t qty{0};
+    int64_t px_m{0};
+    int8_t px_s{0};
+};
+
+struct ExchMap {
+    uint64_t cl_id{0};
+    char exch_id[24]{};
+};
+
+const BindRow* find_bind(const BindRow* rows, int n, uint32_t acct_map, uint8_t mkt) {
+    for (int i = 0; i < n; ++i)
+        if (rows[i].acct_map == acct_map && rows[i].mkt == mkt) return &rows[i];
+    return nullptr;
+}
+
+void put_exch(ExchMap* rows, int& n, int cap, uint64_t cl_id, const char* eid) {
+    if (n >= cap) return;
+    rows[n].cl_id = cl_id;
+    for (int i = 0; i < 23 && eid[i]; ++i) rows[n].exch_id[i] = eid[i];
+    ++n;
+}
+
+const char* get_exch(const ExchMap* rows, int n, uint64_t cl_id) {
+    for (int i = 0; i < n; ++i)
+        if (rows[i].cl_id == cl_id) return rows[i].exch_id;
+    return nullptr;
+}
+```
+
+**Queries run on a cold-path thread; multi-frame answers end on an is-last mark**
+
+Cash and position queries stay off the hot path. The counter hands them to a cold-path thread that reads a memory snapshot and replies with self-describing encoding. An answer may span several frames, each carrying an is-last flag; the client treats the round as complete once that flag arrives.
+
+```cpp
+struct QryAck {
+    uint16_t st{0};
+    uint8_t last{0};
+    uint32_t acct{0};
+    int64_t cash{0};
+};
+
+struct QryBag {
+    QryAck rows[32]{};
+    int n{0};
+    uint8_t done{0};
+};
+
+int on_qry_ack(QryBag& b, const QryAck& a) {
+    if (b.done) return 0;
+    if (b.n < 32) b.rows[b.n++] = a;
+    if (a.last) {
+        b.done = 1;
+        return 2;
+    }
+    return 1;
+}
+```
+
+
 **2. Sequence consistency processing**
 Market flow maintenance for each channel `last_seq`, strictly check continuity.
 After detecting the gap, it enters the recovery state: request retransmission, merge playback, and then switch back to the real-time stream.
@@ -35574,6 +35749,51 @@ const uint8_t* after_block(const uint8_t* p) {
     return p + sizeof(MsgHead) + h->block;
 }
 ```
+
+
+**Hot-path business messages use a fixed layout with a presence bitmap; without a version overlap they fall back to self-describing tags**
+
+The five hot-path business messages encode at compile-time offsets. Optional fields keep their byte slots, and a fixed-width presence bitmap marks which ones are set. Right after a successful logon the client pipelines its schema capability table. The counter picks the highest shared schema version for the fixed layout; with no shared version but compatible tags it falls back to self-describing encoding; incompatible tags disable that message type. The choice is fixed for the session and renegotiated on reconnect. Business traffic before ready is session-rejected. An optional hardware CRC can close the frame and may be turned off on a short same-site link. An unknown enum value is kept as its raw integer so one field does not discard the whole frame.
+
+```cpp
+struct CapRow {
+    uint16_t sid{0};
+    uint16_t vmin{0};
+    uint16_t vmax{0};
+};
+
+enum class WireMode : uint8_t { Fast = 1, Tag = 2, Off = 3 };
+
+WireMode pick_mode(uint16_t a_min, uint16_t a_max, uint16_t b_min, uint16_t b_max, bool tag_ok) {
+    uint16_t hi = a_max < b_max ? a_max : b_max;
+    uint16_t lo = a_min > b_min ? a_min : b_min;
+    if (hi >= lo) return WireMode::Fast;
+    if (tag_ok) return WireMode::Tag;
+    return WireMode::Off;
+}
+
+struct FastHead {
+    uint16_t block{0};
+    uint16_t ver{0};
+    uint32_t bits{0};
+};
+
+bool bit_on(uint32_t bits, int i) {
+    return (bits & (1u << i)) != 0;
+}
+
+uint8_t read_side(uint8_t raw) {
+    if (raw == 1 || raw == 2) return raw;
+    return 255;
+}
+
+uint32_t fold_crc(const uint8_t* p, int n, uint32_t seed) {
+    uint32_t c = seed;
+    for (int i = 0; i < n; ++i) c = (c * 16777619u) ^ p[i];
+    return c;
+}
+```
+
 
 **Example** (illustrative: fixed prefix + hot path only patches quantity; replace with real tag layout or SBE-generated structs in production):
 
@@ -47179,6 +47399,50 @@ Physical value = fixed-point integer / Scale // Scale = an integer multiple of 1
 + **Rounding Rules**:
     - price → align downward tick(`align_price_to_tick`)
     - Funds/Profit and Loss → Round to Cents
+
+
+
+**Wire prices as mantissa plus scale, convert once to the engine fixed scale at the boundary**
+
+Cross-venue messages carry price as a signed 64-bit mantissa plus a signed 8-bit scale, nine bytes in total. Inside the engine, prices stay as a single tick-aligned integer scale. The counter or gateway converts once at the boundary so the hot path does not keep multiplying and dividing. Quantity stays a 64-bit share count; cash and P&L keep the module money scale.
+
+```cpp
+struct WirePx {
+    int64_t m{0};
+    int8_t s{0};
+};
+
+int64_t to_engine(WirePx w, int64_t eng_sc) {
+    int64_t v = w.m;
+    int e = static_cast<int>(w.s);
+    while (e > 0) {
+        v *= 10;
+        --e;
+    }
+    while (e < 0) {
+        v /= 10;
+        ++e;
+    }
+    if (eng_sc <= 1) return v;
+    return (v / eng_sc) * eng_sc;
+}
+
+WirePx from_engine(int64_t px, int8_t wire_s) {
+    WirePx w{};
+    w.s = wire_s;
+    w.m = px;
+    int e = static_cast<int>(wire_s);
+    while (e < 0) {
+        w.m *= 10;
+        ++e;
+    }
+    while (e > 0) {
+        w.m /= 10;
+        --e;
+    }
+    return w;
+}
+```
 
 **3. Engineering implementation**
 
