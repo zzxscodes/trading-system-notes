@@ -23489,6 +23489,46 @@ int64_t foot_delta(const FootBin& b) { return b.buy - b.sell; }
 int64_t foot_total(const FootBin& b) { return b.buy + b.sell; }
 ```
 
+**Build order-flow imbalance from bid1 and ask1 size changes**
+
+When bid1 price rises, add the new bid1 size. When bid1 price falls, subtract the prior bid1 size. When ask1 price falls, subtract the new ask1 size. When ask1 price rises, add the prior ask1 size. When price is unchanged and only size moves, use that level's size delta. Accumulate these contributions into order-flow imbalance and compare with mid moves over the same window. The hot path caches only the previous bid1 and ask1 price and size, and updates the increment in constant time on each top-of-book event.
+
+```cpp
+struct TopSnap {
+    int64_t bid_px{0};
+    int64_t ask_px{0};
+    int64_t bid_sz{0};
+    int64_t ask_sz{0};
+};
+
+int64_t ofi_step(const TopSnap& a, const TopSnap& b) {
+    int64_t e = 0;
+    if (b.bid_px > a.bid_px) e += b.bid_sz;
+    else if (b.bid_px < a.bid_px) e -= a.bid_sz;
+    else e += (b.bid_sz - a.bid_sz);
+    if (b.ask_px < a.ask_px) e -= b.ask_sz;
+    else if (b.ask_px > a.ask_px) e += a.ask_sz;
+    else e -= (b.ask_sz - a.ask_sz);
+    return e;
+}
+
+struct OfiWin {
+    int64_t sum{0};
+    TopSnap last{};
+    uint8_t primed{0};
+};
+
+void on_top(OfiWin& w, const TopSnap& cur) {
+    if (!w.primed) {
+        w.last = cur;
+        w.primed = 1;
+        return;
+    }
+    w.sum += ofi_step(w.last, cur);
+    w.last = cur;
+}
+```
+
 **3. Data noise processing (correction of "ask-ask spread fluctuation")**
 
 Implement the "middle price calculation" logic to eliminate the interference of bid-ask bounce on data
@@ -34104,6 +34144,48 @@ struct ShownGate {
 };
 ```
 
+**Aggressive routes first to the venue with the largest opposite top-of-book size; Passive posts first to the shortest same-side queue**
+
+For aggressive takes, sort venues by opposite top-of-book visible size, largest first. Cap each child at that venue's top size, then route to the next venue; do not walk many book levels on one venue. For passive posts, sort venues by same-side queued size, smallest first, and post to the shortest queue before longer ones. Taker fees and maker rebates still fold into effective price and Passive weights.
+
+```cpp
+struct SpotTop {
+    uint16_t vid{0};
+    int64_t opp_sz{0};
+    int64_t same_sz{0};
+    int64_t px{0};
+    int32_t fee_bps{0};
+};
+
+void sort_take(SpotTop* rows, int n) {
+    for (int i = 1; i < n; ++i) {
+        SpotTop x = rows[i];
+        int j = i;
+        while (j > 0 && rows[j - 1].opp_sz < x.opp_sz) {
+            rows[j] = rows[j - 1];
+            --j;
+        }
+        rows[j] = x;
+    }
+}
+
+void sort_post(SpotTop* rows, int n) {
+    for (int i = 1; i < n; ++i) {
+        SpotTop x = rows[i];
+        int j = i;
+        while (j > 0 && rows[j - 1].same_sz > x.same_sz) {
+            rows[j] = rows[j - 1];
+            --j;
+        }
+        rows[j] = x;
+    }
+}
+
+int64_t take_cap(const SpotTop& v, int64_t left) {
+    return left < v.opp_sz ? left : v.opp_sz;
+}
+```
+
 **Passive allocation (split the remaining amount according to weight)**
 
 **Weight**
@@ -34198,6 +34280,45 @@ $  \mathrm{fill\,rate} = \begin{cases} Q_{\mathrm{filled}} / Q_{\mathrm{requeste
 + Participation rate (relative range trading volume)
 + Realized spread / effective spread
 + Contribution of each venue (proportion of transaction volume, price contribution)
+
+**Equal-size, equal-interval child orders are identifiable from aggressive-trade gaps**
+
+After a TWAP parent is split into equal-quantity children on a fixed interval, aggressive trades bucketed by side and quantity show nearly identical gaps between neighbors. For VWAP children scaled by a historical volume curve, restore quantity with the same curve and re-check gaps; they still align. Bounded random jitter on both interval and quantity breaks that alignment. The hot path keeps only the latest aggressive-trade timestamps per quantity bucket and checks whether successive gaps stay inside a tolerance.
+
+```cpp
+struct PaceBucket {
+    int64_t qty{0};
+    int64_t t_ms[16]{};
+    int n{0};
+};
+
+bool same_pace(const PaceBucket& b, int64_t tol_ms) {
+    if (b.n < 3) return false;
+    int64_t d0 = b.t_ms[1] - b.t_ms[0];
+    if (d0 <= 0) return false;
+    for (int i = 2; i < b.n; ++i) {
+        int64_t d = b.t_ms[i] - b.t_ms[i - 1];
+        int64_t e = d - d0;
+        if (e < 0) e = -e;
+        if (e > tol_ms) return false;
+    }
+    return true;
+}
+
+int64_t jitter_gap(int64_t base_ms, int64_t span_ms, uint32_t r) {
+    if (span_ms <= 0) return base_ms;
+    int64_t off = static_cast<int64_t>(r % static_cast<uint32_t>(2 * span_ms + 1)) - span_ms;
+    int64_t g = base_ms + off;
+    return g < 1 ? 1 : g;
+}
+
+int64_t fuzz_qty(int64_t q, int64_t span, uint32_t r) {
+    if (span <= 0) return q;
+    int64_t off = static_cast<int64_t>(r % static_cast<uint32_t>(2 * span + 1)) - span;
+    int64_t v = q + off;
+    return v < 1 ? 1 : v;
+}
+```
 
 
 **summary**
@@ -47640,6 +47761,47 @@ bool still_on(const GridPx& g, int64_t px) {
 bool post_only(bool buy, int64_t limit, int64_t bid1, int64_t ask1) {
     if (buy) return ask1 <= 0 || limit < ask1;
     return bid1 <= 0 || limit > bid1;
+}
+```
+
+**Widen bid and ask tick offset from mid before a scheduled release; probe with a small opposite order before a large aggressive size**
+
+In the short window before a scheduled release, the market maker moves both bid and ask several ticks farther from mid to reduce immediate adverse selection. After the window, the tick offset returns to the day-to-day setting. Before a large aggressive order, send a small opposite probe first. If the probe fills quickly and mid still moves with the intended trade, send the parent size. If the probe does not fill, or mid reverses, cut the parent size. Probe and parent share the same risk limits, and probe quantity counts toward daily order flow.
+
+```cpp
+struct QuoteWide {
+    int64_t base_ticks{2};
+    int64_t wide_ticks{8};
+    int64_t open_ms{0};
+    int64_t close_ms{0};
+};
+
+int64_t quote_ticks(const QuoteWide& w, int64_t now_ms) {
+    if (now_ms >= w.open_ms && now_ms < w.close_ms) return w.wide_ticks;
+    return w.base_ticks;
+}
+
+struct ProbePlan {
+    int64_t probe_qty{1};
+    int64_t main_qty{0};
+    int64_t send_ms{0};
+    int64_t fill_ms{0};
+    int64_t max_wait_ms{50};
+    int64_t mid0{0};
+    int8_t ok{0};
+};
+
+void on_probe_fill(ProbePlan& p, int64_t now_ms, int64_t mid_now, bool want_up) {
+    p.fill_ms = now_ms;
+    int64_t wait = now_ms - p.send_ms;
+    bool fast = wait >= 0 && wait <= p.max_wait_ms;
+    bool drift = want_up ? (mid_now >= p.mid0) : (mid_now <= p.mid0);
+    p.ok = (fast && drift) ? 1 : 0;
+    if (!p.ok) p.main_qty = p.probe_qty;
+}
+
+int64_t live_main(const ProbePlan& p) {
+    return p.ok ? p.main_qty : p.probe_qty;
 }
 ```
 

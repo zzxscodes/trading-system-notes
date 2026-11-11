@@ -23459,6 +23459,46 @@ int64_t foot_delta(const FootBin& b) { return b.buy - b.sell; }
 int64_t foot_total(const FootBin& b) { return b.buy + b.sell; }
 ```
 
+**用买一、卖一的量变构造订单流失衡**
+
+买一价上移时，新增买一量计入正贡献；买一价下移时，原买一量计入负贡献。卖一价下移时，新增卖一量计入负贡献；卖一价上移时，原卖一量计入正贡献。价位不变、仅挂单量变化时，用该档量差。各次贡献累加为订单流失衡，并与同期中间价变动对照。热路径只缓存上一笔买一、卖一的价格与数量，每笔最优档更新以常数时间计算增量。
+
+```cpp
+struct TopSnap {
+    int64_t bid_px{0};
+    int64_t ask_px{0};
+    int64_t bid_sz{0};
+    int64_t ask_sz{0};
+};
+
+int64_t ofi_step(const TopSnap& a, const TopSnap& b) {
+    int64_t e = 0;
+    if (b.bid_px > a.bid_px) e += b.bid_sz;
+    else if (b.bid_px < a.bid_px) e -= a.bid_sz;
+    else e += (b.bid_sz - a.bid_sz);
+    if (b.ask_px < a.ask_px) e -= b.ask_sz;
+    else if (b.ask_px > a.ask_px) e += a.ask_sz;
+    else e -= (b.ask_sz - a.ask_sz);
+    return e;
+}
+
+struct OfiWin {
+    int64_t sum{0};
+    TopSnap last{};
+    uint8_t primed{0};
+};
+
+void on_top(OfiWin& w, const TopSnap& cur) {
+    if (!w.primed) {
+        w.last = cur;
+        w.primed = 1;
+        return;
+    }
+    w.sum += ofi_step(w.last, cur);
+    w.last = cur;
+}
+```
+
 **3. 数据噪声处理（修正“买卖价差波动”）**
 
 实现“中间价计算”逻辑，消除 bid-ask bounce 对数据的干扰
@@ -34090,6 +34130,48 @@ struct ShownGate {
 };
 ```
 
+**Market order 先发往对手方最优档量最大的交易所，limit order 先挂到本方队列最短的交易所**
+
+Market order 吃单时，各交易所按对手方最优档可见量从大到小排序；在单个交易所上的子单数量不超过该档可见量，完成后再发往下一交易所，避免在同一交易所连续吃穿多层盘口。Limit order 挂单时，各交易所按本方已排队数量从小到大排序，优先挂入队列最短的交易所，再挂队列更长的交易所。Taker 费率与 maker rebate 仍折入有效价和 Passive 权重。
+
+```cpp
+struct SpotTop {
+    uint16_t vid{0};
+    int64_t opp_sz{0};
+    int64_t same_sz{0};
+    int64_t px{0};
+    int32_t fee_bps{0};
+};
+
+void sort_take(SpotTop* rows, int n) {
+    for (int i = 1; i < n; ++i) {
+        SpotTop x = rows[i];
+        int j = i;
+        while (j > 0 && rows[j - 1].opp_sz < x.opp_sz) {
+            rows[j] = rows[j - 1];
+            --j;
+        }
+        rows[j] = x;
+    }
+}
+
+void sort_post(SpotTop* rows, int n) {
+    for (int i = 1; i < n; ++i) {
+        SpotTop x = rows[i];
+        int j = i;
+        while (j > 0 && rows[j - 1].same_sz > x.same_sz) {
+            rows[j] = rows[j - 1];
+            --j;
+        }
+        rows[j] = x;
+    }
+}
+
+int64_t take_cap(const SpotTop& v, int64_t left) {
+    return left < v.opp_sz ? left : v.opp_sz;
+}
+```
+
 **Passive 分配（按权重拆剩余量）**
 
 **权重**
@@ -34184,6 +34266,45 @@ $ \mathrm{fill\,rate} = \begin{cases} Q_{\mathrm{filled}} / Q_{\mathrm{requested
 + Participation rate（相对区间成交量）
 + Realized spread / 有效价差
 + 各 venue 贡献度（成交量占比、价格贡献）
+
+**等量、等间隔的子单可按主动成交间隔识别**
+
+TWAP 把母单拆成相同数量、固定时间间隔的子单发出后，将主动成交按买卖方向与数量分桶，桶内相邻成交的时间间隔趋于一致。VWAP 按历史成交量曲线缩放子单数量时，用同一条曲线把数量还原后再检验间隔，仍可对齐。子单发送在时间间隔与数量上叠加有界随机扰动后，等间隔对齐难以成立。热路径按数量分桶只保留最近若干主动成交时间戳，检验相邻间隔之差是否落在容差内。
+
+```cpp
+struct PaceBucket {
+    int64_t qty{0};
+    int64_t t_ms[16]{};
+    int n{0};
+};
+
+bool same_pace(const PaceBucket& b, int64_t tol_ms) {
+    if (b.n < 3) return false;
+    int64_t d0 = b.t_ms[1] - b.t_ms[0];
+    if (d0 <= 0) return false;
+    for (int i = 2; i < b.n; ++i) {
+        int64_t d = b.t_ms[i] - b.t_ms[i - 1];
+        int64_t e = d - d0;
+        if (e < 0) e = -e;
+        if (e > tol_ms) return false;
+    }
+    return true;
+}
+
+int64_t jitter_gap(int64_t base_ms, int64_t span_ms, uint32_t r) {
+    if (span_ms <= 0) return base_ms;
+    int64_t off = static_cast<int64_t>(r % static_cast<uint32_t>(2 * span_ms + 1)) - span_ms;
+    int64_t g = base_ms + off;
+    return g < 1 ? 1 : g;
+}
+
+int64_t fuzz_qty(int64_t q, int64_t span, uint32_t r) {
+    if (span <= 0) return q;
+    int64_t off = static_cast<int64_t>(r % static_cast<uint32_t>(2 * span + 1)) - span;
+    int64_t v = q + off;
+    return v < 1 ? 1 : v;
+}
+```
 
 
 **小结**
@@ -47632,6 +47753,47 @@ bool still_on(const GridPx& g, int64_t px) {
 bool post_only(bool buy, int64_t limit, int64_t bid1, int64_t ask1) {
     if (buy) return ask1 <= 0 || limit < ask1;
     return bid1 <= 0 || limit > bid1;
+}
+```
+
+**重大新闻发布前扩大买卖报价相对中间价的 ticks，大单前先发反向小单探测承接**
+
+重大新闻发布前的短窗口内，market maker 将买卖报价相对中间价各外移若干 ticks，降低被知情交易对手方立即吃单的风险。窗口结束后，报价偏离恢复日常配置。准备发送较大数量的 market order 前，先发送方向相反、数量很小的试探单：若试探单迅速成交，且中间价仍沿拟交易方向移动，再发送主单；若试探单未成交，或中间价反向回撤，主单数量下调。试探单与主单共用风控限额，试探数量计入当日委托流量。
+
+```cpp
+struct QuoteWide {
+    int64_t base_ticks{2};
+    int64_t wide_ticks{8};
+    int64_t open_ms{0};
+    int64_t close_ms{0};
+};
+
+int64_t quote_ticks(const QuoteWide& w, int64_t now_ms) {
+    if (now_ms >= w.open_ms && now_ms < w.close_ms) return w.wide_ticks;
+    return w.base_ticks;
+}
+
+struct ProbePlan {
+    int64_t probe_qty{1};
+    int64_t main_qty{0};
+    int64_t send_ms{0};
+    int64_t fill_ms{0};
+    int64_t max_wait_ms{50};
+    int64_t mid0{0};
+    int8_t ok{0};
+};
+
+void on_probe_fill(ProbePlan& p, int64_t now_ms, int64_t mid_now, bool want_up) {
+    p.fill_ms = now_ms;
+    int64_t wait = now_ms - p.send_ms;
+    bool fast = wait >= 0 && wait <= p.max_wait_ms;
+    bool drift = want_up ? (mid_now >= p.mid0) : (mid_now <= p.mid0);
+    p.ok = (fast && drift) ? 1 : 0;
+    if (!p.ok) p.main_qty = p.probe_qty;
+}
+
+int64_t live_main(const ProbePlan& p) {
+    return p.ok ? p.main_qty : p.probe_qty;
 }
 ```
 
