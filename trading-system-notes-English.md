@@ -138,6 +138,7 @@
   - [50. Position queries fold today and yesterday by venue, and option free size drops combined lots](#50-position-queries-fold-today-and-yesterday-by-venue-and-option-free-size-drops-combined-lots)
   - [51. Short stock size is rebuilt from the liability tape, and the special pool stays separate](#51-short-stock-size-is-rebuilt-from-the-liability-tape-and-the-special-pool-stays-separate)
   - [52. Past the auction deadline, the cached gap becomes one estimated fill](#52-past-the-auction-deadline-the-cached-gap-becomes-one-estimated-fill)
+  - [53. One decode for many strategies; journal cash before the send](#53-one-decode-for-many-strategies-journal-cash-before-the-send)
 - [Business logic design-calculation](#business-logic-design-calculation)
   - [1. Log return (percent asymmetry)](#1-log-return-percent-asymmetry)
   - [2. Changes in state of market trends and volatility](#2-changes-in-state-of-market-trends-and-volatility)
@@ -157,6 +158,7 @@
   - [16. Fixed point number of trading system](#16-fixed-point-number-of-trading-system)
   - [17. Rolling gap of trade price versus mid at trade time](#17-rolling-gap-of-trade-price-versus-mid-at-trade-time)
   - [18. A futures maker quotes both sides in ticks from the mid, and closes the side that fills](#18-a-futures-maker-quotes-both-sides-in-ticks-from-the-mid-and-closes-the-side-that-fills)
+  - [19. Size-weighted fair, book bias, and trade-pressure score](#19-size-weighted-fair-book-bias-and-trade-pressure-score)
 - [Business logic design-backtest and simulated matching](#business-logic-design-backtest-and-simulated-matching)
   - [1. Four-process sim path: tape, quote adapter, trader, matcher](#1-four-process-sim-path-tape-quote-adapter-trader-matcher)
   - [2. Historical tape pacing, break windows, and parquet streams](#2-historical-tape-pacing-break-windows-and-parquet-streams)
@@ -18688,6 +18690,61 @@ struct TinyDag {
     n_order = 0;
     cycle = false;
     dfs(start);
+  }
+};
+```
+
+Before the open, pick the nodes that stay on the market path: start from a few roots and pull in every upstream they use. Which results to read on this sample is a separate choice. Reading only the short window still updates the long window on every fill, so a later read still matches the tape.
+
+Reading book state needs that node's pulse for this event to have finished; reading a computed mid also needs its refresh. Pulse and refresh stay separate, each once per plan. Two queries mean two full refreshes. Slots do not keep a value good across queries; copy it if the caller must hold it.
+
+Dependencies ship with the build; the graph does not grow nodes mid-session. Attaching a “last ten trades” window halfway through either backfills history or starts empty. Nodes brought into maintenance at start keep taking every matching event from the same origin.
+
+A step list can run as a table of calls or expand into direct calls at compile time. Both share one list so hand-checked numbers can compare; live traffic uses the expanded path.
+
+```cpp
+struct LiveMask {
+  static constexpr int N = 6;
+  uint8_t on[N]{};
+
+  void close_from(const uint8_t* roots, int nr, const uint8_t dep[N][N]) {
+    for (int i = 0; i < N; ++i) on[i] = 0;
+    uint8_t stack[N];
+    int top = 0;
+    for (int i = 0; i < nr; ++i) stack[top++] = roots[i];
+    while (top > 0) {
+      uint8_t u = stack[--top];
+      if (on[u]) continue;
+      on[u] = 1;
+      for (int v = 0; v < N; ++v)
+        if (dep[u][v]) stack[top++] = static_cast<uint8_t>(v);
+    }
+  }
+};
+
+struct OutSlots {
+  double mid{0};
+  double gap_short{0};
+  double gap_long{0};
+
+  void borrow_short(double& view) { view = gap_short; }
+  void copy_short(double& own) { own = gap_short; }
+};
+
+struct PlanTape {
+  using Fn = void (*)(void*);
+  Fn step[8]{};
+  int n{0};
+  void* ctx{nullptr};
+
+  void run_expanded() {
+    for (int i = 0; i < n; ++i) step[i](ctx);
+  }
+  void run_ids(const uint8_t* id, int m) {
+    for (int i = 0; i < m; ++i) {
+      uint8_t k = id[i];
+      if (k < n) step[k](ctx);
+    }
   }
 };
 ```
@@ -39568,6 +39625,32 @@ struct PulseHub {
 };
 ```
 
+At start, choose the roots to keep alive and pull their dependencies with them. Each query may take only a subset; a long window that is not sampled still updates on every fill. A separate reset clears windows or pressure state and leaves book quotes alone. Replay and live share the same `ingest` path in recorded order; if a book update moves after a trade, the gap enters against the old mid.
+
+```cpp
+struct GapHub {
+  Sheet sheet{};
+  FairMid mid{};
+  FillGapWin short_w{};
+  FillGapWin long_w{};
+  uint8_t live_short{1};
+  uint8_t live_long{1};
+
+  void on_fill(FillPulse f) {
+    mid.refresh(sheet);
+    if (live_short) short_w.on_pulse(f, mid.value);
+    if (live_long) long_w.on_pulse(f, mid.value);
+  }
+  void on_reset() {
+    short_w = FillGapWin{};
+    long_w = FillGapWin{};
+  }
+  double sample_short() {
+    short_w.refresh();
+    return short_w.value;
+  }
+};
+```
 
 ### 36. Config-picked frame digests with enum dispatch
 
@@ -41451,6 +41534,74 @@ int64_t pin_cancel_ms(int64_t asked_ms, int64_t cont_begin, bool first) {
     if (first) return cont_begin;
     return asked_ms;
 }
+```
+
+### 53. One decode for many strategies; journal cash before the send
+
+The market-data process decodes a frame once and writes it into a shared ring. Each strategy process keeps its own cursor, reads a local view, and decides in the callback whether to send an order. When a strategy falls behind and the retained window is gone, it takes a fresh snapshot and a ring position, then continues from there. Decode runs once; each reader still updates its own cache and local copy. Size the ring for bursts and for the slowest reader.
+
+The account process admits with a single writer. Order intent hits the local journal and holds cash before a signed send. Cash is checked again just before the first socket write. The same intent and bytes again return the stored admission and do not hold cash twice. New orders need a healthy book, a live private path, and an unfrozen account; cancels and queries may still reach review when the book is not ready. Time the strategy callback, admission, journal flush, and first socket byte as separate cuts.
+
+A single-slot channel can sit between the socket reader and the shared-memory writer; a full slot blocks the reader. One two-sided quote becomes two fixed records: the quote and feed health. Prices and sizes stay in integer ticks and lots; after startup the hot path does not allocate on the heap.
+
+```cpp
+struct QuoteCell {
+  int64_t bid_tick{0};
+  int64_t ask_tick{0};
+  int32_t bid_lot{0};
+  int32_t ask_lot{0};
+  uint64_t seq{0};
+  uint64_t recv_ns{0};
+};
+
+struct WorkerCursor {
+  uint64_t pos{0};
+  uint64_t mask{0};
+  const QuoteCell* ring{nullptr};
+
+  bool next(QuoteCell& out, uint64_t published) {
+    if (pos >= published) return false;
+    out = ring[pos & mask];
+    ++pos;
+    return true;
+  }
+};
+
+struct JoinBoot {
+  QuoteCell base{};
+  uint64_t ring_pos{0};
+};
+
+struct AdmitSlot {
+  uint64_t intent_key{0};
+  int64_t hold{0};
+  uint8_t state{0}; // 0 empty, 1 reserved, 2 sent
+};
+
+struct CashGate {
+  static constexpr int M = 64;
+  AdmitSlot slot[M]{};
+  int64_t cash{0};
+
+  int reserve(uint64_t key, int64_t need) {
+    for (int i = 0; i < M; ++i)
+      if (slot[i].state && slot[i].intent_key == key) return i;
+    if (need > cash) return -1;
+    for (int i = 0; i < M; ++i) {
+      if (slot[i].state) continue;
+      slot[i] = AdmitSlot{key, need, 1};
+      cash -= need;
+      return i;
+    }
+    return -1;
+  }
+  bool first_write_ok(int idx) {
+    if (idx < 0 || idx >= M) return false;
+    if (slot[idx].state != 1) return false;
+    slot[idx].state = 2;
+    return true;
+  }
+};
 ```
 
 ## Business logic design-calculation
@@ -48345,6 +48496,46 @@ FlatStep flat_step(double long_qty, double short_qty) {
     return FlatStep::BuyOne;
 }
 ```
+
+
+### 19. Size-weighted fair, book bias, and trade-pressure score
+
+Current bid, ask, and sizes alone give a fair price: mid plus half the spread times size imbalance. Imbalance is bid size minus ask size over their sum; both sides empty yields zero. Book bias is (fair − mid) / spread, and zero when the spread is not positive.
+
+Each fill adds (trade price − mid at that trade) / spread into an EMA: the first sample writes through, later samples take half the old EMA and half the new sample. Two fills at the same price still count twice. The score is book bias plus trade pressure. Reset clears pressure only; book features keep using the latest quotes.
+
+```cpp
+struct TopSheet {
+  double bid{0}, ask{0}, bid_sz{0}, ask_sz{0};
+};
+
+struct FairPack {
+  double mid{0}, spread{0}, imb{0}, fair{0}, bias{0};
+
+  void from_sheet(const TopSheet& s) {
+    mid = 0.5 * (s.bid + s.ask);
+    spread = s.ask - s.bid;
+    double z = s.bid_sz + s.ask_sz;
+    imb = z > 0.0 ? (s.bid_sz - s.ask_sz) / z : 0.0;
+    fair = mid + 0.5 * spread * imb;
+    bias = spread > 0.0 ? (fair - mid) / spread : 0.0;
+  }
+};
+
+struct PressureEma {
+  double ema{0};
+  uint8_t on{0};
+
+  void on_fill(double px, double mid, double spread) {
+    double x = spread > 0.0 ? (px - mid) / spread : 0.0;
+    ema = on ? 0.5 * ema + 0.5 * x : x;
+    on = 1;
+  }
+  void clear() { ema = 0; on = 0; }
+  double score(double bias) const { return bias + ema; }
+};
+```
+
 
 ## Business logic design-backtest and simulated matching
 

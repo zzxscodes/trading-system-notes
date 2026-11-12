@@ -138,6 +138,7 @@ English version：[https://github.com/zzxscodes/trading-system-notes/blob/main/t
   - [50. 持仓查询按交易所合并今昨行，期权可平扣掉组合量](#50-持仓查询按交易所合并今昨行期权可平扣掉组合量)
   - [51. 融券空头按负债流水重算，专项头寸单独成池](#51-融券空头按负债流水重算专项头寸单独成池)
   - [52. 集合竞价过了截止时刻就用缓存差额补估计成交](#52-集合竞价过了截止时刻就用缓存差额补估计成交)
+  - [53. 一处解码多策略读，账户先记账再发单](#53-一处解码多策略读账户先记账再发单)
 - [业务逻辑设计-计算](#业务逻辑设计-计算)
   - [1. 对数收益率(百分比非对称性)](#1-对数收益率百分比非对称性)
   - [2. 市场趋势和波动率的状态变化](#2-市场趋势和波动率的状态变化)
@@ -157,6 +158,7 @@ English version：[https://github.com/zzxscodes/trading-system-notes/blob/main/t
   - [16. 交易系统的定点数](#16-交易系统的定点数)
   - [17. 成交时刻相对中间价的滚动偏差](#17-成交时刻相对中间价的滚动偏差)
   - [18. 期货做市用盘口和成交定跳数，双边挂出后成交一边就平掉](#18-期货做市用盘口和成交定跳数双边挂出后成交一边就平掉)
+  - [19. 量权公允价、盘口偏置与成交压力合成分数](#19-量权公允价盘口偏置与成交压力合成分数)
 - [业务逻辑设计-回测与模拟撮合](#业务逻辑设计-回测与模拟撮合)
   - [1. 四进程模拟路径：回放、行情适配、交易、撮合](#1-四进程模拟路径回放行情适配交易撮合)
   - [2. 历史回放节拍、休市加速与列式数据流](#2-历史回放节拍休市加速与列式数据流)
@@ -18656,6 +18658,61 @@ struct TinyDag {
     n_order = 0;
     cycle = false;
     dfs(start);
+  }
+};
+```
+
+开盘前先定好要长期跟着行情走的节点：从几个根出发，把它们用到的上游一并纳入。这次读哪些结果是另一回事。只读短窗时，长窗该收的成交仍要收，后面再读也对得上。
+
+读簿状态，本事件上更新簿的脉冲要先跑完；读算出来的中间价，还要等求值跑完。脉冲和求值分开，同一份计划里各只做一次。连查两次就连算两次；结果槽不跨次保质，要留着就拷走。
+
+依赖跟着程序版本走，盘中不临时加节点。半路挂上“最近十笔”窗，要么补历史，要么从空窗开始攒。开盘就纳入维护的节点，从同一起点一直吃事件。
+
+步骤表可以按表逐项调用，也可以在编译期展开成直调。两套走同一张表，方便和手算结果对照；线上用展开路径。
+
+```cpp
+struct LiveMask {
+  static constexpr int N = 6;
+  uint8_t on[N]{};
+
+  void close_from(const uint8_t* roots, int nr, const uint8_t dep[N][N]) {
+    for (int i = 0; i < N; ++i) on[i] = 0;
+    uint8_t stack[N];
+    int top = 0;
+    for (int i = 0; i < nr; ++i) stack[top++] = roots[i];
+    while (top > 0) {
+      uint8_t u = stack[--top];
+      if (on[u]) continue;
+      on[u] = 1;
+      for (int v = 0; v < N; ++v)
+        if (dep[u][v]) stack[top++] = static_cast<uint8_t>(v);
+    }
+  }
+};
+
+struct OutSlots {
+  double mid{0};
+  double gap_short{0};
+  double gap_long{0};
+
+  void borrow_short(double& view) { view = gap_short; }
+  void copy_short(double& own) { own = gap_short; }
+};
+
+struct PlanTape {
+  using Fn = void (*)(void*);
+  Fn step[8]{};
+  int n{0};
+  void* ctx{nullptr};
+
+  void run_expanded() {
+    for (int i = 0; i < n; ++i) step[i](ctx);
+  }
+  void run_ids(const uint8_t* id, int m) {
+    for (int i = 0; i < m; ++i) {
+      uint8_t k = id[i];
+      if (k < n) step[k](ctx);
+    }
   }
 };
 ```
@@ -39554,6 +39611,32 @@ struct PulseHub {
 };
 ```
 
+开盘时选定要维护的根，依赖一并拉进来。每次查询可以只取其中一部分；没取到的长窗，成交到来时仍要更新。清历史单独来一记：只清窗或压力状态，盘口报价留着。回放和实盘走同一套 `ingest`，顺序按记录来；盘口若挪到成交后面，偏差会按旧中间价进窗。
+
+```cpp
+struct GapHub {
+  Sheet sheet{};
+  FairMid mid{};
+  FillGapWin short_w{};
+  FillGapWin long_w{};
+  uint8_t live_short{1};
+  uint8_t live_long{1};
+
+  void on_fill(FillPulse f) {
+    mid.refresh(sheet);
+    if (live_short) short_w.on_pulse(f, mid.value);
+    if (live_long) long_w.on_pulse(f, mid.value);
+  }
+  void on_reset() {
+    short_w = FillGapWin{};
+    long_w = FillGapWin{};
+  }
+  double sample_short() {
+    short_w.refresh();
+    return short_w.value;
+  }
+};
+```
 
 ### 36. 多对手方帧校验的配置选取与枚举分发
 
@@ -41443,6 +41526,74 @@ int64_t pin_cancel_ms(int64_t asked_ms, int64_t cont_begin, bool first) {
     if (first) return cont_begin;
     return asked_ms;
 }
+```
+
+### 53. 一处解码多策略读，账户先记账再发单
+
+行情进程解码一帧就写入共享环。多个策略进程各自带着游标读，在回调里决定要不要报单。某个策略掉队、环上旧数据已经盖掉时，先拿一份当前快照和环位置，再从那里接着读。解码只做一次；每个读者自己的缓存和本地副本仍要各自更新。环要按突发和最慢的读者一起留够长度。
+
+账户进程一个写者做准入。报单意图先写入本地日志并扣住资金，再签名发出。真正往套接字写之前再核一遍资金是否仍够。相同意图、相同字节再来一次，直接返回上次准入结果，不再扣一次款。新单要行情正常、私有回报通路通、账户未冻结；撤单和查询在行情还没就绪时也可以进复核。测延迟时把策略回调、准入、日志刷盘、套接字写出第一字节分开记。
+
+读套接字的线程和写共享内存的线程之间可以夹一个单槽通道：槽满就堵住读侧。一笔完整买卖报价写成两条定长记录，一条报价、一条馈源状态。价格和数量用整数 tick、lot；启动做完以后热路径不再向堆申请内存。
+
+```cpp
+struct QuoteCell {
+  int64_t bid_tick{0};
+  int64_t ask_tick{0};
+  int32_t bid_lot{0};
+  int32_t ask_lot{0};
+  uint64_t seq{0};
+  uint64_t recv_ns{0};
+};
+
+struct WorkerCursor {
+  uint64_t pos{0};
+  uint64_t mask{0};
+  const QuoteCell* ring{nullptr};
+
+  bool next(QuoteCell& out, uint64_t published) {
+    if (pos >= published) return false;
+    out = ring[pos & mask];
+    ++pos;
+    return true;
+  }
+};
+
+struct JoinBoot {
+  QuoteCell base{};
+  uint64_t ring_pos{0};
+};
+
+struct AdmitSlot {
+  uint64_t intent_key{0};
+  int64_t hold{0};
+  uint8_t state{0}; // 0 empty, 1 reserved, 2 sent
+};
+
+struct CashGate {
+  static constexpr int M = 64;
+  AdmitSlot slot[M]{};
+  int64_t cash{0};
+
+  int reserve(uint64_t key, int64_t need) {
+    for (int i = 0; i < M; ++i)
+      if (slot[i].state && slot[i].intent_key == key) return i;
+    if (need > cash) return -1;
+    for (int i = 0; i < M; ++i) {
+      if (slot[i].state) continue;
+      slot[i] = AdmitSlot{key, need, 1};
+      cash -= need;
+      return i;
+    }
+    return -1;
+  }
+  bool first_write_ok(int idx) {
+    if (idx < 0 || idx >= M) return false;
+    if (slot[idx].state != 1) return false;
+    slot[idx].state = 2;
+    return true;
+  }
+};
 ```
 
 ## 业务逻辑设计-计算
@@ -48336,6 +48487,46 @@ FlatStep flat_step(double long_qty, double short_qty) {
     if (long_qty > 0.0 && long_qty >= short_qty) return FlatStep::SellOne;
     return FlatStep::BuyOne;
 }
+```
+
+
+
+### 19. 量权公允价、盘口偏置与成交压力合成分数
+
+只用当前买卖价和量就能算一个公允价：中间价加上半个价差乘以量失衡。量失衡是买量减卖量再除以买卖量之和；两边都没有量时记 0。盘口偏置是 (公允价 − 中间价) / 价差，价差不大于 0 时记 0。
+
+每笔成交再采一个 (成交价 − 当时中间价) / 价差，推进 EMA：第一笔直接写入，之后新旧各半。两笔同价成交仍采两次。分数等于盘口偏置加成交压力。重置只清压力，盘口特征继续用最新报价。
+
+```cpp
+struct TopSheet {
+  double bid{0}, ask{0}, bid_sz{0}, ask_sz{0};
+};
+
+struct FairPack {
+  double mid{0}, spread{0}, imb{0}, fair{0}, bias{0};
+
+  void from_sheet(const TopSheet& s) {
+    mid = 0.5 * (s.bid + s.ask);
+    spread = s.ask - s.bid;
+    double z = s.bid_sz + s.ask_sz;
+    imb = z > 0.0 ? (s.bid_sz - s.ask_sz) / z : 0.0;
+    fair = mid + 0.5 * spread * imb;
+    bias = spread > 0.0 ? (fair - mid) / spread : 0.0;
+  }
+};
+
+struct PressureEma {
+  double ema{0};
+  uint8_t on{0};
+
+  void on_fill(double px, double mid, double spread) {
+    double x = spread > 0.0 ? (px - mid) / spread : 0.0;
+    ema = on ? 0.5 * ema + 0.5 * x : x;
+    on = 1;
+  }
+  void clear() { ema = 0; on = 0; }
+  double score(double bias) const { return bias + ema; }
+};
 ```
 
 
