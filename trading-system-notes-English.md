@@ -140,6 +140,7 @@
   - [52. Past the auction deadline, the cached gap becomes one estimated fill](#52-past-the-auction-deadline-the-cached-gap-becomes-one-estimated-fill)
   - [53. One decode for many strategies; journal cash before the send](#53-one-decode-for-many-strategies-journal-cash-before-the-send)
   - [54. One-process place-match-settle; the order emits cash ops](#54-one-process-place-match-settle-the-order-emits-cash-ops)
+  - [55. Compute the full change set first, and publish after the write succeeds](#55-compute-the-full-change-set-first-and-publish-after-the-write-succeeds)
 - [Business logic design-calculation](#business-logic-design-calculation)
   - [1. Log return (percent asymmetry)](#1-log-return-percent-asymmetry)
   - [2. Changes in state of market trends and volatility](#2-changes-in-state-of-market-trends-and-volatility)
@@ -18911,6 +18912,10 @@ struct SlotGate {
 ```
 
 ### 49. High-quality articles on system design
+[https://mp.weixin.qq.com/s/AboqW4H96nvi-6yMHpoblw](https://mp.weixin.qq.com/s/AboqW4H96nvi-6yMHpoblw)
+
+[https://mp.weixin.qq.com/s/SryHlTc044gbxM2AYUqfwQ](https://mp.weixin.qq.com/s/SryHlTc044gbxM2AYUqfwQ)
+
 [https://mp.weixin.qq.com/s/VxrT2luuXSuhCP0JcewSLA](https://mp.weixin.qq.com/s/VxrT2luuXSuhCP0JcewSLA)
 
 [https://mp.weixin.qq.com/s/9OH1RA8POFidgQnvape6fQ](https://mp.weixin.qq.com/s/9OH1RA8POFidgQnvape6fQ)
@@ -41775,6 +41780,109 @@ bool run_place(SpotTicket& taker, SpotTicket& maker, CashDesk& desk,
     if (th.release > 0 && !desk.release(taker_acct, th.release)) return false;
   }
   return true;
+}
+```
+
+Available cash plus frozen cash equals the account total. When an order is stored as filled, settlement is already booked and the freeze is zero. When it is stored as cancelled, the freeze has returned to available. The order, the balances, and the trades are written in one commit. Until that commit finishes, none of the three new records is visible outside. After it finishes, all three are visible. If the order is marked filled first and the balance is updated in a later step, there is a stretch where the order is already terminal and the cash has not moved.
+
+A freeze only stops that cash from funding another new order. After a sell delivers the base asset, the quote asset may still be missing, and the two sides do not balance. If the last partial fill returns the remaining freeze before settlement is booked, the order is terminal and the trade is not on the ledger. A successful cancel that never returns the freeze shows the order as cancelled while the cash stays frozen.
+
+```cpp
+struct Purse {
+  int64_t free{0};
+  int64_t held{0};
+};
+
+bool purse_closed(const Purse& p, int64_t total) {
+  return p.free >= 0 && p.held >= 0 && p.free + p.held == total;
+}
+
+bool may_show(uint8_t st, const Purse& p, int64_t total) {
+  if (!purse_closed(p, total)) return false;
+  if (st == 1 || st == 2) return p.held == 0;
+  return true;
+}
+```
+
+### 55. Compute the full change set first, and publish after the write succeeds
+
+Place, amend, and fill compute from state loaded before the calculation. The steps are: check account, instrument, price, and size on the command; load the state this calculation needs; check whether the order is allowed and compute every change to the order, margin, and position; write those changes as events that can be replayed; after the write succeeds, replay and publish. The calculation does not read the database, send messages, or call an outside service.
+
+Registering an order that has not entered matching does not read the book or the balances, so the loaded state has neither. A derivatives order reads whether trading is allowed, the margin balance, the position, and the minimum size. A zero position means this order opens. The same direction adds. The opposite direction with a smaller size reduces. The opposite direction with a size at least as large closes, and the position is zero afterward. A reduce-only command that would open or add is rejected. Open and add reserve margin as size times price. Reduce and close do not.
+
+An outside event is turned into a command and then run through the same steps. A trade used to update candles changes only the candles. It does not change orders or balances. The ingress checks message fields and the signature. Order status, freezes, and matching stay out of the ingress.
+
+```cpp
+enum class PosMove : uint8_t { Open, Add, Cut, Flat };
+enum class InKind : uint8_t { Cmd, MatchEvt, PrintEvt };
+
+struct CmdIn {
+  uint64_t acct{0};
+  uint32_t sym{0};
+  int64_t qty{0};
+  int64_t px{0};
+  uint8_t buy{0};
+  uint8_t reduce_only{0};
+};
+
+struct SnapIn {
+  uint8_t loaded{0};
+  uint8_t empty_ok{0};
+  uint8_t trade_on{1};
+  uint64_t acct{0};
+  int64_t margin{0};
+  int64_t pos{0};
+  int64_t min_qty{1};
+};
+
+struct DeltaOut {
+  int64_t pos_after{0};
+  int64_t margin_after{0};
+  int64_t hold{0};
+  PosMove move{PosMove::Open};
+  uint8_t ok{0};
+};
+
+int64_t signed_qty(const CmdIn& c) { return c.buy ? c.qty : -c.qty; }
+
+PosMove move_of(int64_t pos, int64_t dq) {
+  if (pos == 0) return PosMove::Open;
+  bool same = (pos > 0 && dq > 0) || (pos < 0 && dq < 0);
+  if (same) return PosMove::Add;
+  int64_t ap = pos > 0 ? pos : -pos;
+  int64_t aq = dq > 0 ? dq : -dq;
+  return aq < ap ? PosMove::Cut : PosMove::Flat;
+}
+
+bool fields_ok(const CmdIn& c) {
+  return c.acct != 0 && c.sym != 0 && c.qty > 0 && c.px > 0;
+}
+
+DeltaOut decide(const CmdIn& c, const SnapIn& s) {
+  DeltaOut d{};
+  if (s.empty_ok) {
+    d.ok = 1;
+    return d;
+  }
+  if (!s.loaded || !s.trade_on || s.acct != c.acct || c.qty < s.min_qty) return d;
+  int64_t dq = signed_qty(c);
+  PosMove m = move_of(s.pos, dq);
+  if (c.reduce_only && (m == PosMove::Open || m == PosMove::Add)) return d;
+  int64_t need = (m == PosMove::Open || m == PosMove::Add) ? c.qty * c.px : 0;
+  if (need > s.margin) return d;
+  d.pos_after = m == PosMove::Flat ? 0 : s.pos + dq;
+  d.margin_after = s.margin - need;
+  d.hold = need;
+  d.move = m;
+  d.ok = 1;
+  return d;
+}
+
+bool run_once(InKind kind, const CmdIn& c, const SnapIn& s, DeltaOut& out) {
+  if (kind == InKind::PrintEvt) return true;
+  if (!fields_ok(c)) return false;
+  out = decide(c, s);
+  return out.ok == 1;
 }
 ```
 

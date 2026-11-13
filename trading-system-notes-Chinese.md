@@ -140,6 +140,7 @@ English version：[https://github.com/zzxscodes/trading-system-notes/blob/main/t
   - [52. 集合竞价过了截止时刻就用缓存差额补估计成交](#52-集合竞价过了截止时刻就用缓存差额补估计成交)
   - [53. 一处解码多策略读，账户先记账再发单](#53-一处解码多策略读账户先记账再发单)
   - [54. 下单撮合结算单程编排，订单只出资金指令](#54-下单撮合结算单程编排订单只出资金指令)
+  - [55. 下单先算完全部变更，写入成功以后再发布](#55-下单先算完全部变更写入成功以后再发布)
 - [业务逻辑设计-计算](#业务逻辑设计-计算)
   - [1. 对数收益率(百分比非对称性)](#1-对数收益率百分比非对称性)
   - [2. 市场趋势和波动率的状态变化](#2-市场趋势和波动率的状态变化)
@@ -18879,6 +18880,10 @@ struct SlotGate {
 ```
 
 ### 49. 系统设计优质文章
+[https://mp.weixin.qq.com/s/AboqW4H96nvi-6yMHpoblw](https://mp.weixin.qq.com/s/AboqW4H96nvi-6yMHpoblw)
+
+[https://mp.weixin.qq.com/s/SryHlTc044gbxM2AYUqfwQ](https://mp.weixin.qq.com/s/SryHlTc044gbxM2AYUqfwQ)
+
 [https://mp.weixin.qq.com/s/VxrT2luuXSuhCP0JcewSLA](https://mp.weixin.qq.com/s/VxrT2luuXSuhCP0JcewSLA)
 
 [https://mp.weixin.qq.com/s/9OH1RA8POFidgQnvape6fQ](https://mp.weixin.qq.com/s/9OH1RA8POFidgQnvape6fQ)
@@ -41767,6 +41772,109 @@ bool run_place(SpotTicket& taker, SpotTicket& maker, CashDesk& desk,
     if (th.release > 0 && !desk.release(taker_acct, th.release)) return false;
   }
   return true;
+}
+```
+
+可用资金加上冻结资金，等于账户里的总余额。订单记成完全成交时，交割已经入账，冻结已经减到 0。订单记成已撤时，冻结已经全部回到可用。订单、余额和成交放在同一次提交里写。这次提交完成以前，外面看不到这三份新数据；完成以后，三份一起能看见。若先把订单标成完全成交，余额留到下一次再扣，中间会有一段订单已经是终态、资金还没动。
+
+冻结只拦住这笔资金再去下一张新单。卖单把基础资产划给对手以后，计价资产还没记进来，账对不上。最后一笔部分成交若先退掉剩余冻结、交割还没入账，订单已经终态，成交却不在账上。撤单已经成功、冻结却没退回时，订单显示已撤，资金仍停在冻结里。
+
+```cpp
+struct Purse {
+  int64_t free{0};
+  int64_t held{0};
+};
+
+bool purse_closed(const Purse& p, int64_t total) {
+  return p.free >= 0 && p.held >= 0 && p.free + p.held == total;
+}
+
+bool may_show(uint8_t st, const Purse& p, int64_t total) {
+  if (!purse_closed(p, total)) return false;
+  if (st == 1 || st == 2) return p.held == 0;
+  return true;
+}
+```
+
+### 55. 下单先算完全部变更，写入成功以后再发布
+
+下单、改单和成交在计算时只使用事先装好的状态。步骤是：检查命令上的账户、合约、价格和数量；装入这笔计算要用的状态；按这些状态检查能否下单，并算出订单、保证金和持仓的全部变更；把变更写成可以回放的事件；写入成功以后再回放、再发布。计算过程中不读数据库，不发消息，不调用外部接口。
+
+只登记一张还没进撮合的订单时，不读盘口，也不读余额，装入的状态里没有这两项。合约下单要读当前是否允许交易、保证金余额、持仓和最小下单量。持仓为 0，这一笔是开仓。与持仓同向，是加仓。与持仓反向且数量小于持仓，是减仓。与持仓反向且数量大于等于持仓，是平仓，平完持仓为 0。命令写明只允许减仓时，开仓和加仓直接拒绝。开仓和加仓按数量乘价格占用保证金，减仓和平仓不占用。
+
+外面进来的事件先收成一条命令，再按上面的步骤计算。用成交去更新 K 线时，只改 K 线，不改订单，也不改余额。接入层检查报文字段和签名。订单状态、冻结和撮合不放在接入层里做。
+
+```cpp
+enum class PosMove : uint8_t { Open, Add, Cut, Flat };
+enum class InKind : uint8_t { Cmd, MatchEvt, PrintEvt };
+
+struct CmdIn {
+  uint64_t acct{0};
+  uint32_t sym{0};
+  int64_t qty{0};
+  int64_t px{0};
+  uint8_t buy{0};
+  uint8_t reduce_only{0};
+};
+
+struct SnapIn {
+  uint8_t loaded{0};
+  uint8_t empty_ok{0};
+  uint8_t trade_on{1};
+  uint64_t acct{0};
+  int64_t margin{0};
+  int64_t pos{0};
+  int64_t min_qty{1};
+};
+
+struct DeltaOut {
+  int64_t pos_after{0};
+  int64_t margin_after{0};
+  int64_t hold{0};
+  PosMove move{PosMove::Open};
+  uint8_t ok{0};
+};
+
+int64_t signed_qty(const CmdIn& c) { return c.buy ? c.qty : -c.qty; }
+
+PosMove move_of(int64_t pos, int64_t dq) {
+  if (pos == 0) return PosMove::Open;
+  bool same = (pos > 0 && dq > 0) || (pos < 0 && dq < 0);
+  if (same) return PosMove::Add;
+  int64_t ap = pos > 0 ? pos : -pos;
+  int64_t aq = dq > 0 ? dq : -dq;
+  return aq < ap ? PosMove::Cut : PosMove::Flat;
+}
+
+bool fields_ok(const CmdIn& c) {
+  return c.acct != 0 && c.sym != 0 && c.qty > 0 && c.px > 0;
+}
+
+DeltaOut decide(const CmdIn& c, const SnapIn& s) {
+  DeltaOut d{};
+  if (s.empty_ok) {
+    d.ok = 1;
+    return d;
+  }
+  if (!s.loaded || !s.trade_on || s.acct != c.acct || c.qty < s.min_qty) return d;
+  int64_t dq = signed_qty(c);
+  PosMove m = move_of(s.pos, dq);
+  if (c.reduce_only && (m == PosMove::Open || m == PosMove::Add)) return d;
+  int64_t need = (m == PosMove::Open || m == PosMove::Add) ? c.qty * c.px : 0;
+  if (need > s.margin) return d;
+  d.pos_after = m == PosMove::Flat ? 0 : s.pos + dq;
+  d.margin_after = s.margin - need;
+  d.hold = need;
+  d.move = m;
+  d.ok = 1;
+  return d;
+}
+
+bool run_once(InKind kind, const CmdIn& c, const SnapIn& s, DeltaOut& out) {
+  if (kind == InKind::PrintEvt) return true;
+  if (!fields_ok(c)) return false;
+  out = decide(c, s);
+  return out.ok == 1;
 }
 ```
 
