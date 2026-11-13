@@ -141,6 +141,7 @@ English version：[https://github.com/zzxscodes/trading-system-notes/blob/main/t
   - [53. 一处解码多策略读，账户先记账再发单](#53-一处解码多策略读账户先记账再发单)
   - [54. 下单撮合结算单程编排，订单只出资金指令](#54-下单撮合结算单程编排订单只出资金指令)
   - [55. 下单先算完全部变更，写入成功以后再发布](#55-下单先算完全部变更写入成功以后再发布)
+  - [56. 成交把撮合和结算拆到不同分片](#56-成交把撮合和结算拆到不同分片)
 - [业务逻辑设计-计算](#业务逻辑设计-计算)
   - [1. 对数收益率(百分比非对称性)](#1-对数收益率百分比非对称性)
   - [2. 市场趋势和波动率的状态变化](#2-市场趋势和波动率的状态变化)
@@ -18880,12 +18881,6 @@ struct SlotGate {
 ```
 
 ### 49. 系统设计优质文章
-[https://mp.weixin.qq.com/s/AboqW4H96nvi-6yMHpoblw](https://mp.weixin.qq.com/s/AboqW4H96nvi-6yMHpoblw)
-
-[https://mp.weixin.qq.com/s/SryHlTc044gbxM2AYUqfwQ](https://mp.weixin.qq.com/s/SryHlTc044gbxM2AYUqfwQ)
-
-[https://mp.weixin.qq.com/s/VxrT2luuXSuhCP0JcewSLA](https://mp.weixin.qq.com/s/VxrT2luuXSuhCP0JcewSLA)
-
 [https://mp.weixin.qq.com/s/9OH1RA8POFidgQnvape6fQ](https://mp.weixin.qq.com/s/9OH1RA8POFidgQnvape6fQ)
 
 [https://mp.weixin.qq.com/s/PuG4ZFVZ-7hijS4Db8Z5jQ](https://mp.weixin.qq.com/s/PuG4ZFVZ-7hijS4Db8Z5jQ)
@@ -41876,6 +41871,90 @@ bool run_once(InKind kind, const CmdIn& c, const SnapIn& s, DeltaOut& out) {
   out = decide(c, s);
   return out.ok == 1;
 }
+```
+
+### 56. 成交把撮合和结算拆到不同分片
+
+冻结和撮合要读本合约的订单簿和对手挂单，再写出冻结和成交。交割和退回剩余冻结要读成交和双方余额。成交里写上吃单账户、挂单账户、合约、价格、数量和手续费以后，结算侧不再读订单簿，也不再读下单时的余额。订单簿按合约挂在撮合线程上；余额按账户挂在结算线程上。
+
+```cpp
+struct PrintRec {
+  uint64_t take_acct{0};
+  uint64_t make_acct{0};
+  uint32_t sym{0};
+  int64_t px{0};
+  int64_t qty{0};
+  int64_t fee{0};
+};
+
+struct BookTouch {
+  uint32_t sym{0};
+  int64_t ask{0};
+};
+
+struct AcctCash {
+  uint64_t acct{0};
+  int64_t free{0};
+  int64_t held{0};
+};
+
+bool take_on_book(const BookTouch& book, uint64_t take_acct, uint64_t make_acct,
+                  int64_t px, int64_t qty, int64_t fee, PrintRec& out) {
+  if (qty <= 0 || book.ask <= 0 || px < book.ask) return false;
+  out = PrintRec{take_acct, make_acct, book.sym, px, qty, fee};
+  return true;
+}
+
+int find_acct(const AcctCash* rows, int n, uint64_t acct) {
+  for (int i = 0; i < n; ++i)
+    if (rows[i].acct == acct) return i;
+  return -1;
+}
+
+bool settle_print(AcctCash* rows, int n, const PrintRec& p) {
+  int a = find_acct(rows, n, p.take_acct);
+  int b = find_acct(rows, n, p.make_acct);
+  if (a < 0 || b < 0) return false;
+  int64_t quote = p.qty * p.px + p.fee;
+  if (quote > rows[a].held) return false;
+  rows[a].held -= quote;
+  rows[b].free += p.qty * p.px;
+  return true;
+}
+```
+
+订单簿和余额都放在同一条线程里时，所有合约和所有账户按命令到达顺序改。一批改动先写在内存里，批末再提交一次。吞吐就是这条线程跑完这一批的时间。多加核、多加进程，单笔在这条线程上的耗时不会变短。热点合约就少放进这一批。别的机器上的副本只保证主机挂了还能接着跑，不提高这条线程每秒能处理的笔数。
+
+```cpp
+bool commit_batch(AcctCash* rows, int n, const PrintRec* rec, int m) {
+  for (int i = 0; i < m; ++i)
+    if (!settle_print(rows, n, rec[i])) return false;
+  return true;
+}
+```
+
+把成交交给结算进程以后，撮合进程只做冻结和配对。结算进程按账户交割，并退回剩余冻结。热门合约的撮合线程单独占一个核。某个账户成交太密，就把这个账户迁到别的结算分片。结算队列积压时，先做平仓和强平，再做开仓。
+
+```cpp
+struct PrintRing {
+  static constexpr uint32_t N = 64;
+  PrintRec slot[N]{};
+  uint32_t w{0};
+  uint32_t r{0};
+
+  bool push(const PrintRec& p) {
+    if (w - r >= N) return false;
+    slot[w & (N - 1)] = p;
+    ++w;
+    return true;
+  }
+  bool pop(PrintRec& p) {
+    if (r == w) return false;
+    p = slot[r & (N - 1)];
+    ++r;
+    return true;
+  }
+};
 ```
 
 ## 业务逻辑设计-计算

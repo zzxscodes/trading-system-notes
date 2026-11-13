@@ -141,6 +141,7 @@
   - [53. One decode for many strategies; journal cash before the send](#53-one-decode-for-many-strategies-journal-cash-before-the-send)
   - [54. One-process place-match-settle; the order emits cash ops](#54-one-process-place-match-settle-the-order-emits-cash-ops)
   - [55. Compute the full change set first, and publish after the write succeeds](#55-compute-the-full-change-set-first-and-publish-after-the-write-succeeds)
+  - [56. A trade lets matching and settlement sit on different shards](#56-a-trade-lets-matching-and-settlement-sit-on-different-shards)
 - [Business logic design-calculation](#business-logic-design-calculation)
   - [1. Log return (percent asymmetry)](#1-log-return-percent-asymmetry)
   - [2. Changes in state of market trends and volatility](#2-changes-in-state-of-market-trends-and-volatility)
@@ -18912,12 +18913,6 @@ struct SlotGate {
 ```
 
 ### 49. High-quality articles on system design
-[https://mp.weixin.qq.com/s/AboqW4H96nvi-6yMHpoblw](https://mp.weixin.qq.com/s/AboqW4H96nvi-6yMHpoblw)
-
-[https://mp.weixin.qq.com/s/SryHlTc044gbxM2AYUqfwQ](https://mp.weixin.qq.com/s/SryHlTc044gbxM2AYUqfwQ)
-
-[https://mp.weixin.qq.com/s/VxrT2luuXSuhCP0JcewSLA](https://mp.weixin.qq.com/s/VxrT2luuXSuhCP0JcewSLA)
-
 [https://mp.weixin.qq.com/s/9OH1RA8POFidgQnvape6fQ](https://mp.weixin.qq.com/s/9OH1RA8POFidgQnvape6fQ)
 
 [https://mp.weixin.qq.com/s/PuG4ZFVZ-7hijS4Db8Z5jQ](https://mp.weixin.qq.com/s/PuG4ZFVZ-7hijS4Db8Z5jQ)
@@ -41884,6 +41879,90 @@ bool run_once(InKind kind, const CmdIn& c, const SnapIn& s, DeltaOut& out) {
   out = decide(c, s);
   return out.ok == 1;
 }
+```
+
+### 56. A trade lets matching and settlement sit on different shards
+
+Freeze and match read this instrument's book and the opposite resting order, then write the freeze and the trade. Settlement and the return of leftover freeze read the trade and both balances. Once the trade carries the taker account, maker account, instrument, price, size, and fee, settlement does not read the book again and does not read the balances from order entry. The book sits on the matching thread by instrument. Balances sit on the settlement thread by account.
+
+```cpp
+struct PrintRec {
+  uint64_t take_acct{0};
+  uint64_t make_acct{0};
+  uint32_t sym{0};
+  int64_t px{0};
+  int64_t qty{0};
+  int64_t fee{0};
+};
+
+struct BookTouch {
+  uint32_t sym{0};
+  int64_t ask{0};
+};
+
+struct AcctCash {
+  uint64_t acct{0};
+  int64_t free{0};
+  int64_t held{0};
+};
+
+bool take_on_book(const BookTouch& book, uint64_t take_acct, uint64_t make_acct,
+                  int64_t px, int64_t qty, int64_t fee, PrintRec& out) {
+  if (qty <= 0 || book.ask <= 0 || px < book.ask) return false;
+  out = PrintRec{take_acct, make_acct, book.sym, px, qty, fee};
+  return true;
+}
+
+int find_acct(const AcctCash* rows, int n, uint64_t acct) {
+  for (int i = 0; i < n; ++i)
+    if (rows[i].acct == acct) return i;
+  return -1;
+}
+
+bool settle_print(AcctCash* rows, int n, const PrintRec& p) {
+  int a = find_acct(rows, n, p.take_acct);
+  int b = find_acct(rows, n, p.make_acct);
+  if (a < 0 || b < 0) return false;
+  int64_t quote = p.qty * p.px + p.fee;
+  if (quote > rows[a].held) return false;
+  rows[a].held -= quote;
+  rows[b].free += p.qty * p.px;
+  return true;
+}
+```
+
+When books and balances share one thread, every instrument and every account updates in command arrival order. A batch is written in memory first and committed once at the end. Throughput is how long that thread takes to finish the batch. Extra cores and processes do not shorten the time one order spends on that thread. A hot instrument puts fewer orders into the batch. Replicas on other hosts keep the system running after the primary fails. They do not raise how many orders that thread finishes per second.
+
+```cpp
+bool commit_batch(AcctCash* rows, int n, const PrintRec* rec, int m) {
+  for (int i = 0; i < m; ++i)
+    if (!settle_print(rows, n, rec[i])) return false;
+  return true;
+}
+```
+
+After the trade goes to the settlement process, matching only freezes and matches. Settlement transfers cash by account and returns leftover freeze. The matching thread for a hot instrument gets its own core. An account that fills too densely moves to another settlement shard. When the settlement queue backs up, closes and liquidations run before opens.
+
+```cpp
+struct PrintRing {
+  static constexpr uint32_t N = 64;
+  PrintRec slot[N]{};
+  uint32_t w{0};
+  uint32_t r{0};
+
+  bool push(const PrintRec& p) {
+    if (w - r >= N) return false;
+    slot[w & (N - 1)] = p;
+    ++w;
+    return true;
+  }
+  bool pop(PrintRec& p) {
+    if (r == w) return false;
+    p = slot[r & (N - 1)];
+    ++r;
+    return true;
+  }
+};
 ```
 
 ## Business logic design-calculation
