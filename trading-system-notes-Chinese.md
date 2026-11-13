@@ -139,6 +139,7 @@ English version：[https://github.com/zzxscodes/trading-system-notes/blob/main/t
   - [51. 融券空头按负债流水重算，专项头寸单独成池](#51-融券空头按负债流水重算专项头寸单独成池)
   - [52. 集合竞价过了截止时刻就用缓存差额补估计成交](#52-集合竞价过了截止时刻就用缓存差额补估计成交)
   - [53. 一处解码多策略读，账户先记账再发单](#53-一处解码多策略读账户先记账再发单)
+  - [54. 下单撮合结算单程编排，订单只出资金指令](#54-下单撮合结算单程编排订单只出资金指令)
 - [业务逻辑设计-计算](#业务逻辑设计-计算)
   - [1. 对数收益率(百分比非对称性)](#1-对数收益率百分比非对称性)
   - [2. 市场趋势和波动率的状态变化](#2-市场趋势和波动率的状态变化)
@@ -18878,6 +18879,8 @@ struct SlotGate {
 ```
 
 ### 49. 系统设计优质文章
+[https://mp.weixin.qq.com/s/VxrT2luuXSuhCP0JcewSLA](https://mp.weixin.qq.com/s/VxrT2luuXSuhCP0JcewSLA)
+
 [https://mp.weixin.qq.com/s/9OH1RA8POFidgQnvape6fQ](https://mp.weixin.qq.com/s/9OH1RA8POFidgQnvape6fQ)
 
 [https://mp.weixin.qq.com/s/PuG4ZFVZ-7hijS4Db8Z5jQ](https://mp.weixin.qq.com/s/PuG4ZFVZ-7hijS4Db8Z5jQ)
@@ -41594,6 +41597,177 @@ struct CashGate {
     return true;
   }
 };
+```
+
+### 54. 下单撮合结算单程编排，订单只出资金指令
+
+现货撮合里，下单、冻结、配对、交割、解冻是同一条业务过程。拆成跨进程服务再用消息串起来，每一跳都要校验、重试、对账，撮合延迟被网络吃掉，也会留下“簿上已成、账未交割”的中间态。单进程按固定步骤走完：建单、冻结、推进吃单与挂单、逐笔交割、按终态解冻剩余。任一步失败整笔回滚。进程内用函数调用交接，不靠消息驱动主流程。
+
+订单字段对外只读。外部只投业务指令：激活、按吃单成交、按挂单成交、改单、撤单。实体自己扣剩余量、卡手续费上限、推出下一状态，并给出冻结、解冻或增减占用的额度；实体不碰余额对象。编排层按这些额度改余额工作区。完全成交、已撤、已拒是终态，再来任何指令直接拒绝。指令序号小于实体已接受序号时丢掉，避免旧命令盖住新状态。
+
+立即成交否则撤销：零成交变拒单，部分成交后余量撤掉。撤销前有效：部分成交保持部分成交并可继续挂，零成交保持可挂。挂单侧部分成交只进部分成交。状态怎么变留在实体里，编排层只选吃单成交还是挂单成交。
+
+余额工作区先装参与方快照。冻结、交割、解冻都改工作副本，结束时只吐出前后不同的行。同一次撮合里同一账户被改多次，不必反复加载。入口壳只做参数与前置状态检查、加载快照、调用编排、把变更收成前后对；重放事件可从变更导出，不驱动主流程。
+
+```cpp
+enum class OrdSt : uint8_t { Pend, Live, Part, Done, Drop, Deny };
+enum class TifKind : uint8_t { Day, Ioc };
+
+struct HoldHint {
+  int64_t freeze{0};
+  int64_t release{0};
+  int64_t adjust{0};
+};
+
+struct SpotTicket {
+  uint64_t seq{0};
+  int64_t left{0};
+  int64_t fee_cap{0};
+  int64_t fee_used{0};
+  OrdSt st{OrdSt::Pend};
+  TifKind tif{TifKind::Day};
+
+  bool apply_take(uint64_t cmd_seq, int64_t fill, int64_t fee, HoldHint& out) {
+    out = HoldHint{};
+    if (st == OrdSt::Done || st == OrdSt::Drop || st == OrdSt::Deny) return false;
+    if (cmd_seq < seq) return false;
+    if (fill > left || fee_used + fee > fee_cap) return false;
+    left -= fill;
+    fee_used += fee;
+    seq = cmd_seq;
+    if (left == 0) {
+      st = OrdSt::Done;
+      out.release = fee_cap - fee_used;
+      return true;
+    }
+    if (tif == TifKind::Ioc) {
+      st = OrdSt::Drop;
+      out.release = fee_cap - fee_used;
+      return true;
+    }
+    st = OrdSt::Part;
+    return true;
+  }
+
+  bool apply_make(uint64_t cmd_seq, int64_t fill, int64_t fee) {
+    if (st == OrdSt::Done || st == OrdSt::Drop || st == OrdSt::Deny) return false;
+    if (cmd_seq < seq) return false;
+    if (fill > left || fee_used + fee > fee_cap) return false;
+    left -= fill;
+    fee_used += fee;
+    seq = cmd_seq;
+    st = left == 0 ? OrdSt::Done : OrdSt::Part;
+    return true;
+  }
+
+  bool arm(uint64_t cmd_seq, int64_t need, HoldHint& out) {
+    out = HoldHint{};
+    if (st != OrdSt::Pend || cmd_seq < seq) return false;
+    seq = cmd_seq;
+    st = OrdSt::Live;
+    out.freeze = need;
+    return true;
+  }
+};
+```
+
+```cpp
+struct CashRow {
+  uint64_t acct{0};
+  int64_t free{0};
+  int64_t held{0};
+};
+
+struct CashDesk {
+  static constexpr int M = 8;
+  CashRow base[M]{};
+  CashRow work[M]{};
+  int n{0};
+
+  int find(uint64_t acct) const {
+    for (int i = 0; i < n; ++i)
+      if (work[i].acct == acct) return i;
+    return -1;
+  }
+
+  bool load(const CashRow* src, int m) {
+    if (m > M) return false;
+    n = m;
+    for (int i = 0; i < n; ++i) {
+      base[i] = src[i];
+      work[i] = src[i];
+    }
+    return true;
+  }
+
+  bool freeze(uint64_t acct, int64_t qty) {
+    int i = find(acct);
+    if (i < 0 || qty > work[i].free) return false;
+    work[i].free -= qty;
+    work[i].held += qty;
+    return true;
+  }
+
+  bool release(uint64_t acct, int64_t qty) {
+    int i = find(acct);
+    if (i < 0 || qty > work[i].held) return false;
+    work[i].held -= qty;
+    work[i].free += qty;
+    return true;
+  }
+
+  bool settle(uint64_t pay, uint64_t get, int64_t quote, int64_t base_qty) {
+    int a = find(pay), b = find(get);
+    if (a < 0 || b < 0) return false;
+    if (quote > work[a].held) return false;
+    work[a].held -= quote;
+    work[b].free += quote;
+    work[a].free += base_qty;
+    work[b].free -= base_qty;
+    return true;
+  }
+
+  int dump_changed(CashRow* out, int cap) const {
+    int w = 0;
+    for (int i = 0; i < n; ++i) {
+      if (work[i].free == base[i].free && work[i].held == base[i].held) continue;
+      if (w >= cap) return -1;
+      out[w++] = work[i];
+    }
+    return w;
+  }
+};
+```
+
+```cpp
+struct FillBit {
+  uint64_t taker{0};
+  uint64_t maker{0};
+  int64_t qty{0};
+  int64_t px{0};
+  int64_t take_fee{0};
+  int64_t make_fee{0};
+};
+
+bool run_place(SpotTicket& taker, SpotTicket& maker, CashDesk& desk,
+               uint64_t taker_acct, uint64_t maker_acct, int64_t freeze_need,
+               const FillBit* fills, int nf, uint64_t seq0) {
+  HoldHint h{};
+  if (!taker.arm(seq0, freeze_need, h)) return false;
+  if (!desk.freeze(taker_acct, h.freeze)) return false;
+  for (int i = 0; i < nf; ++i) {
+    const FillBit& f = fills[i];
+    HoldHint th{};
+    if (!taker.apply_take(seq0 + 1 + static_cast<uint64_t>(i), f.qty, f.take_fee, th))
+      return false;
+    if (!maker.apply_make(seq0 + 1 + static_cast<uint64_t>(i), f.qty, f.make_fee))
+      return false;
+    int64_t quote = f.qty * f.px;
+    if (!desk.settle(taker_acct, maker_acct, quote, f.qty)) return false;
+    if (th.release > 0 && !desk.release(taker_acct, th.release)) return false;
+  }
+  return true;
+}
 ```
 
 ## 业务逻辑设计-计算

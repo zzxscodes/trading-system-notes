@@ -139,6 +139,7 @@
   - [51. Short stock size is rebuilt from the liability tape, and the special pool stays separate](#51-short-stock-size-is-rebuilt-from-the-liability-tape-and-the-special-pool-stays-separate)
   - [52. Past the auction deadline, the cached gap becomes one estimated fill](#52-past-the-auction-deadline-the-cached-gap-becomes-one-estimated-fill)
   - [53. One decode for many strategies; journal cash before the send](#53-one-decode-for-many-strategies-journal-cash-before-the-send)
+  - [54. One-process place-match-settle; the order emits cash ops](#54-one-process-place-match-settle-the-order-emits-cash-ops)
 - [Business logic design-calculation](#business-logic-design-calculation)
   - [1. Log return (percent asymmetry)](#1-log-return-percent-asymmetry)
   - [2. Changes in state of market trends and volatility](#2-changes-in-state-of-market-trends-and-volatility)
@@ -18910,6 +18911,8 @@ struct SlotGate {
 ```
 
 ### 49. High-quality articles on system design
+[https://mp.weixin.qq.com/s/VxrT2luuXSuhCP0JcewSLA](https://mp.weixin.qq.com/s/VxrT2luuXSuhCP0JcewSLA)
+
 [https://mp.weixin.qq.com/s/9OH1RA8POFidgQnvape6fQ](https://mp.weixin.qq.com/s/9OH1RA8POFidgQnvape6fQ)
 
 [https://mp.weixin.qq.com/s/PuG4ZFVZ-7hijS4Db8Z5jQ](https://mp.weixin.qq.com/s/PuG4ZFVZ-7hijS4Db8Z5jQ)
@@ -41602,6 +41605,177 @@ struct CashGate {
     return true;
   }
 };
+```
+
+### 54. One-process place-match-settle; the order emits cash ops
+
+In a spot matcher, place, freeze, match, settle, and release are one business path. Splitting them across processes and a message bus adds checks, retries, and reconciles on every hop, burns match latency on the network, and can leave “book filled, ledger unset” mid-states. Keep one process and a fixed step list: build the ticket, freeze, advance taker and maker, settle each print, release what remains on a terminal state. Any step failure rolls the whole place back. Inside the process, function calls hand off work; messages do not drive the main path.
+
+Order fields stay private. Callers only send business commands: arm, fill as taker, fill as maker, amend, cancel. The ticket itself cuts remaining size, enforces a fee cap, picks the next state, and emits freeze, release, or hold-adjust amounts; it never touches a balance object. The orchestrator applies those amounts on a cash workspace. Done, cancelled, and rejected are terminal; later commands fail. A command sequence older than the ticket’s accepted sequence is dropped so a stale command cannot overwrite newer state.
+
+Immediate-or-cancel: zero fill becomes rejected; a partial fill cancels the rest. Good-till-cancel: a partial fill stays partially filled and may rest; zero fill stays live. A maker partial fill only becomes partially filled. State rules live in the ticket; the orchestrator only chooses taker fill versus maker fill.
+
+The cash workspace loads participant snapshots first. Freeze, settle, and release mutate the working copy; at the end only rows that changed against the snapshot are emitted. The same account may move many times in one match without reloading. The entry shell checks parameters and preconditions, loads snapshots, runs the orchestrator, and packs before/after pairs; replay events may be exported from the diff and do not drive the main path.
+
+```cpp
+enum class OrdSt : uint8_t { Pend, Live, Part, Done, Drop, Deny };
+enum class TifKind : uint8_t { Day, Ioc };
+
+struct HoldHint {
+  int64_t freeze{0};
+  int64_t release{0};
+  int64_t adjust{0};
+};
+
+struct SpotTicket {
+  uint64_t seq{0};
+  int64_t left{0};
+  int64_t fee_cap{0};
+  int64_t fee_used{0};
+  OrdSt st{OrdSt::Pend};
+  TifKind tif{TifKind::Day};
+
+  bool apply_take(uint64_t cmd_seq, int64_t fill, int64_t fee, HoldHint& out) {
+    out = HoldHint{};
+    if (st == OrdSt::Done || st == OrdSt::Drop || st == OrdSt::Deny) return false;
+    if (cmd_seq < seq) return false;
+    if (fill > left || fee_used + fee > fee_cap) return false;
+    left -= fill;
+    fee_used += fee;
+    seq = cmd_seq;
+    if (left == 0) {
+      st = OrdSt::Done;
+      out.release = fee_cap - fee_used;
+      return true;
+    }
+    if (tif == TifKind::Ioc) {
+      st = OrdSt::Drop;
+      out.release = fee_cap - fee_used;
+      return true;
+    }
+    st = OrdSt::Part;
+    return true;
+  }
+
+  bool apply_make(uint64_t cmd_seq, int64_t fill, int64_t fee) {
+    if (st == OrdSt::Done || st == OrdSt::Drop || st == OrdSt::Deny) return false;
+    if (cmd_seq < seq) return false;
+    if (fill > left || fee_used + fee > fee_cap) return false;
+    left -= fill;
+    fee_used += fee;
+    seq = cmd_seq;
+    st = left == 0 ? OrdSt::Done : OrdSt::Part;
+    return true;
+  }
+
+  bool arm(uint64_t cmd_seq, int64_t need, HoldHint& out) {
+    out = HoldHint{};
+    if (st != OrdSt::Pend || cmd_seq < seq) return false;
+    seq = cmd_seq;
+    st = OrdSt::Live;
+    out.freeze = need;
+    return true;
+  }
+};
+```
+
+```cpp
+struct CashRow {
+  uint64_t acct{0};
+  int64_t free{0};
+  int64_t held{0};
+};
+
+struct CashDesk {
+  static constexpr int M = 8;
+  CashRow base[M]{};
+  CashRow work[M]{};
+  int n{0};
+
+  int find(uint64_t acct) const {
+    for (int i = 0; i < n; ++i)
+      if (work[i].acct == acct) return i;
+    return -1;
+  }
+
+  bool load(const CashRow* src, int m) {
+    if (m > M) return false;
+    n = m;
+    for (int i = 0; i < n; ++i) {
+      base[i] = src[i];
+      work[i] = src[i];
+    }
+    return true;
+  }
+
+  bool freeze(uint64_t acct, int64_t qty) {
+    int i = find(acct);
+    if (i < 0 || qty > work[i].free) return false;
+    work[i].free -= qty;
+    work[i].held += qty;
+    return true;
+  }
+
+  bool release(uint64_t acct, int64_t qty) {
+    int i = find(acct);
+    if (i < 0 || qty > work[i].held) return false;
+    work[i].held -= qty;
+    work[i].free += qty;
+    return true;
+  }
+
+  bool settle(uint64_t pay, uint64_t get, int64_t quote, int64_t base_qty) {
+    int a = find(pay), b = find(get);
+    if (a < 0 || b < 0) return false;
+    if (quote > work[a].held) return false;
+    work[a].held -= quote;
+    work[b].free += quote;
+    work[a].free += base_qty;
+    work[b].free -= base_qty;
+    return true;
+  }
+
+  int dump_changed(CashRow* out, int cap) const {
+    int w = 0;
+    for (int i = 0; i < n; ++i) {
+      if (work[i].free == base[i].free && work[i].held == base[i].held) continue;
+      if (w >= cap) return -1;
+      out[w++] = work[i];
+    }
+    return w;
+  }
+};
+```
+
+```cpp
+struct FillBit {
+  uint64_t taker{0};
+  uint64_t maker{0};
+  int64_t qty{0};
+  int64_t px{0};
+  int64_t take_fee{0};
+  int64_t make_fee{0};
+};
+
+bool run_place(SpotTicket& taker, SpotTicket& maker, CashDesk& desk,
+               uint64_t taker_acct, uint64_t maker_acct, int64_t freeze_need,
+               const FillBit* fills, int nf, uint64_t seq0) {
+  HoldHint h{};
+  if (!taker.arm(seq0, freeze_need, h)) return false;
+  if (!desk.freeze(taker_acct, h.freeze)) return false;
+  for (int i = 0; i < nf; ++i) {
+    const FillBit& f = fills[i];
+    HoldHint th{};
+    if (!taker.apply_take(seq0 + 1 + static_cast<uint64_t>(i), f.qty, f.take_fee, th))
+      return false;
+    if (!maker.apply_make(seq0 + 1 + static_cast<uint64_t>(i), f.qty, f.make_fee))
+      return false;
+    int64_t quote = f.qty * f.px;
+    if (!desk.settle(taker_acct, maker_acct, quote, f.qty)) return false;
+    if (th.release > 0 && !desk.release(taker_acct, th.release)) return false;
+  }
+  return true;
+}
 ```
 
 ## Business logic design-calculation
