@@ -55,7 +55,8 @@ English version：[https://github.com/zzxscodes/trading-system-notes/blob/main/t
   - [46. 单线程与多级流水线：服务时间相对发包间隔](#46-单线程与多级流水线服务时间相对发包间隔)
   - [47. 编译期类型态：非法订单迁移在类型上不可达](#47-编译期类型态非法订单迁移在类型上不可达)
   - [48. 策略热路径本地报价所有权](#48-策略热路径本地报价所有权)
-  - [49. 系统设计优质文章](#49-系统设计优质文章)
+  - [49. 共享状态高频写在分片内按单序列执行](#49-共享状态高频写在分片内按单序列执行)
+  - [50. 系统设计优质文章](#50-系统设计优质文章)
 - [常见性能瓶颈与优化方向](#常见性能瓶颈与优化方向)
   - [1. roofline model](#1-roofline-model)
     - [Memory Bound优化](#memory-bound优化)
@@ -18880,7 +18881,71 @@ struct SlotGate {
 };
 ```
 
-### 49. 系统设计优质文章
+### 49. 共享状态高频写在分片内按单序列执行
+
+同一账户余额、同一合约订单簿、同一序号被很多线程同时改时，比较交换失败就重试，版本对不上就回滚，互斥锁持有久了等待队列会拉长，多版本写最终也要排进同一条追加日志。冲突升高以后，这些路径实际都在排队，只是排队发生在应用、存储还是网络上不一样，尾延迟好不好估也不一样。
+
+分片内改成一条有序队列，请求按到达顺序处理。分片线程不抢锁，也不在热路径上重试。等待时间是队长乘单条处理时间。吞吐约等于单条处理时间的倒数再乘每批条数。
+
+账户号或合约号取模进分片。分片之间并行，分片内部仍一条序列。总账户、全局配置、全局序号、全局限流拆不开，各自占一条序列。跨分片转账要补一笔或走两阶段提交，不能再按单线程线性一致来算。
+
+```cpp
+struct ShardQ {
+  static constexpr uint32_t N = 256;
+  uint64_t key[N]{};
+  int64_t delta[N]{};
+  uint32_t w{0};
+  uint32_t r{0};
+
+  bool push(uint64_t k, int64_t d) {
+    if (w - r >= N) return false;
+    uint32_t i = w & (N - 1);
+    key[i] = k;
+    delta[i] = d;
+    ++w;
+    return true;
+  }
+};
+
+struct CashCell {
+  int64_t bal{0};
+};
+
+uint32_t shard_of(uint64_t acct, uint32_t n) {
+  return static_cast<uint32_t>(acct & (n - 1));
+}
+
+bool apply_one(CashCell* cell, int64_t d) {
+  if (d < 0 && cell->bal < -d) return false;
+  cell->bal += d;
+  return true;
+}
+
+uint32_t drain(ShardQ& q, CashCell* book, uint32_t n_acct, uint32_t max_n) {
+  uint32_t done = 0;
+  while (done < max_n && q.r != q.w) {
+    uint32_t i = q.r & (ShardQ::N - 1);
+    uint64_t acct = q.key[i];
+    if (acct >= n_acct) { ++q.r; continue; }
+    if (!apply_one(&book[acct], q.delta[i])) break;
+    ++q.r;
+    ++done;
+  }
+  return done;
+}
+
+bool cas_add(std::atomic<int64_t>& cell, int64_t d, int tries) {
+  for (int t = 0; t < tries; ++t) {
+    int64_t cur = cell.load(std::memory_order_relaxed);
+    if (d < 0 && cur < -d) return false;
+    if (cell.compare_exchange_weak(cur, cur + d, std::memory_order_acq_rel))
+      return true;
+  }
+  return false;
+}
+```
+
+### 50. 系统设计优质文章
 [https://mp.weixin.qq.com/s/9OH1RA8POFidgQnvape6fQ](https://mp.weixin.qq.com/s/9OH1RA8POFidgQnvape6fQ)
 
 [https://mp.weixin.qq.com/s/PuG4ZFVZ-7hijS4Db8Z5jQ](https://mp.weixin.qq.com/s/PuG4ZFVZ-7hijS4Db8Z5jQ)
@@ -40369,6 +40434,23 @@ int shove_chain(Lane8* nodes, int head, int hops) {
         cur = nodes[cur].next;
     }
     return left;
+}
+```
+
+成交吃掉队首以后，最老那一槽清空。同一节点里其余还挂着的槽，先后号各减 1，号为 1 的仍是下一条要成交的。节点最多只有固定个槽，这一步耗时不随全场挂单变多。
+
+```cpp
+int64_t take_oldest(Lane8& n, int64_t want) {
+    int at = oldest_slot(n);
+    if (at < 0 || want <= 0) return 0;
+    int64_t q = n.qty[at] < want ? n.qty[at] : want;
+    n.qty[at] -= static_cast<int32_t>(q);
+    if (n.qty[at] > 0) return q;
+    n.pri[at] = 0;
+    for (int i = 0; i < Lane8::Cap; ++i) {
+        if (n.pri[i] > 1) --n.pri[i];
+    }
+    return q;
 }
 ```
 

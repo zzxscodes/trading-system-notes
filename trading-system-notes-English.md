@@ -55,7 +55,8 @@
   - [46. Single-thread vs multi-stage pipeline: service time versus packet spacing](#46-single-thread-vs-multi-stage-pipeline-service-time-versus-packet-spacing)
   - [47. Compile-time typestate: illegal ticket moves are unreachable by type](#47-compile-time-typestate-illegal-ticket-moves-are-unreachable-by-type)
   - [48. Local quote ownership on the strategy hot path](#48-local-quote-ownership-on-the-strategy-hot-path)
-  - [49. High-quality articles on system design](#49-high-quality-articles-on-system-design)
+  - [49. High-frequency writes to shared state run as one sequence inside a shard](#49-high-frequency-writes-to-shared-state-run-as-one-sequence-inside-a-shard)
+  - [50. High-quality articles on system design](#50-high-quality-articles-on-system-design)
 - [Common performance bottlenecks and optimization directions](#common-performance-bottlenecks-and-optimization-directions)
   - [1. roofline model](#1-roofline-model)
     - [Memory Bound optimization](#memory-bound-optimization)
@@ -18912,7 +18913,71 @@ struct SlotGate {
 };
 ```
 
-### 49. High-quality articles on system design
+### 49. High-frequency writes to shared state run as one sequence inside a shard
+
+When many threads rewrite one account balance, one instrument book, or one sequence number, compare-and-swap fails and retries, a mismatched version rolls back, a long-held mutex grows a wait queue, and multi-version writes still append to one log. Under rising conflict those paths are already queuing. They differ mainly in whether the queue sits in the application, the store, or the network, and in how hard the tail delay is to bound.
+
+Give each shard one ordered queue and handle requests in arrival order. The shard thread does not take a lock and does not retry on the hot path. Wait time is queue length times per-item work. Throughput is about the reciprocal of per-item work times the batch size.
+
+Accounts or instruments hash into shards. Shards run in parallel; inside a shard the sequence stays one. A total cash account, global config, global sequence, and global rate limit do not split and each keeps its own sequence. A transfer across shards needs a compensating write or two-phase commit and is no longer linear on a single thread.
+
+```cpp
+struct ShardQ {
+  static constexpr uint32_t N = 256;
+  uint64_t key[N]{};
+  int64_t delta[N]{};
+  uint32_t w{0};
+  uint32_t r{0};
+
+  bool push(uint64_t k, int64_t d) {
+    if (w - r >= N) return false;
+    uint32_t i = w & (N - 1);
+    key[i] = k;
+    delta[i] = d;
+    ++w;
+    return true;
+  }
+};
+
+struct CashCell {
+  int64_t bal{0};
+};
+
+uint32_t shard_of(uint64_t acct, uint32_t n) {
+  return static_cast<uint32_t>(acct & (n - 1));
+}
+
+bool apply_one(CashCell* cell, int64_t d) {
+  if (d < 0 && cell->bal < -d) return false;
+  cell->bal += d;
+  return true;
+}
+
+uint32_t drain(ShardQ& q, CashCell* book, uint32_t n_acct, uint32_t max_n) {
+  uint32_t done = 0;
+  while (done < max_n && q.r != q.w) {
+    uint32_t i = q.r & (ShardQ::N - 1);
+    uint64_t acct = q.key[i];
+    if (acct >= n_acct) { ++q.r; continue; }
+    if (!apply_one(&book[acct], q.delta[i])) break;
+    ++q.r;
+    ++done;
+  }
+  return done;
+}
+
+bool cas_add(std::atomic<int64_t>& cell, int64_t d, int tries) {
+  for (int t = 0; t < tries; ++t) {
+    int64_t cur = cell.load(std::memory_order_relaxed);
+    if (d < 0 && cur < -d) return false;
+    if (cell.compare_exchange_weak(cur, cur + d, std::memory_order_acq_rel))
+      return true;
+  }
+  return false;
+}
+```
+
+### 50. High-quality articles on system design
 [https://mp.weixin.qq.com/s/9OH1RA8POFidgQnvape6fQ](https://mp.weixin.qq.com/s/9OH1RA8POFidgQnvape6fQ)
 
 [https://mp.weixin.qq.com/s/PuG4ZFVZ-7hijS4Db8Z5jQ](https://mp.weixin.qq.com/s/PuG4ZFVZ-7hijS4Db8Z5jQ)
@@ -40379,6 +40444,23 @@ int shove_chain(Lane8* nodes, int head, int hops) {
         cur = nodes[cur].next;
     }
     return left;
+}
+```
+
+After a fill takes the front of the queue, the oldest slot is cleared. Every other resting slot in that node drops its rank by one, and the next fill still takes the slot whose rank is 1. The node has a fixed number of slots, so this step does not grow with the size of the whole book.
+
+```cpp
+int64_t take_oldest(Lane8& n, int64_t want) {
+    int at = oldest_slot(n);
+    if (at < 0 || want <= 0) return 0;
+    int64_t q = n.qty[at] < want ? n.qty[at] : want;
+    n.qty[at] -= static_cast<int32_t>(q);
+    if (n.qty[at] > 0) return q;
+    n.pri[at] = 0;
+    for (int i = 0; i < Lane8::Cap; ++i) {
+        if (n.pri[i] > 1) --n.pri[i];
+    }
+    return q;
 }
 ```
 
