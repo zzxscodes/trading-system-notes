@@ -143,6 +143,7 @@
   - [54. One-process place-match-settle; the order emits cash ops](#54-one-process-place-match-settle-the-order-emits-cash-ops)
   - [55. Compute the full change set first, and publish after the write succeeds](#55-compute-the-full-change-set-first-and-publish-after-the-write-succeeds)
   - [56. A trade lets matching and settlement sit on different shards](#56-a-trade-lets-matching-and-settlement-sit-on-different-shards)
+  - [57. Shard by product, aggregate on the shard, then merge on a joint node](#57-shard-by-product-aggregate-on-the-shard-then-merge-on-a-joint-node)
 - [Business logic design-calculation](#business-logic-design-calculation)
   - [1. Log return (percent asymmetry)](#1-log-return-percent-asymmetry)
   - [2. Changes in state of market trends and volatility](#2-changes-in-state-of-market-trends-and-volatility)
@@ -42045,6 +42046,68 @@ struct PrintRing {
     return true;
   }
 };
+```
+
+### 57. Shard by product, aggregate on the shard, then merge on a joint node
+
+Most volume in an asset-management trading stack sits on a few product lines. Cut by product or business line so the shard boundary matches the business boundary. The ingress sends each order to the shard for that product. A shard updates only its own positions and metrics. Cross-product position caps and drill-downs run on a joint node.
+
+Each shard first folds its own detail into numerator and denominator pieces, and sends only those intermediates to the joint node. The joint node adds and takes ratios. It does not pull full detail. Shared denominators such as total shares or total assets sit as a copy on every shard, kept on the same version. A ratio on the shard uses a local numerator and a local denominator.
+
+Metrics continue from the previous point in time. A new fill brings increments `da` and `db`. `(a+da)*(b+db)` is the old product `ab` plus `a*db`, `da*b`, and `da*db`. Only those three terms are recomputed.
+
+```cpp
+struct PieceRow {
+  uint32_t product{0};
+  int64_t hold{0};
+  int64_t num{0};
+  int64_t den{0};
+};
+
+struct DenCopy {
+  int64_t share_total{0};
+  uint64_t ver{0};
+};
+
+struct JointSum {
+  int64_t hold{0};
+  int64_t share_total{0};
+};
+
+bool pick_shard(uint32_t product, const uint32_t* table, uint32_t n, uint32_t& out) {
+  for (uint32_t i = 0; i < n; ++i) {
+    if (table[i] != product) continue;
+    out = i;
+    return true;
+  }
+  return false;
+}
+
+void add_fill(PieceRow& row, int64_t d_hold, int64_t d_num) {
+  row.hold += d_hold;
+  row.num += d_num;
+}
+
+int64_t ratio_bps(int64_t num, const DenCopy& den) {
+  if (den.share_total <= 0) return 0;
+  return num * 10000 / den.share_total;
+}
+
+JointSum merge_hold(const PieceRow* rows, uint32_t n, int64_t share_total) {
+  JointSum j{};
+  j.share_total = share_total;
+  for (uint32_t i = 0; i < n; ++i) j.hold += rows[i].hold;
+  return j;
+}
+
+bool over_limit(const JointSum& j, int64_t limit_bps) {
+  if (j.share_total <= 0) return false;
+  return j.hold * 10000 > j.share_total * limit_bps;
+}
+
+int64_t step_prod(int64_t a, int64_t b, int64_t da, int64_t db, int64_t ab) {
+  return ab + a * db + da * b + da * db;
+}
 ```
 
 ## Business logic design-calculation

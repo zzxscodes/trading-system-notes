@@ -143,6 +143,7 @@ English version：[https://github.com/zzxscodes/trading-system-notes/blob/main/t
   - [54. 下单撮合结算单程编排，订单只出资金指令](#54-下单撮合结算单程编排订单只出资金指令)
   - [55. 下单先算完全部变更，写入成功以后再发布](#55-下单先算完全部变更写入成功以后再发布)
   - [56. 成交把撮合和结算拆到不同分片](#56-成交把撮合和结算拆到不同分片)
+  - [57. 按产品分片，片内先汇总再在联合节点合并](#57-按产品分片片内先汇总再在联合节点合并)
 - [业务逻辑设计-计算](#业务逻辑设计-计算)
   - [1. 对数收益率(百分比非对称性)](#1-对数收益率百分比非对称性)
   - [2. 市场趋势和波动率的状态变化](#2-市场趋势和波动率的状态变化)
@@ -42037,6 +42038,68 @@ struct PrintRing {
     return true;
   }
 };
+```
+
+### 57. 按产品分片，片内先汇总再在联合节点合并
+
+资管交易的量多半落在少数产品条线上。按产品或业务线切开，分片边界和业务边界对齐。入口按产品把报单送到对应分片。分片只改本片持仓和本片指标。跨产品合计持仓占比、穿透汇总，放到联合节点上做。
+
+分片先在本地把明细收成分子、分母部件，只把中间结果送给联合节点。联合节点做相加和占比，不拉全量明细。总股本、总资产这类各指标共用的分母，在每个分片各留一份，版本对齐。片内算占比时分子分母都在本地。
+
+指标在上一时点结果上续算。新成交带来增量 `da`、`db` 时，`(a+da)*(b+db)` 等于旧结果 `ab` 加上 `a*db`、`da*b`、`da*db`，只补这三项。
+
+```cpp
+struct PieceRow {
+  uint32_t product{0};
+  int64_t hold{0};
+  int64_t num{0};
+  int64_t den{0};
+};
+
+struct DenCopy {
+  int64_t share_total{0};
+  uint64_t ver{0};
+};
+
+struct JointSum {
+  int64_t hold{0};
+  int64_t share_total{0};
+};
+
+bool pick_shard(uint32_t product, const uint32_t* table, uint32_t n, uint32_t& out) {
+  for (uint32_t i = 0; i < n; ++i) {
+    if (table[i] != product) continue;
+    out = i;
+    return true;
+  }
+  return false;
+}
+
+void add_fill(PieceRow& row, int64_t d_hold, int64_t d_num) {
+  row.hold += d_hold;
+  row.num += d_num;
+}
+
+int64_t ratio_bps(int64_t num, const DenCopy& den) {
+  if (den.share_total <= 0) return 0;
+  return num * 10000 / den.share_total;
+}
+
+JointSum merge_hold(const PieceRow* rows, uint32_t n, int64_t share_total) {
+  JointSum j{};
+  j.share_total = share_total;
+  for (uint32_t i = 0; i < n; ++i) j.hold += rows[i].hold;
+  return j;
+}
+
+bool over_limit(const JointSum& j, int64_t limit_bps) {
+  if (j.share_total <= 0) return false;
+  return j.hold * 10000 > j.share_total * limit_bps;
+}
+
+int64_t step_prod(int64_t a, int64_t b, int64_t da, int64_t db, int64_t ab) {
+  return ab + a * db + da * b + da * db;
+}
 ```
 
 ## 业务逻辑设计-计算
