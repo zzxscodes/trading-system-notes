@@ -9455,6 +9455,52 @@ inline uint32_t lots_of(uint32_t notional, DivConst lot) {
 }
 ```
 
+**（6）有符号 32 位除法：空闲位与无分支热路径**
+
+撮合、风控、均价、保证金换算里，被除数常是有符号 32 位。除数为编译期常量时，编译器把除法折成乘法加移位。理想乘数偶尔要 33 位，装不进有符号 32 位。常见做法是把乘数减掉 `2^32` 存成负数，乘完再把被除数加回去，再按向零取整对负数补一步。依赖链上多出两步。3 到 1000 里去掉 2 的幂，大约三分之一的除数会走到这条加回路径。
+
+64 位寄存器上有一位空闲。有符号 32 位被除数绝对值不超过 `2^31`，那个 33 位乘数小于 `2^32`，二者乘积绝对值小于 `2^63`，装进有符号 64 位。乘数按无符号 32 位直接参与 64 位乘法，乘完右移，再按算术右移补向零。加回被除数那一步可以去掉。关键路径从六步依赖落到四步。乘数本来就装得进有符号 32 位时，编译器本来没有加回，手写替换往往不更快，有的核上还会多一次符号扩展，以实测为准。
+
+除数开盘才定、盘中反复除时，先算好约等于 `2^64 / |d|` 的乘数。旧写法把乘数当无符号用，遇到负被除数再分支修正，正负号随机时误预测可到三成以上，热路径会慢过一条硬件除法。乘数改成有符号 64 位，乘积取高半，向零与除数符号用算术右移和异或折进结果，热路径上不再按被除数符号分支。价格、数量、费用分摊改写除法前，先固定向零还是向负无穷，再拿正负边界和最小单位对账。
+
+```cpp
+#include <cstdint>
+#include <bit>
+
+template <int32_t D>
+int32_t quot_i32_c(int32_t x) {
+  static_assert(D > 1 && (D & (D - 1)) != 0);
+  constexpr int s = 31 + std::bit_width(uint32_t(D - 1));
+  constexpr int64_t c = (int64_t(1) << s) / D + 1;
+  return int32_t((int64_t(x) * c) >> s) - (x >> 31);
+}
+
+struct QuotPack {
+  int64_t mul{0};
+  int32_t d{0};
+};
+
+QuotPack make_quot(int32_t d) {
+  QuotPack p{};
+  p.d = d;
+  const uint32_t ad = uint32_t(d < 0 ? -d : d);
+  p.mul = int64_t((__uint128_t(1) << 64) / ad);
+  return p;
+}
+
+int64_t hi_s64(int64_t a, int64_t b) {
+  return int64_t((__int128(a) * __int128(b)) >> 64);
+}
+
+int32_t quot_i32_r(int32_t a, QuotPack p) {
+  const int64_t m = p.mul;
+  const int64_t hi = hi_s64(a, m) + (a & (m >> 63));
+  const int32_t q = int32_t(hi) - (a >> 31);
+  const int32_t sd = p.d >> 31;
+  return (q ^ sd) - sd;
+}
+```
+
 **三、低效操作规避：针对取余（`%`）与类型转换**
 
 

@@ -9459,6 +9459,52 @@ inline uint32_t lots_of(uint32_t notional, DivConst lot) {
 }
 ```
 
+**(6) Signed 32-bit division: the free bit and a branchless hot path**
+
+Matching, risk, average price, and margin conversion often divide a signed 32-bit value. When the divisor is a compile-time constant, the compiler turns the divide into a multiply and a shift. The ideal multiplier sometimes needs 33 bits and does not fit in a signed 32-bit word. A common rewrite subtracts `2^32` from the multiplier, stores a negative constant, adds the dividend back after the multiply, then adjusts negatives for truncation toward zero. That adds two steps on the dependency chain. Among divisors from 3 to 1000, excluding powers of two, about one third take this add-back path.
+
+A 64-bit register leaves one free bit. A signed 32-bit dividend has absolute value at most `2^31`. That 33-bit multiplier is still below `2^32`. Their product fits in a signed 64-bit word. Keep the full multiplier as an unsigned 32-bit constant, multiply in 64 bits, shift, and fix truncation toward zero with an arithmetic right shift. The add-back of the dividend drops out. The critical path shrinks from six dependent steps to four. When the multiplier already fits in a signed 32-bit word, the compiler never needed the add-back, so a hand rewrite is often no faster and on some cores pays an extra sign extend. Measure before replacing.
+
+When the divisor is fixed at the open and reused all day, precompute a multiplier near `2^64 / |d|`. Treating that multiplier as unsigned and branching on a negative dividend can mispredict more than thirty percent of the time under random signs, and the hot path can lose to a hardware divide. Keep the multiplier signed, take the high half of the product, and fold truncation and the divisor sign with arithmetic shifts and xor. The hot path no longer branches on the dividend sign. Before rewriting division for price, size, or fee split, fix whether truncation is toward zero or toward negative infinity, then check both signs and the minimum tick against the ledger.
+
+```cpp
+#include <cstdint>
+#include <bit>
+
+template <int32_t D>
+int32_t quot_i32_c(int32_t x) {
+  static_assert(D > 1 && (D & (D - 1)) != 0);
+  constexpr int s = 31 + std::bit_width(uint32_t(D - 1));
+  constexpr int64_t c = (int64_t(1) << s) / D + 1;
+  return int32_t((int64_t(x) * c) >> s) - (x >> 31);
+}
+
+struct QuotPack {
+  int64_t mul{0};
+  int32_t d{0};
+};
+
+QuotPack make_quot(int32_t d) {
+  QuotPack p{};
+  p.d = d;
+  const uint32_t ad = uint32_t(d < 0 ? -d : d);
+  p.mul = int64_t((__uint128_t(1) << 64) / ad);
+  return p;
+}
+
+int64_t hi_s64(int64_t a, int64_t b) {
+  return int64_t((__int128(a) * __int128(b)) >> 64);
+}
+
+int32_t quot_i32_r(int32_t a, QuotPack p) {
+  const int64_t m = p.mul;
+  const int64_t hi = hi_s64(a, m) + (a & (m >> 63));
+  const int32_t q = int32_t(hi) - (a >> 31);
+  const int32_t sd = p.d >> 31;
+  return (q ^ sd) - sd;
+}
+```
+
 **3. Avoid inefficient remainder (`%`) with implicit conversions**
 
 ---
