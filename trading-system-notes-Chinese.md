@@ -18768,6 +18768,95 @@ struct PlanTape {
 };
 ```
 
+多市场共用同一套因子实现时，开盘给每个市场各装一张步骤表。某市场监管用的重特征只写进该市场的表。事件落到市场 A，只跑 A 的表；市场 B 的长窗与比率不进这条链。
+
+因子状态在启动时按节点上界一次开成定长槽。脉冲与求值只改槽里的字段。步骤表按事件编号索引；编号由业务库在装载时登记，盘口、成交、定时滴答、风控告警共用同一套入口。引擎只按编号取表执行，不解释事件的业务含义。
+
+```cpp
+struct PulseIn {
+  double bid{0};
+  double ask{0};
+  double px{0};
+};
+
+struct CellPack {
+  double bid{0};
+  double ask{0};
+  double mid{0};
+  double gap_sum{0};
+  uint32_t gap_n{0};
+  double heavy{0};
+};
+
+using StepFn = void (*)(CellPack&, const PulseIn&);
+
+void push_book(CellPack& c, const PulseIn& in) {
+  c.bid = in.bid;
+  c.ask = in.ask;
+}
+
+void pull_mid(CellPack& c, const PulseIn&) {
+  c.mid = (c.bid + c.ask) * 0.5;
+}
+
+void push_gap(CellPack& c, const PulseIn& in) {
+  c.gap_sum += in.px - c.mid;
+  ++c.gap_n;
+}
+
+void pull_heavy(CellPack& c, const PulseIn&) {
+  c.heavy = c.gap_n ? c.gap_sum / static_cast<double>(c.gap_n) : 0.0;
+}
+
+struct EvPlan {
+  static constexpr int K = 6;
+  StepFn fn[K]{};
+  uint8_t n{0};
+};
+
+struct EvMap {
+  static constexpr int MAX = 16;
+  EvPlan slot[MAX]{};
+  uint8_t used{0};
+
+  uint8_t bind(const EvPlan& p) {
+    const uint8_t id = used++;
+    slot[id] = p;
+    return id;
+  }
+
+  void fire(uint8_t id, CellPack& c, const PulseIn& in) const {
+    const EvPlan& p = slot[id];
+    for (uint8_t i = 0; i < p.n; ++i) p.fn[i](c, in);
+  }
+};
+
+struct VenueRun {
+  CellPack pack{};
+  EvMap map{};
+  uint8_t book_id{0};
+  uint8_t print_id{0};
+
+  void wire_light() {
+    book_id = map.bind(EvPlan{{push_book}, 1});
+    print_id = map.bind(EvPlan{{pull_mid, push_gap}, 2});
+  }
+
+  void wire_heavy() {
+    book_id = map.bind(EvPlan{{push_book}, 1});
+    print_id = map.bind(EvPlan{{pull_mid, push_gap, pull_heavy}, 3});
+  }
+
+  void on_book(double bid, double ask) {
+    map.fire(book_id, pack, PulseIn{bid, ask, 0});
+  }
+
+  void on_print(double px) {
+    map.fire(print_id, pack, PulseIn{0, 0, px});
+  }
+};
+```
+
 ### 46. 单线程与多级流水线：服务时间相对发包间隔
 
 收包到发单这条链路有两种切法：整条放在一个核上顺序做完，或按解码、簿、策略切成几级，级间用队列交接。

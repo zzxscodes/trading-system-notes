@@ -18800,6 +18800,95 @@ struct PlanTape {
 };
 ```
 
+When many venues share one factor library, each venue loads its own step table at the open. A heavy regulatory feature for one venue stays on that venue's table. An event on venue A runs only A's table; long windows and ratios owned by venue B stay off that path.
+
+Factor state is a fixed cell bank sized once at startup to the node bound. Pulse and refresh only write fields in those cells. Step tables are indexed by an event id registered at load time. Book, print, timer tick, and risk alert share the same entry. The engine fetches a table by id and runs it. It does not interpret what the event means in the market.
+
+```cpp
+struct PulseIn {
+  double bid{0};
+  double ask{0};
+  double px{0};
+};
+
+struct CellPack {
+  double bid{0};
+  double ask{0};
+  double mid{0};
+  double gap_sum{0};
+  uint32_t gap_n{0};
+  double heavy{0};
+};
+
+using StepFn = void (*)(CellPack&, const PulseIn&);
+
+void push_book(CellPack& c, const PulseIn& in) {
+  c.bid = in.bid;
+  c.ask = in.ask;
+}
+
+void pull_mid(CellPack& c, const PulseIn&) {
+  c.mid = (c.bid + c.ask) * 0.5;
+}
+
+void push_gap(CellPack& c, const PulseIn& in) {
+  c.gap_sum += in.px - c.mid;
+  ++c.gap_n;
+}
+
+void pull_heavy(CellPack& c, const PulseIn&) {
+  c.heavy = c.gap_n ? c.gap_sum / static_cast<double>(c.gap_n) : 0.0;
+}
+
+struct EvPlan {
+  static constexpr int K = 6;
+  StepFn fn[K]{};
+  uint8_t n{0};
+};
+
+struct EvMap {
+  static constexpr int MAX = 16;
+  EvPlan slot[MAX]{};
+  uint8_t used{0};
+
+  uint8_t bind(const EvPlan& p) {
+    const uint8_t id = used++;
+    slot[id] = p;
+    return id;
+  }
+
+  void fire(uint8_t id, CellPack& c, const PulseIn& in) const {
+    const EvPlan& p = slot[id];
+    for (uint8_t i = 0; i < p.n; ++i) p.fn[i](c, in);
+  }
+};
+
+struct VenueRun {
+  CellPack pack{};
+  EvMap map{};
+  uint8_t book_id{0};
+  uint8_t print_id{0};
+
+  void wire_light() {
+    book_id = map.bind(EvPlan{{push_book}, 1});
+    print_id = map.bind(EvPlan{{pull_mid, push_gap}, 2});
+  }
+
+  void wire_heavy() {
+    book_id = map.bind(EvPlan{{push_book}, 1});
+    print_id = map.bind(EvPlan{{pull_mid, push_gap, pull_heavy}, 3});
+  }
+
+  void on_book(double bid, double ask) {
+    map.fire(book_id, pack, PulseIn{bid, ask, 0});
+  }
+
+  void on_print(double px) {
+    map.fire(print_id, pack, PulseIn{0, 0, px});
+  }
+};
+```
+
 ### 46. Single-thread vs multi-stage pipeline: service time versus packet spacing
 
 The path from packet read to order send can stay on one core end to end, or split into stages such as decode, book, and strategy with a queue between stages.
