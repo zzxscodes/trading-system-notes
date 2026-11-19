@@ -26776,6 +26776,74 @@ bool replay_after_timeout(uint64_t cmd_id) {
 }
 ```
 
+节点之间复制的是已定序的命令。定序器只写 `lsn` 和逻辑时间，不跑业务规则。各节点用同一份前置状态和同一套规则算出变更，再写成事件。事件在各节点本地推出。落盘、重放、发布读的是这批已经定下来的事件，不再改业务结果。
+
+逻辑时间可以看定序时的墙钟，但必须大于上一条日志。重放只用日志里记下的值。订单的创建时刻、更新时刻取命令上的逻辑时间。投影里若先写过本地时钟，装完命令字段后改成这条逻辑时间。
+
+一条命令可以开出多个实体，例如父单带两笔条件子单。先写父事件，再按输入数组顺序写子事件。它们共用同一 `lsn` 和逻辑时间，用 `lsn`、实体类型、实体号三者一起识别。`prev_lsn` 记同一实体上一版本的 `lsn`，新建实体写 0。投影顺序写在规则里。
+
+```cpp
+struct PrepView {
+  int64_t cash{0};
+  uint64_t ent_prev[8]{};
+};
+
+struct Intent {
+  uint64_t lsn{0};
+  int64_t stamp_us{0};
+  uint64_t parent_id{0};
+  uint64_t child_id[2]{};
+  uint8_t child_n{0};
+  int64_t px{0};
+  int64_t qty{0};
+};
+
+struct FactEv {
+  uint64_t lsn{0};
+  int64_t stamp_us{0};
+  uint64_t entity{0};
+  uint8_t kind{0};
+  uint64_t prev_lsn{0};
+  uint64_t parent{0};
+};
+
+struct DiffPack {
+  FactEv out[4]{};
+  uint8_t n{0};
+};
+
+int64_t next_stamp(int64_t prev, int64_t wall_us) {
+  return wall_us > prev ? wall_us : prev + 1;
+}
+
+bool open_bundle(const Intent& cmd, const PrepView& prep, DiffPack& d) {
+  if (cmd.qty <= 0) return false;
+  if (prep.cash < cmd.px * cmd.qty) return false;
+  d.n = 0;
+  d.out[d.n++] = FactEv{cmd.lsn, cmd.stamp_us, cmd.parent_id, 1, 0, 0};
+  for (uint8_t i = 0; i < cmd.child_n; ++i) {
+    d.out[d.n++] =
+        FactEv{cmd.lsn, cmd.stamp_us, cmd.child_id[i], 2, 0, cmd.parent_id};
+  }
+  return true;
+}
+
+void bind_meta(DiffPack& d, const Intent& cmd) {
+  for (uint8_t i = 0; i < d.n; ++i) {
+    d.out[i].lsn = cmd.lsn;
+    d.out[i].stamp_us = cmd.stamp_us;
+  }
+}
+
+FactEv bump_entity(uint64_t lsn, int64_t stamp_us, uint64_t entity,
+                   uint64_t prev_lsn) {
+  return FactEv{lsn, stamp_us, entity, 3, prev_lsn, 0};
+}
+
+bool same_key(const FactEv& a, const FactEv& b) {
+  return a.lsn == b.lsn && a.kind == b.kind && a.entity == b.entity;
+}
+```
 
 **风控按账户分片，撮合按合约分片，拒绝码留在命令上**
 

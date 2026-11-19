@@ -26788,6 +26788,74 @@ bool replay_after_timeout(uint64_t cmd_id) {
 }
 ```
 
+Nodes replicate sequenced commands. The sequencer writes an `lsn` and a logical time. It does not run business rules. Each node takes the same prior state and the same rules, computes the change set, then writes events. Events are produced locally on each node. Persist, replay, and publish read that decided batch. They do not revise the business result.
+
+Logical time may read the wall clock at sequencing time, but it must be greater than the previous log entry. Replay uses the value stored in the log. Create and update times on the order come from the command's logical time. If projection first wrote a local clock, replace it with this logical time after the command fields are bound.
+
+One command may open several entities, for example a parent with two conditional children. Write the parent event first, then the child events in input-array order. They share one `lsn` and one logical time, and are identified by `lsn`, entity kind, and entity id together. `prev_lsn` stores the prior version `lsn` of the same entity, and a new entity writes `0`. Projection order lives in the rule.
+
+```cpp
+struct PrepView {
+  int64_t cash{0};
+  uint64_t ent_prev[8]{};
+};
+
+struct Intent {
+  uint64_t lsn{0};
+  int64_t stamp_us{0};
+  uint64_t parent_id{0};
+  uint64_t child_id[2]{};
+  uint8_t child_n{0};
+  int64_t px{0};
+  int64_t qty{0};
+};
+
+struct FactEv {
+  uint64_t lsn{0};
+  int64_t stamp_us{0};
+  uint64_t entity{0};
+  uint8_t kind{0};
+  uint64_t prev_lsn{0};
+  uint64_t parent{0};
+};
+
+struct DiffPack {
+  FactEv out[4]{};
+  uint8_t n{0};
+};
+
+int64_t next_stamp(int64_t prev, int64_t wall_us) {
+  return wall_us > prev ? wall_us : prev + 1;
+}
+
+bool open_bundle(const Intent& cmd, const PrepView& prep, DiffPack& d) {
+  if (cmd.qty <= 0) return false;
+  if (prep.cash < cmd.px * cmd.qty) return false;
+  d.n = 0;
+  d.out[d.n++] = FactEv{cmd.lsn, cmd.stamp_us, cmd.parent_id, 1, 0, 0};
+  for (uint8_t i = 0; i < cmd.child_n; ++i) {
+    d.out[d.n++] =
+        FactEv{cmd.lsn, cmd.stamp_us, cmd.child_id[i], 2, 0, cmd.parent_id};
+  }
+  return true;
+}
+
+void bind_meta(DiffPack& d, const Intent& cmd) {
+  for (uint8_t i = 0; i < d.n; ++i) {
+    d.out[i].lsn = cmd.lsn;
+    d.out[i].stamp_us = cmd.stamp_us;
+  }
+}
+
+FactEv bump_entity(uint64_t lsn, int64_t stamp_us, uint64_t entity,
+                   uint64_t prev_lsn) {
+  return FactEv{lsn, stamp_us, entity, 3, prev_lsn, 0};
+}
+
+bool same_key(const FactEv& a, const FactEv& b) {
+  return a.lsn == b.lsn && a.kind == b.kind && a.entity == b.entity;
+}
+```
 
 **Risk shards by account, matching shards by symbol, and a reject code stays on the command**
 
