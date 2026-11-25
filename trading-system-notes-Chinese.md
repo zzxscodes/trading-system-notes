@@ -1747,6 +1747,30 @@ _ReadWriteBarrier();  // 编译器屏障
 3. **仅在必要时用强内存序**：若需“全局一致性”（如分布式系统的状态同步），才用`seq_cst`，且需评估性能代价；
 4. **避免“默认使用seq_cst”**：C++原子操作默认`seq_cst`，但90%的场景无需此强约束，手动指定弱内存序可大幅提升性能。
 
+比较交换有成功序和失败序两个参数。成功时才建立发布或获取关系，失败只说明当前值变了、本轮没有写进去，不需要 happens-before，失败序用 `relaxed` 即可。成功序仍按发布或获取来写。两个参数都写成默认顺序一致，失败重试也会多付屏障。
+
+```cpp
+struct ClaimRing {
+  alignas(64) std::atomic<uint32_t> head{0};
+  alignas(64) std::atomic<uint32_t> tail{0};
+  static constexpr uint32_t N = 1024;
+
+  bool claim_one(uint32_t& slot) {
+    uint32_t t = tail.load(std::memory_order_relaxed);
+    for (;;) {
+      const uint32_t h = head.load(std::memory_order_acquire);
+      if (((t + 1) & (N - 1)) == (h & (N - 1))) return false;
+      if (tail.compare_exchange_weak(t, t + 1,
+                                     std::memory_order_release,
+                                     std::memory_order_relaxed)) {
+        slot = t & (N - 1);
+        return true;
+      }
+    }
+  }
+};
+```
+
 **设备和核间用两套屏障**
 
 对设备可见的写，和只对另一个 CPU 核可见的写，不要共用同一种屏障。x86 上，提交描述符之后、敲门铃之前，用 `sfence` 把写合并缓冲排空，设备才能按顺序看见。读设备映射、或要对设备读和后续读做全序时，用 `lfence` 或 `mfence`。
@@ -17257,6 +17281,38 @@ struct InOrder {
 };
 ```
 
+旁路常见两条路。一条用预加载库拦截 `socket`、`send`、`recv`，业务仍写标准套接字，协议在用户态栈里走完，改动面小。一条丢掉套接字接口，线程直接轮询网卡描述符环，自己拆帧、组帧，路径更短、可控更强。交易热线程选定其中一条后就空转收包；核上占用接近满载是设计结果，不是调度异常。
+
+```cpp
+enum class Bypass : uint8_t { SockAccel, RingPoll };
+
+struct PathPick {
+  Bypass kind{Bypass::SockAccel};
+  bool opened{false};
+
+  bool open_sock(const char* lib) {
+    // 预加载加速库后，fd 仍走 send/recv
+    opened = (lib != nullptr && lib[0] != '\0');
+    kind = Bypass::SockAccel;
+    return opened;
+  }
+
+  bool open_ring(int ifindex) {
+    opened = ifindex >= 0;
+    kind = Bypass::RingPoll;
+    return opened;
+  }
+
+  int pull(uint8_t* dst, int cap) {
+    if (!opened || cap <= 0) return 0;
+    if (kind == Bypass::SockAccel) return sock_recv(dst, cap);
+    return ring_drain(dst, cap);
+  }
+
+  int sock_recv(uint8_t* dst, int cap);
+  int ring_drain(uint8_t* dst, int cap);
+};
+```
 
 预热走和实发同一条函数，用失败路径把发送压掉。把完成序号改成已提交序号减去环掩码，两者之差等于掩码，发送函数会认为队列已满。描述符照常写进下一槽，满判断失败，门铃不响，槽上的请求号再改回空闲。切穿映射临时指到一块普通内存，流式写不进网卡。函数返回后，完成序号和映射都改回去。在每个提交点加一个预热标志，实发路径会多一次判断；把队列伪装成已满，实发指令不用改。预热期间这条环不能同时真发，完成序号是临时改过的。
 
@@ -40750,7 +40806,46 @@ void on_new(Sess s, MatchCtx& cx, HotOrd* pool, int64_t px, int64_t qty, bool bu
 }
 ```
 
+连续交易里，部分合约在同一价位按剩余量比例分配，而不是严格按到达先后吃完再下一笔。主动量按各挂单剩余量占本档总量的份额切开，先向下取整。余数再按到达顺序补 1 手，补完为止。带做市保底标记的挂单，先拿到不少于保底份额与按比例份额里较大的那个，再把剩下的量分给其余挂单。比例路径和价格时间优先路径分开选，不要在同一热循环里用分支混跑。
 
+```cpp
+struct RestShare {
+  int64_t leaves{0};
+  uint8_t maker{0};
+  int64_t fill{0};
+};
+
+int64_t floor_share(int64_t take, int64_t part, int64_t whole) {
+  if (take <= 0 || part <= 0 || whole <= 0) return 0;
+  return take * part / whole;
+}
+
+int64_t split_pro_rata(RestShare* row, int n, int64_t take, int64_t floor_bps) {
+  if (n <= 0 || take <= 0) return 0;
+  int64_t whole = 0;
+  for (int i = 0; i < n; ++i) whole += row[i].leaves;
+  if (whole <= 0) return 0;
+
+  int64_t left = take;
+  for (int i = 0; i < n; ++i) {
+    int64_t q = floor_share(take, row[i].leaves, whole);
+    if (row[i].maker) {
+      const int64_t floor_q = floor_share(take, floor_bps, 10000);
+      if (q < floor_q) q = floor_q;
+      if (q > row[i].leaves) q = row[i].leaves;
+    }
+    if (q > left) q = left;
+    row[i].fill = q;
+    left -= q;
+  }
+  for (int i = 0; left > 0 && i < n; ++i) {
+    if (row[i].fill >= row[i].leaves) continue;
+    ++row[i].fill;
+    --left;
+  }
+  return take - left;
+}
+```
 
 **冰山单分开记显示量和真实量，整笔成交先看真实量**
 

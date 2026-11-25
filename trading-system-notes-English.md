@@ -1745,6 +1745,30 @@ _ReadWriteBarrier(); // Compiler barrier
 3. **Only use strong memory ordering when necessary**: Use it if you need "global consistency" (such as state synchronization of a distributed system)`seq_cst`, and the performance cost needs to be evaluated;
 4. **Avoid "use seq_cst by default"**: C++ atomic operations default`seq_cst`, but 90% of scenarios do not require this strong constraint. Manually specifying weak memory order can greatly improve performance.
 
+`compare_exchange_weak` takes a success order and a failure order. Only a successful write needs release or acquire. A failed attempt only learned that the current value moved; it did not publish, so the failure order can be `relaxed`. Putting sequential consistency on both sides still pays barriers on every failed retry.
+
+```cpp
+struct ClaimRing {
+  alignas(64) std::atomic<uint32_t> head{0};
+  alignas(64) std::atomic<uint32_t> tail{0};
+  static constexpr uint32_t N = 1024;
+
+  bool claim_one(uint32_t& slot) {
+    uint32_t t = tail.load(std::memory_order_relaxed);
+    for (;;) {
+      const uint32_t h = head.load(std::memory_order_acquire);
+      if (((t + 1) & (N - 1)) == (h & (N - 1))) return false;
+      if (tail.compare_exchange_weak(t, t + 1,
+                                     std::memory_order_release,
+                                     std::memory_order_relaxed)) {
+        slot = t & (N - 1);
+        return true;
+      }
+    }
+  }
+};
+```
+
 **Use two barrier families: device-facing and core-to-core**
 
 A store that must be visible to a device is not the same as a store that must be visible to another CPU core. On x86, after writing descriptors and before ringing a doorbell, `sfence` drains the write-combining buffers so the device sees the stores in order. When a device mapping must be ordered against later loads, use `lfence` or `mfence`.
@@ -17287,6 +17311,38 @@ struct InOrder {
 };
 ```
 
+Bypass usually takes one of two shapes. One path preloads a library that intercepts `socket`, `send`, and `recv`, so the application keeps the BSD socket API while the stack runs in user space, with a small code change. Another path drops the socket API; the thread polls NIC descriptor rings and parses frames itself, which is shorter and more controllable. Once a hot trading thread picks a path, it busy-polls for packets. Near-full core utilization is the design, not a scheduling fault.
+
+```cpp
+enum class Bypass : uint8_t { SockAccel, RingPoll };
+
+struct PathPick {
+  Bypass kind{Bypass::SockAccel};
+  bool opened{false};
+
+  bool open_sock(const char* lib) {
+    // After the accel library is preloaded, fds still use send/recv.
+    opened = (lib != nullptr && lib[0] != '\0');
+    kind = Bypass::SockAccel;
+    return opened;
+  }
+
+  bool open_ring(int ifindex) {
+    opened = ifindex >= 0;
+    kind = Bypass::RingPoll;
+    return opened;
+  }
+
+  int pull(uint8_t* dst, int cap) {
+    if (!opened || cap <= 0) return 0;
+    if (kind == Bypass::SockAccel) return sock_recv(dst, cap);
+    return ring_drain(dst, cap);
+  }
+
+  int sock_recv(uint8_t* dst, int cap);
+  int ring_drain(uint8_t* dst, int cap);
+};
+```
 
 A warm-up runs the same function as a real send and suppresses the transmit on the failure path. Set the completion index to the posted index minus the ring mask. The difference equals the mask, so the send function treats the queue as full. The descriptor is still written into the next slot, the full check fails, the doorbell is not rung, and the slot's request id is put back to free. The cut-through mapping is pointed at ordinary memory for the call, so the streaming stores never reach the NIC. Both values are restored when the function returns. A warm-up flag checked at every commit adds a branch to the real send. Making the queue look full leaves the real-send instructions alone. The ring must not transmit for real while this is in progress, because the completion index has been overwritten.
 
@@ -40760,7 +40816,46 @@ void on_new(Sess s, MatchCtx& cx, HotOrd* pool, int64_t px, int64_t qty, bool bu
 }
 ```
 
+On continuous trading, some contracts allocate at one price by resting size share instead of draining orders strictly by arrival time. The aggressor size is cut by each resting order's share of the level total, truncated toward zero. Leftover lots are given out one at a time in arrival order until gone. A resting order marked for a maker floor first receives the larger of that floor share and its pro-rata share, capped by its leaves; the remainder is split among the others. Pick the pro-rata path or the price-time path up front. Do not mix both with branches inside one hot loop.
 
+```cpp
+struct RestShare {
+  int64_t leaves{0};
+  uint8_t maker{0};
+  int64_t fill{0};
+};
+
+int64_t floor_share(int64_t take, int64_t part, int64_t whole) {
+  if (take <= 0 || part <= 0 || whole <= 0) return 0;
+  return take * part / whole;
+}
+
+int64_t split_pro_rata(RestShare* row, int n, int64_t take, int64_t floor_bps) {
+  if (n <= 0 || take <= 0) return 0;
+  int64_t whole = 0;
+  for (int i = 0; i < n; ++i) whole += row[i].leaves;
+  if (whole <= 0) return 0;
+
+  int64_t left = take;
+  for (int i = 0; i < n; ++i) {
+    int64_t q = floor_share(take, row[i].leaves, whole);
+    if (row[i].maker) {
+      const int64_t floor_q = floor_share(take, floor_bps, 10000);
+      if (q < floor_q) q = floor_q;
+      if (q > row[i].leaves) q = row[i].leaves;
+    }
+    if (q > left) q = left;
+    row[i].fill = q;
+    left -= q;
+  }
+  for (int i = 0; left > 0 && i < n; ++i) {
+    if (row[i].fill >= row[i].leaves) continue;
+    ++row[i].fill;
+    --left;
+  }
+  return take - left;
+}
+```
 
 **An iceberg keeps shown size apart from real size, and fill-or-kill checks the real size first**
 
