@@ -56,7 +56,8 @@
   - [47. Compile-time typestate: illegal ticket moves are unreachable by type](#47-compile-time-typestate-illegal-ticket-moves-are-unreachable-by-type)
   - [48. Local quote ownership on the strategy hot path](#48-local-quote-ownership-on-the-strategy-hot-path)
   - [49. High-frequency writes to shared state run as one sequence inside a shard](#49-high-frequency-writes-to-shared-state-run-as-one-sequence-inside-a-shard)
-  - [50. High-quality articles on system design](#50-high-quality-articles-on-system-design)
+  - [50. FPGA in brief and host C++ docking](#50-fpga-in-brief-and-host-c-docking)
+  - [51. High-quality articles on system design](#51-high-quality-articles-on-system-design)
 - [Common performance bottlenecks and optimization directions](#common-performance-bottlenecks-and-optimization-directions)
   - [1. roofline model](#1-roofline-model)
     - [Memory Bound optimization](#memory-bound-optimization)
@@ -19169,7 +19170,96 @@ bool cas_add(std::atomic<int64_t>& cell, int64_t d, int tries) {
 }
 ```
 
-### 50. High-quality articles on system design
+### 50. FPGA in brief and host C++ docking
+
+An FPGA is a fabric of configurable logic. Look-up tables implement combinational logic. Flip-flops hold state across clock edges. On-chip block memory and multiply-add units sit across the die. Hard IP blocks terminate PCIe, Ethernet, and memory controllers. After the bitstream loads, the chip is that circuit. There is no shared program counter and no runtime heap allocator. On each clock edge, flip-flops update together. Between edges, combinational logic computes the next values. At 300 MHz one tick is about 3.3 ns.
+
+High-level synthesis turns a C++ function into a datapath plus a small state machine. Bounds are fixed at build time: no `new`, fixed loop limits, and no recursion, virtual calls, or function pointers. Processes pass fixed-size messages on single-writer, single-reader FIFOs. When a FIFO is empty or full, only that state machine stalls; the rest of the chip keeps running. Inside one process, a handler may call another actor on the same circuit. Across processes or across the board, only posted delivery is used. One side does not borrow the other side's circuit to run a handler.
+
+Between host and board, latency-sensitive paths prefer posted writes. The CPU writes a register window on the board. The board writes a ring in host memory. A synchronous read waits for the far side and often costs 0.5 to 1 µs, so the hot path avoids it. Small messages use a write-combining 64-byte window and a store fence after the fill. Inbound traffic uses DMA into ring slots; the receiver thread polls and does not wait on interrupt wakeups. VFIO maps the BAR into the process and pins the ring pages into the IOMMU. After setup, each message on the hot path no longer enters `read`, `write`, or `ioctl`.
+
+Cross-link messages share one header file with the on-board FIFOs: integer fields, fixed message ids, fixed length. Slots align to one cache line. The writer stores the body first, then the sequence number. The reader trusts the body only after it sees the expected sequence. The reader returns read credit in batches. The writer waits on capacity. On the hot path a message leaves as soon as it is ready; the host does not batch again. Each receiving thread or group owns one inbound ring and one outbound window. The board writes the target ring from a build-time route table. No extra forwarding thread sits in the middle. A request and its reply across PCIe are two messages. The caller sends and keeps working; the reply later enters a local handler. Market-data decode and session encode can stay on the board. The host exchanges only business messages.
+
+```cpp
+struct WireHead {
+  uint16_t msg_id{0};
+  uint16_t dst{0};
+  uint32_t src{0};
+  uint32_t corr{0};
+};
+
+struct WireBody {
+  int32_t tick{0};
+  int32_t lots{0};
+  uint32_t inst{0};
+  uint32_t pad[9]{};
+};
+
+struct WireSlot {
+  WireHead head{};
+  WireBody body{};
+  uint32_t seq{0};
+};
+static_assert(sizeof(WireSlot) == 64);
+
+struct HostLane {
+  static constexpr uint32_t N = 256;
+  alignas(64) WireSlot slot[N]{};
+  uint32_t r{1};
+
+  bool try_pop(WireSlot& out) {
+    const WireSlot& s = slot[r & (N - 1)];
+    const uint32_t seen = __atomic_load_n(&s.seq, __ATOMIC_ACQUIRE);
+    if (seen != r) return false;
+    out = s;
+    ++r;
+    return true;
+  }
+};
+
+struct BarWin {
+  volatile uint64_t* words{nullptr};
+  uint32_t w{0};
+  static constexpr uint32_t N = 32;
+
+  bool push(const WireSlot& m) {
+    volatile uint8_t* base =
+        reinterpret_cast<volatile uint8_t*>(words) + (w & (N - 1)) * 64;
+    const uint64_t* src = reinterpret_cast<const uint64_t*>(&m);
+    for (int i = 0; i < 8; ++i)
+      reinterpret_cast<volatile uint64_t*>(base)[i] = src[i];
+    __asm__ __volatile__("sfence" ::: "memory");
+    ++w;
+    return true;
+  }
+};
+
+struct BoardBridge {
+  BarWin out{};
+  HostLane in{};
+  uint32_t credit{0};
+
+  bool send_order(uint16_t dst, int32_t tick, int32_t lots, uint32_t inst) {
+    WireSlot m{};
+    m.head.msg_id = 1;
+    m.head.dst = dst;
+    m.body.tick = tick;
+    m.body.lots = lots;
+    m.body.inst = inst;
+    m.seq = out.w + 1;
+    return out.push(m);
+  }
+
+  int drain(WireSlot* buf, int cap) {
+    int n = 0;
+    while (n < cap && in.try_pop(buf[n])) ++n;
+    credit += static_cast<uint32_t>(n);
+    return n;
+  }
+};
+```
+
+### 51. High-quality articles on system design
 [https://mp.weixin.qq.com/s/9OH1RA8POFidgQnvape6fQ](https://mp.weixin.qq.com/s/9OH1RA8POFidgQnvape6fQ)
 
 [https://mp.weixin.qq.com/s/PuG4ZFVZ-7hijS4Db8Z5jQ](https://mp.weixin.qq.com/s/PuG4ZFVZ-7hijS4Db8Z5jQ)

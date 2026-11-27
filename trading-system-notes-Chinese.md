@@ -56,7 +56,8 @@ English version：[https://github.com/zzxscodes/trading-system-notes/blob/main/t
   - [47. 编译期类型态：非法订单迁移在类型上不可达](#47-编译期类型态非法订单迁移在类型上不可达)
   - [48. 策略热路径本地报价所有权](#48-策略热路径本地报价所有权)
   - [49. 共享状态高频写在分片内按单序列执行](#49-共享状态高频写在分片内按单序列执行)
-  - [50. 系统设计优质文章](#50-系统设计优质文章)
+  - [50. FPGA 简述与主机 C++ 对接](#50-fpga-简述与主机-c-对接)
+  - [51. 系统设计优质文章](#51-系统设计优质文章)
 - [常见性能瓶颈与优化方向](#常见性能瓶颈与优化方向)
   - [1. roofline model](#1-roofline-model)
     - [Memory Bound优化](#memory-bound优化)
@@ -19137,7 +19138,96 @@ bool cas_add(std::atomic<int64_t>& cell, int64_t d, int tries) {
 }
 ```
 
-### 50. 系统设计优质文章
+### 50. FPGA 简述与主机 C++ 对接
+
+FPGA 是可配置的逻辑阵列。查找表做组合逻辑，触发器跨时钟沿保存状态，片上块存储和乘加单元分散在芯片各处，硬核接口承接 PCIe、以太网和内存控制器。加载比特流之后，芯片就是这块电路。没有公共的程序计数器，也没有运行时堆分配器。时钟沿到来时，各处触发器同时更新；边沿之间，组合逻辑算出下一组值。300 MHz 时一个周期大约 3.3 ns。
+
+高层次综合把 C++ 函数收成数据通路加小状态机。综合时边界必须定死：不能 `new`，循环上界固定，没有递归、虚函数和函数指针。进程之间用单写单读 FIFO 传定长消息；读空或写满时，只有这一块状态机停住，芯片其余部分继续跑。组内可直接调用同进程上的处理逻辑；跨进程、跨板卡只用投递，不在对端电路上“借执行”。
+
+主机与板卡之间，延迟敏感路径尽量只用 posted 写。CPU 写板卡寄存器窗口，板卡写主机内存里的环。同步读要等对端回来，常要 0.5 到 1 µs，热路径上少做。小消息走写合并映射的 64 字节窗口，写满后加存储屏障立刻推出。板卡回主机时用 DMA 写入环槽，接收线程轮询，不用中断唤醒。设备经 VFIO 把 BAR 映射进进程，并把环所在页钉住、登记进 IOMMU；热路径上每条消息不再进 `read` / `write` / `ioctl`。
+
+跨链路报文与板卡内部 FIFO 共用同一份头文件：整数字段、固定消息号、固定长度。槽位对齐到一条缓存行。写者先写正文，再写序号；读者看到期望序号才读正文。读者隔一段批量回报已读位置，写者按容量等待。热路径上消息一就绪就发出，不在主机侧再攒批。每个接收侧线程或组独占一条入站环和一块出站窗口，板卡按构建期路由表直写目标环，中间不再经过专门的转发线程。跨 PCIe 的请求与应答是两条消息；调用方 `send` 后继续做事，应答稍后进本侧处理函数。行情解码、会话编码可以留在板卡上，主机只交换业务消息。
+
+```cpp
+struct WireHead {
+  uint16_t msg_id{0};
+  uint16_t dst{0};
+  uint32_t src{0};
+  uint32_t corr{0};
+};
+
+struct WireBody {
+  int32_t tick{0};
+  int32_t lots{0};
+  uint32_t inst{0};
+  uint32_t pad[9]{};
+};
+
+struct WireSlot {
+  WireHead head{};
+  WireBody body{};
+  uint32_t seq{0};
+};
+static_assert(sizeof(WireSlot) == 64);
+
+struct HostLane {
+  static constexpr uint32_t N = 256;
+  alignas(64) WireSlot slot[N]{};
+  uint32_t r{1};
+
+  bool try_pop(WireSlot& out) {
+    const WireSlot& s = slot[r & (N - 1)];
+    const uint32_t seen = __atomic_load_n(&s.seq, __ATOMIC_ACQUIRE);
+    if (seen != r) return false;
+    out = s;
+    ++r;
+    return true;
+  }
+};
+
+struct BarWin {
+  volatile uint64_t* words{nullptr};
+  uint32_t w{0};
+  static constexpr uint32_t N = 32;
+
+  bool push(const WireSlot& m) {
+    volatile uint8_t* base =
+        reinterpret_cast<volatile uint8_t*>(words) + (w & (N - 1)) * 64;
+    const uint64_t* src = reinterpret_cast<const uint64_t*>(&m);
+    for (int i = 0; i < 8; ++i)
+      reinterpret_cast<volatile uint64_t*>(base)[i] = src[i];
+    __asm__ __volatile__("sfence" ::: "memory");
+    ++w;
+    return true;
+  }
+};
+
+struct BoardBridge {
+  BarWin out{};
+  HostLane in{};
+  uint32_t credit{0};
+
+  bool send_order(uint16_t dst, int32_t tick, int32_t lots, uint32_t inst) {
+    WireSlot m{};
+    m.head.msg_id = 1;
+    m.head.dst = dst;
+    m.body.tick = tick;
+    m.body.lots = lots;
+    m.body.inst = inst;
+    m.seq = out.w + 1;
+    return out.push(m);
+  }
+
+  int drain(WireSlot* buf, int cap) {
+    int n = 0;
+    while (n < cap && in.try_pop(buf[n])) ++n;
+    credit += static_cast<uint32_t>(n);
+    return n;
+  }
+};
+```
+
+### 51. 系统设计优质文章
 [https://mp.weixin.qq.com/s/9OH1RA8POFidgQnvape6fQ](https://mp.weixin.qq.com/s/9OH1RA8POFidgQnvape6fQ)
 
 [https://mp.weixin.qq.com/s/PuG4ZFVZ-7hijS4Db8Z5jQ](https://mp.weixin.qq.com/s/PuG4ZFVZ-7hijS4Db8Z5jQ)
